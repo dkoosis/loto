@@ -61,6 +61,7 @@ func init() {
 		tryCmd,
 		statusCmd,
 		reapCmd,
+		breakCmd(),
 		whoamiCmd,
 		releaseCmd,
 		inboxCmd(),
@@ -247,6 +248,45 @@ For forced takeover of a live lock, see 'loto break --force' (loto-7wp.19).`,
 		printJSON(map[string]any{"reaped": true, "target": args[0]})
 		return nil
 	},
+}
+
+// ── break ─────────────────────────────────────────────────────────────────────
+
+func breakCmd() *cobra.Command {
+	var force bool
+	var reason string
+
+	c := &cobra.Command{
+		Use:   "break <path>",
+		Short: "remove a stale tag, or force-take a live lock (--force)",
+		Long: `Without --force, 'loto break' behaves identically to 'loto reap': it removes
+a stale tag only when the lock is not currently held.
+
+With --force, it waits for (or immediately takes) the flock, sends a system
+message to the displaced agent's mailbox, then clears the tag. Use --reason
+to record why the break was necessary.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			l := newLOTO()
+			target := args[0]
+			if force {
+				by := flagAgent
+				if err := l.ForceBreak(target, by, reason); err != nil {
+					exit(err)
+				}
+				printJSON(map[string]any{"broken": true, "force": true, "target": target, "by": by, "reason": reason})
+			} else {
+				if err := l.Reap(target); err != nil {
+					exit(err)
+				}
+				printJSON(map[string]any{"reaped": true, "target": target})
+			}
+			return nil
+		},
+	}
+	c.Flags().BoolVar(&force, "force", false, "force-take a live lock and notify the displaced agent")
+	c.Flags().StringVar(&reason, "reason", "", "reason for forced takeover (recorded in displaced agent's mailbox)")
+	return c
 }
 
 // ── release ───────────────────────────────────────────────────────────────────

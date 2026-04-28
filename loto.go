@@ -331,6 +331,49 @@ func (l *LOTO) Reap(target string) error {
 	return nil
 }
 
+// ForceBreak administratively takes a currently-held file lock, notifying
+// the displaced agent via their mailbox. Unlike Reap, it succeeds even when
+// the lock is live — it takes the flock by closing the holder's descriptor
+// (kernel reclaims on process death) or by waiting if the holder is still up.
+//
+// byAgent is the agent performing the break; reason is logged in the mailbox
+// notice. Mailbox delivery is best-effort; ForceBreak returns nil as long as
+// the lock itself was cleared.
+func (l *LOTO) ForceBreak(target, byAgent, reason string) error {
+	fileLockPath, fileTagPath, err := l.filePaths(target)
+	if err != nil {
+		return &ErrSystem{Op: "force-break: resolve paths", Err: err}
+	}
+
+	// Read tag before acquiring — we need the displaced holder's identity for
+	// the mailbox notice. Tag may be nil if holder crashed before writing it.
+	displaced, _ := l.ReadTag(target)
+
+	f, err := os.OpenFile(fileLockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return &ErrSystem{Op: "force-break: open file lock", Err: err}
+	}
+	defer f.Close()
+
+	// flockExclusive blocks until the current holder releases (process exit
+	// or explicit unlock). This is intentional for ForceBreak — the caller
+	// accepts waiting.
+	if err := flockExclusiveBlocking(f); err != nil {
+		return &ErrSystem{Op: "force-break: acquire flock", Err: err}
+	}
+
+	// Notify displaced agent (best-effort).
+	if displaced != nil {
+		body := fmt.Sprintf("lock on %q force-broken by %s: %s", target, byAgent, reason)
+		_ = l.SendMsg(target, byAgent, displaced.AgentID, body, true)
+	}
+
+	if err := os.Remove(fileTagPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return &ErrSystem{Op: "force-break: remove tag", Err: err}
+	}
+	return nil
+}
+
 func (l *LOTO) globalPaths() (lockPath, tagPath string) {
 	return filepath.Join(l.baseDir, "global.lock"),
 		filepath.Join(l.baseDir, "global.tag")

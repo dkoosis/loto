@@ -16,3 +16,9 @@ func flockShared(f *os.File) error {
 func flockExclusive(f *os.File) error {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 }
+
+// flockExclusiveBlocking takes a blocking exclusive lock on f, waiting until
+// the current holder releases. Used only by ForceBreak.
+func flockExclusiveBlocking(f *os.File) error {
+	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+}

@@ -341,3 +341,62 @@ func TestAcquireSucceedsAfterRelease(t *testing.T) {
 		t.Fatalf("Acquire should succeed after release: %v", err)
 	}
 }
+
+// TestForceBreak: agent-a acquires, agent-b force-breaks, agent-a finds the
+// system message in their inbox.
+func TestForceBreak(t *testing.T) {
+	l := newTestLOTO(t)
+	target := "contested.go"
+
+	// agent-a acquires the lock.
+	lockA, err := l.TryFileLock("agent-a", "edit", target)
+	if err != nil {
+		t.Fatalf("agent-a acquire: %v", err)
+	}
+
+	// agent-b force-breaks in a goroutine (it will block until agent-a releases).
+	breakDone := make(chan error, 1)
+	go func() {
+		breakDone <- l.ForceBreak(target, "agent-b", "taking over for review")
+	}()
+
+	// Let agent-b reach the blocking flock call.
+	time.Sleep(50 * time.Millisecond)
+
+	// agent-a releases — unblocks agent-b's flock.
+	if err := lockA.Unlock(); err != nil {
+		t.Fatalf("agent-a unlock: %v", err)
+	}
+
+	if err := <-breakDone; err != nil {
+		t.Fatalf("ForceBreak: %v", err)
+	}
+
+	// agent-a checks inbox: expects a system message from agent-b.
+	msgs, err := l.ReadMsgs(target, "agent-a")
+	if err != nil {
+		t.Fatalf("ReadMsgs: %v", err)
+	}
+	if len(msgs) == 0 {
+		t.Fatal("expected at least one inbox message for agent-a after ForceBreak")
+	}
+	m := msgs[0]
+	if !m.System {
+		t.Errorf("expected system message, got system=%v", m.System)
+	}
+	if m.From != "agent-b" {
+		t.Errorf("expected From=agent-b, got %q", m.From)
+	}
+	if m.To != "agent-a" {
+		t.Errorf("expected To=agent-a, got %q", m.To)
+	}
+}
+
+// TestForceBreakNoHolder: ForceBreak on an unheld lock succeeds immediately
+// (no tag to notify, no one to displace).
+func TestForceBreakNoHolder(t *testing.T) {
+	l := newTestLOTO(t)
+	if err := l.ForceBreak("nobody.go", "agent-x", "cleanup"); err != nil {
+		t.Fatalf("ForceBreak on unheld target: %v", err)
+	}
+}
