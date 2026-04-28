@@ -22,3 +22,8 @@ func flockExclusive(f *os.File) error {
 func flockExclusiveBlocking(f *os.File) error {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
 }
+
+// flockRelease releases any lock held on f.
+func flockRelease(f *os.File) error {
+	return syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+}

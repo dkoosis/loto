@@ -68,7 +68,7 @@ func init() {
 		msgCmd(),
 		stubCmd("reserve", "stake an advisory glob reservation", "loto-7wp.23"),
 		installHookCmd,
-		stubCmd("doctor", "diagnose and optionally repair stale coordination state", "loto-7wp.20"),
+		doctorCmd(),
 	)
 }
 
