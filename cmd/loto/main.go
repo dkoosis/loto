@@ -68,6 +68,8 @@ func init() {
 		msgCmd(),
 		reserveCmd(),
 		installHookCmd,
+		checkPathsCmd,
+		installGitHookCmd,
 		doctorCmd(),
 	)
 }

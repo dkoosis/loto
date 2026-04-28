@@ -197,3 +197,140 @@ func TestCrashRecovery(t *testing.T) {
 		t.Errorf("doomed-agent tag persists after crash recovery:\n%s", statOut)
 	}
 }
+
+// initGitRepo creates a minimal git repo in dir (init + initial empty commit).
+func initGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	for _, args := range [][]string{
+		{"init", "-b", "main"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Test"},
+		{"commit", "--allow-empty", "-m", "init"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
+// TestCheckPathsBlockedByLock: check-paths --staged exits 1 when a staged file
+// is locked by a different agent.
+func TestCheckPathsBlockedByLock(t *testing.T) {
+	rawRepo := t.TempDir()
+	// Resolve symlinks so filepath.Abs inside the subprocess matches the path
+	// used when acquiring the lock (macOS: /var/folders → /private/var/folders).
+	repoDir, err := filepath.EvalSymlinks(rawRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initGitRepo(t, repoDir)
+	base := t.TempDir()
+
+	// Create and stage a file.
+	target := filepath.Join(repoDir, "work.go")
+	if err := os.WriteFile(target, []byte("package main"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	addCmd := exec.Command("git", "add", "work.go")
+	addCmd.Dir = repoDir
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+
+	// Acquire a lock on the file as a different agent using --hold.
+	holder := lotoCmd(base, "--agent", "blocker", "try", "file", "--hold", target)
+	holderOut, err := holder.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Start(); err != nil {
+		t.Fatal("start holder:", err)
+	}
+	t.Cleanup(func() { _ = holder.Process.Kill(); _ = holder.Wait() })
+
+	acquired := make(chan struct{})
+	go func() {
+		sc := bufio.NewScanner(holderOut)
+		for sc.Scan() {
+			if strings.Contains(sc.Text(), `"acquired"`) {
+				close(acquired)
+				return
+			}
+		}
+	}()
+	select {
+	case <-acquired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("holder did not confirm acquisition within 5s")
+	}
+
+	// check-paths --staged as a different agent: should exit 1.
+	checkCmd := lotoCmd(base, "--agent", "other-agent", "check-paths", "--staged")
+	checkCmd.Dir = repoDir
+	out, err := checkCmd.Output()
+	if err == nil {
+		t.Fatalf("expected check-paths to fail (exit 1), got success; output: %s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected exit 1, got %v", err)
+	}
+}
+
+// TestCheckPathsPassesWhenFree: check-paths --staged exits 0 when no locks conflict.
+func TestCheckPathsPassesWhenFree(t *testing.T) {
+	repoDir := t.TempDir()
+	initGitRepo(t, repoDir)
+	base := t.TempDir()
+
+	target := filepath.Join(repoDir, "clean.go")
+	if err := os.WriteFile(target, []byte("package main"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	addCmd := exec.Command("git", "add", "clean.go")
+	addCmd.Dir = repoDir
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+
+	checkCmd := lotoCmd(base, "--agent", "my-agent", "check-paths", "--staged")
+	checkCmd.Dir = repoDir
+	if out, err := checkCmd.Output(); err != nil {
+		t.Fatalf("check-paths expected success: %v\n%s", err, out)
+	}
+}
+
+// TestInstallGitHookIdempotent: install-git-hook writes the hook; re-running
+// does not duplicate the loto block.
+func TestInstallGitHookIdempotent(t *testing.T) {
+	repoDir := t.TempDir()
+	initGitRepo(t, repoDir)
+	base := t.TempDir()
+
+	run := func() {
+		t.Helper()
+		cmd := lotoCmd(base, "install-git-hook")
+		cmd.Dir = repoDir
+		if out, err := cmd.Output(); err != nil {
+			t.Fatalf("install-git-hook: %v\n%s", err, out)
+		}
+	}
+
+	run()
+	run() // idempotent
+
+	hookContent, err := os.ReadFile(filepath.Join(repoDir, ".git", "hooks", "pre-commit"))
+	if err != nil {
+		t.Fatalf("read pre-commit hook: %v", err)
+	}
+	s := string(hookContent)
+	if !strings.Contains(s, "loto check-paths --staged") {
+		t.Errorf("hook missing loto check-paths line:\n%s", s)
+	}
+	// Should appear exactly once.
+	if count := strings.Count(s, "loto check-paths --staged"); count != 1 {
+		t.Errorf("expected loto check-paths to appear once, got %d:\n%s", count, s)
+	}
+}

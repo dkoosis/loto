@@ -58,6 +58,14 @@ loto release --all-mine
 
 # Install Claude Code session hooks:
 loto install-hook
+
+# Reserve a subtree (advisory):
+loto reserve add "internal/store/**" --intent "refactoring store layer"
+loto reserve list
+loto reserve release "internal/store/**"
+
+# Install git pre-commit hook (blocks commits on conflicting locks/reservations):
+loto install-git-hook
 ```
 
 ## coordination model
@@ -66,7 +74,7 @@ Three tiers, weakest to strongest:
 
 | Tier | Mechanism | Truth source | Use case |
 |------|-----------|--------------|----------|
-| Reservation *(planned)* | `reservations/<hash>.tag` | tag presence | "I plan to work in `internal/store/**` for an hour" |
+| Reservation | `reservations/<hash>.tag` | tag presence | "I plan to work in `internal/store/**` for an hour" |
 | File lock | `flock(2)` exclusive + tag | flock | "I am editing this specific file right now" |
 | Global lock | `flock(2)` exclusive (all) | flock | "Sweep across the whole tree; everyone stand down" |
 
@@ -89,7 +97,8 @@ $XDG_STATE_HOME/loto/
 └── projects/<slug>/              # one per project (derived from git remote)
     ├── global.lock               # flock'd shared/exclusive
     ├── global.tag                # JSON: who holds global, why
-    └── files/<sha256>.{lock,tag} # one pair per target file
+    ├── files/<sha256>.{lock,tag} # one pair per target file
+    └── reservations/<sha256>.tag # advisory glob reservations
 
 ~/.loto/agents/<uuid>.json        # host-global session identity
 ```
