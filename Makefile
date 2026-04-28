@@ -1,5 +1,9 @@
 .PHONY: all build test fmt vet lint tidy install clean check report
 
+# Strict shell for recipes: fail on first error, undefined var, or pipe failure.
+SHELL := /bin/bash
+.SHELLFLAGS := -euo pipefail -c
+
 # ── Shared sandbox (go-sandbox) ──
 include .sandbox/lib/Makefile.doctor.mk
 include .sandbox/lib/Makefile.cross.mk
