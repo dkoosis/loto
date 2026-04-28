@@ -400,3 +400,91 @@ func TestForceBreakNoHolder(t *testing.T) {
 		t.Fatalf("ForceBreak on unheld target: %v", err)
 	}
 }
+
+func TestReserveAndList(t *testing.T) {
+	l := newTestLOTO(t)
+	_, err := l.Reserve("agent-a", "adding auth handler", "internal/auth/**", 0)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	got, err := l.ListReservations()
+	if err != nil {
+		t.Fatalf("ListReservations: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 reservation, got %d", len(got))
+	}
+	if got[0].Pattern != "internal/auth/**" {
+		t.Fatalf("pattern = %q", got[0].Pattern)
+	}
+}
+
+func TestUnreserveRemoves(t *testing.T) {
+	l := newTestLOTO(t)
+	if _, err := l.Reserve("agent-a", "intent", "src/**", 0); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if err := l.Unreserve("src/**"); err != nil {
+		t.Fatalf("Unreserve: %v", err)
+	}
+	got, err := l.ListReservations()
+	if err != nil {
+		t.Fatalf("ListReservations: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("want 0 reservations after release, got %d", len(got))
+	}
+}
+
+func TestReserveExpiredTTLPruned(t *testing.T) {
+	l := newTestLOTO(t)
+	if _, err := l.Reserve("agent-a", "temp work", "pkg/**", 1*time.Millisecond); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	got, err := l.ListReservations()
+	if err != nil {
+		t.Fatalf("ListReservations: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("want 0 (expired) reservations, got %d", len(got))
+	}
+}
+
+func TestTryFileLockSurfacesConflictingReservation(t *testing.T) {
+	l := newTestLOTO(t)
+	target := filepath.Join(t.TempDir(), "internal", "store", "db.go")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("package store"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	absTarget, _ := filepath.Abs(target)
+	pattern := filepath.Join(filepath.Dir(filepath.Dir(absTarget)), "**")
+	if _, err := l.Reserve("agent-b", "refactoring store", pattern, 0); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	lock, err := l.TryFileLock("agent-a", "test", target)
+	if err != nil {
+		t.Fatalf("TryFileLock: %v", err)
+	}
+	defer lock.Unlock()
+
+	if len(lock.Conflicts) == 0 {
+		t.Fatal("expected advisory conflict from reservation, got none")
+	}
+	if lock.Conflicts[0].AgentID != "agent-b" {
+		t.Fatalf("conflicting agent = %q", lock.Conflicts[0].AgentID)
+	}
+}
+
+func TestReserveInvalidPattern(t *testing.T) {
+	l := newTestLOTO(t)
+	_, err := l.Reserve("agent-a", "intent", "[\x00bad", 0)
+	if err == nil {
+		t.Fatal("expected error for invalid pattern")
+	}
+}

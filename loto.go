@@ -121,6 +121,11 @@ type ActiveLock struct {
 	fileFile      *os.File // exclusive, only set for file locks
 	globalTagPath string   // set only for a global lock
 	fileTagPath   string   // set only for a file lock
+
+	// Conflicts lists advisory reservations that overlap the locked target.
+	// Non-nil only when reservations exist that match the path; the lock is
+	// still granted (reservations are advisory).
+	Conflicts []*Reservation
 }
 
 // New creates a LOTO at baseDir, ensuring the directory layout exists.
@@ -182,11 +187,14 @@ func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (
 	}
 
 	success = true
-	return &ActiveLock{
+	lock := &ActiveLock{
 		globalFile:  globalFile,
 		fileFile:    fileFile,
 		fileTagPath: fileTagPath,
-	}, nil
+	}
+	// Advisory: attach any conflicting reservations so callers can warn.
+	lock.Conflicts, _ = l.ConflictingReservations(target)
+	return lock, nil
 }
 
 // TryGlobalLock non-blockingly acquires an exclusive global lock.

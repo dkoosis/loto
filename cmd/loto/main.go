@@ -66,7 +66,7 @@ func init() {
 		releaseCmd,
 		inboxCmd(),
 		msgCmd(),
-		stubCmd("reserve", "stake an advisory glob reservation", "loto-7wp.23"),
+		reserveCmd(),
 		installHookCmd,
 		doctorCmd(),
 	)
@@ -113,13 +113,21 @@ var tryFileCmd = &cobra.Command{
 		if err != nil {
 			exit(err)
 		}
+		result := map[string]any{"acquired": true, "target": target, "agent": flagAgent}
+		if len(lock.Conflicts) > 0 {
+			patterns := make([]string, len(lock.Conflicts))
+			for i, r := range lock.Conflicts {
+				patterns[i] = r.Pattern + " (" + r.AgentID + ")"
+			}
+			result["reservation_warnings"] = patterns
+		}
 		if tryFileHold {
-			printJSON(map[string]any{"acquired": true, "target": target, "agent": flagAgent})
+			printJSON(result)
 			waitForSignal()
 			_ = lock.Unlock()
 			return nil
 		}
-		printJSON(map[string]any{"acquired": true, "target": target, "agent": flagAgent})
+		printJSON(result)
 		_ = lock.Unlock()
 		return nil
 	},
