@@ -32,9 +32,14 @@ $XDG_STATE_HOME/loto/                     # canonical, shared across subtrees
     ├── files/<sha256(abs-path)>.lock     # one per target file
     ├── files/<sha256(abs-path)>.tag      # one per target file
     ├── files/<sha256(abs-path)>.msgs     # JSONL append-only mailbox
-    ├── reservations/<sha256(glob)>.tag   # advisory pattern reservations
-    └── agents/<handle>.json              # session-persistent identities
+    └── reservations/<sha256(glob)>.tag   # advisory pattern reservations
+
+~/.loto/agents/<uuid>.json                # host-global, session-persistent identities
 ```
+
+‡ **Identity is host-global, state is project-scoped.** Agent identity
+lives at `~/.loto/agents/`, not under any project — one Claude session
+touches many projects, and `LOTO_AGENT_ID` is exported once at SessionStart.
 
 ‡ **Single canonical base, project-scoped.** Without this, Claudes in
 sibling worktrees of the same repo can't see each other. With it, they
@@ -128,8 +133,9 @@ happens at the git pre-commit hook (next item).
 pre-commit that runs `loto check-paths --staged` and refuses the commit
 if any staged path is held by *another* agent's exclusive lock or matches
 their exclusive reservation. This is the moment that matters: not the
-edit, the commit. `--no-verify` remains the user's escape hatch (and the
-hook logs the bypass to the affected agents' mailboxes).
+edit, the commit. `--no-verify` remains the user's escape hatch — bypass
+is unobservable to loto by definition (the hook didn't run), and that's
+fine. Trust model = trust the operator.
 
 **`loto doctor`.** One command for diagnostics: stale tags, dead-PID
 holders, orphaned `.lock`/`.tag` files, layout drift, soft-stale-but-still-held

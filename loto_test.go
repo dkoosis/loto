@@ -3,9 +3,12 @@
 package loto
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func newTestLOTO(t *testing.T) *LOTO {
@@ -113,7 +116,7 @@ func TestTwoFileLocksOnDifferentTargetsCoexist(t *testing.T) {
 	defer b.Unlock()
 }
 
-func TestBreakRefusesHeldLock(t *testing.T) {
+func TestReapRefusesHeldLock(t *testing.T) {
 	l := newTestLOTO(t)
 	lock, err := l.TryFileLock("a", "edit", "x.go")
 	if err != nil {
@@ -121,12 +124,20 @@ func TestBreakRefusesHeldLock(t *testing.T) {
 	}
 	defer lock.Unlock()
 
-	if err := l.Break("x.go"); err == nil {
-		t.Fatal("Break should refuse to clear a currently-held lock")
+	err = l.Reap("x.go")
+	if err == nil {
+		t.Fatal("Reap should refuse to clear a currently-held lock")
+	}
+	var held *ErrHeld
+	if !errors.As(err, &held) {
+		t.Fatalf("expected ErrHeld, got %T: %v", err, err)
+	}
+	if held.Kind != "file" {
+		t.Errorf("expected Kind=file, got %q", held.Kind)
 	}
 }
 
-func TestBreakClearsStaleTag(t *testing.T) {
+func TestReapClearsStaleTag(t *testing.T) {
 	l := newTestLOTO(t)
 	// Acquire and release, but manually plant a tag to simulate a crashed
 	// holder that never cleaned up.
@@ -145,10 +156,188 @@ func TestBreakClearsStaleTag(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := l.Break("x.go"); err != nil {
-		t.Fatalf("Break should clear stale tag: %v", err)
+	if err := l.Reap("x.go"); err != nil {
+		t.Fatalf("Reap should clear stale tag: %v", err)
 	}
 	if _, err := l.ReadTag("x.go"); err == nil {
-		t.Fatal("expected no tag after Break")
+		t.Fatal("expected no tag after Reap")
+	}
+}
+
+func TestReapIfDeadRefusesLiveProcess(t *testing.T) {
+	l := newTestLOTO(t)
+	_, err := l.TryFileLock("live", "work", "x.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Don't unlock — live process holds it.
+
+	err = l.ReapIfDead("x.go")
+	if err == nil {
+		t.Fatal("expected ErrHeld for live process")
+	}
+	var held *ErrHeld
+	if !errors.As(err, &held) {
+		t.Fatalf("expected *ErrHeld, got %T", err)
+	}
+}
+
+func TestReapIfDeadClearsDeadPIDTag(t *testing.T) {
+	l := newTestLOTO(t)
+	lock, err := l.TryFileLock("a", "work", "x.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = lock.Unlock()
+
+	// Plant a tag with PID 0 (never a real process).
+	_, tagPath, _ := l.filePaths("x.go")
+	deadTag := `{"agent_id":"ghost","pid":0,"target":"x.go","kind":"file","timestamp":"2026-01-01T00:00:00Z"}`
+	if err := os.WriteFile(tagPath, []byte(deadTag), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := l.ReapIfDead("x.go"); err != nil {
+		t.Fatalf("ReapIfDead should succeed for dead PID: %v", err)
+	}
+	if _, err := l.ReadTag("x.go"); err == nil {
+		t.Fatal("expected tag removed")
+	}
+}
+
+func TestLazyGCOnAcquireAfterCrash(t *testing.T) {
+	l := newTestLOTO(t)
+	lock, err := l.TryFileLock("a", "work", "x.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = lock.Unlock()
+
+	// Plant a stale tag with dead PID, simulating a crashed holder.
+	_, tagPath, _ := l.filePaths("x.go")
+	deadTag := `{"agent_id":"ghost","pid":0,"target":"x.go","kind":"file","timestamp":"2026-01-01T00:00:00Z"}`
+	if err := os.WriteFile(tagPath, []byte(deadTag), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Next acquire should succeed and lazy-GC the stale tag.
+	lock2, err := l.TryFileLock("b", "work", "x.go")
+	if err != nil {
+		t.Fatalf("acquire after crash should succeed: %v", err)
+	}
+	defer lock2.Unlock()
+
+	tag, err := l.ReadTag("x.go")
+	if err != nil {
+		t.Fatalf("expected tag for new holder: %v", err)
+	}
+	if tag.AgentID != "b" {
+		t.Errorf("expected new holder 'b', got %q", tag.AgentID)
+	}
+}
+
+func TestErrHeldContainsTag(t *testing.T) {
+	l := newTestLOTO(t)
+	_, err := l.TryFileLock("holder-agent", "doing-work", "x.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Don't unlock — leave it held.
+
+	_, err = l.TryFileLock("other", "try", "x.go")
+	if err == nil {
+		t.Fatal("expected conflict error")
+	}
+	var held *ErrHeld
+	if !errors.As(err, &held) {
+		t.Fatalf("expected *ErrHeld, got %T: %v", err, err)
+	}
+	if held.Kind != "file" {
+		t.Errorf("Kind=%q, want file", held.Kind)
+	}
+	if held.Tag == nil {
+		t.Fatal("expected Tag to be populated")
+	}
+	if held.Tag.AgentID != "holder-agent" {
+		t.Errorf("AgentID=%q, want holder-agent", held.Tag.AgentID)
+	}
+}
+
+func TestErrHeldGlobalContainsTag(t *testing.T) {
+	l := newTestLOTO(t)
+	_, err := l.TryGlobalLock("global-holder", "sweep")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = l.TryFileLock("other", "try", "x.go")
+	if err == nil {
+		t.Fatal("expected conflict error")
+	}
+	var held *ErrHeld
+	if !errors.As(err, &held) {
+		t.Fatalf("expected *ErrHeld, got %T: %v", err, err)
+	}
+	if held.Kind != "global" {
+		t.Errorf("Kind=%q, want global", held.Kind)
+	}
+}
+
+func TestAcquireSucceedsWhenFree(t *testing.T) {
+	l := newTestLOTO(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	lock, err := l.Acquire(ctx, "a", "work", "x.go")
+	if err != nil {
+		t.Fatalf("Acquire on free target: %v", err)
+	}
+	defer lock.Unlock()
+}
+
+func TestAcquireTimesOutWhenHeld(t *testing.T) {
+	l := newTestLOTO(t)
+	holder, err := l.TryFileLock("holder", "hold", "x.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	_, err = l.Acquire(ctx, "waiter", "wait", "x.go")
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	var sys *ErrSystem
+	if !errors.As(err, &sys) {
+		t.Fatalf("expected ErrSystem (context cancel), got %T: %v", err, err)
+	}
+}
+
+func TestAcquireSucceedsAfterRelease(t *testing.T) {
+	l := newTestLOTO(t)
+	holder, err := l.TryFileLock("holder", "hold", "x.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		lock, err := l.Acquire(ctx, "waiter", "wait", "x.go")
+		if err == nil {
+			lock.Unlock()
+		}
+		done <- err
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	holder.Unlock()
+
+	if err := <-done; err != nil {
+		t.Fatalf("Acquire should succeed after release: %v", err)
 	}
 }

@@ -37,6 +37,58 @@ import (
 	"time"
 )
 
+// ErrHeld is returned when a lock is currently held by another agent.
+// Use errors.As to extract the holder's Tag and Kind.
+type ErrHeld struct {
+	Tag    *Tag   // advisory; may be nil if the tag was unreadable
+	Kind   string // "file" or "global"
+	Target string // the requested target path or "global"
+}
+
+func (e *ErrHeld) Error() string {
+	if e.Tag != nil {
+		return fmt.Sprintf("loto: %s held by %s (%s)", e.Target, e.Tag.AgentID, e.Tag.Intent)
+	}
+	return fmt.Sprintf("loto: %s is held", e.Target)
+}
+
+// MarshalJSON emits the NS holder-report shape so CLI can write structured
+// blocker JSON directly to stderr without reformatting.
+func (e *ErrHeld) MarshalJSON() ([]byte, error) {
+	type report struct {
+		BlockedBy string `json:"blocked_by,omitempty"`
+		Intent    string `json:"intent,omitempty"`
+		Kind      string `json:"kind"`
+		Target    string `json:"target"`
+		HeldSince string `json:"held_since,omitempty"`
+		ExpiresAt string `json:"expires_at,omitempty"`
+		Branch    string `json:"branch,omitempty"`
+		Host      string `json:"host,omitempty"`
+		PID       int    `json:"pid,omitempty"`
+	}
+	r := report{Kind: e.Kind, Target: e.Target}
+	if e.Tag != nil {
+		r.BlockedBy = e.Tag.AgentID
+		r.Intent = e.Tag.Intent
+		r.Branch = e.Tag.Branch
+		r.Host = e.Tag.Host
+		r.PID = e.Tag.PID
+		if !e.Tag.Timestamp.IsZero() {
+			r.HeldSince = e.Tag.Timestamp.Format(time.RFC3339)
+		}
+	}
+	return json.Marshal(r)
+}
+
+// ErrSystem wraps an IO or OS-level failure (exit code 3 at the CLI).
+type ErrSystem struct {
+	Op  string
+	Err error
+}
+
+func (e *ErrSystem) Error() string { return fmt.Sprintf("loto: %s: %v", e.Op, e.Err) }
+func (e *ErrSystem) Unwrap() error { return e.Err }
+
 // Tag describes the holder of a lock.
 type Tag struct {
 	AgentID   string    `json:"agent_id"`
@@ -48,6 +100,13 @@ type Tag struct {
 	Branch    string    `json:"branch,omitempty"`
 	Cwd       string    `json:"cwd,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"` // zero = no TTL
+}
+
+// SoftStale reports whether the tag's advisory TTL has expired.
+// A soft-stale tag may still hold the flock (flock remains authoritative).
+func (t *Tag) SoftStale() bool {
+	return !t.ExpiresAt.IsZero() && time.Now().After(t.ExpiresAt)
 }
 
 // LOTO coordinates locks under a shared base directory.
@@ -75,7 +134,8 @@ func New(baseDir string) (*LOTO, error) {
 // TryFileLock non-blockingly acquires a shared global lock and an
 // exclusive lock on target. On failure, callers may use ReadTag /
 // ReadGlobalTag to discover the blocker.
-func (l *LOTO) TryFileLock(agentID, intent, target string) (*ActiveLock, error) {
+// Pass a tagOptions with TTL to set an advisory expiry on the tag.
+func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (*ActiveLock, error) {
 	globalLockPath, _ := l.globalPaths()
 	fileLockPath, fileTagPath, err := l.filePaths(target)
 	if err != nil {
@@ -84,7 +144,7 @@ func (l *LOTO) TryFileLock(agentID, intent, target string) (*ActiveLock, error) 
 
 	globalFile, err := os.OpenFile(globalLockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("loto: open global lock: %w", err)
+		return nil, &ErrSystem{Op: "open global lock", Err: err}
 	}
 	success := false
 	defer func() {
@@ -94,15 +154,13 @@ func (l *LOTO) TryFileLock(agentID, intent, target string) (*ActiveLock, error) 
 	}()
 
 	if err := flockShared(globalFile); err != nil {
-		if tag, tagErr := l.ReadGlobalTag(); tagErr == nil {
-			return nil, fmt.Errorf("loto: global lock held by %s (%s)", tag.AgentID, tag.Intent)
-		}
-		return nil, fmt.Errorf("loto: global lock held: %w", err)
+		tag, _ := l.ReadGlobalTag()
+		return nil, &ErrHeld{Tag: tag, Kind: "global", Target: "global"}
 	}
 
 	fileFile, err := os.OpenFile(fileLockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("loto: open file lock: %w", err)
+		return nil, &ErrSystem{Op: "open file lock", Err: err}
 	}
 	defer func() {
 		if !success {
@@ -111,15 +169,16 @@ func (l *LOTO) TryFileLock(agentID, intent, target string) (*ActiveLock, error) 
 	}()
 
 	if err := flockExclusive(fileFile); err != nil {
-		if tag, tagErr := l.ReadTag(target); tagErr == nil {
-			return nil, fmt.Errorf("loto: %s held by %s (%s)", target, tag.AgentID, tag.Intent)
-		}
-		return nil, fmt.Errorf("loto: %s held: %w", target, err)
+		tag, _ := l.ReadTag(target)
+		return nil, &ErrHeld{Tag: tag, Kind: "file", Target: target}
 	}
 
-	tag := l.newTag(agentID, intent, target, "file")
+	// Lazy-GC: flock succeeded but a stale tag from a dead process remains.
+	lazyReapTag(fileTagPath)
+
+	tag := l.newTag(agentID, intent, target, "file", opts...)
 	if err := writeTagAtomic(fileTagPath, tag); err != nil {
-		return nil, err
+		return nil, &ErrSystem{Op: "write tag", Err: err}
 	}
 
 	success = true
@@ -132,12 +191,12 @@ func (l *LOTO) TryFileLock(agentID, intent, target string) (*ActiveLock, error) 
 
 // TryGlobalLock non-blockingly acquires an exclusive global lock.
 // This fails while any file lock is active.
-func (l *LOTO) TryGlobalLock(agentID, intent string) (*ActiveLock, error) {
+func (l *LOTO) TryGlobalLock(agentID, intent string, opts ...TagOptions) (*ActiveLock, error) {
 	globalLockPath, globalTagPath := l.globalPaths()
 
 	globalFile, err := os.OpenFile(globalLockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("loto: open global lock: %w", err)
+		return nil, &ErrSystem{Op: "open global lock", Err: err}
 	}
 	success := false
 	defer func() {
@@ -147,15 +206,15 @@ func (l *LOTO) TryGlobalLock(agentID, intent string) (*ActiveLock, error) {
 	}()
 
 	if err := flockExclusive(globalFile); err != nil {
-		if tag, tagErr := l.ReadGlobalTag(); tagErr == nil {
-			return nil, fmt.Errorf("loto: global lock held by %s (%s)", tag.AgentID, tag.Intent)
-		}
-		return nil, fmt.Errorf("loto: global lock held: %w", err)
+		tag, _ := l.ReadGlobalTag()
+		return nil, &ErrHeld{Tag: tag, Kind: "global", Target: "global"}
 	}
 
-	tag := l.newTag(agentID, intent, "global", "global")
+	lazyReapTag(globalTagPath)
+
+	tag := l.newTag(agentID, intent, "global", "global", opts...)
 	if err := writeTagAtomic(globalTagPath, tag); err != nil {
-		return nil, err
+		return nil, &ErrSystem{Op: "write tag", Err: err}
 	}
 
 	success = true
@@ -216,24 +275,58 @@ func (l *LOTO) ReadGlobalTag() (*Tag, error) {
 	return readTag(tagPath)
 }
 
-// Break administratively force-releases a file lock by attempting to take
-// it exclusively (which only succeeds when no live process holds it),
-// then removing the tag. Returns an error if the lock is currently held.
-func (l *LOTO) Break(target string) error {
+// ReapIfDead reaps target's file lock tag only if the tag's recorded PID is no
+// longer alive. Returns nil if the tag was reaped or was already absent.
+// Returns ErrHeld if the process is still running.
+func (l *LOTO) ReapIfDead(target string) error {
+	tag, err := l.ReadTag(target)
+	if err != nil {
+		return nil // no tag, nothing to do
+	}
+	if pidAlive(tag.PID) {
+		return &ErrHeld{Tag: tag, Kind: "file", Target: target}
+	}
+	return l.Reap(target)
+}
+
+// lazyReapTag silently removes a tag file if its recorded PID is dead.
+// Called after a successful flock acquire to clean up crash leftovers.
+func lazyReapTag(tagPath string) {
+	data, err := os.ReadFile(tagPath)
+	if err != nil {
+		return
+	}
+	var tag Tag
+	if json.Unmarshal(data, &tag) != nil {
+		return
+	}
+	if !pidAlive(tag.PID) {
+		_ = os.Remove(tagPath)
+	}
+}
+
+// Reap removes a stale tag on target when no live process holds the lock.
+// It succeeds only if the flock is currently acquirable (i.e., the previous
+// holder has exited). Returns ErrHeld if the lock is still live.
+//
+// Reap is safe cleanup, not forced takeover. For a forced-takeover that
+// notifies the displaced agent, see the planned ForceBreak (loto-7wp.19).
+func (l *LOTO) Reap(target string) error {
 	fileLockPath, fileTagPath, err := l.filePaths(target)
 	if err != nil {
-		return err
+		return &ErrSystem{Op: "reap: resolve paths", Err: err}
 	}
 	f, err := os.OpenFile(fileLockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return fmt.Errorf("loto: open file lock: %w", err)
+		return &ErrSystem{Op: "reap: open file lock", Err: err}
 	}
 	defer f.Close()
 	if err := flockExclusive(f); err != nil {
-		return fmt.Errorf("loto: %s is currently held; refusing to break", target)
+		tag, _ := l.ReadTag(target)
+		return &ErrHeld{Tag: tag, Kind: "file", Target: target}
 	}
 	if err := os.Remove(fileTagPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		return &ErrSystem{Op: "reap: remove tag", Err: err}
 	}
 	return nil
 }
@@ -259,10 +352,16 @@ func hashTarget(target string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (l *LOTO) newTag(agentID, intent, target, kind string) Tag {
-	host, _ := os.Hostname() // best effort
-	cwd, _ := os.Getwd()     // best effort
-	return Tag{
+// TagOptions carries optional parameters for tag creation.
+type TagOptions struct {
+	TTL time.Duration // 0 = no expiry (advisory only; flock remains authoritative)
+}
+
+func (l *LOTO) newTag(agentID, intent, target, kind string, opts ...TagOptions) Tag {
+	host, _ := os.Hostname()
+	cwd, _ := os.Getwd()
+	now := time.Now().UTC()
+	tag := Tag{
 		AgentID:   agentID,
 		Intent:    intent,
 		Target:    target,
@@ -271,8 +370,12 @@ func (l *LOTO) newTag(agentID, intent, target, kind string) Tag {
 		PID:       os.Getpid(),
 		Branch:    gitBranch(cwd),
 		Cwd:       cwd,
-		Timestamp: time.Now().UTC(),
+		Timestamp: now,
 	}
+	if len(opts) > 0 && opts[0].TTL > 0 {
+		tag.ExpiresAt = now.Add(opts[0].TTL)
+	}
+	return tag
 }
 
 func writeTagAtomic(tagPath string, tag Tag) error {
