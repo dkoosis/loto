@@ -60,7 +60,7 @@ func createAgent(dir, id string) (*Agent, error) {
 	host, _ := os.Hostname()
 	a := &Agent{
 		ID:        id,
-		Handle:    placeholderHandle(id),
+		Handle:    generateHandle(id),
 		CreatedAt: time.Now().UTC(),
 		Host:      host,
 	}
@@ -73,16 +73,6 @@ func createAgent(dir, id string) (*Agent, error) {
 		return nil, fmt.Errorf("loto: write agent file: %w", err)
 	}
 	return a, nil
-}
-
-// placeholderHandle returns a temporary handle until .10 ships the full word list.
-// Format: "Agent-<first8>" e.g. "Agent-a3f2b1c0"
-func placeholderHandle(id string) string {
-	short := id
-	if len(short) > 8 {
-		short = short[:8]
-	}
-	return "Agent-" + short
 }
 
 func newUUID() string {
