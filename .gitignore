@@ -5,3 +5,13 @@ bin/
 .snipe/
 .claude/tmp/
 .beads/*.db
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+
+# Sandbox caches and ephemeral reports
+.sandbox/cache/
+.sandbox/setup-report.json
+.sandbox/baseline.txt
