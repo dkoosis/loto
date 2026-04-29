@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"loto"
@@ -102,7 +104,9 @@ func init() {
 }
 
 func stagedPaths() ([]string, error) {
-	out, err := exec.Command("git", "diff", "--name-only", "--cached").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "diff", "--name-only", "--cached").Output()
 	if err != nil {
 		return nil, &loto.ErrSystem{Op: "git diff --cached", Err: err}
 	}
@@ -168,7 +172,7 @@ func writeGitPreCommitHook() error {
 		}
 	}
 
-	if err := os.WriteFile(hookPath, []byte(content), 0o755); err != nil {
+	if err := os.WriteFile(hookPath, []byte(content), 0o755); err != nil { //nolint:gosec // G306: git hooks must be executable
 		return &loto.ErrSystem{Op: "write pre-commit hook", Err: err}
 	}
 	return nil

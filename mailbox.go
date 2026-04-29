@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -157,7 +156,12 @@ func rewriteMsgs(msgsPath string, msgs []Msg) error {
 		return &ErrSystem{Op: "msg: compact create", Err: err}
 	}
 	for _, m := range msgs {
-		data, _ := json.Marshal(m)
+		data, err := json.Marshal(m)
+		if err != nil {
+			f.Close()
+			_ = os.Remove(tmp)
+			return &ErrSystem{Op: "msg: compact marshal", Err: err}
+		}
 		if _, err := f.Write(append(data, '\n')); err != nil {
 			f.Close()
 			_ = os.Remove(tmp)
@@ -204,9 +208,4 @@ func compactFile(msgsPath string) error {
 		}
 	}
 	return rewriteMsgs(msgsPath, keep)
-}
-
-// msgPath returns the .msgs path for a hash (used by doctor/GC).
-func (l *LOTO) msgPathForHash(hash string) string {
-	return filepath.Join(l.baseDir, "files", hash+".msgs")
 }

@@ -442,7 +442,7 @@ func writeClaudeHooks() error {
 	if err != nil {
 		return &loto.ErrSystem{Op: "marshal settings", Err: err}
 	}
-	if err := os.WriteFile(".claude/settings.json", append(data, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(".claude/settings.json", append(data, '\n'), 0o644); err != nil { //nolint:gosec // G306: project-local config, world-readable by design
 		return &loto.ErrSystem{Op: "write settings.json", Err: err}
 	}
 	return nil
@@ -471,19 +471,6 @@ func init() {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-// stubCmd creates a not-yet-implemented subcommand that exits 2.
-func stubCmd(use, short, tracker string) *cobra.Command {
-	return &cobra.Command{
-		Use:   use,
-		Short: short + " [not yet implemented]",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(os.Stderr, "loto: %s: not yet implemented (tracked: %s)\n", use, tracker)
-			os.Exit(2)
-			return nil
-		},
-	}
-}
 
 // printJSON writes v as indented JSON to stdout. Retained for any callers
 // (e.g. helper output paths) that haven't migrated to a per-shape emit*.

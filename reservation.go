@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,14 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 )
+
+const reservationExt = ".tag"
+
+// ErrInvalidGlob is returned when a reservation pattern is not a valid doublestar glob.
+var ErrInvalidGlob = errors.New("invalid glob pattern")
+
+// ErrReservationExpired is returned when a reservation file existed but is past its TTL.
+var ErrReservationExpired = errors.New("reservation expired")
 
 // Reservation is an advisory glob-pattern hold on a subtree.
 // Stored at <baseDir>/reservations/<hash>.tag; no flock (purely advisory).
@@ -27,7 +36,7 @@ type Reservation struct {
 // can reserve overlapping patterns — conflicts surface at TryFileLock time.
 func (l *LOTO) Reserve(agentID, intent, pattern string, ttl time.Duration) (*Reservation, error) {
 	if !doublestar.ValidatePattern(pattern) {
-		return nil, &ErrSystem{Op: "reserve: invalid pattern", Err: fmt.Errorf("invalid glob pattern: %q", pattern)}
+		return nil, &ErrSystem{Op: "reserve: invalid pattern", Err: fmt.Errorf("%w: %q", ErrInvalidGlob, pattern)}
 	}
 	resDir := l.reservationsDir()
 	if err := os.MkdirAll(resDir, 0o700); err != nil {
@@ -47,7 +56,7 @@ func (l *LOTO) Reserve(agentID, intent, pattern string, ttl time.Duration) (*Res
 	if err != nil {
 		return nil, &ErrSystem{Op: "reserve: marshal", Err: err}
 	}
-	tagPath := filepath.Join(resDir, hashPattern(pattern)+".tag")
+	tagPath := filepath.Join(resDir, hashPattern(pattern)+reservationExt)
 	if err := os.WriteFile(tagPath, append(data, '\n'), 0o600); err != nil {
 		return nil, &ErrSystem{Op: "reserve: write", Err: err}
 	}
@@ -56,7 +65,7 @@ func (l *LOTO) Reserve(agentID, intent, pattern string, ttl time.Duration) (*Res
 
 // Unreserve removes the reservation for the given pattern, if it exists.
 func (l *LOTO) Unreserve(pattern string) error {
-	tagPath := filepath.Join(l.reservationsDir(), hashPattern(pattern)+".tag")
+	tagPath := filepath.Join(l.reservationsDir(), hashPattern(pattern)+reservationExt)
 	if err := os.Remove(tagPath); err != nil && !os.IsNotExist(err) {
 		return &ErrSystem{Op: "unreserve: remove", Err: err}
 	}
@@ -75,7 +84,7 @@ func (l *LOTO) ListReservations() ([]*Reservation, error) {
 	}
 	var out []*Reservation
 	for _, e := range entries {
-		if filepath.Ext(e.Name()) != ".tag" {
+		if filepath.Ext(e.Name()) != reservationExt {
 			continue
 		}
 		r, err := l.readReservation(filepath.Join(resDir, e.Name()))
@@ -125,7 +134,7 @@ func (l *LOTO) readReservation(tagPath string) (*Reservation, error) {
 	// Drop expired reservations (lazy GC on read).
 	if r.ExpiresAt != nil && time.Now().After(*r.ExpiresAt) {
 		_ = os.Remove(tagPath)
-		return nil, nil
+		return nil, ErrReservationExpired
 	}
 	return &r, nil
 }
@@ -142,6 +151,8 @@ func hashPattern(pattern string) string {
 // ErrReservationConflict is returned when TryFileLock detects a conflicting
 // advisory reservation and the policy is set to fail (future work).
 // For now, conflicts are surface as warnings only.
+//
+//nolint:errname // sentinel-style name kept for API stability
 type ErrReservationConflict struct {
 	Target       string
 	Reservations []*Reservation

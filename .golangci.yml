@@ -1,0 +1,199 @@
+version: "2"
+
+run:
+  modules-download-mode: readonly
+  tests: true
+
+linters:
+  enable:
+    # Error handling
+    - err113
+    - errchkjson
+    - errorlint
+    - nilerr
+    - nilnesserr
+
+    # Safety
+    - bodyclose
+    - containedctx
+    - forcetypeassert
+    - gosec
+    - noctx
+    - predeclared
+    - rowserrcheck
+    - sqlclosecheck
+
+    # Complexity
+    - cyclop
+    - funlen
+    - gocognit
+    - gocyclo
+    - nestif
+
+    # Enum & type safety
+    - exhaustive
+    - makezero
+    - musttag
+    - reassign
+
+    # Style & correctness
+    - asciicheck
+    - copyloopvar
+    - dupword
+    - durationcheck
+    - errname
+    - exptostd
+    - fatcontext
+    - gocheckcompilerdirectives
+    - gochecknoinits
+    - goconst
+    - gocritic
+    - grouper
+    - inamedparam
+    - intrange
+    - iotamixing
+    - loggercheck
+    - misspell
+    - modernize
+    - nakedret
+    - nilnil
+    - nolintlint
+    - prealloc
+    - recvcheck
+    - revive
+    - sloglint
+    - unconvert
+    - unparam
+    - usestdlibvars
+    - wastedassign
+
+    # Performance
+    - mirror
+    - perfsprint
+
+    # Testing
+    - testifylint
+    - thelper
+    - usetesting
+
+  disable:
+    - godox
+    - wsl
+
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - fmt.Fprintf
+        - fmt.Printf
+        - fmt.Print
+        - fmt.Println
+        - fmt.Fprint
+        - fmt.Fprintln
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        - appendCombine
+        - commentFormatting
+        - deprecatedComment
+        - hugeParam
+        - ifElseChain
+        - rangeValCopy
+        - unlambda
+    cyclop:
+      max-complexity: 15
+    funlen:
+      lines: 80
+      statements: 40
+    gocognit:
+      min-complexity: 15
+    gocyclo:
+      min-complexity: 15
+    nestif:
+      min-complexity: 5
+    nakedret:
+      max-func-lines: 20
+    revive:
+      severity: warning
+      rules:
+        - name: exported
+          disabled: true
+        - name: package-comments
+          disabled: true
+        - name: bare-return
+          disabled: true
+        - name: var-naming
+          disabled: false
+        - name: context-as-argument
+          disabled: false
+        - name: error-return
+          disabled: false
+        - name: dot-imports
+          disabled: false
+        - name: waitgroup-by-value
+          disabled: false
+    staticcheck:
+      checks:
+        - all
+    testifylint:
+      enable-all: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Test files: relax security, complexity, and context requirements
+      - linters:
+          - gosec
+          - errcheck
+          - errchkjson
+          - gocritic
+        path: _test\.go
+      - linters:
+          - cyclop
+          - funlen
+          - gocognit
+          - gocyclo
+          - nestif
+        path: _test\.go
+      - linters:
+          - noctx
+        path: _test\.go
+      - linters:
+          - unparam
+        path: _test\.go
+      # cmd main.go: relax complexity, allow cobra init()
+      - linters:
+          - cyclop
+          - funlen
+          - gocognit
+          - gocyclo
+          - nestif
+          - gochecknoinits
+        path: cmd/loto/
+      - linters:
+          - gocritic
+        path: cmd/.*/main\.go
+        text: exitAfterDefer
+    paths:
+      - third_party$
+      - examples$
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - examples$

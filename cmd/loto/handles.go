@@ -11,8 +11,8 @@ import (
 // Space: len(adjectives) × len(animals) = 10,000 combinations.
 func generateHandle(uuid string) string {
 	h := sha256.Sum256([]byte(uuid))
-	adj := adjectives[binary.BigEndian.Uint32(h[0:4])%uint32(len(adjectives))]
-	animal := animals[binary.BigEndian.Uint32(h[4:8])%uint32(len(animals))]
+	adj := adjectives[binary.BigEndian.Uint32(h[0:4])%uint32(len(adjectives))] //nolint:gosec // G115: word lists are <1k entries
+	animal := animals[binary.BigEndian.Uint32(h[4:8])%uint32(len(animals))]    //nolint:gosec // G115: word lists are <1k entries
 	return toTitle(adj) + toTitle(animal)
 }
 

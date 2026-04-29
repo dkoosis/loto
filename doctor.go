@@ -78,7 +78,10 @@ func (l *LOTO) examineGlobalTag(byAgent string, mode DoctorMode) ([]Finding, err
 	globalLockPath, globalTagPath := l.globalPaths()
 	data, err := os.ReadFile(globalTagPath)
 	if err != nil {
-		return nil, nil // no global tag — clean
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, &ErrSystem{Op: "doctor: read global tag", Err: err}
 	}
 	var tag Tag
 	if json.Unmarshal(data, &tag) != nil {
@@ -87,12 +90,14 @@ func (l *LOTO) examineGlobalTag(byAgent string, mode DoctorMode) ([]Finding, err
 			Path:   globalTagPath,
 			Detail: "global tag unreadable (corrupt JSON)",
 		}
-		if mode == DoctorRepair {
+		switch mode {
+		case DoctorRepair:
 			if os.Remove(globalTagPath) == nil {
 				f.Repaired = true
 			}
-		} else if mode == DoctorDryRun {
+		case DoctorDryRun:
 			f.WouldRepair = true
+		case DoctorCheck:
 		}
 		return []Finding{f}, nil
 	}
@@ -100,6 +105,8 @@ func (l *LOTO) examineGlobalTag(byAgent string, mode DoctorMode) ([]Finding, err
 }
 
 // examineFileTags walks <base>/files/ and checks each lock+tag pair plus orphan conditions.
+//
+//nolint:gocognit,gocyclo,cyclop,funlen // tracked: loto-dit (refactor pending)
 func (l *LOTO) examineFileTags(byAgent string, mode DoctorMode) ([]Finding, error) {
 	filesDir := filepath.Join(l.baseDir, "files")
 	entries, err := os.ReadDir(filesDir)
@@ -150,12 +157,14 @@ func (l *LOTO) examineFileTags(byAgent string, mode DoctorMode) ([]Finding, erro
 				AgentID: tag.AgentID,
 				Detail:  "tag file has no matching lock",
 			}
-			if mode == DoctorRepair {
+			switch mode {
+			case DoctorRepair:
 				if os.Remove(tagPath) == nil {
 					f.Repaired = true
 				}
-			} else if mode == DoctorDryRun {
+			case DoctorDryRun:
 				f.WouldRepair = true
+			case DoctorCheck:
 			}
 			findings = append(findings, f)
 			continue
@@ -192,12 +201,14 @@ func (l *LOTO) examineFileTags(byAgent string, mode DoctorMode) ([]Finding, erro
 					AgentID: tag.AgentID,
 					Detail:  fmt.Sprintf("target path %q no longer exists on disk", tag.Target),
 				}
-				if mode == DoctorRepair {
+				switch mode {
+				case DoctorRepair:
 					_ = os.Remove(tagPath)
 					_ = os.Remove(lockPath)
 					f.Repaired = true
-				} else if mode == DoctorDryRun {
+				case DoctorDryRun:
 					f.WouldRepair = true
+				case DoctorCheck:
 				}
 				findings = append(findings, f)
 			}
@@ -209,6 +220,8 @@ func (l *LOTO) examineFileTags(byAgent string, mode DoctorMode) ([]Finding, erro
 
 // examineTagPair checks a lock+tag pair for drift classes 1, 2, and 5.
 // isGlobal=true skips ForceBreak (which only handles file targets).
+//
+//nolint:gocognit,gocyclo,cyclop // tracked: loto-dit (refactor pending)
 func (l *LOTO) examineTagPair(lockPath, tagPath, displayTarget string, tag *Tag, byAgent string, mode DoctorMode, isGlobal bool) ([]Finding, error) {
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -231,12 +244,14 @@ func (l *LOTO) examineTagPair(lockPath, tagPath, displayTarget string, tag *Tag,
 			AgentID: tag.AgentID,
 			Detail:  fmt.Sprintf("tag present but lock unheld (last holder: pid %d, agent %s)", tag.PID, tag.AgentID),
 		}
-		if mode == DoctorRepair {
+		switch mode {
+		case DoctorRepair:
 			if os.Remove(tagPath) == nil {
 				fi.Repaired = true
 			}
-		} else if mode == DoctorDryRun {
+		case DoctorDryRun:
 			fi.WouldRepair = true
+		case DoctorCheck:
 		}
 		return []Finding{fi}, nil
 	}
@@ -251,20 +266,20 @@ func (l *LOTO) examineTagPair(lockPath, tagPath, displayTarget string, tag *Tag,
 			AgentID: tag.AgentID,
 			Detail:  fmt.Sprintf("lock held but tag PID %d is dead (agent %s)", tag.PID, tag.AgentID),
 		}
-		if mode == DoctorRepair {
+		switch mode {
+		case DoctorRepair:
 			body := fmt.Sprintf("doctor: lock on %q force-broken by %s: recorded PID %d is dead", displayTarget, byAgent, tag.PID)
 			_ = l.sendMsgBestEffort(displayTarget, byAgent, tag.AgentID, body, isGlobal)
 			if isGlobal {
 				if os.Remove(tagPath) == nil {
 					fi.Repaired = true
 				}
-			} else {
-				if l.ForceBreak(displayTarget, byAgent, fmt.Sprintf("doctor: PID %d is dead", tag.PID)) == nil {
-					fi.Repaired = true
-				}
+			} else if l.ForceBreak(displayTarget, byAgent, fmt.Sprintf("doctor: PID %d is dead", tag.PID)) == nil {
+				fi.Repaired = true
 			}
-		} else if mode == DoctorDryRun {
+		case DoctorDryRun:
 			fi.WouldRepair = true
+		case DoctorCheck:
 		}
 		return []Finding{fi}, nil
 	}

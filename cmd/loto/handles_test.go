@@ -29,7 +29,7 @@ func TestHandleDeterminism(t *testing.T) {
 
 // TestHandleFormat verifies handles are non-empty PascalCase strings.
 func TestHandleFormat(t *testing.T) {
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		uuid := randomUUID()
 		h := generateHandle(uuid)
 		if len(h) < 4 {
@@ -47,7 +47,7 @@ func TestHandleFormat(t *testing.T) {
 func TestHandleCollisionRate(t *testing.T) {
 	const samples = 10_000
 	counts := make(map[string]int, samples)
-	for i := 0; i < samples; i++ {
+	for range samples {
 		h := generateHandle(randomUUID())
 		counts[h]++
 	}

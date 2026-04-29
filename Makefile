@@ -13,10 +13,10 @@ BIN     := $(BIN_DIR)/loto
 PKG     := ./...
 VERSION ?= dev
 
-all: fmt vet test build
+all: fmt vet lint test build
 
-## check: fast validation — fmt, vet, test, build (sandbox-safe)
-check: fmt vet test build
+## check: fast validation — fmt, vet, lint, test, build (sandbox-safe)
+check: fmt vet lint test build
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -31,13 +31,12 @@ fmt:
 vet:
 	go vet $(PKG)
 
-# Optional; skips silently if staticcheck isn't installed.
 lint:
-	@if command -v staticcheck >/dev/null 2>&1; then \
-		staticcheck $(PKG); \
-	else \
-		echo "staticcheck not installed; skipping (go install honnef.co/go/tools/cmd/staticcheck@latest)"; \
+	@if ! command -v golangci-lint >/dev/null 2>&1; then \
+		echo "golangci-lint not installed; install via .sandbox or 'go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest'"; \
+		exit 1; \
 	fi
+	golangci-lint run $(PKG)
 
 tidy:
 	go mod tidy
@@ -52,6 +51,13 @@ clean:
 report:
 	@echo "--- tool:vet  format:text ---"
 	@go vet $(PKG) 2>&1 || true
+	@echo ""
+	@echo "--- tool:lint format:text ---"
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		golangci-lint run $(PKG) 2>&1 || true; \
+	else \
+		echo "golangci-lint not installed"; \
+	fi
 	@echo ""
 	@echo "--- tool:test format:testjson ---"
 	@go test -race -json $(PKG) 2>&1 || true

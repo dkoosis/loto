@@ -98,7 +98,7 @@ func TestContendedAcquire(t *testing.T) {
 	}
 	results := make([]result, N)
 	var wg sync.WaitGroup
-	for i := 0; i < N; i++ {
+	for i := range N {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()

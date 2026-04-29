@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+const unnamedSlug = "unnamed"
 
 // defaultBase returns the canonical coordination directory for the current
 // project. See docs/decisions/0002-canonical-base.md.
@@ -112,7 +116,7 @@ func normalizeURL(rawURL string) string {
 	s = strings.TrimSuffix(s, ".git")
 	s = strings.NewReplacer("/", "-", "_", "-", ".", "-").Replace(s)
 	if s == "" {
-		return "unnamed"
+		return unnamedSlug
 	}
 	return s
 }
@@ -125,16 +129,18 @@ func slugFromDir() string {
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "unnamed"
+		return unnamedSlug
 	}
 	if base := filepath.Base(cwd); base != "" && base != "." {
 		return base
 	}
-	return "unnamed"
+	return unnamedSlug
 }
 
 func gitCmd(args ...string) (string, error) {
-	out, err := exec.Command("git", args...).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", args...).Output()
 	return string(out), err
 }
 

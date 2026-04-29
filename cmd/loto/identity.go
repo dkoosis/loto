@@ -42,7 +42,7 @@ func currentAgent() (*Agent, error) {
 
 	if id := os.Getenv("LOTO_AGENT_ID"); id != "" {
 		path := filepath.Join(dir, id+".json")
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) //nolint:gosec // G304/G703: path under XDG identity dir, id from env
 		if err == nil {
 			var a Agent
 			if err := json.Unmarshal(data, &a); err == nil {
@@ -69,7 +69,7 @@ func createAgent(dir, id string) (*Agent, error) {
 		return nil, fmt.Errorf("loto: marshal agent: %w", err)
 	}
 	path := filepath.Join(dir, id+".json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil { //nolint:gosec // G304/G703: path under XDG identity dir
 		return nil, fmt.Errorf("loto: write agent file: %w", err)
 	}
 	return a, nil

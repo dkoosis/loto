@@ -10,6 +10,8 @@ import (
 // ReleaseAllMine walks the project base and reaps every tag whose agent_id
 // matches agentID. It is best-effort: per-file errors are collected but do
 // not abort the walk. Returns a summary of what was released.
+//
+//nolint:gocognit // tracked: loto-dit (refactor pending)
 func (l *LOTO) ReleaseAllMine(agentID string) (released []string, errs []error) {
 	filesDir := filepath.Join(l.baseDir, "files")
 	entries, err := os.ReadDir(filesDir)

@@ -25,6 +25,7 @@
 package loto
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -39,6 +40,8 @@ import (
 
 // ErrHeld is returned when a lock is currently held by another agent.
 // Use errors.As to extract the holder's Tag and Kind.
+//
+//nolint:errname // sentinel-style name kept for API stability
 type ErrHeld struct {
 	Tag    *Tag   // advisory; may be nil if the tag was unreadable
 	Kind   string // "file" or "global"
@@ -81,6 +84,8 @@ func (e *ErrHeld) MarshalJSON() ([]byte, error) {
 }
 
 // ErrSystem wraps an IO or OS-level failure (exit code 3 at the CLI).
+//
+//nolint:errname // sentinel-style name kept for API stability
 type ErrSystem struct {
 	Op  string
 	Err error
@@ -289,7 +294,10 @@ func (l *LOTO) ReadGlobalTag() (*Tag, error) {
 func (l *LOTO) ReapIfDead(target string) error {
 	tag, err := l.ReadTag(target)
 	if err != nil {
-		return nil // no tag, nothing to do
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return &ErrSystem{Op: "reap-if-dead: read tag", Err: err}
 	}
 	if pidAlive(tag.PID) {
 		return &ErrHeld{Tag: tag, Kind: "file", Target: target}
@@ -473,7 +481,9 @@ func readTag(tagPath string) (*Tag, error) {
 }
 
 func gitBranch(dir string) string {
-	cmd := exec.Command("git", "branch", "--show-current")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "branch", "--show-current")
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
