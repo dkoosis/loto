@@ -1,3 +1,6 @@
+// Command loto is the CLI for lock-out/tag-out coordination across concurrent
+// Claude sessions — claims file and global locks, tags them with agent
+// identity, and surfaces holders so editors don't silently clobber each other.
 package main
 
 import (
