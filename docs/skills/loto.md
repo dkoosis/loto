@@ -21,14 +21,33 @@ description: >
 
 ## Operating loop
 
+‡ **Critical for Bash-tool callers:** `loto try file <path>` *without* `--hold` acquires AND releases in the same process. The lock is gone the moment the Bash command returns. You cannot hold an OS lock across separate Bash tool calls. Choose the pattern that matches your workflow:
+
+### Pattern A — multi-file refactor (recommended for Claude)
+
+Use **reservations**. They're advisory tags that persist across process exits and surface as warnings to other agents.
+
 ```
 1. orient    → loto whoami
-2. intend    → loto reserve "<glob>"      # optional
-3. acquire   → loto try file <path>       # exit 0 + acquired line, or exit 1 + blocked line
+2. reserve   → loto reserve add "<glob>" --intent "<why>"
+3. probe     → loto status <path>            # check no conflicting holder
 4. edit      → ... do the work ...
 5. read msgs → loto inbox <path>
-6. release   → loto release --all-mine    # explicit, or auto-on-session-end
+6. release   → loto reserve release "<glob>"
 ```
+
+### Pattern B — single-file probe before edit
+
+Use `loto try file` as a **probe**: exit 0 means no one currently holds it; you proceed and edit immediately, accepting that the lock didn't persist. Adequate for fast edits where the race window is tiny.
+
+```
+1. loto try file <path>     # exit 0 = clear to edit, exit 1 = someone holds it
+2. ... edit immediately ...
+```
+
+### Pattern C — genuine hold across a long edit
+
+Run `loto try file <path> --hold` via `run_in_background`; it stays foreground until SIGTERM. Send the signal when done. Rare; only when Pattern A or B isn't enough.
 
 ## Reading LLM output
 
@@ -88,6 +107,8 @@ status | target | holder | intent
 - ✗ Use `--no-verify` to bypass the loto pre-commit hook. If it fires, someone else is holding what you're committing — talk to them first.
 - ✗ `loto break --force` without a `--reason`. The displaced agent gets a mailbox message; give them the why.
 - ✗ Hold a file lock across long-running tool calls (builds, tests). Acquire just before the edit, release just after.
+- ✗ Assume `loto try file` (no `--hold`) holds the lock past the bash command. It doesn't — see Pattern A/B/C above.
+- ✗ Treat `loto reserve` output as LLM-format yet — it currently emits raw JSON (loto-guy, loto-84u). Parse accordingly until those land.
 
 ## Cross-refs
 
