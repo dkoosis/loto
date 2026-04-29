@@ -32,13 +32,16 @@ LDFLAGS := -X main.Version=$(VERSION) -X main.GitCommit=$(COMMIT)
 # Report stream — fo dashboard format. `set +e` opts out of the recipe-wide
 # -euo pipefail so report MUST run every tool and emit output even if one
 # fails. The outer `|| true` on report targets keeps make exit-0 regardless.
+# fo's multiplex protocol accepts only format:sarif and format:testjson.
+# Text-emitting tools (build/vet/lint) are routed through `fo wrap diag`
+# to convert line diagnostics into SARIF before the section delimiter.
 REPORT_CMD = set +e; \
-	echo '--- tool:build format:text ---'; \
-	go build ./... 2>&1; echo; \
-	echo '--- tool:vet format:text ---'; \
-	go vet $(PKG) 2>&1; echo; \
-	echo '--- tool:lint format:text ---'; \
-	golangci-lint run $(PKG) 2>&1; echo; \
+	echo '--- tool:build format:sarif ---'; \
+	go build ./... 2>&1 | fo wrap diag --tool build --level error; echo; \
+	echo '--- tool:vet format:sarif ---'; \
+	go vet $(PKG) 2>&1 | fo wrap diag --tool vet --level error; echo; \
+	echo '--- tool:lint format:sarif ---'; \
+	golangci-lint run --output.sarif.path=/dev/stdout $(PKG) 2>/dev/null; echo; \
 	echo '--- tool:test format:testjson ---'; \
 	go test -race -json -cover -count=1 $(PKG) 2>&1; echo
 
