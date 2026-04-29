@@ -491,7 +491,7 @@ func exit(err error) {
 		if currentFormat == render.FormatLLM {
 			in := render.BlockedInput{Kind: held.Kind, Target: held.Target}
 			if held.Tag != nil {
-				in.AgentID = held.Tag.AgentID
+				in.AgentID = displayAgent(held.Tag.AgentID)
 				in.Intent = held.Tag.Intent
 				in.HeldSince = held.Tag.Timestamp
 				in.ExpiresAt = held.Tag.ExpiresAt
@@ -524,9 +524,9 @@ func emitTrySuccess(kind, target, agent string, warnings []*loto.Reservation) {
 	if currentFormat == render.FormatLLM {
 		w := make([]render.ReservationWarning, len(warnings))
 		for i, r := range warnings {
-			w[i] = render.ReservationWarning{Pattern: r.Pattern, AgentID: r.AgentID}
+			w[i] = render.ReservationWarning{Pattern: r.Pattern, AgentID: displayAgent(r.AgentID)}
 		}
-		_ = render.EmitLLMTrySuccess(os.Stdout, kind, target, agent, w)
+		_ = render.EmitLLMTrySuccess(os.Stdout, kind, target, displayAgent(agent), w)
 		return
 	}
 	var result map[string]any
@@ -547,7 +547,7 @@ func emitTrySuccess(kind, target, agent string, warnings []*loto.Reservation) {
 
 func emitStatusGlobal(free bool, agent, intent string, tag *loto.Tag) {
 	if currentFormat == render.FormatLLM {
-		_ = render.EmitLLMStatusGlobal(os.Stdout, free, agent, intent)
+		_ = render.EmitLLMStatusGlobal(os.Stdout, free, displayAgent(agent), intent)
 		return
 	}
 	if free {
@@ -559,7 +559,12 @@ func emitStatusGlobal(free bool, agent, intent string, tag *loto.Tag) {
 
 func emitStatusTargets(entries []render.StatusEntry, jsonResult map[string]any) {
 	if currentFormat == render.FormatLLM {
-		_ = render.EmitLLMStatusTargets(os.Stdout, entries)
+		display := make([]render.StatusEntry, len(entries))
+		for i, e := range entries {
+			display[i] = e
+			display[i].AgentID = displayAgent(e.AgentID)
+		}
+		_ = render.EmitLLMStatusTargets(os.Stdout, display)
 		return
 	}
 	_ = render.EmitJSON(os.Stdout, jsonResult)
@@ -569,7 +574,7 @@ func emitInbox(target string, msgs []loto.Msg) {
 	if currentFormat == render.FormatLLM {
 		out := make([]render.InboxMessage, len(msgs))
 		for i, m := range msgs {
-			out[i] = render.InboxMessage{From: m.From, To: m.To, Body: m.Body}
+			out[i] = render.InboxMessage{From: displayAgent(m.From), To: displayAgent(m.To), Body: m.Body}
 		}
 		_ = render.EmitLLMInbox(os.Stdout, target, out)
 		return
@@ -579,7 +584,7 @@ func emitInbox(target string, msgs []loto.Msg) {
 
 func emitMsgSent(target, to string) {
 	if currentFormat == render.FormatLLM {
-		_ = render.EmitLLMMsgSent(os.Stdout, target, to)
+		_ = render.EmitLLMMsgSent(os.Stdout, target, displayAgent(to))
 		return
 	}
 	_ = render.EmitJSON(os.Stdout, map[string]any{"sent": true, "to": to, "target": target})
@@ -587,7 +592,7 @@ func emitMsgSent(target, to string) {
 
 func emitReleased(agent string, released []string, errs []string) {
 	if currentFormat == render.FormatLLM {
-		_ = render.EmitLLMReleased(os.Stdout, agent, len(released), errs)
+		_ = render.EmitLLMReleased(os.Stdout, displayAgent(agent), len(released), errs)
 		return
 	}
 	_ = render.EmitJSON(os.Stdout, map[string]any{"agent": agent, "released": released, "errors": errs})
@@ -603,7 +608,7 @@ func emitReaped(target string) {
 
 func emitBroken(target, by, reason string) {
 	if currentFormat == render.FormatLLM {
-		_ = render.EmitLLMBroken(os.Stdout, target, by, reason)
+		_ = render.EmitLLMBroken(os.Stdout, target, displayAgent(by), reason)
 		return
 	}
 	_ = render.EmitJSON(os.Stdout, map[string]any{"broken": true, "force": true, "target": target, "by": by, "reason": reason})

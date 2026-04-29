@@ -6,8 +6,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 )
+
+var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// displayAgent resolves a raw agent ID to a human-readable handle for LLM/tty output.
+// UUID-shaped IDs become deterministic handles (e.g. "GreenCastle"). Anything else
+// (e.g. "pid-1234", legacy literal handles) passes through unchanged.
+func displayAgent(id string) string {
+	if uuidRE.MatchString(id) {
+		return generateHandle(id)
+	}
+	return id
+}
 
 // Agent represents a session-persistent loto identity.
 // Stored at ~/.loto/agents/<uuid>.json; shared via LOTO_AGENT_ID env var.
