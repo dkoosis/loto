@@ -1,0 +1,12 @@
+usage: loto [flags] <command> [args]
+
+commands:
+  file <target>      acquire and hold a file lock until SIGINT
+  global             acquire and hold the global lock until SIGINT
+  status [target..]  show tag for global lock, or for given files
+  break <target>     force-release a stale file lock (must be unheld)
+
+flags:
+  -base    coordination base directory (or $LOTO_BASE; default ./.loto)
+  -agent   agent id (default pid-N)
+  -intent  human-readable intent
