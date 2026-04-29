@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -114,11 +115,15 @@ func appendMsg(msgsPath string, msg Msg) error {
 }
 
 // appendMsgLocked writes msg to msgsPath; caller must hold the mailbox lock.
+// Data is fsynced before close, and the parent directory is fsynced after the
+// first creation, so an acknowledged append survives a crash/power loss.
 func appendMsgLocked(msgsPath string, msg Msg) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return &ErrSystem{Op: "msg: marshal", Err: err}
 	}
+	_, statErr := os.Stat(msgsPath)
+	creating := os.IsNotExist(statErr)
 	f, err := os.OpenFile(msgsPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return &ErrSystem{Op: "msg: open mailbox", Err: err}
@@ -127,14 +132,34 @@ func appendMsgLocked(msgsPath string, msg Msg) error {
 		_ = f.Close()
 		return &ErrSystem{Op: "msg: write mailbox", Err: err}
 	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return &ErrSystem{Op: "msg: fsync mailbox", Err: err}
+	}
 	if err := f.Close(); err != nil {
 		return &ErrSystem{Op: "msg: close mailbox", Err: err}
+	}
+	if creating {
+		// Newly created file: parent dir must be fsynced or the entry itself
+		// may not survive reboot on some filesystems.
+		_ = fsyncDir(filepath.Dir(msgsPath))
 	}
 
 	if countLines(msgsPath) >= mailboxCompactAt {
 		_ = compactFileLocked(msgsPath)
 	}
 	return nil
+}
+
+// fsyncDir flushes a directory's metadata so renames/creates within it are
+// durable across a crash. Best-effort: some filesystems don't support it.
+func fsyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func readMsgs(msgsPath string) ([]Msg, error) {
@@ -186,6 +211,10 @@ func quarantineCorruptLines(msgsPath string, lines []string) {
 	}
 }
 
+// rewriteMsgs atomically replaces msgsPath with msgs. The temp file is
+// fsynced before rename, and the parent directory is fsynced after, so a
+// crash anywhere along the way leaves either the old contents or the new —
+// never a truncated file or a missing rename.
 func rewriteMsgs(msgsPath string, msgs []Msg) error {
 	tmp := msgsPath + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -205,6 +234,11 @@ func rewriteMsgs(msgsPath string, msgs []Msg) error {
 			return &ErrSystem{Op: "msg: compact write", Err: err}
 		}
 	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return &ErrSystem{Op: "msg: compact fsync", Err: err}
+	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return &ErrSystem{Op: "msg: compact close", Err: err}
@@ -213,6 +247,7 @@ func rewriteMsgs(msgsPath string, msgs []Msg) error {
 		_ = os.Remove(tmp)
 		return &ErrSystem{Op: "msg: compact rename", Err: err}
 	}
+	_ = fsyncDir(filepath.Dir(msgsPath))
 	return nil
 }
 
