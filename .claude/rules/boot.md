@@ -1,12 +1,8 @@
 # Boot
 updated: 2026-04-29
 
-→ pick from queue: `bd ready` — fresh: loto-edt (P2, session-identity hook bug).
-
-✓ done
-- skill `~/.claude/skills/loto/` + repo snapshot `docs/skills/loto.md`
-- LLM output renders agent UUIDs as handles (`by:KeenWarbler`)
+→ `bd ready` — 6 bugs in queue, top: loto-616 (P1 mailbox race).
 
 ‡ traps
-- `bd auto-export "git add failed"` warning is harmless
-- skill claims one-handle-per-session — currently false (loto-edt). Don't promise it in convos until fixed.
+- `CLAUDE_SESSION_ID` ✗ in Bash tool env — only `CLAUDECODE`/`CLAUDE_CODE_*`. Stable ID comes from CC session JSONL discovery (4622ab9).
+- `try file` (no `--hold`) auto-releases on exit; use `--hold` in tests needing live lock
