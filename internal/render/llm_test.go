@@ -98,6 +98,94 @@ func TestEmitLLMStatusGlobalHeld(t *testing.T) {
 	}
 }
 
+func TestEmitLLMInboxEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitLLMInbox(&buf, "store.go", nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "inbox | store.go | [status: empty]\n") {
+		t.Fatalf("got:\n%s", buf.String())
+	}
+}
+
+func TestEmitLLMInboxWithMessages(t *testing.T) {
+	var buf bytes.Buffer
+	msgs := []InboxMessage{
+		{From: "BlueOak", To: "@all", Body: "renaming Foo→Bar"},
+	}
+	if err := EmitLLMInbox(&buf, "store.go", msgs); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "inbox | store.go | 1 msgs\n") {
+		t.Fatalf("missing header row:\n%s", got)
+	}
+	if !strings.Contains(got, "→ from:BlueOak | to:@all | renaming Foo→Bar\n") {
+		t.Fatalf("missing msg row:\n%s", got)
+	}
+}
+
+func TestEmitLLMMsgSent(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitLLMMsgSent(&buf, "store.go", "BlueOak"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "✔ msg-sent | target:store.go | to:BlueOak\n") {
+		t.Fatalf("got:\n%s", buf.String())
+	}
+}
+
+func TestEmitLLMReleased(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitLLMReleased(&buf, "GreenCastle", 3, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "✔ released | agent:GreenCastle | n:3\n") {
+		t.Fatalf("got:\n%s", buf.String())
+	}
+}
+
+func TestEmitLLMReleasedWithErrors(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitLLMReleased(&buf, "A", 1, []string{"permission denied"}); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "✗ release-error | permission denied\n") {
+		t.Fatalf("got:\n%s", got)
+	}
+}
+
+func TestEmitLLMReaped(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitLLMReaped(&buf, "store.go"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "✔ reaped | store.go\n") {
+		t.Fatalf("got:\n%s", buf.String())
+	}
+}
+
+func TestEmitLLMBroken(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitLLMBroken(&buf, "store.go", "RedRiver", "stuck"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "✔ broken | store.go | by:RedRiver | reason:stuck\n") {
+		t.Fatalf("got:\n%s", buf.String())
+	}
+}
+
+func TestEmitLLMInstalled(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitLLMInstalled(&buf, ".claude/settings.json"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "✔ installed | .claude/settings.json\n") {
+		t.Fatalf("got:\n%s", buf.String())
+	}
+}
+
 func TestEmitLLMStatusTargets(t *testing.T) {
 	var buf bytes.Buffer
 	entries := []StatusEntry{

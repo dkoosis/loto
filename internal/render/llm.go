@@ -119,6 +119,97 @@ func EmitLLMStatusGlobal(w io.Writer, free bool, agent, intent string) error {
 	return err
 }
 
+// InboxMessage is a single message rendered for `loto inbox`.
+type InboxMessage struct {
+	From string
+	To   string
+	Body string
+}
+
+const inboxBodyMax = 200
+
+func collapseBody(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= inboxBodyMax {
+		return s
+	}
+	return s[:inboxBodyMax-1] + "…"
+}
+
+// EmitLLMInbox writes inbox content. Empty inbox renders an explicit
+// `[status: empty]` line — silence is dangerous (looks like a crash).
+func EmitLLMInbox(w io.Writer, target string, msgs []InboxMessage) error {
+	if _, err := io.WriteString(w, llmHeader); err != nil {
+		return err
+	}
+	if len(msgs) == 0 {
+		_, err := fmt.Fprintf(w, "inbox | %s | [status: empty]\n", target)
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "inbox | %s | %d msgs\n", target, len(msgs)); err != nil {
+		return err
+	}
+	for _, m := range msgs {
+		if _, err := fmt.Fprintf(w, "→ from:%s | to:%s | %s\n", m.From, m.To, collapseBody(m.Body)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// EmitLLMMsgSent confirms a sent message.
+func EmitLLMMsgSent(w io.Writer, target, to string) error {
+	if _, err := io.WriteString(w, llmHeader); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w, "✔ msg-sent | target:%s | to:%s\n", target, to)
+	return err
+}
+
+// EmitLLMReleased reports release results: count + per-error lines.
+func EmitLLMReleased(w io.Writer, agent string, n int, errs []string) error {
+	if _, err := io.WriteString(w, llmHeader); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "✔ released | agent:%s | n:%d\n", agent, n); err != nil {
+		return err
+	}
+	for _, e := range errs {
+		if _, err := fmt.Fprintf(w, "✗ release-error | %s\n", e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// EmitLLMReaped confirms a reap.
+func EmitLLMReaped(w io.Writer, target string) error {
+	if _, err := io.WriteString(w, llmHeader); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w, "✔ reaped | %s\n", target)
+	return err
+}
+
+// EmitLLMBroken confirms a forced break.
+func EmitLLMBroken(w io.Writer, target, by, reason string) error {
+	if _, err := io.WriteString(w, llmHeader); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w, "✔ broken | %s | by:%s | reason:%s\n", target, by, reason)
+	return err
+}
+
+// EmitLLMInstalled confirms a hook install.
+func EmitLLMInstalled(w io.Writer, path string) error {
+	if _, err := io.WriteString(w, llmHeader); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w, "✔ installed | %s\n", path)
+	return err
+}
+
 // EmitLLMStatusTargets writes a small positional table for per-file status.
 func EmitLLMStatusTargets(w io.Writer, entries []StatusEntry) error {
 	if _, err := io.WriteString(w, llmHeader); err != nil {
