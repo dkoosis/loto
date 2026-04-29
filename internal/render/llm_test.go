@@ -77,3 +77,44 @@ func TestEmitLLMBlockedTruncatesLongIntent(t *testing.T) {
 		t.Fatalf("intent not truncated; got:\n%s", buf.String())
 	}
 }
+
+func TestEmitLLMStatusGlobalFree(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitLLMStatusGlobal(&buf, true, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "✔ global | free\n") {
+		t.Fatalf("unexpected:\n%s", buf.String())
+	}
+}
+
+func TestEmitLLMStatusGlobalHeld(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitLLMStatusGlobal(&buf, false, "GreenCastle", "sweep"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "✗ global | by:GreenCastle | intent:sweep\n") {
+		t.Fatalf("unexpected:\n%s", buf.String())
+	}
+}
+
+func TestEmitLLMStatusTargets(t *testing.T) {
+	var buf bytes.Buffer
+	entries := []StatusEntry{
+		{Target: "a.go", Free: true},
+		{Target: "b.go", Free: false, AgentID: "GreenCastle", Intent: "store refactor"},
+	}
+	if err := EmitLLMStatusTargets(&buf, entries); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "status | target | holder | intent\n") {
+		t.Fatalf("missing column header:\n%s", got)
+	}
+	if !strings.Contains(got, "✔ free | a.go | - | -\n") {
+		t.Fatalf("missing free row:\n%s", got)
+	}
+	if !strings.Contains(got, "✗ held | b.go | GreenCastle | store refactor\n") {
+		t.Fatalf("missing held row:\n%s", got)
+	}
+}

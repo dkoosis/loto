@@ -97,3 +97,50 @@ func EmitLLMBlocked(w io.Writer, in BlockedInput) error {
 	_, err := io.WriteString(w, b.String())
 	return err
 }
+
+// StatusEntry is one row of `loto status <targets...>` output.
+type StatusEntry struct {
+	Target  string
+	Free    bool
+	AgentID string
+	Intent  string
+}
+
+// EmitLLMStatusGlobal writes the global-lock status line.
+func EmitLLMStatusGlobal(w io.Writer, free bool, agent, intent string) error {
+	if _, err := io.WriteString(w, llmHeader); err != nil {
+		return err
+	}
+	if free {
+		_, err := io.WriteString(w, "✔ global | free\n")
+		return err
+	}
+	_, err := fmt.Fprintf(w, "✗ global | by:%s | intent:%s\n", agent, intent)
+	return err
+}
+
+// EmitLLMStatusTargets writes a small positional table for per-file status.
+func EmitLLMStatusTargets(w io.Writer, entries []StatusEntry) error {
+	if _, err := io.WriteString(w, llmHeader); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, "status | target | holder | intent\n"); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.Free {
+			if _, err := fmt.Fprintf(w, "✔ free | %s | - | -\n", e.Target); err != nil {
+				return err
+			}
+			continue
+		}
+		intent := e.Intent
+		if intent == "" {
+			intent = "-"
+		}
+		if _, err := fmt.Fprintf(w, "✗ held | %s | %s | %s\n", e.Target, e.AgentID, intent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
