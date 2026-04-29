@@ -11,8 +11,12 @@ loto answers one question fast:
 
 > "Is it safe for me to edit this path right now, and if not, who's on it?"
 
-If the answer arrives in <50ms, with structured JSON, with a useful holder
+If the answer arrives in <50ms, with structured output, with a useful holder
 description, Claudes will actually use it.
+
+> Using Claude Code? Install the loto skill at `~/.claude/skills/loto/SKILL.md`
+> (snapshot at `docs/skills/loto.md`) and the global hooks at
+> `~/.claude/settings.json` so every session gets identity + auto-release.
 
 ## non-goals
 
@@ -36,19 +40,28 @@ make install
 ```sh
 # Who am I in this session?
 loto whoami
+# → loto:llm:v1
+# → agent | RemoteSnipe | id:2dd46381 | host:Mac
 
 # Acquire a file lock (non-blocking):
-loto try file internal/store/store.go --json
-# → {"acquired":true,"target":"...","agent":"pid-1234"}
+loto try file internal/store/store.go
+# → loto:llm:v1
+# → ✔ acquired | file | internal/store/store.go | by:RemoteSnipe
+
+# When blocked (stderr, exit 1):
+# → ✗ blocked | file | … | by:GreenCastle | intent:… | held-since:…
+
+# JSON output for scripts / hooks:
+loto whoami --json
 
 # Acquire with wait (blocks up to 30s):
-loto try file internal/store/store.go --wait 30s --json
+loto try file internal/store/store.go --wait 30s
 
 # Hold for foreground work:
 loto try file internal/store/store.go --hold
 
 # Check what's locked in this project:
-loto status --json
+loto status
 
 # Release stale tag from a crashed session:
 loto reap internal/store/store.go
@@ -67,6 +80,10 @@ loto reserve release "internal/store/**"
 # Install git pre-commit hook (blocks commits on conflicting locks/reservations):
 loto install-git-hook
 ```
+
+By default, loto emits the **claude-optimized** terse format when stdout is
+not a tty (≈40-60% fewer tokens than JSON). Pipe consumers and existing
+hooks should pass `--json` explicitly.
 
 ## coordination model
 
@@ -132,7 +149,7 @@ loto install-hook   # write .claude/settings.json hooks
 1. **flock is truth.** Never trust a tag alone for a safety decision.
 2. **Single host.** All paths are absolute on this machine.
 3. **No daemon.** State lives on disk; every operation is a fresh process.
-4. **JSON-first I/O.** Human formatting is opt-in (`--json` or non-tty stdout).
+4. **Claude-optimized I/O.** Default to terse `loto:llm:v1` format on non-tty stdout; `--json` for scripts; pretty for ttys.
 5. **Identity is per-session, not per-process.** Many shells, one handle.
 6. **Reads are free.** loto coordinates writes only.
 7. **Cleanup is layered.** SessionStop hook (eager) → lazy GC on next acquire (passive) → `loto doctor --repair` (manual).
