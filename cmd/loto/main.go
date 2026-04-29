@@ -12,14 +12,17 @@ import (
 
 	"github.com/spf13/cobra"
 	"loto"
+	"loto/internal/render"
 )
 
 // globals set by persistent root flags, available to all subcommands.
 var (
-	flagBase   string
-	flagAgent  string
-	flagIntent string
-	flagJSON   bool
+	flagBase      string
+	flagAgent     string
+	flagIntent    string
+	flagJSON      bool   // back-compat: synonym for --format=json
+	flagFormat    string // "" (auto) | "json" | "llm"
+	currentFormat render.Format
 )
 
 func main() {
@@ -35,17 +38,18 @@ var rootCmd = &cobra.Command{
 	Short: "lock-out / tag-out coordination for multi-agent workspaces",
 	Long: `loto coordinates file and workspace locks across Claude sessions.
 
-Outputs structured JSON when --json is set or stdout is not a tty.
+Default output is the Claude-Optimized "llm" format (terse, line-oriented)
+when stdout is not a tty; tty output is JSON. Override with --format=json|llm
+or the legacy --json alias.
 Exit codes: 0 success · 1 advisory conflict · 2 usage error · 3 system error`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// Auto-enable JSON when stdout is not a tty.
-		if !flagJSON {
-			if fi, err := os.Stdout.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
-				flagJSON = true
-			}
+		explicit := flagFormat
+		if flagJSON && explicit == "" {
+			explicit = "json"
 		}
+		currentFormat = render.Resolve(explicit, os.Stdout)
 		return nil
 	},
 }
@@ -55,7 +59,8 @@ func init() {
 	pf.StringVar(&flagBase, "base", defaultBase(), "coordination base directory (or $LOTO_BASE)")
 	pf.StringVar(&flagAgent, "agent", defaultAgent(), "agent id")
 	pf.StringVar(&flagIntent, "intent", "ad-hoc", "human-readable intent")
-	pf.BoolVar(&flagJSON, "json", false, "force JSON output")
+	pf.BoolVar(&flagJSON, "json", false, "force JSON output (alias for --format=json)")
+	pf.StringVar(&flagFormat, "format", "", "output format: json | llm (default: llm when stdout is not a tty)")
 
 	rootCmd.AddCommand(
 		tryCmd,
@@ -115,21 +120,10 @@ var tryFileCmd = &cobra.Command{
 		if err != nil {
 			exit(err)
 		}
-		result := map[string]any{"acquired": true, "target": target, "agent": flagAgent}
-		if len(lock.Conflicts) > 0 {
-			patterns := make([]string, len(lock.Conflicts))
-			for i, r := range lock.Conflicts {
-				patterns[i] = r.Pattern + " (" + r.AgentID + ")"
-			}
-			result["reservation_warnings"] = patterns
-		}
+		emitTrySuccess("file", target, flagAgent, lock.Conflicts)
 		if tryFileHold {
-			printJSON(result)
 			waitForSignal()
-			_ = lock.Unlock()
-			return nil
 		}
-		printJSON(result)
 		_ = lock.Unlock()
 		return nil
 	},
@@ -145,13 +139,10 @@ var tryGlobalCmd = &cobra.Command{
 		if err != nil {
 			exit(err)
 		}
+		emitTrySuccess("global", "global", flagAgent, nil)
 		if tryFileHold {
-			printJSON(map[string]any{"acquired": true, "kind": "global", "agent": flagAgent})
 			waitForSignal()
-			_ = lock.Unlock()
-			return nil
 		}
-		printJSON(map[string]any{"acquired": true, "kind": "global", "agent": flagAgent})
 		_ = lock.Unlock()
 		return nil
 	},
@@ -221,22 +212,25 @@ var statusCmd = &cobra.Command{
 		if len(args) == 0 {
 			tag, err := l.ReadGlobalTag()
 			if err != nil {
-				printJSON(map[string]any{"global": "free"})
+				emitStatusGlobal(true, "", "", nil)
 				return nil
 			}
-			printJSON(map[string]any{"global": tag})
+			emitStatusGlobal(false, tag.AgentID, tag.Intent, tag)
 			return nil
 		}
-		result := make(map[string]any, len(args))
+		entries := make([]render.StatusEntry, 0, len(args))
+		jsonResult := make(map[string]any, len(args))
 		for _, t := range args {
 			tag, err := l.ReadTag(t)
 			if err != nil {
-				result[t] = "free"
+				entries = append(entries, render.StatusEntry{Target: t, Free: true})
+				jsonResult[t] = "free"
 			} else {
-				result[t] = tag
+				entries = append(entries, render.StatusEntry{Target: t, Free: false, AgentID: tag.AgentID, Intent: tag.Intent})
+				jsonResult[t] = tag
 			}
 		}
-		printJSON(result)
+		emitStatusTargets(entries, jsonResult)
 		return nil
 	},
 }
@@ -255,7 +249,7 @@ For forced takeover of a live lock, see 'loto break --force' (loto-7wp.19).`,
 		if err := l.Reap(args[0]); err != nil {
 			exit(err)
 		}
-		printJSON(map[string]any{"reaped": true, "target": args[0]})
+		emitReaped(args[0])
 		return nil
 	},
 }
@@ -284,12 +278,12 @@ to record why the break was necessary.`,
 				if err := l.ForceBreak(target, by, reason); err != nil {
 					exit(err)
 				}
-				printJSON(map[string]any{"broken": true, "force": true, "target": target, "by": by, "reason": reason})
+				emitBroken(target, by, reason)
 			} else {
 				if err := l.Reap(target); err != nil {
 					exit(err)
 				}
-				printJSON(map[string]any{"reaped": true, "target": target})
+				emitReaped(target)
 			}
 			return nil
 		},
@@ -320,11 +314,7 @@ var releaseCmd = &cobra.Command{
 		}
 		l := newLOTO()
 		released, errs := l.ReleaseAllMine(agent)
-		printJSON(map[string]any{
-			"agent":    agent,
-			"released": released,
-			"errors":   errsToStrings(errs),
-		})
+		emitReleased(agent, released, errsToStrings(errs))
 		if len(errs) > 0 {
 			os.Exit(1)
 		}
@@ -360,7 +350,7 @@ func inboxCmd() *cobra.Command {
 			if err != nil {
 				exit(err)
 			}
-			printJSON(msgs)
+			emitInbox(args[0], msgs)
 			return nil
 		},
 	}
@@ -377,7 +367,7 @@ func msgCmd() *cobra.Command {
 			if err := l.SendMsg(args[0], flagAgent, to, args[1], false); err != nil {
 				exit(err)
 			}
-			printJSON(map[string]any{"sent": true, "to": to, "target": args[0]})
+			emitMsgSent(args[0], to)
 			return nil
 		},
 	}
@@ -398,7 +388,7 @@ SessionStop:  runs 'loto release --all-mine' to clean up this session's locks.`,
 		if err := writeClaudeHooks(); err != nil {
 			exit(err)
 		}
-		printJSON(map[string]any{"installed": true, "file": ".claude/settings.json"})
+		emitInstalled(".claude/settings.json")
 		return nil
 	},
 }
@@ -471,7 +461,7 @@ var whoamiCmd = &cobra.Command{
 		if err != nil {
 			exit(err)
 		}
-		printJSON(a)
+		emitWhoami(a)
 		return nil
 	},
 }
@@ -495,11 +485,10 @@ func stubCmd(use, short, tracker string) *cobra.Command {
 	}
 }
 
-// printJSON writes v as indented JSON to stdout. Falls back to plain text on error.
+// printJSON writes v as indented JSON to stdout. Retained for any callers
+// (e.g. helper output paths) that haven't migrated to a per-shape emit*.
 func printJSON(v any) {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(v)
+	_ = render.EmitJSON(os.Stdout, v)
 }
 
 // exit writes a typed error to stderr and exits with the appropriate code.
@@ -510,16 +499,135 @@ func exit(err error) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(3)
 	}
-	// ErrHeld: emit structured JSON to stderr so callers can parse the blocker.
 	var held *loto.ErrHeld
-	if errors.As(err, &held) && flagJSON {
-		enc := json.NewEncoder(os.Stderr)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(held)
+	if errors.As(err, &held) {
+		if currentFormat == render.FormatLLM {
+			in := render.BlockedInput{Kind: held.Kind, Target: held.Target}
+			if held.Tag != nil {
+				in.AgentID = held.Tag.AgentID
+				in.Intent = held.Tag.Intent
+				in.HeldSince = held.Tag.Timestamp
+				in.ExpiresAt = held.Tag.ExpiresAt
+				in.Branch = held.Tag.Branch
+				in.Host = held.Tag.Host
+				in.PID = held.Tag.PID
+			}
+			_ = render.EmitLLMBlocked(os.Stderr, in)
+			os.Exit(1)
+		}
+		// JSON path: ErrHeld.MarshalJSON emits the holder-report shape.
+		_ = render.EmitJSON(os.Stderr, held)
 		os.Exit(1)
 	}
 	fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
+}
+
+// ── format dispatchers ───────────────────────────────────────────────────────
+
+func emitWhoami(a *Agent) {
+	if currentFormat == render.FormatLLM {
+		_ = render.EmitLLMWhoami(os.Stdout, a.ID, a.Handle, a.Host)
+		return
+	}
+	_ = render.EmitJSON(os.Stdout, a)
+}
+
+func emitTrySuccess(kind, target, agent string, warnings []*loto.Reservation) {
+	if currentFormat == render.FormatLLM {
+		w := make([]render.ReservationWarning, len(warnings))
+		for i, r := range warnings {
+			w[i] = render.ReservationWarning{Pattern: r.Pattern, AgentID: r.AgentID}
+		}
+		_ = render.EmitLLMTrySuccess(os.Stdout, kind, target, agent, w)
+		return
+	}
+	var result map[string]any
+	if kind == "global" {
+		result = map[string]any{"acquired": true, "kind": "global", "agent": agent}
+	} else {
+		result = map[string]any{"acquired": true, "target": target, "agent": agent}
+	}
+	if len(warnings) > 0 {
+		patterns := make([]string, len(warnings))
+		for i, r := range warnings {
+			patterns[i] = r.Pattern + " (" + r.AgentID + ")"
+		}
+		result["reservation_warnings"] = patterns
+	}
+	_ = render.EmitJSON(os.Stdout, result)
+}
+
+func emitStatusGlobal(free bool, agent, intent string, tag *loto.Tag) {
+	if currentFormat == render.FormatLLM {
+		_ = render.EmitLLMStatusGlobal(os.Stdout, free, agent, intent)
+		return
+	}
+	if free {
+		_ = render.EmitJSON(os.Stdout, map[string]any{"global": "free"})
+		return
+	}
+	_ = render.EmitJSON(os.Stdout, map[string]any{"global": tag})
+}
+
+func emitStatusTargets(entries []render.StatusEntry, jsonResult map[string]any) {
+	if currentFormat == render.FormatLLM {
+		_ = render.EmitLLMStatusTargets(os.Stdout, entries)
+		return
+	}
+	_ = render.EmitJSON(os.Stdout, jsonResult)
+}
+
+func emitInbox(target string, msgs []loto.Msg) {
+	if currentFormat == render.FormatLLM {
+		out := make([]render.InboxMessage, len(msgs))
+		for i, m := range msgs {
+			out[i] = render.InboxMessage{From: m.From, To: m.To, Body: m.Body}
+		}
+		_ = render.EmitLLMInbox(os.Stdout, target, out)
+		return
+	}
+	_ = render.EmitJSON(os.Stdout, msgs)
+}
+
+func emitMsgSent(target, to string) {
+	if currentFormat == render.FormatLLM {
+		_ = render.EmitLLMMsgSent(os.Stdout, target, to)
+		return
+	}
+	_ = render.EmitJSON(os.Stdout, map[string]any{"sent": true, "to": to, "target": target})
+}
+
+func emitReleased(agent string, released []string, errs []string) {
+	if currentFormat == render.FormatLLM {
+		_ = render.EmitLLMReleased(os.Stdout, agent, len(released), errs)
+		return
+	}
+	_ = render.EmitJSON(os.Stdout, map[string]any{"agent": agent, "released": released, "errors": errs})
+}
+
+func emitReaped(target string) {
+	if currentFormat == render.FormatLLM {
+		_ = render.EmitLLMReaped(os.Stdout, target)
+		return
+	}
+	_ = render.EmitJSON(os.Stdout, map[string]any{"reaped": true, "target": target})
+}
+
+func emitBroken(target, by, reason string) {
+	if currentFormat == render.FormatLLM {
+		_ = render.EmitLLMBroken(os.Stdout, target, by, reason)
+		return
+	}
+	_ = render.EmitJSON(os.Stdout, map[string]any{"broken": true, "force": true, "target": target, "by": by, "reason": reason})
+}
+
+func emitInstalled(path string) {
+	if currentFormat == render.FormatLLM {
+		_ = render.EmitLLMInstalled(os.Stdout, path)
+		return
+	}
+	_ = render.EmitJSON(os.Stdout, map[string]any{"installed": true, "file": path})
 }
 
 func waitForSignal() {
