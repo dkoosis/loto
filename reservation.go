@@ -72,7 +72,9 @@ func (l *LOTO) Unreserve(pattern string) error {
 	return nil
 }
 
-// ListReservations returns all active (non-expired) reservations.
+// ListReservations returns all active (non-expired) reservations. Corrupt
+// reservation files are quarantined to a .corrupt sidecar (with a stderr
+// warning) so coordination state never silently drops entries.
 func (l *LOTO) ListReservations() ([]*Reservation, error) {
 	resDir := l.reservationsDir()
 	entries, err := os.ReadDir(resDir)
@@ -87,13 +89,33 @@ func (l *LOTO) ListReservations() ([]*Reservation, error) {
 		if filepath.Ext(e.Name()) != reservationExt {
 			continue
 		}
-		r, err := l.readReservation(filepath.Join(resDir, e.Name()))
-		if err != nil || r == nil {
+		tagPath := filepath.Join(resDir, e.Name())
+		r, err := l.readReservation(tagPath)
+		if err != nil {
+			if errors.Is(err, ErrReservationExpired) || os.IsNotExist(err) {
+				continue
+			}
+			quarantineCorruptReservation(tagPath, err)
+			continue
+		}
+		if r == nil {
 			continue
 		}
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// quarantineCorruptReservation renames a malformed reservation tag to a
+// .corrupt sidecar so it is visible to operators but no longer participates
+// in coordination. Best-effort: errors are logged, never propagated.
+func quarantineCorruptReservation(tagPath string, parseErr error) {
+	corruptPath := fmt.Sprintf("%s.corrupt-%d", tagPath, time.Now().UnixNano())
+	fmt.Fprintf(os.Stderr, "loto: warning: corrupt reservation %s (%v); quarantined to %s\n",
+		tagPath, parseErr, corruptPath)
+	if err := os.Rename(tagPath, corruptPath); err != nil {
+		fmt.Fprintf(os.Stderr, "loto: warning: cannot quarantine %s: %v\n", tagPath, err)
+	}
 }
 
 // ConflictingReservations returns active reservations whose pattern matches path.

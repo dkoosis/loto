@@ -3,6 +3,7 @@ package loto
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -143,6 +144,7 @@ func readMsgs(msgsPath string) ([]Msg, error) {
 	}
 	defer f.Close()
 	var msgs []Msg
+	var corrupt []string
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -150,11 +152,38 @@ func readMsgs(msgsPath string) ([]Msg, error) {
 			continue
 		}
 		var m Msg
-		if json.Unmarshal([]byte(line), &m) == nil {
-			msgs = append(msgs, m)
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			corrupt = append(corrupt, line)
+			continue
 		}
+		msgs = append(msgs, m)
 	}
-	return msgs, scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return msgs, err
+	}
+	if len(corrupt) > 0 {
+		quarantineCorruptLines(msgsPath, corrupt)
+	}
+	return msgs, nil
+}
+
+// quarantineCorruptLines appends corrupt mailbox lines to a sidecar file and
+// emits a warning. Best-effort: failures are logged but do not propagate, so
+// corruption visibility never breaks the read path.
+func quarantineCorruptLines(msgsPath string, lines []string) {
+	corruptPath := msgsPath + ".corrupt"
+	fmt.Fprintf(os.Stderr, "loto: warning: %d corrupt line(s) in mailbox %s; quarantined to %s\n",
+		len(lines), msgsPath, corruptPath)
+	f, err := os.OpenFile(corruptPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "loto: warning: cannot open quarantine file %s: %v\n", corruptPath, err)
+		return
+	}
+	defer f.Close()
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, line := range lines {
+		fmt.Fprintf(f, "%s\t%s\n", stamp, line)
+	}
 }
 
 func rewriteMsgs(msgsPath string, msgs []Msg) error {

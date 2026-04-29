@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -448,6 +449,51 @@ func TestReserveExpiredTTLPruned(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("want 0 (expired) reservations, got %d", len(got))
+	}
+}
+
+// TestListReservationsQuarantinesCorruptTag: a malformed .tag file must be
+// quarantined to a sidecar (with a stderr warning) rather than silently
+// dropped. Valid reservations beside it are still returned. Regression for
+// loto-ydi.
+func TestListReservationsQuarantinesCorruptTag(t *testing.T) {
+	l := newTestLOTO(t)
+	if _, err := l.Reserve("agent-good", "intent", "src/**", 0); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	resDir := l.reservationsDir()
+	corruptPath := filepath.Join(resDir, "deadbeef"+reservationExt)
+	if err := os.WriteFile(corruptPath, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("plant corrupt tag: %v", err)
+	}
+
+	got, err := l.ListReservations()
+	if err != nil {
+		t.Fatalf("ListReservations: %v", err)
+	}
+	if len(got) != 1 || got[0].Pattern != "src/**" {
+		t.Fatalf("want only the valid reservation, got %+v", got)
+	}
+
+	// Original corrupt tag should be gone — renamed to a .corrupt-* sidecar
+	// so it's visible to operators but no longer participates in coordination.
+	if _, err := os.Stat(corruptPath); !os.IsNotExist(err) {
+		t.Errorf("corrupt tag should have been renamed; stat=%v", err)
+	}
+	entries, err := os.ReadDir(resDir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	foundQuarantine := false
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".corrupt-") {
+			foundQuarantine = true
+			break
+		}
+	}
+	if !foundQuarantine {
+		t.Errorf("expected quarantine sidecar in %s; entries=%v", resDir, entries)
 	}
 }
 
