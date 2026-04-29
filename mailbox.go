@@ -77,21 +77,25 @@ func (l *LOTO) CompactMsgs(target string) error {
 	if err != nil {
 		return err
 	}
-	all, err := readMsgs(msgsPath)
+	return compactFile(msgsPath)
+}
+
+// withMailboxLock serializes append/compact for a single mailbox by taking
+// a blocking exclusive flock on a sidecar lock file. This closes the
+// append-vs-compact race where O_APPEND writes to the original inode were
+// lost when compactFile's rename swapped in a snapshot taken pre-write.
+func withMailboxLock(msgsPath string, fn func() error) error {
+	lockPath := msgsPath + ".lock"
+	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return &ErrSystem{Op: "msg: compact read", Err: err}
+		return &ErrSystem{Op: "msg: open mailbox lock", Err: err}
 	}
-	cutoff := time.Now().Add(-mailboxMaxAge)
-	var keep []Msg
-	for _, m := range all {
-		if !m.Timestamp.Before(cutoff) {
-			keep = append(keep, m)
-		}
+	defer func() { _ = lf.Close() }()
+	if err := flockExclusiveBlocking(lf); err != nil {
+		return &ErrSystem{Op: "msg: acquire mailbox lock", Err: err}
 	}
-	return rewriteMsgs(msgsPath, keep)
+	defer func() { _ = flockRelease(lf) }()
+	return fn()
 }
 
 func (l *LOTO) msgsPath(target string) (string, error) {
@@ -103,6 +107,13 @@ func (l *LOTO) msgsPath(target string) (string, error) {
 }
 
 func appendMsg(msgsPath string, msg Msg) error {
+	return withMailboxLock(msgsPath, func() error {
+		return appendMsgLocked(msgsPath, msg)
+	})
+}
+
+// appendMsgLocked writes msg to msgsPath; caller must hold the mailbox lock.
+func appendMsgLocked(msgsPath string, msg Msg) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return &ErrSystem{Op: "msg: marshal", Err: err}
@@ -111,19 +122,16 @@ func appendMsg(msgsPath string, msg Msg) error {
 	if err != nil {
 		return &ErrSystem{Op: "msg: open mailbox", Err: err}
 	}
-	defer f.Close()
 	if _, err := f.Write(append(data, '\n')); err != nil {
+		_ = f.Close()
 		return &ErrSystem{Op: "msg: write mailbox", Err: err}
 	}
+	if err := f.Close(); err != nil {
+		return &ErrSystem{Op: "msg: close mailbox", Err: err}
+	}
 
-	// Compact opportunistically after reaching the threshold.
-	if info, err := f.Stat(); err == nil {
-		lines := countLines(msgsPath)
-		if lines >= mailboxCompactAt {
-			// Best-effort; ignore error.
-			_ = compactFile(msgsPath)
-		}
-		_ = info
+	if countLines(msgsPath) >= mailboxCompactAt {
+		_ = compactFileLocked(msgsPath)
 	}
 	return nil
 }
@@ -196,8 +204,19 @@ func countLines(path string) int {
 }
 
 func compactFile(msgsPath string) error {
+	return withMailboxLock(msgsPath, func() error {
+		return compactFileLocked(msgsPath)
+	})
+}
+
+// compactFileLocked drops expired messages and rewrites msgsPath; caller
+// must hold the mailbox lock.
+func compactFileLocked(msgsPath string) error {
 	msgs, err := readMsgs(msgsPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
 	cutoff := time.Now().Add(-mailboxMaxAge)
