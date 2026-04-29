@@ -72,7 +72,7 @@ func TestResolveAgentID_DistinctSessionsDistinctIDs(t *testing.T) {
 	}
 }
 
-func TestResolveAgentID_PIDFallback(t *testing.T) {
+func TestResolveAgentID_ShellFallback(t *testing.T) {
 	t.Setenv("LOTO_AGENT_ID", "")
 	t.Setenv("LOTO_CC_PROJECT_DIR", t.TempDir()) // empty dir → no JSONL → fallback
 
@@ -80,8 +80,23 @@ func TestResolveAgentID_PIDFallback(t *testing.T) {
 	if src != srcPID {
 		t.Errorf("src: got %q, want %q", src, srcPID)
 	}
-	if !regexp.MustCompile(`^pid-\d+$`).MatchString(id) {
-		t.Errorf("id %q does not match pid-N", id)
+	if !regexp.MustCompile(`^shell-[0-9a-f]{12}$`).MatchString(id) {
+		t.Errorf("id %q does not match shell-<hex>", id)
+	}
+}
+
+// TestShellAgentID_StableAcrossCalls: a non-CC shell must produce the same
+// agent ID across multiple loto invocations from the same parent shell +
+// CWD. This is the loto-edt regression: every invocation used to mint a
+// fresh pid-N, accumulating zombie agents.
+func TestShellAgentID_StableAcrossCalls(t *testing.T) {
+	t.Setenv("LOTO_AGENT_ID", "")
+	t.Setenv("LOTO_CC_PROJECT_DIR", t.TempDir())
+
+	id1, _ := resolveAgentID()
+	id2, _ := resolveAgentID()
+	if id1 != id2 {
+		t.Errorf("non-deterministic shell ID: %q != %q", id1, id2)
 	}
 }
 

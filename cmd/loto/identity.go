@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,13 +16,38 @@ import (
 var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // displayAgent resolves a raw agent ID to a human-readable handle for LLM/tty output.
-// UUID-shaped IDs become deterministic handles (e.g. "GreenCastle"). Anything else
-// (e.g. "pid-1234", legacy literal handles) passes through unchanged.
+// Resolution order: persisted Agent.Handle (if the agent file exists) →
+// deterministic handle for UUID-shaped IDs → passthrough.
 func displayAgent(id string) string {
+	if id == "" {
+		return id
+	}
+	if h := lookupAgentHandle(id); h != "" {
+		return h
+	}
 	if uuidRE.MatchString(id) {
 		return generateHandle(id)
 	}
 	return id
+}
+
+// lookupAgentHandle reads the persisted Handle for id, if its agent file
+// exists. Returns "" on any miss; never errors out — display must be
+// best-effort and never block on disk problems.
+func lookupAgentHandle(id string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".loto", "agents", id+".json"))
+	if err != nil {
+		return ""
+	}
+	var a Agent
+	if err := json.Unmarshal(data, &a); err != nil {
+		return ""
+	}
+	return a.Handle
 }
 
 // Agent represents a session-persistent loto identity.
@@ -49,7 +75,10 @@ const (
 //  2. CC session JSONL discovery — deterministic per-session UUID; every
 //     shell-out within one Claude session converges on the same handle without
 //     env-var injection.
-//  3. pid-N — ephemeral fallback for non-Claude shells.
+//  3. shell-<hash(PPID|CWD|host)> — stable for non-Claude shells: every
+//     loto invocation from the same shell + same project converges on one
+//     identity. PPID reuse after the parent dies is mitigated by including
+//     CWD in the hash.
 func resolveAgentID() (string, agentIDSource) {
 	if id := os.Getenv("LOTO_AGENT_ID"); id != "" {
 		return id, srcEnv
@@ -57,7 +86,17 @@ func resolveAgentID() (string, agentIDSource) {
 	if sid := discoverCCSessionID(); sid != "" {
 		return sessionUUID(sid), srcSession
 	}
-	return fmt.Sprintf("pid-%d", os.Getpid()), srcPID
+	return shellAgentID(), srcPID
+}
+
+// shellAgentID derives a stable per-shell, per-project identity. Same parent
+// shell + same working directory + same host → same ID across loto invocations.
+func shellAgentID() string {
+	cwd, _ := os.Getwd()
+	host, _ := os.Hostname()
+	key := fmt.Sprintf("%d|%s|%s", os.Getppid(), cwd, host)
+	sum := sha256.Sum256([]byte("loto-shell-v1|" + key))
+	return "shell-" + hex.EncodeToString(sum[:6])
 }
 
 // discoverCCSessionID finds the active Claude Code session ID by reading
@@ -133,19 +172,16 @@ func agentHome() (string, error) {
 }
 
 // currentAgent returns the agent for this session, creating its on-disk
-// record on first use. For srcEnv/srcSession the ID is stable across calls;
-// for srcPID each call gets a fresh random UUID.
+// record on first use. All sources (env, session, shell-key) re-attach to
+// an existing agent file when one is present, so repeated invocations from
+// the same shell or session converge on a single identity.
 func currentAgent() (*Agent, error) {
 	dir, err := agentHome()
 	if err != nil {
 		return nil, err
 	}
 
-	id, src := resolveAgentID()
-	if src == srcPID {
-		return createAgent(dir, newUUID())
-	}
-
+	id, _ := resolveAgentID()
 	path := filepath.Join(dir, id+".json")
 	data, err := os.ReadFile(path)
 	if err == nil {

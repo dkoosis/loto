@@ -309,10 +309,8 @@ var releaseCmd = &cobra.Command{
 			os.Exit(2)
 		}
 		agent := flagAgent
-		if agent == "" || agent == fmt.Sprintf("pid-%d", os.Getpid()) {
-			if id, src := resolveAgentID(); src != srcPID {
-				agent = id
-			}
+		if agent == "" {
+			agent, _ = resolveAgentID()
 		}
 		l := newLOTO()
 		released, errs := l.ReleaseAllMine(agent)

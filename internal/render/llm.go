@@ -9,12 +9,16 @@ import (
 
 const llmHeader = "loto:llm:v1\n"
 
-// shortID returns the first 8 chars of a UUID-ish string for display.
+// shortID returns a compact 8-char display form. For shell-keyed IDs the
+// "shell-" prefix is dropped first so the disambiguating hex bytes survive
+// the truncation; UUIDs and arbitrary IDs are truncated as-is.
 func shortID(id string) string {
-	if len(id) <= 8 {
-		return id
+	const n = 8
+	core := strings.TrimPrefix(id, "shell-")
+	if len(core) <= n {
+		return core
 	}
-	return id[:8]
+	return core[:n]
 }
 
 // EmitLLMWhoami writes the whoami output in LLM format.
