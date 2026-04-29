@@ -214,6 +214,71 @@ func EmitLLMInstalled(w io.Writer, path string) error {
 	return err
 }
 
+// ReservationEntry is one row of `loto reserve list` output.
+type ReservationEntry struct {
+	Pattern   string
+	AgentID   string
+	Intent    string
+	ExpiresAt time.Time // zero = no TTL
+}
+
+// EmitLLMReserveAdded confirms an advisory reservation was added.
+func EmitLLMReserveAdded(w io.Writer, e ReservationEntry) error {
+	if _, err := io.WriteString(w, llmHeader); err != nil {
+		return err
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "✔ reserved | %s | by:%s", e.Pattern, e.AgentID)
+	if e.Intent != "" {
+		fmt.Fprintf(&b, " | intent:%s", truncIntent(e.Intent))
+	}
+	if !e.ExpiresAt.IsZero() {
+		fmt.Fprintf(&b, " | ttl:%s", e.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	b.WriteByte('\n')
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
+// EmitLLMReserveReleased confirms an advisory reservation was removed.
+func EmitLLMReserveReleased(w io.Writer, pattern string) error {
+	if _, err := io.WriteString(w, llmHeader); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w, "✔ unreserved | %s\n", pattern)
+	return err
+}
+
+// EmitLLMReserveList writes the active reservations. Empty list renders an
+// explicit `[status: empty]` line — silence is dangerous (looks like a crash).
+func EmitLLMReserveList(w io.Writer, entries []ReservationEntry) error {
+	if _, err := io.WriteString(w, llmHeader); err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		_, err := io.WriteString(w, "reservations | [status: empty]\n")
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "reservations | n:%d\n", len(entries)); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		var b strings.Builder
+		fmt.Fprintf(&b, "→ %s | by:%s", e.Pattern, e.AgentID)
+		if e.Intent != "" {
+			fmt.Fprintf(&b, " | intent:%s", truncIntent(e.Intent))
+		}
+		if !e.ExpiresAt.IsZero() {
+			fmt.Fprintf(&b, " | ttl:%s", e.ExpiresAt.UTC().Format(time.RFC3339))
+		}
+		b.WriteByte('\n')
+		if _, err := io.WriteString(w, b.String()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // EmitLLMStatusTargets writes a small positional table for per-file status.
 func EmitLLMStatusTargets(w io.Writer, entries []StatusEntry) error {
 	if _, err := io.WriteString(w, llmHeader); err != nil {

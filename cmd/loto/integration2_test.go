@@ -639,6 +639,75 @@ func TestReserveWarningOnTryFile(t *testing.T) {
 	}
 }
 
+func TestReserveLLMFormat(t *testing.T) {
+	base := t.TempDir()
+	pattern := "internal/foo/**/*.go"
+
+	// add — use a UUID via --agent so we can assert UUID→handle resolution.
+	const uuid = "01234567-89ab-4cde-8f01-23456789abcd"
+	addOut, err := lotoLLMCmd(base, "--agent", uuid, "--intent", "refactor",
+		"reserve", "add", pattern).Output()
+	if err != nil {
+		t.Fatalf("reserve add (LLM): %v\n%s", err, addOut)
+	}
+	s := string(addOut)
+	if !strings.HasPrefix(s, "loto:llm:v1\n") {
+		t.Errorf("add: missing LLM header: %s", s)
+	}
+	if !strings.Contains(s, "✔ reserved") || !strings.Contains(s, pattern) {
+		t.Errorf("add: missing reserved line: %s", s)
+	}
+	if !strings.Contains(s, "by:") {
+		t.Errorf("add: missing by:<handle> field: %s", s)
+	}
+	if strings.Contains(s, uuid) {
+		// raw UUID must be resolved to a handle in LLM output
+		t.Errorf("add: raw UUID leaked into LLM output: %s", s)
+	}
+	if !strings.Contains(s, "intent:refactor") {
+		t.Errorf("add: missing intent: %s", s)
+	}
+
+	// list (non-empty)
+	listOut, err := lotoLLMCmd(base, "reserve", "list").Output()
+	if err != nil {
+		t.Fatalf("reserve list (LLM): %v\n%s", err, listOut)
+	}
+	ls := string(listOut)
+	if !strings.HasPrefix(ls, "loto:llm:v1\n") {
+		t.Errorf("list: missing LLM header: %s", ls)
+	}
+	if !strings.Contains(ls, "reservations | n:1") {
+		t.Errorf("list: expected 'reservations | n:1', got: %s", ls)
+	}
+	if !strings.Contains(ls, pattern) || !strings.Contains(ls, "by:") {
+		t.Errorf("list: missing pattern/by: %s", ls)
+	}
+	if strings.Contains(ls, uuid) {
+		t.Errorf("list: raw UUID leaked into LLM output: %s", ls)
+	}
+
+	// release
+	relOut, err := lotoLLMCmd(base, "reserve", "release", pattern).Output()
+	if err != nil {
+		t.Fatalf("reserve release (LLM): %v\n%s", err, relOut)
+	}
+	rs := string(relOut)
+	if !strings.HasPrefix(rs, "loto:llm:v1\n") || !strings.Contains(rs, "✔ unreserved") {
+		t.Errorf("release: bad LLM output: %s", rs)
+	}
+
+	// list (empty after release)
+	emptyOut, err := lotoLLMCmd(base, "reserve", "list").Output()
+	if err != nil {
+		t.Fatalf("reserve list empty (LLM): %v\n%s", err, emptyOut)
+	}
+	es := string(emptyOut)
+	if !strings.Contains(es, "[status: empty]") {
+		t.Errorf("list-empty: expected [status: empty], got: %s", es)
+	}
+}
+
 // ── doctor ────────────────────────────────────────────────────────────────────
 
 func TestDoctorClean(t *testing.T) {

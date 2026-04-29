@@ -108,7 +108,6 @@ status | target | holder | intent
 - ✗ `loto break --force` without a `--reason`. The displaced agent gets a mailbox message; give them the why.
 - ✗ Hold a file lock across long-running tool calls (builds, tests). Acquire just before the edit, release just after.
 - ✗ Assume `loto try file` (no `--hold`) holds the lock past the bash command. It doesn't — see Pattern A/B/C above.
-- ✗ Treat `loto reserve` output as LLM-format yet — it currently emits raw JSON (loto-guy, loto-84u). Parse accordingly until those land.
 
 ## Cross-refs
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"loto"
+	"loto/internal/render"
 )
 
 func reserveCmd() *cobra.Command {
@@ -41,7 +42,7 @@ Subcommands: add, release, list`,
 			if err != nil {
 				exit(err)
 			}
-			printJSON(r)
+			emitReserveAdded(r)
 			return nil
 		},
 	}
@@ -56,7 +57,7 @@ Subcommands: add, release, list`,
 			if err := l.Unreserve(args[0]); err != nil {
 				exit(err)
 			}
-			printJSON(map[string]any{"released": true, "pattern": args[0]})
+			emitReserveReleased(args[0])
 			return nil
 		},
 	}
@@ -74,11 +75,51 @@ Subcommands: add, release, list`,
 			if reservations == nil {
 				reservations = []*loto.Reservation{}
 			}
-			printJSON(reservations)
+			emitReserveList(reservations)
 			return nil
 		},
 	}
 
 	c.AddCommand(addCmd, releaseCmd, listCmd)
 	return c
+}
+
+func reservationEntry(r *loto.Reservation) render.ReservationEntry {
+	e := render.ReservationEntry{
+		Pattern: r.Pattern,
+		AgentID: displayAgent(r.AgentID),
+		Intent:  r.Intent,
+	}
+	if r.ExpiresAt != nil {
+		e.ExpiresAt = *r.ExpiresAt
+	}
+	return e
+}
+
+func emitReserveAdded(r *loto.Reservation) {
+	if currentFormat == render.FormatLLM {
+		_ = render.EmitLLMReserveAdded(os.Stdout, reservationEntry(r))
+		return
+	}
+	_ = render.EmitJSON(os.Stdout, r)
+}
+
+func emitReserveReleased(pattern string) {
+	if currentFormat == render.FormatLLM {
+		_ = render.EmitLLMReserveReleased(os.Stdout, pattern)
+		return
+	}
+	_ = render.EmitJSON(os.Stdout, map[string]any{"released": true, "pattern": pattern})
+}
+
+func emitReserveList(reservations []*loto.Reservation) {
+	if currentFormat == render.FormatLLM {
+		entries := make([]render.ReservationEntry, len(reservations))
+		for i, r := range reservations {
+			entries[i] = reservationEntry(r)
+		}
+		_ = render.EmitLLMReserveList(os.Stdout, entries)
+		return
+	}
+	_ = render.EmitJSON(os.Stdout, reservations)
 }
