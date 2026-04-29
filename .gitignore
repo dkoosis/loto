@@ -17,3 +17,6 @@ bin/
 .sandbox/cache/
 .sandbox/setup-report.json
 .sandbox/baseline.txt
+
+# fo sidecar state (per-run diff classification)
+.fo/
