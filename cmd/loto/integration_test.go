@@ -334,3 +334,29 @@ func TestInstallGitHookIdempotent(t *testing.T) {
 		t.Errorf("expected loto check-paths to appear once, got %d:\n%s", count, s)
 	}
 }
+
+// TestIntegrationWhoamiFormatDefaults verifies that piped stdout defaults to
+// the LLM format and --json continues to emit valid JSON for back-compat.
+func TestIntegrationWhoamiFormatDefaults(t *testing.T) {
+	if lotoBin == "" {
+		t.Skip("loto binary not built")
+	}
+	out, err := exec.Command(lotoBin, "whoami").CombinedOutput()
+	if err != nil {
+		t.Fatalf("whoami: %v\n%s", err, out)
+	}
+	if !strings.HasPrefix(string(out), "loto:llm:v1\n") {
+		t.Fatalf("expected llm header on piped stdout, got:\n%s", out)
+	}
+	out2, err := exec.Command(lotoBin, "whoami", "--json").CombinedOutput()
+	if err != nil {
+		t.Fatalf("whoami --json: %v\n%s", err, out2)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out2, &got); err != nil {
+		t.Fatalf("--json output not valid JSON: %v\n%s", err, out2)
+	}
+	if got["id"] == nil {
+		t.Fatalf("--json missing id field: %s", out2)
+	}
+}
