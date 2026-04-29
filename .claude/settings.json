@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "loto whoami --ensure --json | python3 -c \"import sys,json,os; d=json.load(sys.stdin); print('LOTO_AGENT_ID='+d['id'])\" \u003e\u003e $CLAUDE_ENV 2\u003e/dev/null || true",
+            "command": "loto whoami --ensure >/dev/null 2>&1 || true",
             "type": "command"
           }
         ],
@@ -15,7 +15,7 @@
       {
         "hooks": [
           {
-            "command": "loto release --all-mine --json \u003e/dev/null 2\u003e\u00261 || true",
+            "command": "loto release --all-mine --json >/dev/null 2>&1 || true",
             "type": "command"
           }
         ],

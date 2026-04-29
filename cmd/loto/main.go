@@ -82,13 +82,12 @@ func init() {
 	)
 }
 
-// defaultAgent returns LOTO_AGENT_ID if set, otherwise "pid-N".
-// The full identity (with handle) is loaded on demand by whoami/currentAgent.
+// defaultAgent returns the stable session-scoped agent ID via resolveAgentID
+// (LOTO_AGENT_ID → CLAUDE_SESSION_ID → "pid-N"). The full identity record
+// (with handle) is loaded on demand by whoami/currentAgent.
 func defaultAgent() string {
-	if id := os.Getenv("LOTO_AGENT_ID"); id != "" {
-		return id
-	}
-	return fmt.Sprintf("pid-%d", os.Getpid())
+	id, _ := resolveAgentID()
+	return id
 }
 
 // newLOTO builds a LOTO instance from the current flags, exiting on error.
@@ -311,7 +310,7 @@ var releaseCmd = &cobra.Command{
 		}
 		agent := flagAgent
 		if agent == "" || agent == fmt.Sprintf("pid-%d", os.Getpid()) {
-			if id := os.Getenv("LOTO_AGENT_ID"); id != "" {
+			if id, src := resolveAgentID(); src != srcPID {
 				agent = id
 			}
 		}
@@ -385,7 +384,9 @@ var installHookCmd = &cobra.Command{
 	Short: "install SessionStart/End hooks for Claude Code",
 	Long: `Writes loto hook configuration to .claude/settings.json (project-level).
 
-SessionStart: runs 'loto whoami --ensure' and exports LOTO_AGENT_ID.
+SessionStart: runs 'loto whoami --ensure' to eager-create the agent file.
+              Identity is recovered on demand from CLAUDE_SESSION_ID, so
+              no env-var injection is required.
 SessionStop:  runs 'loto release --all-mine' to clean up this session's locks.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := writeClaudeHooks(); err != nil {
@@ -413,14 +414,16 @@ func writeClaudeHooks() error {
 		hooks = map[string]any{}
 	}
 
-	// SessionStart: ensure identity exists and export LOTO_AGENT_ID.
+	// SessionStart: eager-create the agent file. The identity is then
+	// recovered on demand from CLAUDE_SESSION_ID by every subsequent loto
+	// invocation, so no env-var injection is needed.
 	hooks["SessionStart"] = []any{
 		map[string]any{
 			"matcher": "",
 			"hooks": []any{
 				map[string]any{
 					"type":    "command",
-					"command": "loto whoami --ensure --json | python3 -c \"import sys,json,os; d=json.load(sys.stdin); print('LOTO_AGENT_ID='+d['id'])\" >> $CLAUDE_ENV 2>/dev/null || true",
+					"command": "loto whoami --ensure >/dev/null 2>&1 || true",
 				},
 			},
 		},
@@ -463,6 +466,10 @@ var whoamiCmd = &cobra.Command{
 		a, err := currentAgent()
 		if err != nil {
 			exit(err)
+		}
+		if ensureFlag {
+			// SessionStart-hook mode: side-effect (create-on-miss) only.
+			return nil
 		}
 		emitWhoami(a)
 		return nil

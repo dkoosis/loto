@@ -49,6 +49,10 @@ loto:llm:v1
 agent | RemoteSnipe | id:2dd46381 | host:Mac
 ```
 
+Identity is stable for the life of one Claude session: derived from
+`CLAUDE_SESSION_ID` when the harness sets it, else from `LOTO_AGENT_ID`.
+Bare shells with neither variable set get an ephemeral `pid-N` identity.
+
 **try file (success):**
 ```
 loto:llm:v1

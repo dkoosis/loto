@@ -335,6 +335,64 @@ func TestInstallGitHookIdempotent(t *testing.T) {
 	}
 }
 
+// TestSessionIDStableHandle verifies the one-handle-per-session invariant:
+// two independent loto whoami invocations with the same CLAUDE_SESSION_ID
+// (and no LOTO_AGENT_ID) produce the same agent id and handle.
+func TestSessionIDStableHandle(t *testing.T) {
+	if lotoBin == "" {
+		t.Skip("loto binary not built")
+	}
+	homeDir := t.TempDir()
+
+	// Build a clean env: keep PATH + the system bits we need, drop any
+	// inherited LOTO_AGENT_ID, point HOME at a fresh dir so ~/.loto is empty.
+	cleanEnv := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + homeDir,
+		"CLAUDE_SESSION_ID=test-session-xyz",
+		"LOTO_SUPPRESS_LEGACY_WARNING=1",
+	}
+
+	run := func() map[string]any {
+		t.Helper()
+		cmd := exec.Command(lotoBin, "whoami", "--json")
+		cmd.Env = cleanEnv
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("whoami: %v\n%s", err, out)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("parse: %v\n%s", err, out)
+		}
+		return got
+	}
+
+	first := run()
+	second := run()
+
+	if first["id"] != second["id"] {
+		t.Errorf("id drift across calls: %v != %v", first["id"], second["id"])
+	}
+	if first["handle"] != second["handle"] {
+		t.Errorf("handle drift across calls: %v != %v", first["handle"], second["handle"])
+	}
+
+	// Exactly one agent file should exist for this session.
+	agentDir := filepath.Join(homeDir, ".loto", "agents")
+	entries, err := os.ReadDir(agentDir)
+	if err != nil {
+		t.Fatalf("read agent dir: %v", err)
+	}
+	if len(entries) != 1 {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("expected 1 agent file, got %d: %v", len(entries), names)
+	}
+}
+
 // TestIntegrationWhoamiFormatDefaults verifies that piped stdout defaults to
 // the LLM format and --json continues to emit valid JSON for back-compat.
 func TestIntegrationWhoamiFormatDefaults(t *testing.T) {

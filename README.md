@@ -135,10 +135,18 @@ pinned to `.git/.loto-slug` on first use. Override with `LOTO_BASE`.
 ## session identity
 
 Each Claude session gets a persistent handle stored at
-`~/.loto/agents/<uuid>.json`. Set `LOTO_AGENT_ID` in the environment to
-re-attach to an existing identity. The `install-hook` command writes
-`SessionStart`/`Stop` hooks to `.claude/settings.json` to handle this
-automatically.
+`~/.loto/agents/<uuid>.json`. The agent ID is resolved on every invocation:
+
+1. `LOTO_AGENT_ID` if set (explicit re-attach).
+2. Otherwise a deterministic UUID derived from `CLAUDE_SESSION_ID` —
+   every shell-out within one Claude session converges on the same handle
+   without relying on env-var propagation through the harness.
+3. Otherwise an ephemeral `pid-N` (bare shells with neither variable).
+
+The `install-hook` command writes `SessionStart`/`Stop` hooks to
+`.claude/settings.json`. SessionStart is now an eager-create nicety
+(creates the agent file up front); the Stop hook releases all locks
+held by the session-derived ID.
 
 ```sh
 loto install-hook   # write .claude/settings.json hooks
