@@ -164,6 +164,9 @@ func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (
 	}()
 
 	if err := flockShared(globalFile); err != nil {
+		if !isFlockContention(err) {
+			return nil, &ErrSystem{Op: "flock global", Err: err}
+		}
 		tag, _ := l.ReadGlobalTag()
 		return nil, &ErrHeld{Tag: tag, Kind: "global", Target: "global"}
 	}
@@ -179,6 +182,9 @@ func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (
 	}()
 
 	if err := flockExclusive(fileFile); err != nil {
+		if !isFlockContention(err) {
+			return nil, &ErrSystem{Op: "flock file", Err: err}
+		}
 		tag, _ := l.ReadTag(target)
 		return nil, &ErrHeld{Tag: tag, Kind: "file", Target: target}
 	}
@@ -219,6 +225,9 @@ func (l *LOTO) TryGlobalLock(agentID, intent string, opts ...TagOptions) (*Activ
 	}()
 
 	if err := flockExclusive(globalFile); err != nil {
+		if !isFlockContention(err) {
+			return nil, &ErrSystem{Op: "flock global", Err: err}
+		}
 		tag, _ := l.ReadGlobalTag()
 		return nil, &ErrHeld{Tag: tag, Kind: "global", Target: "global"}
 	}
@@ -338,6 +347,9 @@ func (l *LOTO) Reap(target string) error {
 	}
 	defer f.Close()
 	if err := flockExclusive(f); err != nil {
+		if !isFlockContention(err) {
+			return &ErrSystem{Op: "reap: flock", Err: err}
+		}
 		tag, _ := l.ReadTag(target)
 		return &ErrHeld{Tag: tag, Kind: "file", Target: target}
 	}
