@@ -345,6 +345,122 @@ func EmitLLMReserveList(w io.Writer, entries []ReservationEntry) error {
 	return nil
 }
 
+// DoctorFinding is one row of `loto doctor` LLM output. Mirrors loto.Finding
+// in the public package; defined here to keep render free of a loto-package
+// import cycle.
+type DoctorFinding struct {
+	Class       string // drift class (e.g. "stale_tag", "dead_pid")
+	Path        string // tag path (the artifact on disk)
+	Target      string // optional: target the lock guards
+	AgentID     string // last holder, when known
+	Detail      string // human-ish explanation from the doctor
+	Repaired    bool   // DoctorRepair succeeded
+	WouldRepair bool   // DoctorDryRun: would repair if --repair were set
+	Error       string // DoctorRepair attempted but failed; explains why
+}
+
+// doctorClassGlyph maps a drift class to its severity glyph.
+// Action-required classes get ✗; report-only get ⚠ or ℹ.
+func doctorClassGlyph(class string) string {
+	switch class {
+	case "stale_tag", "dead_pid", "orphaned", "zombie_held":
+		return "✗"
+	case "soft_stale_held":
+		return "⚠"
+	case "layout_drift":
+		return "ℹ"
+	default:
+		return "ℹ"
+	}
+}
+
+// doctorClassRepairable reports whether `loto doctor --repair` knows how to
+// clear this class. Used to decide whether to emit an inline fix command.
+func doctorClassRepairable(class string) bool {
+	switch class {
+	case "stale_tag", "dead_pid", "orphaned", "zombie_held":
+		return true
+	}
+	return false
+}
+
+// doctorTriage returns the first-line counts (e.g. "3 ✗ 1 ⚠ 0 ℹ").
+func doctorTriage(findings []DoctorFinding) string {
+	var errs, warns, info int
+	for _, f := range findings {
+		switch doctorClassGlyph(f.Class) {
+		case "✗":
+			errs++
+		case "⚠":
+			warns++
+		default:
+			info++
+		}
+	}
+	return fmt.Sprintf("%d ✗ %d ⚠ %d ℹ", errs, warns, info)
+}
+
+// EmitLLMDoctor writes the doctor report in LLM format. Empty findings render
+// an explicit ok header — see emptyStatus for why silence is dangerous.
+// Findings should already be sorted deterministically by the caller.
+func EmitLLMDoctor(w io.Writer, findings []DoctorFinding, mode string) error {
+	if err := writeHeader(w); err != nil {
+		return err
+	}
+	if len(findings) == 0 {
+		_, err := fmt.Fprintf(w, "doctor | mode:%s | %s\n", mode, "[status: ok]")
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "%s | doctor | mode:%s\n", doctorTriage(findings), mode); err != nil {
+		return err
+	}
+	for _, f := range findings {
+		if err := writeDoctorRow(w, f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeDoctorRow emits one finding plus its repair-state suffix and (when
+// applicable) an inline fix command.
+func writeDoctorRow(w io.Writer, f DoctorFinding) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s | %s", doctorClassGlyph(f.Class), f.Class, f.Path)
+	if f.Target != "" && f.Target != f.Path {
+		fmt.Fprintf(&b, " | target:%s", f.Target)
+	}
+	if f.AgentID != "" {
+		fmt.Fprintf(&b, " | by:%s", f.AgentID)
+	}
+	switch {
+	case f.Repaired:
+		b.WriteString(" | repaired:yes")
+	case f.WouldRepair:
+		b.WriteString(" | would-repair:yes")
+	case f.Error != "":
+		fmt.Fprintf(&b, " | repair-failed:%s", collapseLine(f.Error))
+	}
+	fmt.Fprintf(&b, " | %s\n", collapseLine(f.Detail))
+	if _, err := io.WriteString(w, b.String()); err != nil {
+		return err
+	}
+	// Fix block only when there's still work for the agent to do.
+	if !f.Repaired && !f.WouldRepair && doctorClassRepairable(f.Class) {
+		if _, err := fmt.Fprintf(w, "```bash\nloto doctor --repair\n```\n"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// collapseLine flattens newlines so a multiline detail can't break the row format.
+func collapseLine(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return s
+}
+
 // EmitLLMStatusTargets writes a small positional table for per-file status.
 func EmitLLMStatusTargets(w io.Writer, entries []StatusEntry) error {
 	if err := writeHeader(w); err != nil {

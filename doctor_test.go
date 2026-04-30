@@ -103,6 +103,43 @@ func TestDoctorRepairStaleTag(t *testing.T) {
 	}
 }
 
+// TestDoctorRepairFailsPopulatesError: when --repair attempts a removal that
+// fails, the Finding records the error in Finding.Error and Repaired stays false.
+// Simulated by making the files/ dir read-only so os.Remove(tag) fails.
+func TestDoctorRepairFailsPopulatesError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("read-only dir does not block root")
+	}
+	l := newTestLOTO(t)
+
+	tagPath := writeRawTag(t, l, "stale.go", Tag{
+		AgentID: "dead-agent",
+		Target:  "stale.go",
+		PID:     0,
+	})
+
+	filesDir := filepath.Dir(tagPath)
+	if err := os.Chmod(filesDir, 0o500); err != nil {
+		t.Fatalf("chmod files dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filesDir, 0o700) })
+
+	report, err := l.Doctor("test-agent", DoctorRepair)
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	if len(report.Findings) != 1 {
+		t.Fatalf("expected 1 finding, got %+v", report.Findings)
+	}
+	f := report.Findings[0]
+	if f.Repaired {
+		t.Error("expected Repaired=false on failed repair")
+	}
+	if f.Error == "" {
+		t.Errorf("expected Error to be populated; got empty")
+	}
+}
+
 // TestDoctorDryRun: --dry-run reports WouldRepair but does not remove tag.
 func TestDoctorDryRun(t *testing.T) {
 	l := newTestLOTO(t)

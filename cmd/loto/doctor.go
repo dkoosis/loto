@@ -36,7 +36,7 @@ Exit codes: 0 = clean, 1 = drift found, 3 = system error.`,
 			if err != nil {
 				exit(err)
 			}
-			printJSON(report)
+			emitDoctor(report, mode)
 			if !report.Clean {
 				os.Exit(1)
 			}

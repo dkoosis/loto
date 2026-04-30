@@ -760,6 +760,40 @@ func emitBroken(target, by, reason string) {
 	_ = render.EmitJSON(os.Stdout, map[string]any{"broken": true, "force": true, "target": target, "by": by, "reason": reason})
 }
 
+// doctorModeLabel returns the wire form of a DoctorMode for emitter headers.
+func doctorModeLabel(mode loto.DoctorMode) string {
+	switch mode {
+	case loto.DoctorRepair:
+		return "repair"
+	case loto.DoctorDryRun:
+		return "dry-run"
+	case loto.DoctorCheck:
+		return "check"
+	}
+	return "check"
+}
+
+func emitDoctor(report *loto.DoctorReport, mode loto.DoctorMode) {
+	if currentFormat == render.FormatLLM {
+		out := make([]render.DoctorFinding, len(report.Findings))
+		for i, f := range report.Findings {
+			out[i] = render.DoctorFinding{
+				Class:       string(f.Class),
+				Path:        f.Path,
+				Target:      f.Target,
+				AgentID:     displayAgent(f.AgentID),
+				Detail:      f.Detail,
+				Repaired:    f.Repaired,
+				WouldRepair: f.WouldRepair,
+				Error:       f.Error,
+			}
+		}
+		_ = render.EmitLLMDoctor(os.Stdout, out, doctorModeLabel(mode))
+		return
+	}
+	printJSON(report)
+}
+
 func emitInstalled(path string) {
 	if currentFormat == render.FormatLLM {
 		_ = render.EmitLLMInstalled(os.Stdout, path)

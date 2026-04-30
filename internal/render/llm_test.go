@@ -206,3 +206,76 @@ func TestEmitLLMStatusTargets(t *testing.T) {
 		t.Fatalf("missing held row:\n%s", got)
 	}
 }
+
+func TestEmitLLMDoctorClean(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitLLMDoctor(&buf, nil, "check"); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.HasPrefix(got, "loto:llm:v1\n") {
+		t.Fatalf("missing header:\n%s", got)
+	}
+	if !strings.Contains(got, "doctor | mode:check | [status: ok]\n") {
+		t.Fatalf("missing ok line:\n%s", got)
+	}
+}
+
+func TestEmitLLMDoctorTriageAndFix(t *testing.T) {
+	findings := []DoctorFinding{
+		{Class: "stale_tag", Path: "/p/a.tag", AgentID: "Alpha", Detail: "tag without lock"},
+		{Class: "soft_stale_held", Path: "/p/b.tag", AgentID: "Bravo", Detail: "TTL expired"},
+		{Class: "layout_drift", Path: "/p/junk", Detail: "unexpected entry"},
+	}
+	var buf bytes.Buffer
+	if err := EmitLLMDoctor(&buf, findings, "check"); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "1 ✗ 1 ⚠ 1 ℹ | doctor | mode:check\n") {
+		t.Fatalf("missing triage line:\n%s", got)
+	}
+	if !strings.Contains(got, "✗ stale_tag | /p/a.tag | by:Alpha | tag without lock\n") {
+		t.Fatalf("missing stale_tag row:\n%s", got)
+	}
+	if !strings.Contains(got, "⚠ soft_stale_held | /p/b.tag | by:Bravo | TTL expired\n") {
+		t.Fatalf("missing soft_stale_held row:\n%s", got)
+	}
+	if !strings.Contains(got, "ℹ layout_drift | /p/junk | unexpected entry\n") {
+		t.Fatalf("missing layout_drift row:\n%s", got)
+	}
+	// Repairable class gets a fix block; report-only classes do not.
+	if !strings.Contains(got, "```bash\nloto doctor --repair\n```\n") {
+		t.Fatalf("missing fix block for repairable finding:\n%s", got)
+	}
+	if strings.Count(got, "loto doctor --repair") != 1 {
+		t.Fatalf("fix block should appear exactly once (only stale_tag is repairable):\n%s", got)
+	}
+}
+
+func TestEmitLLMDoctorRepairStates(t *testing.T) {
+	findings := []DoctorFinding{
+		{Class: "stale_tag", Path: "/p/a.tag", Detail: "x", Repaired: true},
+		{Class: "stale_tag", Path: "/p/b.tag", Detail: "x", WouldRepair: true},
+		{Class: "stale_tag", Path: "/p/c.tag", Detail: "x", Error: "perm denied"},
+	}
+	var buf bytes.Buffer
+	if err := EmitLLMDoctor(&buf, findings, "repair"); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "| repaired:yes |") {
+		t.Fatalf("missing repaired suffix:\n%s", got)
+	}
+	if !strings.Contains(got, "| would-repair:yes |") {
+		t.Fatalf("missing would-repair suffix:\n%s", got)
+	}
+	if !strings.Contains(got, "| repair-failed:perm denied |") {
+		t.Fatalf("missing repair-failed suffix:\n%s", got)
+	}
+	// Already-repaired and would-repair findings should NOT carry a fix block.
+	// Failed-repair should — Claude still has work to do.
+	if strings.Count(got, "loto doctor --repair\n```") != 1 {
+		t.Fatalf("fix block should appear only for the failed-repair row:\n%s", got)
+	}
+}
