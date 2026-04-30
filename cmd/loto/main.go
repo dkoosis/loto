@@ -70,20 +70,38 @@ func init() {
 	pf.StringVar(&flagFormat, "format", "", "output format: json | llm (default: llm when stdout is not a tty)")
 
 	rootCmd.AddCommand(
-		tryCmd,
+		tryCmd(),
 		statusCmd,
 		reapCmd,
 		breakCmd(),
 		whoamiCmd,
-		releaseCmd,
+		releaseCmd(),
 		inboxCmd(),
 		msgCmd(),
 		reserveCmd(),
 		installHookCmd,
-		checkPathsCmd,
+		checkPathsCmd(),
 		installGitHookCmd,
 		doctorCmd(),
 	)
+	// --ensure is accepted for SessionStart-hook compatibility; whoami already
+	// creates identity on demand, so the flag is a no-op (kept to avoid breaking
+	// existing hook scripts).
+	whoamiCmd.Flags().Bool("ensure", false, "create identity if missing, then exit 0 (for SessionStart hooks)")
+}
+
+// parseDurationOrExit parses a duration flag value, exiting 2 with a usage
+// error on parse failure. Centralized so all flag-time parses report identically.
+func parseDurationOrExit(flag, value string) time.Duration {
+	if value == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "loto: invalid --%s duration %q: %v\n", flag, value, err)
+		os.Exit(2)
+	}
+	return d
 }
 
 // defaultAgent returns the stable session-scoped agent ID via resolveAgentID
@@ -105,95 +123,88 @@ func newLOTO() *loto.LOTO {
 
 // ── try ──────────────────────────────────────────────────────────────────────
 
-var tryCmd = &cobra.Command{
-	Use:   "try",
-	Short: "acquire a lock (non-blocking)",
-	Long:  "Acquire a file or global lock. Exits 0 with lock JSON on success, 1 with holder JSON on conflict.",
-}
+// tryCmd builds the `loto try` command tree. Flags scoped per-instance
+// avoid the cross-command pollution of package-level globals.
+func tryCmd() *cobra.Command {
+	var hold bool
+	var wait string
+	var ttl string
 
-var tryFileHold bool
-var tryWait string
-var tryTTL string
-
-var tryFileCmd = &cobra.Command{
-	Use:   "file <path>",
-	Short: "acquire a file lock",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		l := newLOTO()
-		target := args[0]
-		lock, err := acquireFile(l, flagAgent, flagIntent, target)
-		if err != nil {
-			exit(err)
-		}
-		emitTrySuccess("file", target, flagAgent, lock.Conflicts)
-		if tryFileHold {
-			waitForSignal()
-		}
-		_ = lock.Unlock()
-		return nil
-	},
-}
-
-var tryGlobalCmd = &cobra.Command{
-	Use:   "global",
-	Short: "acquire the global lock",
-	Args:  cobra.NoArgs,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		l := newLOTO()
-		lock, err := acquireGlobal(l, flagAgent, flagIntent)
-		if err != nil {
-			exit(err)
-		}
-		emitTrySuccess("global", "global", flagAgent, nil)
-		if tryFileHold {
-			waitForSignal()
-		}
-		_ = lock.Unlock()
-		return nil
-	},
-}
-
-func init() {
-	tryCmd.AddCommand(tryFileCmd, tryGlobalCmd)
-	for _, c := range []*cobra.Command{tryFileCmd, tryGlobalCmd} {
-		c.Flags().BoolVar(&tryFileHold, "hold", false, "hold lock until SIGINT/SIGTERM (foreground)")
-		c.Flags().StringVar(&tryWait, "wait", "", "block until acquired (e.g. 30s, 5m); empty = non-blocking")
-		c.Flags().StringVar(&tryTTL, "ttl", "", "advisory expiry on the tag (e.g. 10m, 1h); empty = no expiry")
+	c := &cobra.Command{
+		Use:   "try",
+		Short: "acquire a lock (non-blocking)",
+		Long:  "Acquire a file or global lock. Exits 0 with lock JSON on success, 1 with holder JSON on conflict.",
 	}
+
+	fileCmd := &cobra.Command{
+		Use:   "file <path>",
+		Short: "acquire a file lock",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			l := newLOTO()
+			target := args[0]
+			lock, err := acquireFile(l, flagAgent, flagIntent, target, ttl, wait)
+			if err != nil {
+				exit(err)
+			}
+			emitTrySuccess("file", target, flagAgent, lock.Conflicts)
+			if hold {
+				waitForSignal()
+			}
+			_ = lock.Unlock()
+			return nil
+		},
+	}
+
+	globalCmd := &cobra.Command{
+		Use:   "global",
+		Short: "acquire the global lock",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			l := newLOTO()
+			lock, err := acquireGlobal(l, flagAgent, flagIntent, ttl, wait)
+			if err != nil {
+				exit(err)
+			}
+			emitTrySuccess("global", "global", flagAgent, nil)
+			if hold {
+				waitForSignal()
+			}
+			_ = lock.Unlock()
+			return nil
+		},
+	}
+
+	c.AddCommand(fileCmd, globalCmd)
+	for _, sub := range []*cobra.Command{fileCmd, globalCmd} {
+		sub.Flags().BoolVar(&hold, "hold", false, "hold lock until SIGINT/SIGTERM (foreground)")
+		sub.Flags().StringVar(&wait, "wait", "", "block until acquired (e.g. 30s, 5m); empty = non-blocking")
+		sub.Flags().StringVar(&ttl, "ttl", "", "advisory expiry on the tag (e.g. 10m, 1h); empty = no expiry")
+	}
+	return c
 }
 
-// tagOpts builds a loto.tagOptions from current flag values.
-func tagOpts() loto.TagOptions {
-	if tryTTL == "" {
+// tagOpts builds loto.TagOptions from a --ttl flag value (empty = no expiry).
+func tagOpts(ttl string) loto.TagOptions {
+	if ttl == "" {
 		return loto.TagOptions{}
 	}
-	d, err := time.ParseDuration(tryTTL)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "loto: invalid --ttl duration %q: %v\n", tryTTL, err)
-		os.Exit(2)
-	}
-	return loto.TagOptions{TTL: d}
+	return loto.TagOptions{TTL: parseDurationOrExit("ttl", ttl)}
 }
 
-// waitContext parses --wait and returns a bounded context, or (nil, nil) when
-// --wait is empty (non-blocking). On parse error it exits 2.
-func waitContext() (context.Context, context.CancelFunc) {
-	if tryWait == "" {
+// waitContext returns a bounded context for the --wait flag, or (nil, nil)
+// when wait is empty (non-blocking).
+func waitContext(wait string) (context.Context, context.CancelFunc) {
+	if wait == "" {
 		return nil, nil
 	}
-	d, err := time.ParseDuration(tryWait)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "loto: invalid --wait duration %q: %v\n", tryWait, err)
-		os.Exit(2)
-	}
-	return context.WithTimeout(context.Background(), d)
+	return context.WithTimeout(context.Background(), parseDurationOrExit("wait", wait))
 }
 
 // acquireFile runs TryFileLock or blocks with Acquire depending on --wait.
-func acquireFile(l *loto.LOTO, agent, intent, target string) (*loto.ActiveLock, error) {
-	opts := tagOpts()
-	ctx, cancel := waitContext()
+func acquireFile(l *loto.LOTO, agent, intent, target, ttl, wait string) (*loto.ActiveLock, error) {
+	opts := tagOpts(ttl)
+	ctx, cancel := waitContext(wait)
 	if ctx == nil {
 		return l.TryFileLock(agent, intent, target, opts)
 	}
@@ -202,9 +213,9 @@ func acquireFile(l *loto.LOTO, agent, intent, target string) (*loto.ActiveLock, 
 }
 
 // acquireGlobal runs TryGlobalLock or blocks with AcquireGlobal depending on --wait.
-func acquireGlobal(l *loto.LOTO, agent, intent string) (*loto.ActiveLock, error) {
-	opts := tagOpts()
-	ctx, cancel := waitContext()
+func acquireGlobal(l *loto.LOTO, agent, intent, ttl, wait string) (*loto.ActiveLock, error) {
+	opts := tagOpts(ttl)
+	ctx, cancel := waitContext(wait)
 	if ctx == nil {
 		return l.TryGlobalLock(agent, intent, opts)
 	}
@@ -305,33 +316,32 @@ to record why the break was necessary.`,
 
 // ── release ───────────────────────────────────────────────────────────────────
 
-var releaseAllMine bool
-
-var releaseCmd = &cobra.Command{
-	Use:   "release",
-	Short: "release held locks",
-	Long:  "Release locks held by this agent. Use --all-mine to release all locks for LOTO_AGENT_ID.",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if !releaseAllMine {
-			fmt.Fprintln(os.Stderr, "loto: release: specify --all-mine (per-handle release coming in a future version)")
-			os.Exit(2)
-		}
-		agent := flagAgent
-		if agent == "" {
-			agent, _ = resolveAgentID()
-		}
-		l := newLOTO()
-		released, errs := l.ReleaseAllMine(agent)
-		emitReleased(agent, released, errsToStrings(errs))
-		if len(errs) > 0 {
-			os.Exit(1)
-		}
-		return nil
-	},
-}
-
-func init() {
-	releaseCmd.Flags().BoolVar(&releaseAllMine, "all-mine", false, "release all locks held by this agent (uses LOTO_AGENT_ID)")
+func releaseCmd() *cobra.Command {
+	var allMine bool
+	c := &cobra.Command{
+		Use:   "release",
+		Short: "release held locks",
+		Long:  "Release locks held by this agent. Use --all-mine to release all locks for LOTO_AGENT_ID.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !allMine {
+				fmt.Fprintln(os.Stderr, "loto: release: specify --all-mine (per-handle release coming in a future version)")
+				os.Exit(2)
+			}
+			agent := flagAgent
+			if agent == "" {
+				agent, _ = resolveAgentID()
+			}
+			l := newLOTO()
+			released, errs := l.ReleaseAllMine(agent)
+			emitReleased(agent, released, errsToStrings(errs))
+			if len(errs) > 0 {
+				os.Exit(1)
+			}
+			return nil
+		},
+	}
+	c.Flags().BoolVar(&allMine, "all-mine", false, "release all locks held by this agent (uses LOTO_AGENT_ID)")
+	return c
 }
 
 func errsToStrings(errs []error) []string {
@@ -575,13 +585,6 @@ var whoamiCmd = &cobra.Command{
 		emitWhoami(a)
 		return nil
 	},
-}
-
-func init() {
-	// --ensure is accepted for SessionStart-hook compatibility; whoami already
-	// creates identity on demand, so the flag is a no-op (kept to avoid breaking
-	// existing hook scripts).
-	whoamiCmd.Flags().Bool("ensure", false, "create identity if missing, then exit 0 (for SessionStart hooks)")
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

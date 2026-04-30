@@ -10,97 +10,101 @@ import (
 
 	"github.com/spf13/cobra"
 	"loto"
+	"loto/internal/render"
 )
 
 // ── check-paths ───────────────────────────────────────────────────────────────
 
-var checkStagedFlag bool
+// pathConflict captures one path-vs-holder conflict surfaced by check-paths.
+type pathConflict struct {
+	Path    string `json:"path"`
+	Kind    string `json:"kind"` // "lock" or "reservation"
+	Holder  string `json:"holder"`
+	Pattern string `json:"pattern,omitempty"`
+	Intent  string `json:"intent,omitempty"`
+}
 
-var checkPathsCmd = &cobra.Command{
-	Use:   "check-paths [path...]",
-	Short: "check paths against active locks and reservations",
-	Long: `Exits 1 if any path is held by another agent's exclusive lock or
+func checkPathsCmd() *cobra.Command {
+	var staged bool
+	c := &cobra.Command{
+		Use:   "check-paths [path...]",
+		Short: "check paths against active locks and reservations",
+		Long: `Exits 1 if any path is held by another agent's exclusive lock or
 matches another agent's advisory reservation. Designed for use as a git pre-commit hook.
 
 Flags:
   --staged   read paths from 'git diff --name-only --cached'`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		paths := args
-		if checkStagedFlag {
-			staged, err := stagedPaths()
-			if err != nil {
-				exit(err)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			paths := args
+			if staged {
+				stagedList, err := stagedPaths()
+				if err != nil {
+					exit(err)
+				}
+				paths = append(paths, stagedList...)
 			}
-			paths = append(paths, staged...)
-		}
-		if len(paths) == 0 {
-			return nil
-		}
-
-		l := newLOTO()
-		myAgent := flagAgent
-
-		type conflict struct {
-			Path    string `json:"path"`
-			Kind    string `json:"kind"`
-			Holder  string `json:"holder"`
-			Pattern string `json:"pattern,omitempty"`
-			Intent  string `json:"intent,omitempty"`
-		}
-		var conflicts []conflict
-
-		for _, p := range paths {
-			tag, err := l.ReadTag(p)
-			if err == nil && tag != nil && tag.AgentID != myAgent {
-				conflicts = append(conflicts, conflict{
-					Path:   p,
-					Kind:   "lock",
-					Holder: tag.AgentID,
-					Intent: tag.Intent,
-				})
+			if len(paths) == 0 {
+				return nil
 			}
 
-			res, err := l.ConflictingReservations(p)
-			if err == nil {
-				for _, r := range res {
-					if r.AgentID != myAgent {
-						conflicts = append(conflicts, conflict{
-							Path:    p,
-							Kind:    "reservation",
-							Holder:  r.AgentID,
-							Pattern: r.Pattern,
-							Intent:  r.Intent,
-						})
+			conflicts := collectPathConflicts(newLOTO(), flagAgent, paths)
+			if len(conflicts) == 0 {
+				return nil
+			}
+
+			if currentFormat == render.FormatJSON {
+				printJSON(map[string]any{"conflicts": conflicts})
+			} else {
+				fmt.Fprintln(os.Stderr, "loto: commit blocked — staged paths conflict with active locks or reservations")
+				for _, conflict := range conflicts {
+					if conflict.Pattern != "" {
+						fmt.Fprintf(os.Stderr, "  %s: %s matches reservation %q held by %s (%s)\n",
+							conflict.Kind, conflict.Path, conflict.Pattern, conflict.Holder, conflict.Intent)
+					} else {
+						fmt.Fprintf(os.Stderr, "  %s: %s held by %s (%s)\n",
+							conflict.Kind, conflict.Path, conflict.Holder, conflict.Intent)
 					}
 				}
 			}
-		}
-
-		if len(conflicts) == 0 {
+			os.Exit(1)
 			return nil
-		}
-
-		if flagJSON {
-			printJSON(map[string]any{"conflicts": conflicts})
-		} else {
-			fmt.Fprintln(os.Stderr, "loto: commit blocked — staged paths conflict with active locks or reservations")
-			for _, c := range conflicts {
-				if c.Pattern != "" {
-					fmt.Fprintf(os.Stderr, "  %s: %s matches reservation %q held by %s (%s)\n",
-						c.Kind, c.Path, c.Pattern, c.Holder, c.Intent)
-				} else {
-					fmt.Fprintf(os.Stderr, "  %s: %s held by %s (%s)\n",
-						c.Kind, c.Path, c.Holder, c.Intent)
-				}
-			}
-		}
-		os.Exit(1)
-		return nil
-	},
+		},
+	}
+	c.Flags().BoolVar(&staged, "staged", false, "read paths from git diff --name-only --cached")
+	return c
 }
 
-func init() {
-	checkPathsCmd.Flags().BoolVar(&checkStagedFlag, "staged", false, "read paths from git diff --name-only --cached")
+// collectPathConflicts walks paths and returns every lock/reservation conflict
+// held by an agent other than myAgent.
+func collectPathConflicts(l *loto.LOTO, myAgent string, paths []string) []pathConflict {
+	var conflicts []pathConflict
+	for _, p := range paths {
+		if tag, err := l.ReadTag(p); err == nil && tag != nil && tag.AgentID != myAgent {
+			conflicts = append(conflicts, pathConflict{
+				Path:   p,
+				Kind:   "lock",
+				Holder: tag.AgentID,
+				Intent: tag.Intent,
+			})
+		}
+		res, err := l.ConflictingReservations(p)
+		if err != nil {
+			continue
+		}
+		for _, r := range res {
+			if r.AgentID == myAgent {
+				continue
+			}
+			conflicts = append(conflicts, pathConflict{
+				Path:    p,
+				Kind:    "reservation",
+				Holder:  r.AgentID,
+				Pattern: r.Pattern,
+				Intent:  r.Intent,
+			})
+		}
+	}
+	return conflicts
 }
 
 func stagedPaths() ([]string, error) {
@@ -138,9 +142,11 @@ block is appended (or updated in place if already present).`,
 	},
 }
 
-const hookBeginMarker = "# loto:begin"
-const hookEndMarker = "# loto:end"
-const hookBlock = "# loto:begin\nloto check-paths --staged || exit 1\n# loto:end"
+const (
+	hookBeginMarker = "# loto:begin"
+	hookEndMarker   = "# loto:end"
+	hookBlock       = "# loto:begin\nloto check-paths --staged || exit 1\n# loto:end"
+)
 
 func writeGitPreCommitHook() error {
 	hookPath := ".git/hooks/pre-commit"

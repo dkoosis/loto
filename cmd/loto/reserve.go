@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"time"
 
@@ -30,12 +29,7 @@ Subcommands: add, release, list`,
 			pattern := args[0]
 			var dur time.Duration
 			if ttl != "" {
-				d, err := time.ParseDuration(ttl)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "loto: invalid --ttl %q: %v\n", ttl, err)
-					os.Exit(2)
-				}
-				dur = d
+				dur = parseDurationOrExit("ttl", ttl)
 			}
 			l := newLOTO()
 			r, err := l.Reserve(flagAgent, flagIntent, pattern, dur)
