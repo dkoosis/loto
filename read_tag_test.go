@@ -88,6 +88,31 @@ func TestLOTO_ReadGlobalTag_When_TagStateVaries(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "TTL option populates ExpiresAt after Timestamp",
+			input: func(t *testing.T, baseDir string, l *loto.LOTO) {
+				t.Helper()
+				lock, err := l.TryGlobalLock("agent-b", "release", loto.TagOptions{TTL: 15 * time.Minute})
+				if err != nil {
+					t.Fatalf("acquire global lock: %v", err)
+				}
+				t.Cleanup(func() {
+					if err := lock.Unlock(); err != nil {
+						t.Fatalf("unlock global lock: %v", err)
+					}
+				})
+			},
+			want: &loto.Tag{AgentID: "agent-b", Intent: "release", Target: "global", Kind: "global"},
+			inspect: func(t *testing.T, got *loto.Tag) {
+				t.Helper()
+				if got.ExpiresAt.IsZero() {
+					t.Fatal("ExpiresAt invariant violated: zero with TTL set")
+				}
+				if !got.ExpiresAt.After(got.Timestamp) {
+					t.Fatalf("ExpiresAt invariant violated: %v not after Timestamp %v", got.ExpiresAt, got.Timestamp)
+				}
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -125,6 +150,7 @@ func TestLOTO_ReadGlobalTag_When_TagStateVaries(t *testing.T) {
 			gotCmp := *got
 			gotCmp.PID = 0
 			gotCmp.Timestamp = time.Time{}
+			gotCmp.ExpiresAt = time.Time{}
 			gotCmp.Host = ""
 			gotCmp.Branch = ""
 			gotCmp.Cwd = ""
