@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -112,6 +113,9 @@ func emitReserveList(reservations []*loto.Reservation) {
 		for i, r := range reservations {
 			entries[i] = reservationEntry(r)
 		}
+		sort.SliceStable(entries, func(i, j int) bool {
+			return entries[i].Pattern < entries[j].Pattern
+		})
 		_ = render.EmitLLMReserveList(os.Stdout, entries)
 		return
 	}

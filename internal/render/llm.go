@@ -3,6 +3,7 @@ package render
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -17,7 +18,51 @@ const (
 	emptyStatus = "[status: empty]"
 	// dash is the placeholder for absent optional column values.
 	dash = "-"
+	// tokenHintThreshold is the row count above which an emitter writes a
+	// token-estimate hint after the header. Below this, the hint is noise.
+	tokenHintThreshold = 20
+	// avgTokensPerRow is a rough heuristic for estimating LLM token cost
+	// per output row. Tuned against typical inbox/reserve/doctor lines.
+	avgTokensPerRow = 25
 )
+
+// RelPath returns p as a path relative to cwd when p resolves under cwd; on
+// any error, or when p escapes cwd ("../"), it returns the original input.
+// Used to keep emitter output cwd-relative — agents see paths the way they
+// already address them.
+func RelPath(p string) string {
+	if p == "" {
+		return p
+	}
+	cwd, err := filepathAbs(".")
+	if err != nil {
+		return p
+	}
+	abs := p
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(cwd, abs)
+	}
+	rel, err := filepath.Rel(cwd, abs)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return p
+	}
+	return rel
+}
+
+// filepathAbs is a seam for testing; defaults to filepath.Abs.
+var filepathAbs = filepath.Abs
+
+// writeTokenHint emits a single comment line of the form
+// "# est_tokens:~N rows:M" when rows exceeds tokenHintThreshold.
+// Appears immediately after the header/count line so agents can budget
+// before consuming the body.
+func writeTokenHint(w io.Writer, rows int) error {
+	if rows <= tokenHintThreshold {
+		return nil
+	}
+	_, err := fmt.Fprintf(w, "# est_tokens:~%d rows:%d\n", rows*avgTokensPerRow, rows)
+	return err
+}
 
 // writeHeader emits the version sentinel that prefixes every LLM payload.
 func writeHeader(w io.Writer) error {
@@ -225,6 +270,9 @@ func EmitLLMInboxMine(w io.Writer, msgs []InboxMineMessage, since time.Time) err
 	if _, err := fmt.Fprintln(w, header); err != nil {
 		return err
 	}
+	if err := writeTokenHint(w, len(msgs)); err != nil {
+		return err
+	}
 	for _, m := range msgs {
 		if _, err := fmt.Fprintf(w, "→ from:%s | to:%s | target:%s | ts:%s | %s\n",
 			m.From, m.To, orDash(m.Target), rfc3339UTC(m.Timestamp),
@@ -347,6 +395,9 @@ func EmitLLMReserveList(w io.Writer, entries []ReservationEntry) error {
 	if _, err := fmt.Fprintf(w, "reservations | n:%d\n", len(entries)); err != nil {
 		return err
 	}
+	if err := writeTokenHint(w, len(entries)); err != nil {
+		return err
+	}
 	for _, e := range entries {
 		if err := writeReservationRow(w, "→", e); err != nil {
 			return err
@@ -422,6 +473,9 @@ func EmitLLMDoctor(w io.Writer, findings []DoctorFinding, mode string) error {
 		return err
 	}
 	if _, err := fmt.Fprintf(w, "%s | doctor | mode:%s\n", doctorTriage(findings), mode); err != nil {
+		return err
+	}
+	if err := writeTokenHint(w, len(findings)); err != nil {
 		return err
 	}
 	for _, f := range findings {

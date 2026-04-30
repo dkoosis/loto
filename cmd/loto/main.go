@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -688,8 +689,12 @@ func emitStatusTargets(entries []render.StatusEntry, jsonResult map[string]any) 
 		display := make([]render.StatusEntry, len(entries))
 		for i, e := range entries {
 			display[i] = e
+			display[i].Target = render.RelPath(e.Target)
 			display[i].AgentID = displayAgent(e.AgentID)
 		}
+		sort.SliceStable(display, func(i, j int) bool {
+			return display[i].Target < display[j].Target
+		})
 		_ = render.EmitLLMStatusTargets(os.Stdout, display)
 		return
 	}
@@ -703,11 +708,20 @@ func emitInboxMine(msgs []loto.Msg, since time.Time) {
 			out[i] = render.InboxMineMessage{
 				From:      displayAgent(m.From),
 				To:        displayAgent(m.To),
-				Target:    m.Target,
+				Target:    render.RelPath(m.Target),
 				Timestamp: m.Timestamp,
 				Body:      m.Body,
 			}
 		}
+		sort.SliceStable(out, func(i, j int) bool {
+			if !out[i].Timestamp.Equal(out[j].Timestamp) {
+				return out[i].Timestamp.Before(out[j].Timestamp)
+			}
+			if out[i].Target != out[j].Target {
+				return out[i].Target < out[j].Target
+			}
+			return out[i].From < out[j].From
+		})
 		_ = render.EmitLLMInboxMine(os.Stdout, out, since)
 		return
 	}
@@ -787,8 +801,8 @@ func emitDoctor(report *loto.DoctorReport, mode loto.DoctorMode) {
 		for i, f := range report.Findings {
 			out[i] = render.DoctorFinding{
 				Class:       string(f.Class),
-				Path:        f.Path,
-				Target:      f.Target,
+				Path:        render.RelPath(f.Path),
+				Target:      render.RelPath(f.Target),
 				AgentID:     displayAgent(f.AgentID),
 				Detail:      f.Detail,
 				Repaired:    f.Repaired,

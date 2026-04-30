@@ -186,6 +186,54 @@ func TestEmitLLMInstalled(t *testing.T) {
 	}
 }
 
+func TestRelPath(t *testing.T) {
+	cwd, err := filepathAbs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty passes through", "", ""},
+		{"under cwd becomes relative", cwd + "/foo/bar.go", "foo/bar.go"},
+		{"already relative passes through", "foo/bar.go", "foo/bar.go"},
+		{"escapes cwd returns input", "/var/tmp/elsewhere", "/var/tmp/elsewhere"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := RelPath(c.in); got != c.want {
+				t.Fatalf("RelPath(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestEmitLLMDoctorTokenHint(t *testing.T) {
+	findings := make([]DoctorFinding, tokenHintThreshold+1)
+	for i := range findings {
+		findings[i] = DoctorFinding{Class: "stale_tag", Path: "/p/x", Detail: "x"}
+	}
+	var buf bytes.Buffer
+	if err := EmitLLMDoctor(&buf, findings, "check"); err != nil {
+		t.Fatal(err)
+	}
+	want := "# est_tokens:~"
+	if !strings.Contains(buf.String(), want) {
+		t.Fatalf("missing token hint over threshold:\n%s", buf.String())
+	}
+
+	// Below threshold: no hint.
+	var buf2 bytes.Buffer
+	if err := EmitLLMDoctor(&buf2, findings[:1], "check"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf2.String(), want) {
+		t.Fatalf("unexpected token hint at small row count:\n%s", buf2.String())
+	}
+}
+
 func TestEmitLLMStatusTargets(t *testing.T) {
 	var buf bytes.Buffer
 	entries := []StatusEntry{
