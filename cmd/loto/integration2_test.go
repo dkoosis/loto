@@ -1034,7 +1034,12 @@ func TestCheckPathsExplicitPathFree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("check-paths (explicit free): %v\n%s", err, out)
 	}
-	// Exit 0 means no conflicts.
+	// design.md: silence looks like a crash — empty result must still emit
+	// a structured payload. lotoCmd forces --json; expect the empty array.
+	s := string(out)
+	if !strings.Contains(s, `"conflicts"`) {
+		t.Errorf("expected JSON payload with conflicts key on empty result, got:\n%s", s)
+	}
 }
 
 func TestCheckPathsExplicitPathHeld(t *testing.T) {

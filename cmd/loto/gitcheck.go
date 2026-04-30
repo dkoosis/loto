@@ -43,23 +43,25 @@ Flags:
 				}
 				paths = append(paths, stagedList...)
 			}
-			if len(paths) == 0 {
-				return nil
-			}
-
 			conflicts := collectPathConflicts(newLOTO(), flagAgent, paths)
-			if len(conflicts) == 0 {
-				return nil
+			out := os.Stdout
+			if len(conflicts) > 0 {
+				out = os.Stderr
 			}
-
 			if currentFormat == render.FormatJSON {
-				printJSON(map[string]any{"conflicts": conflicts})
+				payload := conflicts
+				if payload == nil {
+					payload = []pathConflict{}
+				}
+				_ = render.EmitJSON(out, map[string]any{"conflicts": payload})
 			} else {
 				rows := toRenderConflicts(conflicts)
 				sortCheckPathsConflicts(rows)
-				_ = render.EmitLLMCheckPaths(os.Stderr, rows)
+				_ = render.EmitLLMCheckPaths(out, rows)
 			}
-			os.Exit(1)
+			if len(conflicts) > 0 {
+				os.Exit(1)
+			}
 			return nil
 		},
 	}
