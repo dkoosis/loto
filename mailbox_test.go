@@ -189,6 +189,84 @@ func TestCompactDedupesByMsgID(t *testing.T) {
 	}
 }
 
+// TestReadStampsReadAtForDirectMessages: a recipient's first ReadMsgs stamps
+// ReadAt on direct messages addressed to them; @all messages are never
+// stamped; subsequent reads do not change ReadAt (idempotent).
+func TestReadStampsReadAtForDirectMessages(t *testing.T) {
+	l := newTestLOTO(t)
+	target := filepath.Join(t.TempDir(), "ack.go")
+
+	if err := l.SendMsgWith(target, Msg{From: "alice", To: "bob", Body: "direct", AckRequired: true}); err != nil {
+		t.Fatalf("SendMsgWith direct: %v", err)
+	}
+	if err := l.SendMsg(target, "alice", "@all", "broadcast", false); err != nil {
+		t.Fatalf("SendMsg broadcast: %v", err)
+	}
+
+	got, err := l.ReadMsgs(target, "bob")
+	if err != nil {
+		t.Fatalf("ReadMsgs: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 messages, got %d", len(got))
+	}
+
+	var direct, broadcast *Msg
+	for i := range got {
+		switch got[i].Body {
+		case "direct":
+			direct = &got[i]
+		case "broadcast":
+			broadcast = &got[i]
+		}
+	}
+	if direct == nil || direct.ReadAt == nil {
+		t.Fatalf("direct message must be stamped with ReadAt; got %+v", direct)
+	}
+	if broadcast == nil || broadcast.ReadAt != nil {
+		t.Errorf("@all message must not be stamped; got %+v", broadcast)
+	}
+
+	first := *direct.ReadAt
+	got2, err := l.ReadMsgs(target, "bob")
+	if err != nil {
+		t.Fatalf("ReadMsgs second: %v", err)
+	}
+	for _, m := range got2 {
+		if m.Body == "direct" {
+			if m.ReadAt == nil || !m.ReadAt.Equal(first) {
+				t.Errorf("ReadAt must be stable across reads: first=%v second=%v", first, m.ReadAt)
+			}
+		}
+	}
+}
+
+// TestReadDoesNotStampForOtherRecipient: a non-recipient reading the mailbox
+// must not stamp ReadAt on someone else's direct message.
+func TestReadDoesNotStampForOtherRecipient(t *testing.T) {
+	l := newTestLOTO(t)
+	target := filepath.Join(t.TempDir(), "no-stamp.go")
+
+	if err := l.SendMsgWith(target, Msg{From: "alice", To: "bob", Body: "for-bob"}); err != nil {
+		t.Fatalf("SendMsgWith: %v", err)
+	}
+	// Carol reads — she's not bob; the message isn't even returned to her,
+	// and stamping must not occur.
+	if _, err := l.ReadMsgs(target, "carol"); err != nil {
+		t.Fatalf("ReadMsgs carol: %v", err)
+	}
+	got, err := l.ReadMsgs(target, "bob")
+	if err != nil {
+		t.Fatalf("ReadMsgs bob: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1, got %d", len(got))
+	}
+	if got[0].ReadAt == nil {
+		t.Errorf("bob's read should stamp; got nil")
+	}
+}
+
 // TestReadMsgsQuarantinesCorruptLines: a mailbox file with one valid + one
 // truncated JSON line must (a) still return the valid message and (b)
 // quarantine the corrupt line to a .corrupt sidecar — never silently drop it.

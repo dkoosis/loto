@@ -28,6 +28,8 @@ var (
 	currentFormat render.Format
 )
 
+var errInvalidImportance = errors.New("--importance must be one of: low, normal, urgent")
+
 func main() {
 	if err := rootCmd.Execute(); err != nil {
 		// Cobra prints the error; we just exit. RunE commands call exit()
@@ -357,14 +359,30 @@ func inboxCmd() *cobra.Command {
 }
 
 func msgCmd() *cobra.Command {
-	var to string
+	var (
+		to         string
+		ack        bool
+		importance string
+	)
 	c := &cobra.Command{
 		Use:   "msg <path> <body>",
 		Short: "send a message to an agent via a file's mailbox",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			switch importance {
+			case "", loto.ImportanceLow, loto.ImportanceNormal, loto.ImportanceUrgent:
+			default:
+				return errInvalidImportance
+			}
 			l := newLOTO()
-			if err := l.SendMsg(args[0], flagAgent, to, args[1], false); err != nil {
+			err := l.SendMsgWith(args[0], loto.Msg{
+				From:        flagAgent,
+				To:          to,
+				Body:        args[1],
+				AckRequired: ack,
+				Importance:  importance,
+			})
+			if err != nil {
 				exit(err)
 			}
 			emitMsgSent(args[0], to)
@@ -372,6 +390,8 @@ func msgCmd() *cobra.Command {
 		},
 	}
 	c.Flags().StringVar(&to, "to", "@all", "recipient agent id or @all")
+	c.Flags().BoolVar(&ack, "ack", false, "request ACK — recipient's first read stamps read_at")
+	c.Flags().StringVar(&importance, "importance", "", "advisory hint: low|normal|urgent (default normal)")
 	return c
 }
 

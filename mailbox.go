@@ -17,6 +17,13 @@ const (
 	mailboxCompactAt = 200                 // compact after this many appends
 )
 
+// Importance values for Msg.Importance. Empty == normal.
+const (
+	ImportanceLow    = "low"
+	ImportanceNormal = "normal"
+	ImportanceUrgent = "urgent"
+)
+
 // Msg is a single mailbox message.
 //
 // MsgID is a UUIDv4 set on first append; it makes appends idempotent (a retry
@@ -27,14 +34,23 @@ const (
 // ThreadID is an optional caller-supplied conversation key (e.g. a bead ID).
 // loto neither generates nor interprets it; it exists so consumers can group
 // related messages without reusing Body.
+//
+// AckRequired signals the sender wants confirmation the recipient saw this
+// (e.g. a "please release" note to a lock holder). loto stamps ReadAt on the
+// recipient's first ReadMsgs call for direct messages — senders read the
+// mailbox to check it. Importance is an advisory hint (low|normal|urgent);
+// loto stores but does not enforce delivery semantics from it.
 type Msg struct {
-	MsgID     string    `json:"msg_id,omitempty"`
-	ThreadID  string    `json:"thread_id,omitempty"`
-	From      string    `json:"from"`
-	To        string    `json:"to"` // agent handle/id, or "@all"
-	Body      string    `json:"body"`
-	Timestamp time.Time `json:"timestamp"`
-	System    bool      `json:"system,omitempty"` // true for loto-generated notices
+	MsgID       string     `json:"msg_id,omitempty"`
+	ThreadID    string     `json:"thread_id,omitempty"`
+	From        string     `json:"from"`
+	To          string     `json:"to"` // agent handle/id, or "@all"
+	Body        string     `json:"body"`
+	Timestamp   time.Time  `json:"timestamp"`
+	System      bool       `json:"system,omitempty"` // true for loto-generated notices
+	AckRequired bool       `json:"ack_required,omitempty"`
+	ReadAt      *time.Time `json:"read_at,omitempty"` // stamped on recipient's first read of a direct message
+	Importance  string     `json:"importance,omitempty"`
 }
 
 // newMsgID returns a random UUIDv4 in 8-4-4-4-12 hex form. Falls back to a
@@ -89,18 +105,61 @@ func (l *LOTO) SendMsgWith(target string, msg Msg) error {
 
 // ReadMsgs returns all non-expired messages for target, filtered to those
 // addressed to agentID or @all. Messages older than mailboxMaxAge are dropped.
+//
+// As a side effect, ReadMsgs stamps Msg.ReadAt = now for any direct message
+// (To == agentID, not @all) whose ReadAt is unset, then rewrites the mailbox
+// under the per-mailbox lock. Senders read the file later to check ACK. @all
+// messages are never stamped — they have no single recipient.
 func (l *LOTO) ReadMsgs(target, agentID string) ([]Msg, error) {
 	msgsPath, err := l.msgsPath(target)
 	if err != nil {
 		return nil, err
 	}
-	all, err := readMsgs(msgsPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, &ErrSystem{Op: "msg: read mailbox", Err: err}
+	if _, statErr := os.Stat(msgsPath); os.IsNotExist(statErr) {
+		return nil, nil
 	}
+	var out []Msg
+	if err := withMailboxLock(msgsPath, func() error {
+		all, rerr := readMsgs(msgsPath)
+		if rerr != nil {
+			if os.IsNotExist(rerr) {
+				return nil
+			}
+			return &ErrSystem{Op: "msg: read mailbox", Err: rerr}
+		}
+		stamped := stampReadAt(all, agentID)
+		out = filterVisible(all, agentID)
+		if stamped {
+			return rewriteMsgs(msgsPath, all)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// stampReadAt sets ReadAt = now on every direct message in all addressed to
+// agentID whose ReadAt is unset. Returns true if any stamp was applied.
+func stampReadAt(all []Msg, agentID string) bool {
+	if agentID == "" || agentID == "@all" {
+		return false
+	}
+	now := time.Now().UTC()
+	stamped := false
+	for i := range all {
+		if all[i].To == agentID && all[i].ReadAt == nil {
+			t := now
+			all[i].ReadAt = &t
+			stamped = true
+		}
+	}
+	return stamped
+}
+
+// filterVisible returns messages addressed to agentID or @all, dropping any
+// older than mailboxMaxAge.
+func filterVisible(all []Msg, agentID string) []Msg {
 	cutoff := time.Now().Add(-mailboxMaxAge)
 	var out []Msg
 	for _, m := range all {
@@ -112,7 +171,7 @@ func (l *LOTO) ReadMsgs(target, agentID string) ([]Msg, error) {
 		}
 		out = append(out, m)
 	}
-	return out, nil
+	return out
 }
 
 // CompactMsgs rewrites the mailbox dropping messages older than mailboxMaxAge.
