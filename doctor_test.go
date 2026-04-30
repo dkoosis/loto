@@ -232,6 +232,126 @@ func TestDoctorSoftStaleHeld(t *testing.T) {
 	}
 }
 
+// backdateTagTimestamp rewrites the on-disk tag for target with a stale timestamp
+// while the caller still holds the flock. Used to simulate zombie staleness.
+func backdateTagTimestamp(t *testing.T, l *LOTO, target string, ts time.Time) {
+	t.Helper()
+	_, tagPath, err := l.filePaths(target)
+	if err != nil {
+		t.Fatalf("filePaths: %v", err)
+	}
+	data, err := os.ReadFile(tagPath)
+	if err != nil {
+		t.Fatalf("read tag: %v", err)
+	}
+	var tag Tag
+	if err := json.Unmarshal(data, &tag); err != nil {
+		t.Fatalf("unmarshal tag: %v", err)
+	}
+	tag.Timestamp = ts
+	out, err := json.Marshal(tag)
+	if err != nil {
+		t.Fatalf("marshal tag: %v", err)
+	}
+	if err := os.WriteFile(tagPath, out, 0o600); err != nil {
+		t.Fatalf("write tag: %v", err)
+	}
+}
+
+// TestDoctorZombieHeld: held lock + live PID + last activity older than threshold → zombie_held.
+func TestDoctorZombieHeld(t *testing.T) {
+	l := newTestLOTO(t)
+	l.ZombieIdle = 10 * time.Millisecond
+
+	lock, err := l.TryFileLock("agent-a", "edit", "z.go")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer lock.Unlock()
+
+	backdateTagTimestamp(t, l, "z.go", time.Now().Add(-time.Hour))
+
+	report, err := l.Doctor("test-agent", DoctorCheck)
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	found := false
+	for _, f := range report.Findings {
+		if f.Class == DriftZombieHeld {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected zombie_held finding, got %+v", report.Findings)
+	}
+}
+
+// TestDoctorZombieHeld_RecentMsgsResetsActivity: stale tag timestamp but a
+// fresh mailbox write still counts as activity → no zombie.
+func TestDoctorZombieHeld_RecentMsgsResetsActivity(t *testing.T) {
+	l := newTestLOTO(t)
+	l.ZombieIdle = time.Hour // generous so only the backdated tag could trip it
+
+	lock, err := l.TryFileLock("agent-a", "edit", "active.go")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer lock.Unlock()
+
+	// Tag is acquired-now (would be fresh), but force it past the threshold.
+	backdateTagTimestamp(t, l, "active.go", time.Now().Add(-2*time.Hour))
+
+	// Recent mailbox write — bumps msgs file mtime to "now", which lastActivity
+	// must observe, suppressing the zombie diagnosis even though the tag is stale.
+	if err := l.SendMsg("active.go", "agent-a", "agent-b", "still here", false); err != nil {
+		t.Fatalf("SendMsg: %v", err)
+	}
+
+	report, err := l.Doctor("test-agent", DoctorCheck)
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	for _, f := range report.Findings {
+		if f.Class == DriftZombieHeld {
+			t.Fatalf("recent mailbox write should suppress zombie_held, got %+v", report.Findings)
+		}
+	}
+}
+
+// TestDoctorZombieHeld_DryRun: zombie finding under --dry-run sets WouldRepair, never Repaired.
+func TestDoctorZombieHeld_DryRun(t *testing.T) {
+	l := newTestLOTO(t)
+	l.ZombieIdle = 10 * time.Millisecond
+
+	lock, err := l.TryFileLock("agent-a", "edit", "dry.go")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer lock.Unlock()
+
+	backdateTagTimestamp(t, l, "dry.go", time.Now().Add(-time.Hour))
+
+	report, err := l.Doctor("test-agent", DoctorDryRun)
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	var fi *Finding
+	for i := range report.Findings {
+		if report.Findings[i].Class == DriftZombieHeld {
+			fi = &report.Findings[i]
+		}
+	}
+	if fi == nil {
+		t.Fatalf("expected zombie_held finding, got %+v", report.Findings)
+	}
+	if fi.Repaired {
+		t.Error("Repaired must be false in dry-run mode")
+	}
+	if !fi.WouldRepair {
+		t.Error("WouldRepair must be true in dry-run mode")
+	}
+}
+
 // TestDoctorCleanAfterRelease: normal lock/release leaves base clean.
 func TestDoctorCleanAfterRelease(t *testing.T) {
 	l := newTestLOTO(t)

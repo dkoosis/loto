@@ -18,7 +18,36 @@ const (
 	DriftOrphaned      DriftClass = "orphaned"
 	DriftLayoutDrift   DriftClass = "layout_drift"
 	DriftSoftStaleHeld DriftClass = "soft_stale_held"
+	DriftZombieHeld    DriftClass = "zombie_held"
 )
+
+// defaultZombieIdle is the inactivity threshold doctor applies when LOTO.ZombieIdle is zero.
+const defaultZombieIdle = 30 * time.Minute
+
+func (l *LOTO) zombieIdleThreshold() time.Duration {
+	if l.ZombieIdle > 0 {
+		return l.ZombieIdle
+	}
+	return defaultZombieIdle
+}
+
+// lastActivity returns the most recent observable touch for a held lock:
+// tag acquisition time, mailbox file mtime, and target file mtime.
+// msgsPath and target may be empty (global locks); empty inputs are skipped.
+func lastActivity(tag *Tag, msgsPath, target string) time.Time {
+	last := tag.Timestamp
+	if msgsPath != "" {
+		if fi, err := os.Stat(msgsPath); err == nil && fi.ModTime().After(last) {
+			last = fi.ModTime()
+		}
+	}
+	if target != "" {
+		if fi, err := os.Stat(target); err == nil && fi.ModTime().After(last) {
+			last = fi.ModTime()
+		}
+	}
+	return last
+}
 
 // Finding is one item in a DoctorReport.
 type Finding struct {
@@ -221,7 +250,7 @@ func (l *LOTO) examineFileTags(byAgent string, mode DoctorMode) ([]Finding, erro
 // examineTagPair checks a lock+tag pair for drift classes 1, 2, and 5.
 // isGlobal=true skips ForceBreak (which only handles file targets).
 //
-//nolint:gocognit,gocyclo,cyclop // tracked: loto-dit (refactor pending)
+//nolint:gocognit,gocyclo,cyclop,funlen // tracked: loto-dit (refactor pending)
 func (l *LOTO) examineTagPair(lockPath, tagPath, displayTarget string, tag *Tag, byAgent string, mode DoctorMode, isGlobal bool) ([]Finding, error) {
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -284,7 +313,47 @@ func (l *LOTO) examineTagPair(lockPath, tagPath, displayTarget string, tag *Tag,
 		return []Finding{fi}, nil
 	}
 
-	// Lock held, PID alive. Check soft-TTL expiry.
+	// Lock held, PID alive. Check activity-based staleness (zombie):
+	// agent process exists but hasn't refreshed tag, sent mail, or touched
+	// target within the idle threshold.
+	var msgsPath string
+	if !isGlobal {
+		if mp, perr := l.msgsPath(displayTarget); perr == nil {
+			msgsPath = mp
+		}
+	}
+	target := ""
+	if !isGlobal {
+		target = displayTarget
+	}
+	la := lastActivity(tag, msgsPath, target)
+	if !la.IsZero() && time.Since(la) > l.zombieIdleThreshold() {
+		fi := Finding{
+			Class:   DriftZombieHeld,
+			Path:    tagPath,
+			Target:  displayTarget,
+			AgentID: tag.AgentID,
+			Detail:  fmt.Sprintf("lock held by pid %d (agent %s) but no activity since %s (idle %s > threshold %s)", tag.PID, tag.AgentID, la.Format(time.RFC3339), time.Since(la).Round(time.Second), l.zombieIdleThreshold()),
+		}
+		switch mode {
+		case DoctorRepair:
+			body := fmt.Sprintf("doctor: lock on %q force-broken by %s: zombie (no activity since %s)", displayTarget, byAgent, la.Format(time.RFC3339))
+			_ = l.sendMsgBestEffort(displayTarget, byAgent, tag.AgentID, body, isGlobal)
+			if isGlobal {
+				if os.Remove(tagPath) == nil {
+					fi.Repaired = true
+				}
+			} else if l.ForceBreak(displayTarget, byAgent, fmt.Sprintf("doctor: zombie idle %s", time.Since(la).Round(time.Second))) == nil {
+				fi.Repaired = true
+			}
+		case DoctorDryRun:
+			fi.WouldRepair = true
+		case DoctorCheck:
+		}
+		return []Finding{fi}, nil
+	}
+
+	// Soft-TTL expiry: report-only.
 	if tag.SoftStale() {
 		return []Finding{{
 			Class:   DriftSoftStaleHeld,

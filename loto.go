@@ -117,6 +117,11 @@ func (t *Tag) SoftStale() bool {
 // LOTO coordinates locks under a shared base directory.
 type LOTO struct {
 	baseDir string
+
+	// ZombieIdle is the maximum interval doctor allows between observed
+	// activity (tag timestamp, mailbox writes, target mtime) and "now"
+	// before flagging a held lock as a zombie. Zero = use default.
+	ZombieIdle time.Duration
 }
 
 // ActiveLock represents an acquired lock. Call Unlock to release.
