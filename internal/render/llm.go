@@ -461,6 +461,70 @@ func collapseLine(s string) string {
 	return s
 }
 
+// CheckPathsConflict is one row of `loto check-paths` LLM output. Mirrors
+// the cmd-side pathConflict struct; defined here to keep render free of a
+// loto-package import cycle.
+type CheckPathsConflict struct {
+	Kind    string // "lock" | "reservation"
+	Path    string
+	Holder  string
+	Intent  string
+	Pattern string // reservation only
+}
+
+// EmitLLMCheckPaths writes a path-conflict report in LLM format. Conflicts
+// should already be sorted deterministically by the caller. Caller decides
+// whether to emit nothing on empty input — typical pre-commit hook flow only
+// calls this when blocking.
+func EmitLLMCheckPaths(w io.Writer, conflicts []CheckPathsConflict) error {
+	if err := writeHeader(w); err != nil {
+		return err
+	}
+	if len(conflicts) == 0 {
+		_, err := fmt.Fprintf(w, "check-paths | %s\n", "[status: ok]")
+		return err
+	}
+	var locks, reservations int
+	for _, c := range conflicts {
+		if c.Kind == "reservation" {
+			reservations++
+		} else {
+			locks++
+		}
+	}
+	if _, err := fmt.Fprintf(w, "%d ✗ | check-paths | locks:%d | reservations:%d\n",
+		len(conflicts), locks, reservations); err != nil {
+		return err
+	}
+	for _, c := range conflicts {
+		if err := writeCheckPathsRow(w, c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeCheckPathsRow emits one conflict line plus its inline fix command.
+func writeCheckPathsRow(w io.Writer, c CheckPathsConflict) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "✗ %s | %s", c.Kind, c.Path)
+	if c.Pattern != "" {
+		fmt.Fprintf(&b, " | pattern:%s", c.Pattern)
+	}
+	fmt.Fprintf(&b, " | by:%s", c.Holder)
+	appendIntent(&b, c.Intent)
+	b.WriteByte('\n')
+	if _, err := io.WriteString(w, b.String()); err != nil {
+		return err
+	}
+	if c.Kind == "reservation" {
+		_, err := fmt.Fprintf(w, "```bash\nloto reserve release %s\n```\n", c.Pattern)
+		return err
+	}
+	_, err := fmt.Fprintf(w, "```bash\nloto break --force %s --reason \"pre-commit\"\n```\n", c.Path)
+	return err
+}
+
 // EmitLLMStatusTargets writes a small positional table for per-file status.
 func EmitLLMStatusTargets(w io.Writer, entries []StatusEntry) error {
 	if err := writeHeader(w); err != nil {

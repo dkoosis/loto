@@ -207,6 +207,47 @@ func TestEmitLLMStatusTargets(t *testing.T) {
 	}
 }
 
+func TestEmitLLMCheckPathsLockAndReservation(t *testing.T) {
+	conflicts := []CheckPathsConflict{
+		{Kind: "lock", Path: "internal/store/store.go", Holder: "BlueOak", Intent: "refactor"},
+		{Kind: "reservation", Path: "internal/store/store.go", Holder: "RedFox",
+			Pattern: "internal/store/**", Intent: "sweep"},
+	}
+	var buf bytes.Buffer
+	if err := EmitLLMCheckPaths(&buf, conflicts); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.HasPrefix(got, "loto:llm:v1\n") {
+		t.Fatalf("missing header:\n%s", got)
+	}
+	if !strings.Contains(got, "2 ✗ | check-paths | locks:1 | reservations:1\n") {
+		t.Fatalf("missing triage line:\n%s", got)
+	}
+	if !strings.Contains(got, "✗ lock | internal/store/store.go | by:BlueOak | intent:refactor\n") {
+		t.Fatalf("missing lock row:\n%s", got)
+	}
+	if !strings.Contains(got, "✗ reservation | internal/store/store.go | pattern:internal/store/** | by:RedFox | intent:sweep\n") {
+		t.Fatalf("missing reservation row:\n%s", got)
+	}
+	if !strings.Contains(got, "```bash\nloto break --force internal/store/store.go --reason \"pre-commit\"\n```\n") {
+		t.Fatalf("missing lock fix block:\n%s", got)
+	}
+	if !strings.Contains(got, "```bash\nloto reserve release internal/store/**\n```\n") {
+		t.Fatalf("missing reservation fix block:\n%s", got)
+	}
+}
+
+func TestEmitLLMCheckPathsEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitLLMCheckPaths(&buf, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "check-paths | [status: ok]\n") {
+		t.Fatalf("missing ok line:\n%s", buf.String())
+	}
+}
+
 func TestEmitLLMDoctorClean(t *testing.T) {
 	var buf bytes.Buffer
 	if err := EmitLLMDoctor(&buf, nil, "check"); err != nil {

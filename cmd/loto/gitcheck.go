@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -55,16 +55,9 @@ Flags:
 			if currentFormat == render.FormatJSON {
 				printJSON(map[string]any{"conflicts": conflicts})
 			} else {
-				fmt.Fprintln(os.Stderr, "loto: commit blocked — staged paths conflict with active locks or reservations")
-				for _, conflict := range conflicts {
-					if conflict.Pattern != "" {
-						fmt.Fprintf(os.Stderr, "  %s: %s matches reservation %q held by %s (%s)\n",
-							conflict.Kind, conflict.Path, conflict.Pattern, conflict.Holder, conflict.Intent)
-					} else {
-						fmt.Fprintf(os.Stderr, "  %s: %s held by %s (%s)\n",
-							conflict.Kind, conflict.Path, conflict.Holder, conflict.Intent)
-					}
-				}
+				rows := toRenderConflicts(conflicts)
+				sortCheckPathsConflicts(rows)
+				_ = render.EmitLLMCheckPaths(os.Stderr, rows)
 			}
 			os.Exit(1)
 			return nil
@@ -105,6 +98,39 @@ func collectPathConflicts(l *loto.LOTO, myAgent string, paths []string) []pathCo
 		}
 	}
 	return conflicts
+}
+
+// toRenderConflicts adapts cmd-side pathConflict to the render struct.
+func toRenderConflicts(in []pathConflict) []render.CheckPathsConflict {
+	out := make([]render.CheckPathsConflict, len(in))
+	for i, c := range in {
+		out[i] = render.CheckPathsConflict{
+			Kind:    c.Kind,
+			Path:    c.Path,
+			Holder:  c.Holder,
+			Intent:  c.Intent,
+			Pattern: c.Pattern,
+		}
+	}
+	return out
+}
+
+// sortCheckPathsConflicts orders by (kind, path, pattern, holder) so the same
+// input always produces byte-identical output.
+func sortCheckPathsConflicts(rows []render.CheckPathsConflict) {
+	sort.Slice(rows, func(i, j int) bool {
+		a, b := rows[i], rows[j]
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		if a.Path != b.Path {
+			return a.Path < b.Path
+		}
+		if a.Pattern != b.Pattern {
+			return a.Pattern < b.Pattern
+		}
+		return a.Holder < b.Holder
+	})
 }
 
 func stagedPaths() ([]string, error) {
