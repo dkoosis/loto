@@ -22,6 +22,7 @@ func lotoLLMCmd(base string, args ...string) *exec.Cmd {
 	full := append([]string{"--base", base}, args...)
 	cmd := exec.Command(lotoBin, full...)
 	cmd.Env = append(os.Environ(), "LOTO_SUPPRESS_LEGACY_WARNING=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd
 }
 
@@ -50,8 +51,7 @@ func startHolder(t *testing.T, base, agent, target string) *exec.Cmd {
 	select {
 	case <-acquired:
 	case <-time.After(5 * time.Second):
-		_ = holder.Process.Kill()
-		_ = holder.Wait()
+		killAndWait(holder)
 		t.Fatal("holder did not confirm acquisition within 5s")
 	}
 	return holder
@@ -81,16 +81,20 @@ func startGlobalHolder(t *testing.T, base, agent string) *exec.Cmd {
 	select {
 	case <-acquired:
 	case <-time.After(5 * time.Second):
-		_ = holder.Process.Kill()
-		_ = holder.Wait()
+		killAndWait(holder)
 		t.Fatal("global holder did not confirm acquisition within 5s")
 	}
 	return holder
 }
 
-// killAndWait sends SIGKILL and waits; ignores errors (process may already be gone).
+// killAndWait SIGKILLs the entire process group rooted at p (set up via
+// Setpgid in lotoCmd) and reaps it. Group-kill is what prevents orphaned
+// --hold subprocesses from outliving a panicked test.
 func killAndWait(p *exec.Cmd) {
-	_ = p.Process.Signal(syscall.SIGKILL)
+	if p == nil || p.Process == nil {
+		return
+	}
+	_ = syscall.Kill(-p.Process.Pid, syscall.SIGKILL)
 	_ = p.Wait()
 }
 

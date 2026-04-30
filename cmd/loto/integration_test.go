@@ -27,7 +27,9 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	lotoBin = bin
-	os.Exit(m.Run())
+	code := m.Run()
+	_ = os.RemoveAll(filepath.Dir(bin))
+	os.Exit(code)
 }
 
 // buildLotoBinary compiles the loto CLI into a temp directory.
@@ -48,10 +50,14 @@ func buildLotoBinary() (string, error) {
 }
 
 // lotoCmd returns an *exec.Cmd for the loto binary with a private base dir.
+// Setpgid puts the child in its own process group so killAndWait can
+// reap any descendants via a single negative-PID signal — preventing
+// orphaned --hold subprocesses from squatting flocks after a panic.
 func lotoCmd(base string, args ...string) *exec.Cmd {
 	full := append([]string{"--base", base, "--json"}, args...)
 	cmd := exec.Command(lotoBin, full...)
 	cmd.Env = append(os.Environ(), "LOTO_SUPPRESS_LEGACY_WARNING=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd
 }
 
@@ -70,7 +76,7 @@ func TestContendedAcquire(t *testing.T) {
 	if err := holder.Start(); err != nil {
 		t.Fatal("start holder:", err)
 	}
-	t.Cleanup(func() { _ = holder.Process.Kill(); _ = holder.Wait() })
+	t.Cleanup(func() { killAndWait(holder) })
 
 	// Wait for holder to confirm acquisition.
 	acquired := make(chan struct{})
@@ -248,7 +254,7 @@ func TestCheckPathsBlockedByLock(t *testing.T) {
 	if err := holder.Start(); err != nil {
 		t.Fatal("start holder:", err)
 	}
-	t.Cleanup(func() { _ = holder.Process.Kill(); _ = holder.Wait() })
+	t.Cleanup(func() { killAndWait(holder) })
 
 	acquired := make(chan struct{})
 	go func() {
