@@ -71,21 +71,22 @@ func init() {
 	pf.BoolVar(&flagJSON, "json", false, "force JSON output (alias for --format=json)")
 	pf.StringVar(&flagFormat, "format", "", "output format: json | llm (default: llm when stdout is not a tty)")
 
+	// Subcommand → defining file. Keep alphabetical-ish by file for orientation.
 	rootCmd.AddCommand(
-		tryCmd(),
-		statusCmd,
-		reapCmd,
-		breakCmd(),
-		whoamiCmd,
-		releaseCmd(),
-		inboxCmd(),
-		msgCmd(),
-		reserveCmd(),
-		installHookCmd,
-		checkPathsCmd(),
-		installGitHookCmd,
-		doctorCmd(),
-		dashboardCmd(),
+		tryCmd(),          // main.go
+		statusCmd,         // main.go
+		reapCmd,           // main.go
+		breakCmd(),        // main.go
+		whoamiCmd,         // main.go
+		releaseCmd(),      // main.go
+		inboxCmd(),        // main.go
+		msgCmd(),          // main.go
+		installHookCmd,    // main.go
+		reserveCmd(),      // reserve.go
+		checkPathsCmd(),   // gitcheck.go
+		installGitHookCmd, // gitcheck.go
+		doctorCmd(),       // doctor.go
+		dashboardCmd(),    // dashboard.go
 	)
 	// --ensure is accepted for SessionStart-hook compatibility; whoami already
 	// creates identity on demand, so the flag is a no-op (kept to avoid breaking
