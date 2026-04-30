@@ -2,6 +2,8 @@ package loto
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,7 +18,18 @@ const (
 )
 
 // Msg is a single mailbox message.
+//
+// MsgID is a UUIDv4 set on first append; it makes appends idempotent (a retry
+// with the same ID is dropped) and lets the compactor dedupe by identity
+// rather than by line. Legacy messages without MsgID are passed through
+// unchanged.
+//
+// ThreadID is an optional caller-supplied conversation key (e.g. a bead ID).
+// loto neither generates nor interprets it; it exists so consumers can group
+// related messages without reusing Body.
 type Msg struct {
+	MsgID     string    `json:"msg_id,omitempty"`
+	ThreadID  string    `json:"thread_id,omitempty"`
 	From      string    `json:"from"`
 	To        string    `json:"to"` // agent handle/id, or "@all"
 	Body      string    `json:"body"`
@@ -24,23 +37,52 @@ type Msg struct {
 	System    bool      `json:"system,omitempty"` // true for loto-generated notices
 }
 
-// SendMsg appends a message to the mailbox for target.
+// newMsgID returns a random UUIDv4 in 8-4-4-4-12 hex form. Falls back to a
+// timestamp-derived hex string if the system entropy source fails — uniqueness
+// is degraded but the dedupe path still functions.
+func newMsgID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Last-resort fallback: nanosecond timestamp padded to 16 bytes.
+		ns := uint64(time.Now().UnixNano())
+		for i := range b {
+			b[i] = byte((ns >> (8 * (i % 8))) & 0xff)
+		}
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	h := hex.EncodeToString(b[:])
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// SendMsg appends a message to the mailbox for target. A fresh MsgID is
+// generated; for idempotent retries (same ID across calls), use SendMsgWith.
 // Returns an error only on IO failure; message delivery is best-effort.
 func (l *LOTO) SendMsg(target, from, to, body string, system bool) error {
-	_, _, err := l.filePaths(target)
-	if err != nil {
+	return l.SendMsgWith(target, Msg{
+		From:   from,
+		To:     to,
+		Body:   body,
+		System: system,
+	})
+}
+
+// SendMsgWith appends msg, filling in MsgID and Timestamp if empty. If a
+// message with the same non-empty MsgID is already in the mailbox, the call
+// is a no-op — making retries safe to repeat.
+func (l *LOTO) SendMsgWith(target string, msg Msg) error {
+	if _, _, err := l.filePaths(target); err != nil {
 		return &ErrSystem{Op: "msg: resolve paths", Err: err}
 	}
 	msgsPath, err := l.msgsPath(target)
 	if err != nil {
 		return err
 	}
-	msg := Msg{
-		From:      from,
-		To:        to,
-		Body:      body,
-		Timestamp: time.Now().UTC(),
-		System:    system,
+	if msg.MsgID == "" {
+		msg.MsgID = newMsgID()
+	}
+	if msg.Timestamp.IsZero() {
+		msg.Timestamp = time.Now().UTC()
 	}
 	return appendMsg(msgsPath, msg)
 }
@@ -117,7 +159,19 @@ func appendMsg(msgsPath string, msg Msg) error {
 // appendMsgLocked writes msg to msgsPath; caller must hold the mailbox lock.
 // Data is fsynced before close, and the parent directory is fsynced after the
 // first creation, so an acknowledged append survives a crash/power loss.
+//
+// If msg.MsgID is set and already present in the file, the call is a no-op —
+// retries are safe regardless of how many times they fire.
 func appendMsgLocked(msgsPath string, msg Msg) error {
+	if msg.MsgID != "" {
+		dup, err := mailboxContainsID(msgsPath, msg.MsgID)
+		if err != nil {
+			return err
+		}
+		if dup {
+			return nil
+		}
+	}
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return &ErrSystem{Op: "msg: marshal", Err: err}
@@ -160,6 +214,41 @@ func fsyncDir(dir string) error {
 	}
 	defer d.Close()
 	return d.Sync()
+}
+
+// mailboxContainsID reports whether msgsPath already contains a message with
+// the given non-empty MsgID. Returns false (no error) if the file does not
+// exist. Reads line-by-line and unmarshals only the msg_id field for speed.
+func mailboxContainsID(msgsPath, id string) (bool, error) {
+	f, err := os.Open(msgsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, &ErrSystem{Op: "msg: dedupe scan", Err: err}
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	var probe struct {
+		MsgID string `json:"msg_id"`
+	}
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		if err := json.Unmarshal(line, &probe); err != nil {
+			continue // corrupt lines are handled by readMsgs/quarantine path
+		}
+		if probe.MsgID == id {
+			return true, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, &ErrSystem{Op: "msg: dedupe scan", Err: err}
+	}
+	return false, nil
 }
 
 func readMsgs(msgsPath string) ([]Msg, error) {
@@ -284,11 +373,21 @@ func compactFileLocked(msgsPath string) error {
 		return err
 	}
 	cutoff := time.Now().Add(-mailboxMaxAge)
-	var keep []Msg
+	keep := make([]Msg, 0, len(msgs))
+	// Dedupe by MsgID, keeping the first occurrence (preserves arrival order).
+	// Legacy messages without MsgID are never deduped — they pass through.
+	seen := make(map[string]struct{}, len(msgs))
 	for _, m := range msgs {
-		if !m.Timestamp.Before(cutoff) {
-			keep = append(keep, m)
+		if m.Timestamp.Before(cutoff) {
+			continue
 		}
+		if m.MsgID != "" {
+			if _, dup := seen[m.MsgID]; dup {
+				continue
+			}
+			seen[m.MsgID] = struct{}{}
+		}
+		keep = append(keep, m)
 	}
 	return rewriteMsgs(msgsPath, keep)
 }

@@ -85,6 +85,110 @@ func TestMailboxAppendCompactRace(t *testing.T) {
 	}
 }
 
+// TestSendMsgWithIsIdempotent verifies that re-appending a Msg with the same
+// MsgID is a no-op — the dedupe-on-append guard for retry paths (loto-lgk.7).
+func TestSendMsgWithIsIdempotent(t *testing.T) {
+	l := newTestLOTO(t)
+	target := filepath.Join(t.TempDir(), "idempotent.go")
+
+	msg := Msg{
+		MsgID: "fixed-id-abc",
+		From:  "writer", To: "@all", Body: "hello",
+	}
+	for range 5 {
+		if err := l.SendMsgWith(target, msg); err != nil {
+			t.Fatalf("SendMsgWith: %v", err)
+		}
+	}
+	got, err := l.ReadMsgs(target, "any-reader")
+	if err != nil {
+		t.Fatalf("ReadMsgs: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 message after 5 retries with same MsgID, got %d", len(got))
+	}
+	if got[0].MsgID != "fixed-id-abc" {
+		t.Errorf("MsgID not preserved: %q", got[0].MsgID)
+	}
+}
+
+// TestSendMsgAutoAssignsUniqueIDs verifies that SendMsg generates a fresh
+// UUIDv4 per call so two consecutive sends are NOT collapsed.
+func TestSendMsgAutoAssignsUniqueIDs(t *testing.T) {
+	l := newTestLOTO(t)
+	target := filepath.Join(t.TempDir(), "unique.go")
+
+	for i := range 3 {
+		if err := l.SendMsg(target, "w", "@all", fmt.Sprintf("m%d", i), false); err != nil {
+			t.Fatalf("SendMsg %d: %v", i, err)
+		}
+	}
+	got, err := l.ReadMsgs(target, "any-reader")
+	if err != nil {
+		t.Fatalf("ReadMsgs: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want 3 distinct messages, got %d", len(got))
+	}
+	ids := make(map[string]bool)
+	for _, m := range got {
+		if m.MsgID == "" {
+			t.Errorf("message missing MsgID: %+v", m)
+		}
+		if ids[m.MsgID] {
+			t.Errorf("duplicate MsgID generated: %s", m.MsgID)
+		}
+		ids[m.MsgID] = true
+	}
+}
+
+// TestCompactDedupesByMsgID: if duplicate-MsgID rows somehow land in the file
+// (e.g. concurrent writers that bypassed dedupe, or schema rollback), compact
+// must collapse them to one. Legacy rows without MsgID pass through unchanged.
+func TestCompactDedupesByMsgID(t *testing.T) {
+	l := newTestLOTO(t)
+	target := filepath.Join(t.TempDir(), "compact-dedupe.go")
+
+	// Seed via the public API so msgsPath/dirs are created.
+	if err := l.SendMsg(target, "w", "@all", "seed", false); err != nil {
+		t.Fatalf("SendMsg seed: %v", err)
+	}
+	msgsPath, err := l.msgsPath(target)
+	if err != nil {
+		t.Fatalf("msgsPath: %v", err)
+	}
+
+	// Hand-write a mailbox with two rows sharing one MsgID, plus a legacy row.
+	lines := []string{
+		`{"msg_id":"dup-1","from":"w","to":"@all","body":"first","timestamp":"2026-04-29T12:00:00Z"}`,
+		`{"msg_id":"dup-1","from":"w","to":"@all","body":"second","timestamp":"2026-04-29T12:00:01Z"}`,
+		`{"from":"w","to":"@all","body":"legacy-no-id","timestamp":"2026-04-29T12:00:02Z"}`,
+		`{"from":"w","to":"@all","body":"legacy-also-no-id","timestamp":"2026-04-29T12:00:03Z"}`,
+	}
+	if err := os.WriteFile(msgsPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+
+	if err := l.CompactMsgs(target); err != nil {
+		t.Fatalf("CompactMsgs: %v", err)
+	}
+	got, err := l.ReadMsgs(target, "any-reader")
+	if err != nil {
+		t.Fatalf("ReadMsgs: %v", err)
+	}
+
+	bodies := make(map[string]int, len(got))
+	for _, m := range got {
+		bodies[m.Body]++
+	}
+	if bodies["first"] != 1 || bodies["second"] != 0 {
+		t.Errorf("dup-1: want first=1 second=0, got first=%d second=%d", bodies["first"], bodies["second"])
+	}
+	if bodies["legacy-no-id"] != 1 || bodies["legacy-also-no-id"] != 1 {
+		t.Errorf("legacy rows must pass through: %v", bodies)
+	}
+}
+
 // TestReadMsgsQuarantinesCorruptLines: a mailbox file with one valid + one
 // truncated JSON line must (a) still return the valid message and (b)
 // quarantine the corrupt line to a .corrupt sidecar — never silently drop it.
