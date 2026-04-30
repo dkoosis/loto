@@ -1,31 +1,41 @@
 # loto
 
-Lock-out / tag-out coordination for multi-agent workspaces. Lets multiple
-Claude sessions edit files in the same repository without clobbering each other.
+Lock-out / tag-out coordination for multi-agent workspaces. Stops two Claude
+sessions from silently clobbering each other's edits.
 
 ## what it does
 
-When several Claude sessions work in the same project (across worktrees,
-subagents, or concurrent windows), they can unknowingly edit the same files.
-loto answers one question fast:
+You have several Claude sessions running in the same repo — worktrees,
+subagents, concurrent windows. Without coordination, two of them can edit
+`internal/store/store.go` at the same time and one set of changes vanishes.
 
-> "Is it safe for me to edit this path right now, and if not, who's on it?"
+loto answers, in <50ms:
 
-If the answer arrives in <50ms, with structured output, with a useful holder
-description, Claudes will actually use it.
+> "Is it safe for me to edit this path right now, and if not, who's on it
+> and what are they doing?"
+
+Acquire a lock with intent. The tag carries your handle, PID, branch, and a
+one-line "what I'm doing." The next agent that tries the same file sees the
+holder and decides: wait, message them, work elsewhere, or break the lock.
+
+```sh
+loto try file internal/store/store.go --hold --intent "refactor query path"
+# → ✔ acquired | file | internal/store/store.go | by:BraveOtter
+
+loto status internal/store/store.go
+# → ✗ held | file | internal/store/store.go | by:BraveOtter | intent:refactor query path | since:14:32
+
+loto msg internal/store/store.go "need 5min when you're done"
+# → leaves a note in the holder's mailbox; they read it with `loto inbox --mine`
+```
+
+Reservations declare advisory holds on subtrees ahead of locking
+(`internal/store/**`). The `dashboard` command shows live state. `doctor` and
+`break` recover from crashed holders.
 
 > Using Claude Code? Install the loto skill at `~/.claude/skills/loto/SKILL.md`
-> (snapshot at `docs/skills/loto.md`) and the global hooks at
-> `~/.claude/settings.json` so every session gets identity + auto-release.
-
-## non-goals
-
-- **No multi-host coordination.** Designed for a single machine. flock(2)
-  semantics on NFS / networked filesystems are unreliable — do not use loto
-  over shared network mounts.
-- **No daemon.** Every operation is a fresh process. State lives on disk.
-- **No strong consistency.** Tags are advisory; flock(2) is the ground truth.
-- **Not a git conflict resolver.** loto reduces conflicts; git handles them.
+> (snapshot at `docs/skills/loto.md`) and the global hooks via
+> `loto install-hook` so every session gets identity + auto-release.
 
 ## installation
 
@@ -35,55 +45,27 @@ go install loto/cmd/loto@latest
 make install
 ```
 
-## quick start
+## commands
 
 ```sh
-# Who am I in this session?
-loto whoami
-# → loto:llm:v1
-# → agent | RemoteSnipe | id:2dd46381 | host:Mac
-
-# Acquire a file lock (non-blocking):
-loto try file internal/store/store.go
-# → loto:llm:v1
-# → ✔ acquired | file | internal/store/store.go | by:RemoteSnipe
-
-# When blocked (stderr, exit 1):
-# → ✗ blocked | file | … | by:GreenCastle | intent:… | held-since:…
-
-# JSON output for scripts / hooks:
-loto whoami --json
-
-# Acquire with wait (blocks up to 30s):
-loto try file internal/store/store.go --wait 30s
-
-# Hold for foreground work:
-loto try file internal/store/store.go --hold
-
-# Check what's locked in this project:
-loto status
-
-# Release stale tag from a crashed session:
-loto reap internal/store/store.go
-
-# Release all locks for this session:
-loto release --all-mine
-
-# Install Claude Code session hooks:
-loto install-hook
-
-# Reserve a subtree (advisory):
+loto whoami                                 # session identity
+loto try file <path> [--hold] [--wait 30s]  # acquire (non-blocking by default)
+loto status [path...]                       # who holds what
+loto release --all-mine                     # drop my locks
+loto msg <path> "..."                       # message the holder
+loto inbox --mine                           # read messages addressed to me
 loto reserve add "internal/store/**" --intent "refactoring store layer"
 loto reserve list
-loto reserve release "internal/store/**"
-
-# Install git pre-commit hook (blocks commits on conflicting locks/reservations):
-loto install-git-hook
+loto check-paths <path...>                  # used by the git pre-commit hook
+loto doctor [--repair]                      # diagnose / clean stale state
+loto break <path> [--force]                 # remove stale tag, or take a live lock
+loto dashboard                              # live TUI
+loto install-hook                           # write Claude Code SessionStart/Stop hooks
+loto install-git-hook                       # write .git/hooks/pre-commit
 ```
 
-By default, loto emits the **claude-optimized** terse format when stdout is
-not a tty (≈40-60% fewer tokens than JSON). Pipe consumers and existing
-hooks should pass `--json` explicitly.
+Default output is the terse `loto:llm:v1` format on non-tty stdout (~40-60%
+fewer tokens than JSON). Pipe consumers should pass `--json` explicitly.
 
 ## coordination model
 
@@ -97,15 +79,6 @@ Three tiers, weakest to strongest:
 
 **Tags are descriptive; flock is authoritative.** Tags can lie (writer
 crashed, tag rotted). flock cannot — if you can acquire it, nobody holds it.
-
-## operating loop
-
-```
-1. orient    → loto whoami            # who am I in this session?
-2. acquire   → loto try file <path>   # exit 0 + JSON on success, exit 1 + holder JSON on conflict
-3. edit      → ... do the work ...
-4. release   → loto release --all-mine
-```
 
 ## on-disk layout
 
@@ -129,39 +102,33 @@ pinned to `.git/.loto-slug` on first use. Override with `LOTO_BASE`.
 |------|---------|
 | 0 | success |
 | 1 | advisory conflict (lock held by another agent) |
-| 2 | usage error (bad flags, unknown command) |
+| 2 | usage error |
 | 3 | IO / system error |
 
 ## session identity
 
 Each Claude session gets a persistent handle stored at
-`~/.loto/agents/<uuid>.json`. Set `LOTO_AGENT_ID` in the environment to
-re-attach to an existing identity. The `install-hook` command writes
-`SessionStart`/`Stop` hooks to `.claude/settings.json` to handle this
+`~/.loto/agents/<uuid>.json`. Set `LOTO_AGENT_ID` to re-attach. The
+`install-hook` command wires `SessionStart`/`Stop` hooks in
+`.claude/settings.json` so identity is set and locks are released
 automatically.
-
-```sh
-loto install-hook   # write .claude/settings.json hooks
-```
 
 ## design invariants
 
 1. **flock is truth.** Never trust a tag alone for a safety decision.
 2. **Single host.** All paths are absolute on this machine.
 3. **No daemon.** State lives on disk; every operation is a fresh process.
-4. **Claude-optimized I/O.** Default to terse `loto:llm:v1` format on non-tty stdout; `--json` for scripts; pretty for ttys.
+4. **Claude-optimized I/O.** Terse `loto:llm:v1` on non-tty stdout; `--json` for scripts; pretty for ttys.
 5. **Identity is per-session, not per-process.** Many shells, one handle.
 6. **Reads are free.** loto coordinates writes only.
 7. **Cleanup is layered.** SessionStop hook (eager) → lazy GC on next acquire (passive) → `loto doctor --repair` (manual).
 
-## known limitations
+## what loto isn't
 
-- `loto try file` in fire-and-return mode (no `--hold`) releases the lock
-  immediately after printing. Persistent hold-while-working requires `--hold`
-  or a wrapper that keeps the process alive. Full handle-based release is
-  tracked in the backlog.
-- Reservation and mailbox tiers are not yet implemented.
-- `loto doctor` is not yet implemented.
+- **Not multi-host.** flock(2) on NFS is unreliable; do not use over network mounts.
+- **Not a daemon.** Fresh process per op, state on disk.
+- **Not strongly consistent.** Tags are advisory; flock is the ground truth.
+- **Not a git conflict resolver.** loto reduces conflicts; git handles them.
 
 ## development
 
