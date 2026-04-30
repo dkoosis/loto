@@ -320,3 +320,31 @@ func TestEmitLLMDoctorRepairStates(t *testing.T) {
 		t.Fatalf("fix block should appear only for the failed-repair row:\n%s", got)
 	}
 }
+
+func TestEmitLLMError(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitLLMError(&buf, "create base dir", "permission denied"); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.HasPrefix(got, "loto:llm:v1\n") {
+		t.Fatalf("missing header:\n%s", got)
+	}
+	if !strings.Contains(got, "✗ error | create base dir | permission denied\n") {
+		t.Fatalf("unexpected body:\n%s", got)
+	}
+}
+
+func TestEmitLLMErrorCollapsesNewlines(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitLLMError(&buf, "op", "line1\nline2"); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if strings.Count(got, "\n") != 2 { // header + single data line
+		t.Fatalf("expected single-line body, got:\n%s", got)
+	}
+	if !strings.Contains(got, "line1 line2") {
+		t.Fatalf("newline not collapsed:\n%s", got)
+	}
+}

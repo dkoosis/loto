@@ -140,7 +140,7 @@ type ActiveLock struct {
 // New creates a LOTO at baseDir, ensuring the directory layout exists.
 func New(baseDir string) (*LOTO, error) {
 	if err := os.MkdirAll(filepath.Join(baseDir, "files"), 0o700); err != nil {
-		return nil, fmt.Errorf("loto: create base dir: %w", err)
+		return nil, &ErrSystem{Op: "create base dir", Err: err}
 	}
 	return &LOTO{baseDir: baseDir}, nil
 }
@@ -198,7 +198,7 @@ func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (
 
 	tag := l.newTag(agentID, intent, target, "file", opts...)
 	if err := writeTagAtomic(fileTagPath, tag); err != nil {
-		return nil, &ErrSystem{Op: "write tag", Err: err}
+		return nil, err
 	}
 
 	success = true
@@ -240,7 +240,7 @@ func (l *LOTO) TryGlobalLock(agentID, intent string, opts ...TagOptions) (*Activ
 
 	tag := l.newTag(agentID, intent, "global", "global", opts...)
 	if err := writeTagAtomic(globalTagPath, tag); err != nil {
-		return nil, &ErrSystem{Op: "write tag", Err: err}
+		return nil, err
 	}
 
 	success = true
@@ -414,7 +414,7 @@ func (l *LOTO) globalPaths() (lockPath, tagPath string) {
 func (l *LOTO) filePaths(target string) (lockPath, tagPath string, err error) {
 	abs, err := filepath.Abs(target)
 	if err != nil {
-		return "", "", fmt.Errorf("loto: normalize target %q: %w", target, err)
+		return "", "", &ErrSystem{Op: fmt.Sprintf("normalize target %q", target), Err: err}
 	}
 	name := hashTarget(filepath.Clean(abs))
 	return filepath.Join(l.baseDir, "files", name+".lock"),
@@ -456,17 +456,17 @@ func (l *LOTO) newTag(agentID, intent, target, kind string, opts ...TagOptions) 
 func writeTagAtomic(tagPath string, tag Tag) error {
 	data, err := json.Marshal(tag)
 	if err != nil {
-		return fmt.Errorf("loto: marshal tag: %w", err)
+		return &ErrSystem{Op: "marshal tag", Err: err}
 	}
 	tmpPath := tagPath + ".tmp"
 	tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		return fmt.Errorf("loto: create tmp tag: %w", err)
+		return &ErrSystem{Op: "create tmp tag", Err: err}
 	}
 	// On any error past this point, drop the half-written temp file.
 	fail := func(op string, err error) error {
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("loto: %s tmp tag: %w", op, err)
+		return &ErrSystem{Op: op + " tmp tag", Err: err}
 	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()

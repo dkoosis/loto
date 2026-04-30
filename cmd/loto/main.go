@@ -601,6 +601,10 @@ func printJSON(v any) {
 func exit(err error) {
 	var sys *loto.ErrSystem
 	if errors.As(err, &sys) {
+		if currentFormat == render.FormatLLM {
+			_ = render.EmitLLMError(os.Stderr, sys.Op, sys.Err.Error())
+			os.Exit(3)
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(3)
 	}
@@ -622,6 +626,10 @@ func exit(err error) {
 		}
 		// JSON path: ErrHeld.MarshalJSON emits the holder-report shape.
 		_ = render.EmitJSON(os.Stderr, held)
+		os.Exit(1)
+	}
+	if currentFormat == render.FormatLLM {
+		_ = render.EmitLLMError(os.Stderr, "loto", err.Error())
 		os.Exit(1)
 	}
 	fmt.Fprintln(os.Stderr, err)

@@ -278,6 +278,16 @@ func EmitLLMBroken(w io.Writer, target, by, reason string) error {
 	return err
 }
 
+// EmitLLMError writes a typed error line: "✗ error | <op> | <reason>".
+// Reasons are line-collapsed so a multi-line wrapped error can't break the row.
+func EmitLLMError(w io.Writer, op, reason string) error {
+	if err := writeHeader(w); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w, "✗ error | %s | %s\n", op, collapseLine(reason))
+	return err
+}
+
 // EmitLLMInstalled confirms a hook install.
 func EmitLLMInstalled(w io.Writer, path string) error {
 	if err := writeHeader(w); err != nil {

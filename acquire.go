@@ -28,10 +28,13 @@ func (l *LOTO) AcquireGlobal(ctx context.Context, agentID, intent string, opts .
 }
 
 // pollAcquire retries try with exponential backoff until it succeeds, returns
-// a non-contention error, or ctx is done. cancelOp labels the ErrSystem
-// returned on context cancellation.
+// a non-contention error, or ctx is done. On context cancellation it returns
+// the last ErrHeld observed (the actual blocker) so callers see the holder,
+// not a synthetic "context cancelled" error. cancelOp is used only as a
+// fallback ErrSystem op label when no ErrHeld was ever observed.
 func pollAcquire(ctx context.Context, cancelOp string, try func() (*ActiveLock, error)) (*ActiveLock, error) {
 	interval := defaultPollInterval
+	var lastHeld *ErrHeld
 	for {
 		lock, err := try()
 		if err == nil {
@@ -41,9 +44,13 @@ func pollAcquire(ctx context.Context, cancelOp string, try func() (*ActiveLock, 
 		if !errors.As(err, &held) {
 			return nil, err
 		}
+		lastHeld = held
 
 		select {
 		case <-ctx.Done():
+			if lastHeld != nil {
+				return nil, lastHeld
+			}
 			return nil, &ErrSystem{Op: cancelOp, Err: ctx.Err()}
 		case <-time.After(interval):
 		}

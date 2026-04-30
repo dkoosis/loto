@@ -311,9 +311,14 @@ func TestAcquireTimesOutWhenHeld(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
-	var sys *ErrSystem
-	if !errors.As(err, &sys) {
-		t.Fatalf("expected ErrSystem (context cancel), got %T: %v", err, err)
+	// After timeout, --wait callers should see the actual blocker (ErrHeld
+	// with the holder tag), not a synthetic ErrSystem("context cancelled").
+	var held *ErrHeld
+	if !errors.As(err, &held) {
+		t.Fatalf("expected ErrHeld (the actual blocker), got %T: %v", err, err)
+	}
+	if held.Tag == nil || held.Tag.AgentID != "holder" {
+		t.Fatalf("expected ErrHeld with holder tag, got %+v", held)
 	}
 }
 

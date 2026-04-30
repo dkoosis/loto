@@ -37,7 +37,7 @@ func (l *LOTO) ReleaseAllMine(agentID string) (released []string, errs []error) 
 	filesDir := filepath.Join(l.baseDir, "files")
 	entries, err := os.ReadDir(filesDir)
 	if err != nil && !os.IsNotExist(err) {
-		return nil, []error{err}
+		return nil, []error{&ErrSystem{Op: "release-all-mine: read files dir", Err: err}}
 	}
 
 	for _, e := range entries {
