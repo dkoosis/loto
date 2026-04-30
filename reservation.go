@@ -1,3 +1,13 @@
+// On-disk shape (reservations):
+//
+//	<baseDir>/reservations/<sha256(pattern)>.tag   JSON Reservation, advisory
+//
+// One file per reservation. Body is a JSON-encoded Reservation (see struct
+// for fields). Mode 0600. No flock — reservations are purely advisory hints
+// for tooling/UI; conflicts surface at TryFileLock time, not at Reserve time.
+// Two agents may hold reservations whose patterns overlap. Expired tags
+// (ExpiresAt past) are pruned lazily on read.
+
 package loto
 
 import (

@@ -1,3 +1,14 @@
+// On-disk shape (mailbox):
+//
+//	<baseDir>/files/<sha256(target)>.msgs        append-only NDJSON of Msg
+//	<baseDir>/files/<sha256(target)>.msgs.lock   flock file, serializes append/compact
+//	<baseDir>/files/<sha256(target)>.msgs.corrupt unparseable lines, quarantined on compact
+//
+// Each line in .msgs is a JSON-encoded Msg (see the Msg struct for fields).
+// Readers drop messages older than mailboxMaxAge (30d). Compaction rewrites
+// the file in place once it grows past mailboxCompactAt (200) appends.
+// Mode 0600. No directory-level lock; per-mailbox flock is sufficient.
+
 package loto
 
 import (

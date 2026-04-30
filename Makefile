@@ -50,9 +50,9 @@ REPORT_CMD = set +e; \
 ## ---------------------------------------------------------------------
 
 help: ## Show this help
-	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} \
-		/^## [^-]/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 4) } \
-		/^[a-zA-Z0-9_-]+:.*?## / { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*##"; printf "\nusage: make <target>\n"} \
+		/^## [^-]/ { printf "\n%s\n", substr($$0, 4) } \
+		/^[a-zA-Z0-9_-]+:.*?## / { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 check: vet lint test ## Full repo: vet + lint + test + build
 	@go build -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/loto
