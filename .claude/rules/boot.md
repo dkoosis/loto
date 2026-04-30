@@ -1,8 +1,8 @@
 # Boot
 updated: 2026-04-30
 
-→ pick from `bd ready`. Open: `loto-egg` (dashboard, human-primary).
+→ check `bd ready`. Empty → review backlog with dk or pick a polish item from prior wrap notes.
 
-✓ shipped 2026-04-30
-- loto-2ar epic closed: cvi (check-paths LLM), akr (doctor LLM), v6a (error consistency + --wait holder), 7xs (relative paths + token hints)
-- design rules pinned → `.claude/rules/design.md`
+✓ done
+- check-paths emits `[status: ok]` on empty result (9b4e3dc)
+- design.md violations audit — 1 fix shipped, several polish items surfaced

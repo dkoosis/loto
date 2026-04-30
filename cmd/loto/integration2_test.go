@@ -476,6 +476,25 @@ func TestMsgInboxBroadcast(t *testing.T) {
 	}
 }
 
+// TestInboxBareEqualsMine: bare `loto inbox` should auto-mine — calling it
+// without --mine and without a path should return the agent's cross-file inbox.
+func TestInboxBareEqualsMine(t *testing.T) {
+	base := t.TempDir()
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.go")
+
+	if out, err := lotoCmd(base, "--agent", "sender", "msg", a, "hello-bare", "--to", "recipient").Output(); err != nil {
+		t.Fatalf("msg: %v\n%s", err, out)
+	}
+	out, err := lotoCmd(base, "--agent", "recipient", "inbox").Output()
+	if err != nil {
+		t.Fatalf("bare inbox: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "hello-bare") {
+		t.Errorf("bare inbox missing expected message: %s", out)
+	}
+}
+
 // TestInboxMineCrossFile: an agent should see all of its messages across
 // targets in one call, with the checkpoint advancing so a follow-up call
 // returns nothing new.

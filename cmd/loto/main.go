@@ -66,7 +66,8 @@ func init() {
 	pf := rootCmd.PersistentFlags()
 	pf.StringVar(&flagBase, "base", defaultBase(), "coordination base directory (or $LOTO_BASE)")
 	pf.StringVar(&flagAgent, "agent", defaultAgent(), "agent id")
-	pf.StringVar(&flagIntent, "intent", "ad-hoc", "human-readable intent")
+	pf.Lookup("agent").DefValue = "<auto>"
+	pf.StringVar(&flagIntent, "intent", "", "human-readable intent (optional)")
 	pf.BoolVar(&flagJSON, "json", false, "force JSON output (alias for --format=json)")
 	pf.StringVar(&flagFormat, "format", "", "output format: json | llm (default: llm when stdout is not a tty)")
 
@@ -367,18 +368,15 @@ func inboxCmd() *cobra.Command {
 	)
 	c := &cobra.Command{
 		Use:   "inbox [path]",
-		Short: "read mailbox: per-file (path) or cross-file (--mine)",
+		Short: "read mailbox: per-file (path) or cross-file (default / --mine)",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			l := newLOTO()
-			if mine {
-				if len(args) > 0 {
+			if mine || len(args) == 0 {
+				if mine && len(args) > 0 {
 					return errInboxMineArg
 				}
 				return runInboxMine(l, since, noCheckpoint)
-			}
-			if len(args) != 1 {
-				return errInboxNeedsPath
 			}
 			msgs, err := l.ReadMsgs(args[0], flagAgent)
 			if err != nil {
@@ -456,10 +454,7 @@ func writeInboxCheckpoint(base, agentID string, t time.Time) error {
 		[]byte(t.UTC().Format(time.RFC3339Nano)+"\n"), 0o600)
 }
 
-var (
-	errInboxMineArg   = errors.New("loto: inbox --mine takes no path argument")
-	errInboxNeedsPath = errors.New("loto: inbox needs a path (or use --mine)")
-)
+var errInboxMineArg = errors.New("loto: inbox --mine takes no path argument")
 
 func msgCmd() *cobra.Command {
 	var (
