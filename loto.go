@@ -104,7 +104,7 @@ type Tag struct {
 	Branch    string    `json:"branch,omitempty"`
 	Cwd       string    `json:"cwd,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
-	ExpiresAt time.Time `json:"expires_at,omitempty"` // zero = no TTL
+	ExpiresAt time.Time `json:"expires_at,omitzero"` // zero = no TTL
 }
 
 // SoftStale reports whether the tag's advisory TTL has expired.

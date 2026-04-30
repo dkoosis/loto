@@ -84,6 +84,7 @@ func init() {
 		checkPathsCmd(),
 		installGitHookCmd,
 		doctorCmd(),
+		dashboardCmd(),
 	)
 	// --ensure is accepted for SessionStart-hook compatibility; whoami already
 	// creates identity on demand, so the flag is a no-op (kept to avoid breaking

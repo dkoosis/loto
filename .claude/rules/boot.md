@@ -1,9 +1,8 @@
 # Boot
 updated: 2026-04-30
 
-→ pick from `bd ready`. Epic `loto-2ar`: 2 children left (v6a error consistency + --wait holder, 7xs relative paths + token hints).
+→ pick from `bd ready`. Open: `loto-egg` (dashboard, human-primary).
 
-✓ done
-- shipped loto-cvi: check-paths LLM envelope + inline fix commands
-- shipped loto-akr: doctor LLM emitter + Finding.Error + sort (473c9f9)
-- pinned design rules → `.claude/rules/design.md`
+✓ shipped 2026-04-30
+- loto-2ar epic closed: cvi (check-paths LLM), akr (doctor LLM), v6a (error consistency + --wait holder), 7xs (relative paths + token hints)
+- design rules pinned → `.claude/rules/design.md`
