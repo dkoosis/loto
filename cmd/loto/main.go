@@ -176,18 +176,27 @@ func tagOpts() loto.TagOptions {
 	return loto.TagOptions{TTL: d}
 }
 
-// acquireFile runs TryFileLock or blocks with Acquire depending on --wait.
-func acquireFile(l *loto.LOTO, agent, intent, target string) (*loto.ActiveLock, error) {
-	opts := tagOpts()
+// waitContext parses --wait and returns a bounded context, or (nil, nil) when
+// --wait is empty (non-blocking). On parse error it exits 2.
+func waitContext() (context.Context, context.CancelFunc) {
 	if tryWait == "" {
-		return l.TryFileLock(agent, intent, target, opts)
+		return nil, nil
 	}
 	d, err := time.ParseDuration(tryWait)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "loto: invalid --wait duration %q: %v\n", tryWait, err)
 		os.Exit(2)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), d)
+	return context.WithTimeout(context.Background(), d)
+}
+
+// acquireFile runs TryFileLock or blocks with Acquire depending on --wait.
+func acquireFile(l *loto.LOTO, agent, intent, target string) (*loto.ActiveLock, error) {
+	opts := tagOpts()
+	ctx, cancel := waitContext()
+	if ctx == nil {
+		return l.TryFileLock(agent, intent, target, opts)
+	}
 	defer cancel()
 	return l.Acquire(ctx, agent, intent, target, opts)
 }
@@ -195,15 +204,10 @@ func acquireFile(l *loto.LOTO, agent, intent, target string) (*loto.ActiveLock, 
 // acquireGlobal runs TryGlobalLock or blocks with AcquireGlobal depending on --wait.
 func acquireGlobal(l *loto.LOTO, agent, intent string) (*loto.ActiveLock, error) {
 	opts := tagOpts()
-	if tryWait == "" {
+	ctx, cancel := waitContext()
+	if ctx == nil {
 		return l.TryGlobalLock(agent, intent, opts)
 	}
-	d, err := time.ParseDuration(tryWait)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "loto: invalid --wait duration %q: %v\n", tryWait, err)
-		os.Exit(2)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), d)
 	defer cancel()
 	return l.AcquireGlobal(ctx, agent, intent, opts)
 }
@@ -559,8 +563,6 @@ func writeClaudeHooks() error {
 
 // ── whoami ────────────────────────────────────────────────────────────────────
 
-var ensureFlag bool
-
 var whoamiCmd = &cobra.Command{
 	Use:   "whoami",
 	Short: "show current agent identity (creates one if LOTO_AGENT_ID is unset)",
@@ -576,13 +578,17 @@ var whoamiCmd = &cobra.Command{
 }
 
 func init() {
-	whoamiCmd.Flags().BoolVar(&ensureFlag, "ensure", false, "create identity if missing, then exit 0 (for SessionStart hooks)")
+	// --ensure is accepted for SessionStart-hook compatibility; whoami already
+	// creates identity on demand, so the flag is a no-op (kept to avoid breaking
+	// existing hook scripts).
+	whoamiCmd.Flags().Bool("ensure", false, "create identity if missing, then exit 0 (for SessionStart hooks)")
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-// printJSON writes v as indented JSON to stdout. Retained for any callers
-// (e.g. helper output paths) that haven't migrated to a per-shape emit*.
+// printJSON writes v as indented JSON to stdout. Used by commands whose
+// shape doesn't warrant a dedicated render.EmitLLM* helper (doctor report,
+// check-paths conflict list, install-git-hook ack).
 func printJSON(v any) {
 	_ = render.EmitJSON(os.Stdout, v)
 }
