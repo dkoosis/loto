@@ -113,21 +113,13 @@ func (l *LOTO) examineGlobalTag(byAgent string, mode DoctorMode) ([]Finding, err
 		return nil, &ErrSystem{Op: "doctor: read global tag", Err: err}
 	}
 	var tag Tag
-	if json.Unmarshal(data, &tag) != nil {
+	if err := json.Unmarshal(data, &tag); err != nil {
 		f := Finding{
 			Class:  DriftOrphaned,
 			Path:   globalTagPath,
-			Detail: "global tag unreadable (corrupt JSON)",
+			Detail: fmt.Sprintf("global tag unreadable (corrupt JSON: %v)", err),
 		}
-		switch mode {
-		case DoctorRepair:
-			if os.Remove(globalTagPath) == nil {
-				f.Repaired = true
-			}
-		case DoctorDryRun:
-			f.WouldRepair = true
-		case DoctorCheck:
-		}
+		applyMode(&f, mode, func() bool { return os.Remove(globalTagPath) == nil })
 		return []Finding{f}, nil
 	}
 	return l.examineTagPair(globalLockPath, globalTagPath, "global", &tag, byAgent, mode, true)
@@ -186,15 +178,7 @@ func (l *LOTO) examineFileTags(byAgent string, mode DoctorMode) ([]Finding, erro
 				AgentID: tag.AgentID,
 				Detail:  "tag file has no matching lock",
 			}
-			switch mode {
-			case DoctorRepair:
-				if os.Remove(tagPath) == nil {
-					f.Repaired = true
-				}
-			case DoctorDryRun:
-				f.WouldRepair = true
-			case DoctorCheck:
-			}
+			applyMode(&f, mode, func() bool { return os.Remove(tagPath) == nil })
 			findings = append(findings, f)
 			continue
 		}
@@ -230,15 +214,11 @@ func (l *LOTO) examineFileTags(byAgent string, mode DoctorMode) ([]Finding, erro
 					AgentID: tag.AgentID,
 					Detail:  fmt.Sprintf("target path %q no longer exists on disk", tag.Target),
 				}
-				switch mode {
-				case DoctorRepair:
+				applyMode(&f, mode, func() bool {
 					_ = os.Remove(tagPath)
 					_ = os.Remove(lockPath)
-					f.Repaired = true
-				case DoctorDryRun:
-					f.WouldRepair = true
-				case DoctorCheck:
-				}
+					return true
+				})
 				findings = append(findings, f)
 			}
 		}
@@ -249,8 +229,6 @@ func (l *LOTO) examineFileTags(byAgent string, mode DoctorMode) ([]Finding, erro
 
 // examineTagPair checks a lock+tag pair for drift classes 1, 2, and 5.
 // isGlobal=true skips ForceBreak (which only handles file targets).
-//
-//nolint:gocognit,gocyclo,cyclop,funlen // tracked: loto-dit (refactor pending)
 func (l *LOTO) examineTagPair(lockPath, tagPath, displayTarget string, tag *Tag, byAgent string, mode DoctorMode, isGlobal bool) ([]Finding, error) {
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -273,15 +251,7 @@ func (l *LOTO) examineTagPair(lockPath, tagPath, displayTarget string, tag *Tag,
 			AgentID: tag.AgentID,
 			Detail:  fmt.Sprintf("tag present but lock unheld (last holder: pid %d, agent %s)", tag.PID, tag.AgentID),
 		}
-		switch mode {
-		case DoctorRepair:
-			if os.Remove(tagPath) == nil {
-				fi.Repaired = true
-			}
-		case DoctorDryRun:
-			fi.WouldRepair = true
-		case DoctorCheck:
-		}
+		applyMode(&fi, mode, func() bool { return os.Remove(tagPath) == nil })
 		return []Finding{fi}, nil
 	}
 
@@ -295,61 +265,41 @@ func (l *LOTO) examineTagPair(lockPath, tagPath, displayTarget string, tag *Tag,
 			AgentID: tag.AgentID,
 			Detail:  fmt.Sprintf("lock held but tag PID %d is dead (agent %s)", tag.PID, tag.AgentID),
 		}
-		switch mode {
-		case DoctorRepair:
+		applyMode(&fi, mode, func() bool {
 			body := fmt.Sprintf("doctor: lock on %q force-broken by %s: recorded PID %d is dead", displayTarget, byAgent, tag.PID)
 			_ = l.sendMsgBestEffort(displayTarget, byAgent, tag.AgentID, body, isGlobal)
-			if isGlobal {
-				if os.Remove(tagPath) == nil {
-					fi.Repaired = true
-				}
-			} else if l.ForceBreak(displayTarget, byAgent, fmt.Sprintf("doctor: PID %d is dead", tag.PID)) == nil {
-				fi.Repaired = true
-			}
-		case DoctorDryRun:
-			fi.WouldRepair = true
-		case DoctorCheck:
-		}
+			return l.breakHeldLock(displayTarget, byAgent, tagPath, isGlobal,
+				fmt.Sprintf("doctor: PID %d is dead", tag.PID))
+		})
 		return []Finding{fi}, nil
 	}
 
 	// Lock held, PID alive. Check activity-based staleness (zombie):
 	// agent process exists but hasn't refreshed tag, sent mail, or touched
 	// target within the idle threshold.
-	var msgsPath string
+	var msgsPath, target string
 	if !isGlobal {
+		target = displayTarget
 		if mp, perr := l.msgsPath(displayTarget); perr == nil {
 			msgsPath = mp
 		}
 	}
-	target := ""
-	if !isGlobal {
-		target = displayTarget
-	}
 	la := lastActivity(tag, msgsPath, target)
 	if !la.IsZero() && time.Since(la) > l.zombieIdleThreshold() {
+		idle := time.Since(la).Round(time.Second)
 		fi := Finding{
 			Class:   DriftZombieHeld,
 			Path:    tagPath,
 			Target:  displayTarget,
 			AgentID: tag.AgentID,
-			Detail:  fmt.Sprintf("lock held by pid %d (agent %s) but no activity since %s (idle %s > threshold %s)", tag.PID, tag.AgentID, la.Format(time.RFC3339), time.Since(la).Round(time.Second), l.zombieIdleThreshold()),
+			Detail:  fmt.Sprintf("lock held by pid %d (agent %s) but no activity since %s (idle %s > threshold %s)", tag.PID, tag.AgentID, la.Format(time.RFC3339), idle, l.zombieIdleThreshold()),
 		}
-		switch mode {
-		case DoctorRepair:
+		applyMode(&fi, mode, func() bool {
 			body := fmt.Sprintf("doctor: lock on %q force-broken by %s: zombie (no activity since %s)", displayTarget, byAgent, la.Format(time.RFC3339))
 			_ = l.sendMsgBestEffort(displayTarget, byAgent, tag.AgentID, body, isGlobal)
-			if isGlobal {
-				if os.Remove(tagPath) == nil {
-					fi.Repaired = true
-				}
-			} else if l.ForceBreak(displayTarget, byAgent, fmt.Sprintf("doctor: zombie idle %s", time.Since(la).Round(time.Second))) == nil {
-				fi.Repaired = true
-			}
-		case DoctorDryRun:
-			fi.WouldRepair = true
-		case DoctorCheck:
-		}
+			return l.breakHeldLock(displayTarget, byAgent, tagPath, isGlobal,
+				fmt.Sprintf("doctor: zombie idle %s", idle))
+		})
 		return []Finding{fi}, nil
 	}
 
@@ -404,4 +354,29 @@ func (l *LOTO) sendMsgBestEffort(target, from, to, body string, isGlobal bool) e
 		return nil
 	}
 	return l.SendMsg(target, from, to, body, true)
+}
+
+// breakHeldLock clears a held lock+tag pair: ForceBreak for file locks (which
+// blocks for the holder's flock), or a plain tag remove for global locks.
+// Returns true if the clearing succeeded.
+func (l *LOTO) breakHeldLock(displayTarget, byAgent, tagPath string, isGlobal bool, reason string) bool {
+	if isGlobal {
+		return os.Remove(tagPath) == nil
+	}
+	return l.ForceBreak(displayTarget, byAgent, reason) == nil
+}
+
+// applyMode wires a Finding to the requested DoctorMode. In DoctorRepair it
+// runs repair and sets f.Repaired on success; in DoctorDryRun it sets
+// WouldRepair; in DoctorCheck it leaves f untouched.
+func applyMode(f *Finding, mode DoctorMode, repair func() bool) {
+	switch mode {
+	case DoctorRepair:
+		if repair() {
+			f.Repaired = true
+		}
+	case DoctorDryRun:
+		f.WouldRepair = true
+	case DoctorCheck:
+	}
 }

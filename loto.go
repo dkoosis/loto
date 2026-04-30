@@ -463,23 +463,24 @@ func writeTagAtomic(tagPath string, tag Tag) error {
 	if err != nil {
 		return fmt.Errorf("loto: create tmp tag: %w", err)
 	}
+	// On any error past this point, drop the half-written temp file.
+	fail := func(op string, err error) error {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("loto: %s tmp tag: %w", op, err)
+	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("loto: write tmp tag: %w", err)
+		return fail("write", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("loto: sync tmp tag: %w", err)
+		return fail("sync", err)
 	}
 	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("loto: close tmp tag: %w", err)
+		return fail("close", err)
 	}
 	if err := os.Rename(tmpPath, tagPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("loto: rename tmp tag: %w", err)
+		return fail("rename", err)
 	}
 	return nil
 }
@@ -496,8 +497,12 @@ func readTag(tagPath string) (*Tag, error) {
 	return &tag, nil
 }
 
+// gitBranchTimeout caps the cost of stamping a tag's branch when git is slow,
+// hung, or unreachable (e.g. a stale .git lock).
+const gitBranchTimeout = 5 * time.Second
+
 func gitBranch(dir string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), gitBranchTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "branch", "--show-current")
 	cmd.Dir = dir

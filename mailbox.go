@@ -94,9 +94,6 @@ func (l *LOTO) SendMsg(target, from, to, body string, system bool) error {
 // message with the same non-empty MsgID is already in the mailbox, the call
 // is a no-op — making retries safe to repeat.
 func (l *LOTO) SendMsgWith(target string, msg Msg) error {
-	if _, _, err := l.filePaths(target); err != nil {
-		return &ErrSystem{Op: "msg: resolve paths", Err: err}
-	}
 	msgsPath, err := l.msgsPath(target)
 	if err != nil {
 		return err
