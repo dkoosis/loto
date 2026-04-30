@@ -64,7 +64,6 @@ func (e *ErrHeld) MarshalJSON() ([]byte, error) {
 		Kind      string `json:"kind"`
 		Target    string `json:"target"`
 		HeldSince string `json:"held_since,omitempty"`
-		ExpiresAt string `json:"expires_at,omitempty"`
 		Branch    string `json:"branch,omitempty"`
 		Host      string `json:"host,omitempty"`
 		PID       int    `json:"pid,omitempty"`

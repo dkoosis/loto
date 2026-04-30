@@ -169,22 +169,3 @@ func hashPattern(pattern string) string {
 	sum := sha256.Sum256([]byte(pattern))
 	return hex.EncodeToString(sum[:])
 }
-
-// ErrReservationConflict is returned when TryFileLock detects a conflicting
-// advisory reservation and the policy is set to fail (future work).
-// For now, conflicts are surface as warnings only.
-//
-//nolint:errname // sentinel-style name kept for API stability
-type ErrReservationConflict struct {
-	Target       string
-	Reservations []*Reservation
-}
-
-func (e *ErrReservationConflict) Error() string {
-	if len(e.Reservations) == 1 {
-		r := e.Reservations[0]
-		return fmt.Sprintf("loto: %s conflicts with reservation %q held by %s (%s)",
-			e.Target, r.Pattern, r.AgentID, r.Intent)
-	}
-	return fmt.Sprintf("loto: %s conflicts with %d reservations", e.Target, len(e.Reservations))
-}
