@@ -7,18 +7,36 @@ import (
 	"strings"
 )
 
+// tagStatus is the outcome of attempting to load a tag file from disk.
+type tagStatus int
+
+const (
+	tagOK      tagStatus = iota // file present, JSON parsed
+	tagMissing                  // file absent or unreadable
+	tagCorrupt                  // file present but JSON did not parse
+)
+
+// loadTag reads and unmarshals a tag file. The returned tagStatus distinguishes
+// missing-or-unreadable from corrupt-JSON so callers can treat them differently.
+func loadTag(path string) (Tag, tagStatus) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Tag{}, tagMissing
+	}
+	var t Tag
+	if json.Unmarshal(data, &t) != nil {
+		return Tag{}, tagCorrupt
+	}
+	return t, tagOK
+}
+
 // ReleaseAllMine walks the project base and reaps every tag whose agent_id
 // matches agentID. It is best-effort: per-file errors are collected but do
 // not abort the walk. Returns a summary of what was released.
-//
-//nolint:gocognit // tracked: loto-dit (refactor pending)
 func (l *LOTO) ReleaseAllMine(agentID string) (released []string, errs []error) {
 	filesDir := filepath.Join(l.baseDir, "files")
 	entries, err := os.ReadDir(filesDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
+	if err != nil && !os.IsNotExist(err) {
 		return nil, []error{err}
 	}
 
@@ -27,42 +45,36 @@ func (l *LOTO) ReleaseAllMine(agentID string) (released []string, errs []error) 
 			continue
 		}
 		tagPath := filepath.Join(filesDir, e.Name())
-		data, err := os.ReadFile(tagPath)
-		if err != nil {
-			continue
-		}
-		var tag Tag
-		if json.Unmarshal(data, &tag) != nil {
-			continue
-		}
-		if tag.AgentID != agentID {
-			continue
-		}
-		// Derive the lock path from the tag path.
 		lockPath := strings.TrimSuffix(tagPath, ".tag") + ".lock"
-		if err := reapLockFile(lockPath, tagPath); err != nil {
+		if target, ok, err := reapTagIfMine(lockPath, tagPath, agentID); err != nil {
 			errs = append(errs, err)
-		} else {
-			released = append(released, tag.Target)
+		} else if ok {
+			released = append(released, target)
 		}
 	}
 
-	// Also check the global tag.
-	_, globalTagPath := l.globalPaths()
-	data, err := os.ReadFile(globalTagPath)
-	if err == nil {
-		var tag Tag
-		if json.Unmarshal(data, &tag) == nil && tag.AgentID == agentID {
-			globalLockPath, _ := l.globalPaths()
-			if err := reapLockFile(globalLockPath, globalTagPath); err != nil {
-				errs = append(errs, err)
-			} else {
-				released = append(released, "global")
-			}
-		}
+	globalLockPath, globalTagPath := l.globalPaths()
+	if _, ok, err := reapTagIfMine(globalLockPath, globalTagPath, agentID); err != nil {
+		errs = append(errs, err)
+	} else if ok {
+		released = append(released, "global")
 	}
 
 	return released, errs
+}
+
+// reapTagIfMine reads tagPath, and if the tag belongs to agentID, releases
+// the lock+tag pair. Returns the tag's target on success.
+// (target, true, nil) = released; (_, false, nil) = not ours / unreadable; (_, _, err) = reap failed.
+func reapTagIfMine(lockPath, tagPath, agentID string) (string, bool, error) {
+	tag, status := loadTag(tagPath)
+	if status != tagOK || tag.AgentID != agentID {
+		return "", false, nil
+	}
+	if err := reapLockFile(lockPath, tagPath); err != nil {
+		return "", false, err
+	}
+	return tag.Target, true, nil
 }
 
 // reapLockFile attempts to remove a tag by acquiring the lock exclusively.

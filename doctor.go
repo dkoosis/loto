@@ -125,9 +125,31 @@ func (l *LOTO) examineGlobalTag(byAgent string, mode DoctorMode) ([]Finding, err
 	return l.examineTagPair(globalLockPath, globalTagPath, "global", &tag, byAgent, mode, true)
 }
 
+type lockPair struct{ hasLock, hasTag bool }
+
+// groupLockEntries groups .lock/.tag/.msgs siblings by base name.
+func groupLockEntries(entries []os.DirEntry) map[string]*lockPair {
+	pairs := map[string]*lockPair{}
+	for _, e := range entries {
+		ext := filepath.Ext(e.Name())
+		if ext != ".lock" && ext != ".tag" && ext != ".msgs" {
+			continue
+		}
+		base := strings.TrimSuffix(e.Name(), ext)
+		if pairs[base] == nil {
+			pairs[base] = &lockPair{}
+		}
+		switch ext {
+		case ".lock":
+			pairs[base].hasLock = true
+		case ".tag":
+			pairs[base].hasTag = true
+		}
+	}
+	return pairs
+}
+
 // examineFileTags walks <base>/files/ and checks each lock+tag pair plus orphan conditions.
-//
-//nolint:gocognit,gocyclo,cyclop,funlen // tracked: loto-dit (refactor pending)
 func (l *LOTO) examineFileTags(byAgent string, mode DoctorMode) ([]Finding, error) {
 	filesDir := filepath.Join(l.baseDir, "files")
 	entries, err := os.ReadDir(filesDir)
@@ -137,94 +159,91 @@ func (l *LOTO) examineFileTags(byAgent string, mode DoctorMode) ([]Finding, erro
 		}
 		return nil, &ErrSystem{Op: "doctor: read files dir", Err: err}
 	}
-
-	type pair struct{ hasLock, hasTag bool }
-	pairs := map[string]*pair{}
-	for _, e := range entries {
-		ext := filepath.Ext(e.Name())
-		if ext != ".lock" && ext != ".tag" && ext != ".msgs" {
-			continue
-		}
-		base := strings.TrimSuffix(e.Name(), ext)
-		if pairs[base] == nil {
-			pairs[base] = &pair{}
-		}
-		switch ext {
-		case ".lock":
-			pairs[base].hasLock = true
-		case ".tag":
-			pairs[base].hasTag = true
-		}
-	}
+	pairs := groupLockEntries(entries)
 
 	var findings []Finding
 	for base, p := range pairs {
-		lockPath := filepath.Join(filesDir, base+".lock")
-		tagPath := filepath.Join(filesDir, base+".tag")
-
-		// .lock without .tag is the normal state after a clean release — skip.
-		if !p.hasTag {
-			continue
-		}
-
-		if p.hasTag && !p.hasLock {
-			data, _ := os.ReadFile(tagPath)
-			var tag Tag
-			_ = json.Unmarshal(data, &tag)
-			f := Finding{
-				Class:   DriftOrphaned,
-				Path:    tagPath,
-				Target:  tag.Target,
-				AgentID: tag.AgentID,
-				Detail:  "tag file has no matching lock",
-			}
-			applyMode(&f, mode, func() bool { return os.Remove(tagPath) == nil })
-			findings = append(findings, f)
-			continue
-		}
-
-		// Both exist — read the tag.
-		data, err := os.ReadFile(tagPath)
-		if err != nil {
-			continue
-		}
-		var tag Tag
-		if json.Unmarshal(data, &tag) != nil {
-			findings = append(findings, Finding{
-				Class:  DriftOrphaned,
-				Path:   tagPath,
-				Detail: "tag file unreadable (corrupt JSON)",
-			})
-			continue
-		}
-
-		pf, err := l.examineTagPair(lockPath, tagPath, tag.Target, &tag, byAgent, mode, false)
+		pf, err := l.examineLockPair(filesDir, base, p, byAgent, mode)
 		if err != nil {
 			return nil, err
 		}
 		findings = append(findings, pf...)
+	}
+	return findings, nil
+}
 
-		// Only check target-exists if the pair itself looks healthy (lock held, PID alive).
-		if len(pf) == 0 && tag.Target != "" {
-			if _, statErr := os.Stat(tag.Target); os.IsNotExist(statErr) {
-				f := Finding{
-					Class:   DriftOrphaned,
-					Path:    tagPath,
-					Target:  tag.Target,
-					AgentID: tag.AgentID,
-					Detail:  fmt.Sprintf("target path %q no longer exists on disk", tag.Target),
-				}
-				applyMode(&f, mode, func() bool {
-					_ = os.Remove(tagPath)
-					_ = os.Remove(lockPath)
-					return true
-				})
-				findings = append(findings, f)
-			}
-		}
+// examineLockPair handles one .lock/.tag base name, dispatching by which sides exist.
+func (l *LOTO) examineLockPair(filesDir, base string, p *lockPair, byAgent string, mode DoctorMode) ([]Finding, error) {
+	// .lock without .tag is the normal state after a clean release.
+	if !p.hasTag {
+		return nil, nil
+	}
+	lockPath := filepath.Join(filesDir, base+".lock")
+	tagPath := filepath.Join(filesDir, base+".tag")
+
+	if !p.hasLock {
+		return []Finding{orphanTagFinding(tagPath, mode)}, nil
 	}
 
-	return findings, nil
+	tag, status := loadTag(tagPath)
+	switch status {
+	case tagMissing:
+		return nil, nil
+	case tagCorrupt:
+		return []Finding{{
+			Class:  DriftOrphaned,
+			Path:   tagPath,
+			Detail: "tag file unreadable (corrupt JSON)",
+		}}, nil
+	case tagOK:
+		// proceed below
+	}
+
+	pf, err := l.examineTagPair(lockPath, tagPath, tag.Target, &tag, byAgent, mode, false)
+	if err != nil {
+		return nil, err
+	}
+	// Only check target-exists if the pair itself looks healthy (lock held, PID alive).
+	if len(pf) == 0 && tag.Target != "" {
+		if mf, ok := missingTargetFinding(lockPath, tagPath, &tag, mode); ok {
+			pf = append(pf, mf)
+		}
+	}
+	return pf, nil
+}
+
+// orphanTagFinding builds the finding for a .tag with no matching .lock.
+func orphanTagFinding(tagPath string, mode DoctorMode) Finding {
+	tag, _ := loadTag(tagPath)
+	f := Finding{
+		Class:   DriftOrphaned,
+		Path:    tagPath,
+		Target:  tag.Target,
+		AgentID: tag.AgentID,
+		Detail:  "tag file has no matching lock",
+	}
+	applyMode(&f, mode, func() bool { return os.Remove(tagPath) == nil })
+	return f
+}
+
+// missingTargetFinding flags a healthy lock+tag whose target file no longer exists on disk.
+func missingTargetFinding(lockPath, tagPath string, tag *Tag, mode DoctorMode) (Finding, bool) {
+	if _, statErr := os.Stat(tag.Target); !os.IsNotExist(statErr) {
+		return Finding{}, false
+	}
+	f := Finding{
+		Class:   DriftOrphaned,
+		Path:    tagPath,
+		Target:  tag.Target,
+		AgentID: tag.AgentID,
+		Detail:  fmt.Sprintf("target path %q no longer exists on disk", tag.Target),
+	}
+	applyMode(&f, mode, func() bool {
+		_ = os.Remove(tagPath)
+		_ = os.Remove(lockPath)
+		return true
+	})
+	return f, true
 }
 
 // examineTagPair checks a lock+tag pair for drift classes 1, 2, and 5.

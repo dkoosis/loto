@@ -1,13 +1,8 @@
 # Boot
-updated: 2026-04-29
+updated: 2026-04-30
 
-→ pick from `bd ready`. Top of queue: loto-lgk epic remainder (.2 zombie staleness, .6 inbox index — both P2, each needs design pass before code).
+→ pick from `bd ready`. Next: loto-egg (dashboard) is the main open work.
 
 ✓ done
-- loto-lgk.7 shipped: MsgID/ThreadID + idempotent dedupe-on-append
-- loto-lgk.5 shipped: AckRequired/ReadAt/Importance fields + read-side stamping
-- closed .1, .3, .4 as already-shipped (verify before re-doing in this epic)
-
-‡ traps
-- before implementing any loto-lgk.* bead, grep mailbox.go/loto.go/cmd — three were already done
-- `CLAUDE_SESSION_ID` ✗ in Bash env; only `CLAUDECODE`/`CLAUDE_CODE_*`
+- /sweep craft across 3 pkgs: 8cf64c0, 038da07, 40d4f56
+- loto-dit closed — all 4 nolints removed via examineLockPair / loadTag / reapTagIfMine extraction
