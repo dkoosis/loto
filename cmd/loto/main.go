@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -342,12 +344,26 @@ func errsToStrings(errs []error) []string {
 // ── inbox + msg ───────────────────────────────────────────────────────────────
 
 func inboxCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "inbox <path>",
-		Short: "read messages addressed to this agent for a target file",
-		Args:  cobra.ExactArgs(1),
+	var (
+		mine         bool
+		since        string
+		noCheckpoint bool
+	)
+	c := &cobra.Command{
+		Use:   "inbox [path]",
+		Short: "read mailbox: per-file (path) or cross-file (--mine)",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			l := newLOTO()
+			if mine {
+				if len(args) > 0 {
+					return errInboxMineArg
+				}
+				return runInboxMine(l, since, noCheckpoint)
+			}
+			if len(args) != 1 {
+				return errInboxNeedsPath
+			}
 			msgs, err := l.ReadMsgs(args[0], flagAgent)
 			if err != nil {
 				exit(err)
@@ -356,7 +372,78 @@ func inboxCmd() *cobra.Command {
 			return nil
 		},
 	}
+	c.Flags().BoolVar(&mine, "mine", false, "read all mailboxes addressed to this agent")
+	c.Flags().StringVar(&since, "since", "", "RFC3339 timestamp; overrides the per-agent checkpoint")
+	c.Flags().BoolVar(&noCheckpoint, "no-checkpoint", false, "do not advance the per-agent checkpoint after reading")
+	return c
 }
+
+func runInboxMine(l *loto.LOTO, sinceFlag string, noCheckpoint bool) error {
+	var since time.Time
+	switch {
+	case sinceFlag != "":
+		t, err := time.Parse(time.RFC3339, sinceFlag)
+		if err != nil {
+			return fmt.Errorf("loto: invalid --since %q: %w", sinceFlag, err)
+		}
+		since = t
+	default:
+		if t, ok := readInboxCheckpoint(flagBase, flagAgent); ok {
+			since = t
+		}
+	}
+	msgs, err := l.ReadAllMsgs(flagAgent, since)
+	if err != nil {
+		exit(err)
+	}
+	emitInboxMine(msgs, since)
+	if !noCheckpoint && sinceFlag == "" {
+		// Advance checkpoint to max(seen ts) so the next call returns only
+		// strictly newer messages. Empty result preserves the prior checkpoint.
+		var newest time.Time
+		for _, m := range msgs {
+			if m.Timestamp.After(newest) {
+				newest = m.Timestamp
+			}
+		}
+		if !newest.IsZero() {
+			// +1ns so the next read excludes messages we just saw without
+			// dropping a sibling that shares the same nanosecond stamp.
+			_ = writeInboxCheckpoint(flagBase, flagAgent, newest.Add(time.Nanosecond))
+		}
+	}
+	return nil
+}
+
+func inboxCheckpointPath(base, agentID string) string {
+	return filepath.Join(base, "agents", agentID+".checkpoint")
+}
+
+func readInboxCheckpoint(base, agentID string) (time.Time, bool) {
+	data, err := os.ReadFile(inboxCheckpointPath(base, agentID))
+	if err != nil {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+func writeInboxCheckpoint(base, agentID string, t time.Time) error {
+	dir := filepath.Join(base, "agents")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(inboxCheckpointPath(base, agentID),
+		[]byte(t.UTC().Format(time.RFC3339Nano)+"\n"), 0o600)
+}
+
+var (
+	errInboxMineArg   = errors.New("loto: inbox --mine takes no path argument")
+	errInboxNeedsPath = errors.New("loto: inbox needs a path (or use --mine)")
+)
 
 func msgCmd() *cobra.Command {
 	var (
@@ -590,6 +677,34 @@ func emitStatusTargets(entries []render.StatusEntry, jsonResult map[string]any) 
 		return
 	}
 	_ = render.EmitJSON(os.Stdout, jsonResult)
+}
+
+func emitInboxMine(msgs []loto.Msg, since time.Time) {
+	if currentFormat == render.FormatLLM {
+		out := make([]render.InboxMineMessage, len(msgs))
+		for i, m := range msgs {
+			out[i] = render.InboxMineMessage{
+				From:      displayAgent(m.From),
+				To:        displayAgent(m.To),
+				Target:    m.Target,
+				Timestamp: m.Timestamp,
+				Body:      m.Body,
+			}
+		}
+		_ = render.EmitLLMInboxMine(os.Stdout, out, since)
+		return
+	}
+	_ = render.EmitJSON(os.Stdout, map[string]any{
+		"messages": msgs,
+		"since":    sinceJSON(since),
+	})
+}
+
+func sinceJSON(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t.UTC().Format(time.RFC3339Nano)
 }
 
 func emitInbox(target string, msgs []loto.Msg) {

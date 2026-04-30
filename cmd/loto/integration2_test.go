@@ -472,6 +472,62 @@ func TestMsgInboxBroadcast(t *testing.T) {
 	}
 }
 
+// TestInboxMineCrossFile: an agent should see all of its messages across
+// targets in one call, with the checkpoint advancing so a follow-up call
+// returns nothing new.
+func TestInboxMineCrossFile(t *testing.T) {
+	base := t.TempDir()
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.go")
+	b := filepath.Join(dir, "b.go")
+
+	for _, send := range [][]string{
+		{"--agent", "sender", "msg", a, "for-recipient-a", "--to", "recipient"},
+		{"--agent", "sender", "msg", b, "for-recipient-b", "--to", "recipient"},
+		{"--agent", "sender", "msg", a, "for-someone-else", "--to", "other-agent"},
+	} {
+		if out, err := lotoCmd(base, send...).Output(); err != nil {
+			t.Fatalf("msg: %v\n%s", err, out)
+		}
+	}
+
+	out, err := lotoCmd(base, "--agent", "recipient", "inbox", "--mine").Output()
+	if err != nil {
+		t.Fatalf("inbox --mine: %v\n%s", err, out)
+	}
+	s := string(out)
+	if !strings.Contains(s, "for-recipient-a") || !strings.Contains(s, "for-recipient-b") {
+		t.Errorf("inbox --mine missing expected messages: %s", s)
+	}
+	if strings.Contains(s, "for-someone-else") {
+		t.Errorf("inbox --mine leaked another agent's message: %s", s)
+	}
+
+	// Second call should show no new messages — checkpoint advanced.
+	out2, err := lotoCmd(base, "--agent", "recipient", "inbox", "--mine").Output()
+	if err != nil {
+		t.Fatalf("inbox --mine (2nd): %v\n%s", err, out2)
+	}
+	if strings.Contains(string(out2), "for-recipient-a") || strings.Contains(string(out2), "for-recipient-b") {
+		t.Errorf("expected empty inbox on 2nd call (checkpoint), got: %s", out2)
+	}
+
+	// A new message arrives — only it should appear.
+	if out3, err := lotoCmd(base, "--agent", "sender", "msg", b, "fresh-one", "--to", "recipient").Output(); err != nil {
+		t.Fatalf("msg fresh: %v\n%s", err, out3)
+	}
+	out4, err := lotoCmd(base, "--agent", "recipient", "inbox", "--mine").Output()
+	if err != nil {
+		t.Fatalf("inbox --mine (3rd): %v\n%s", err, out4)
+	}
+	if !strings.Contains(string(out4), "fresh-one") {
+		t.Errorf("expected fresh-one in 3rd call: %s", out4)
+	}
+	if strings.Contains(string(out4), "for-recipient-a") {
+		t.Errorf("3rd call should not re-show old messages: %s", out4)
+	}
+}
+
 // ── install-hook ──────────────────────────────────────────────────────────────
 
 func TestInstallHookWritesSettings(t *testing.T) {

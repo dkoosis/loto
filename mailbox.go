@@ -24,6 +24,9 @@ const (
 	ImportanceUrgent = "urgent"
 )
 
+// RecipientAll is the wildcard To address for broadcast messages.
+const RecipientAll = "@all"
+
 // Msg is a single mailbox message.
 //
 // MsgID is a UUIDv4 set on first append; it makes appends idempotent (a retry
@@ -51,6 +54,10 @@ type Msg struct {
 	AckRequired bool       `json:"ack_required,omitempty"`
 	ReadAt      *time.Time `json:"read_at,omitempty"` // stamped on recipient's first read of a direct message
 	Importance  string     `json:"importance,omitempty"`
+	// Target is the absolute path the message was sent about. Populated by
+	// SendMsgWith so per-agent inbox views can name the file without a
+	// hash→target sidecar. Legacy messages may omit it.
+	Target string `json:"target,omitempty"`
 }
 
 // newMsgID returns a random UUIDv4 in 8-4-4-4-12 hex form. Falls back to a
@@ -100,6 +107,13 @@ func (l *LOTO) SendMsgWith(target string, msg Msg) error {
 	if msg.Timestamp.IsZero() {
 		msg.Timestamp = time.Now().UTC()
 	}
+	if msg.Target == "" {
+		if abs, aerr := filepath.Abs(target); aerr == nil {
+			msg.Target = filepath.Clean(abs)
+		} else {
+			msg.Target = target
+		}
+	}
 	return appendMsg(msgsPath, msg)
 }
 
@@ -142,7 +156,7 @@ func (l *LOTO) ReadMsgs(target, agentID string) ([]Msg, error) {
 // stampReadAt sets ReadAt = now on every direct message in all addressed to
 // agentID whose ReadAt is unset. Returns true if any stamp was applied.
 func stampReadAt(all []Msg, agentID string) bool {
-	if agentID == "" || agentID == "@all" {
+	if agentID == "" || agentID == RecipientAll {
 		return false
 	}
 	now := time.Now().UTC()
@@ -166,7 +180,75 @@ func filterVisible(all []Msg, agentID string) []Msg {
 		if m.Timestamp.Before(cutoff) {
 			continue
 		}
-		if m.To != "@all" && m.To != agentID {
+		if m.To != RecipientAll && m.To != agentID {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// ReadAllMsgs scans every mailbox under baseDir and returns messages addressed
+// to agentID (direct or @all) with Timestamp >= since. Messages older than
+// mailboxMaxAge are dropped, matching ReadMsgs.
+//
+// As with ReadMsgs, ReadAt is stamped on first read for direct messages
+// (To == agentID, not @all). Each mailbox is processed under its own lock.
+//
+// Mailboxes that fail to read are skipped — one corrupt file does not break
+// the cross-mailbox view. Callers wanting strict failure semantics should
+// read individual mailboxes via ReadMsgs.
+func (l *LOTO) ReadAllMsgs(agentID string, since time.Time) ([]Msg, error) {
+	dir := filepath.Join(l.baseDir, "files")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, &ErrSystem{Op: "msg: list mailboxes", Err: err}
+	}
+	var out []Msg
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".msgs") {
+			continue
+		}
+		msgsPath := filepath.Join(dir, e.Name())
+		var visible []Msg
+		lerr := withMailboxLock(msgsPath, func() error {
+			all, rerr := readMsgs(msgsPath)
+			if rerr != nil {
+				// Skip unreadable mailbox — surface to stderr below.
+				return rerr
+			}
+			stamped := stampReadAt(all, agentID)
+			visible = filterSince(all, agentID, since)
+			if stamped {
+				return rewriteMsgs(msgsPath, all)
+			}
+			return nil
+		})
+		if lerr != nil {
+			fmt.Fprintf(os.Stderr, "loto: warning: skipped mailbox %s: %v\n", msgsPath, lerr)
+			continue
+		}
+		out = append(out, visible...)
+	}
+	return out, nil
+}
+
+// filterSince returns messages addressed to agentID or @all whose Timestamp is
+// at or after since, dropping anything older than mailboxMaxAge.
+func filterSince(all []Msg, agentID string, since time.Time) []Msg {
+	cutoff := time.Now().Add(-mailboxMaxAge)
+	var out []Msg
+	for _, m := range all {
+		if m.Timestamp.Before(cutoff) {
+			continue
+		}
+		if !since.IsZero() && m.Timestamp.Before(since) {
+			continue
+		}
+		if m.To != RecipientAll && m.To != agentID {
 			continue
 		}
 		out = append(out, m)

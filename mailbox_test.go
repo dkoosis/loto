@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestMailboxAppendCompactRace stresses the append/compact critical section.
@@ -326,5 +327,100 @@ func TestReadMsgsQuarantinesCorruptLines(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "truncated") {
 		t.Errorf("quarantine file missing corrupt content: %q", data)
+	}
+}
+
+// TestReadAllMsgsAggregatesAcrossMailboxes: a single agent's view across
+// multiple .msgs files must include direct messages addressed to it and
+// @all messages, but exclude messages addressed to other agents. The Target
+// field on each returned message must point at the original abs path so the
+// caller can locate the source file without inspecting hashes.
+func TestReadAllMsgsAggregatesAcrossMailboxes(t *testing.T) {
+	l := newTestLOTO(t)
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.go")
+	b := filepath.Join(dir, "b.go")
+
+	if err := l.SendMsg(a, "alice", "bob", "direct-on-a", false); err != nil {
+		t.Fatalf("send direct-on-a: %v", err)
+	}
+	if err := l.SendMsg(a, "alice", "@all", "broadcast-on-a", false); err != nil {
+		t.Fatalf("send broadcast-on-a: %v", err)
+	}
+	if err := l.SendMsg(b, "alice", "bob", "direct-on-b", false); err != nil {
+		t.Fatalf("send direct-on-b: %v", err)
+	}
+	if err := l.SendMsg(b, "alice", "carol", "not-for-bob", false); err != nil {
+		t.Fatalf("send not-for-bob: %v", err)
+	}
+
+	got, err := l.ReadAllMsgs("bob", time.Time{})
+	if err != nil {
+		t.Fatalf("ReadAllMsgs: %v", err)
+	}
+	bodies := map[string]string{} // body -> target
+	for _, m := range got {
+		bodies[m.Body] = m.Target
+	}
+	if len(bodies) != 3 {
+		t.Fatalf("expected 3 messages for bob, got %d: %+v", len(bodies), got)
+	}
+	for _, want := range []string{"direct-on-a", "broadcast-on-a", "direct-on-b"} {
+		if _, ok := bodies[want]; !ok {
+			t.Errorf("missing %q in bob's inbox: %+v", want, got)
+		}
+	}
+	if _, ok := bodies["not-for-bob"]; ok {
+		t.Errorf("carol's message leaked into bob's inbox")
+	}
+	if bodies["direct-on-a"] == "" || bodies["direct-on-b"] == "" {
+		t.Errorf("expected Target populated; got %+v", bodies)
+	}
+}
+
+// TestReadAllMsgsSinceFiltersByTimestamp: messages older than `since` must
+// be excluded; messages at or after `since` must be returned.
+func TestReadAllMsgsSinceFiltersByTimestamp(t *testing.T) {
+	l := newTestLOTO(t)
+	target := filepath.Join(t.TempDir(), "since.go")
+	if err := l.SendMsg(target, "alice", "bob", "old", false); err != nil {
+		t.Fatalf("send old: %v", err)
+	}
+	cutoff := time.Now().UTC().Add(time.Millisecond)
+	// Ensure the cutoff strictly precedes the next send.
+	time.Sleep(2 * time.Millisecond)
+	if err := l.SendMsg(target, "alice", "bob", "new", false); err != nil {
+		t.Fatalf("send new: %v", err)
+	}
+	got, err := l.ReadAllMsgs("bob", cutoff)
+	if err != nil {
+		t.Fatalf("ReadAllMsgs: %v", err)
+	}
+	if len(got) != 1 || got[0].Body != "new" {
+		t.Fatalf("expected only `new`; got %+v", got)
+	}
+}
+
+// TestReadAllMsgsStampsReadAtForDirect: a direct message must be stamped on
+// first read, exactly like ReadMsgs. @all messages are not stamped.
+func TestReadAllMsgsStampsReadAtForDirect(t *testing.T) {
+	l := newTestLOTO(t)
+	target := filepath.Join(t.TempDir(), "ack.go")
+	if err := l.SendMsgWith(target, Msg{From: "alice", To: "bob", Body: "ping", AckRequired: true}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if _, err := l.ReadAllMsgs("bob", time.Time{}); err != nil {
+		t.Fatalf("ReadAllMsgs: %v", err)
+	}
+	// Re-read via per-file API — ReadAt must already be set from the cross-file read.
+	msgs, err := l.ReadMsgs(target, "bob")
+	if err != nil {
+		t.Fatalf("ReadMsgs: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message; got %+v", msgs)
+	}
+	if msgs[0].ReadAt == nil {
+		t.Errorf("expected ReadAt stamped by ReadAllMsgs; got nil")
 	}
 }

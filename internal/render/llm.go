@@ -162,6 +162,49 @@ func EmitLLMInbox(w io.Writer, target string, msgs []InboxMessage) error {
 	return nil
 }
 
+// InboxMineMessage is one row of the cross-mailbox `loto inbox --mine` view.
+type InboxMineMessage struct {
+	From      string
+	To        string
+	Target    string
+	Timestamp time.Time
+	Body      string
+}
+
+// EmitLLMInboxMine writes a cross-mailbox inbox view for the current agent.
+// Empty inbox renders an explicit `[status: empty]` line — silence is dangerous.
+func EmitLLMInboxMine(w io.Writer, msgs []InboxMineMessage, since time.Time) error {
+	if _, err := io.WriteString(w, llmHeader); err != nil {
+		return err
+	}
+	header := fmt.Sprintf("inbox-mine | n:%d", len(msgs))
+	if !since.IsZero() {
+		header += " | since:" + since.UTC().Format(time.RFC3339)
+	}
+	if len(msgs) == 0 {
+		if _, err := fmt.Fprintf(w, "%s | [status: empty]\n", header); err != nil {
+			return err
+		}
+		return nil
+	}
+	if _, err := fmt.Fprintln(w, header); err != nil {
+		return err
+	}
+	for _, m := range msgs {
+		target := m.Target
+		if target == "" {
+			target = "-"
+		}
+		if _, err := fmt.Fprintf(w, "→ from:%s | to:%s | target:%s | ts:%s | %s\n",
+			m.From, m.To, target,
+			m.Timestamp.UTC().Format(time.RFC3339),
+			collapseBody(m.Body)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // EmitLLMMsgSent confirms a sent message.
 func EmitLLMMsgSent(w io.Writer, target, to string) error {
 	if _, err := io.WriteString(w, llmHeader); err != nil {
