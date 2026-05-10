@@ -16,7 +16,6 @@ import (
 
 const (
 	defaultHookWait = 10 * time.Second
-	defaultHookTTL  = 5 * time.Minute
 	hookPollStart   = 50 * time.Millisecond
 	hookPollMax     = 500 * time.Millisecond
 	envHookWait     = "LOTO_HOOK_WAIT"
@@ -92,7 +91,7 @@ LOTO_HOOK_WAIT sets the max wait (default 10s).`,
 			interval := hookPollStart
 			var lastHeld *loto.ErrHeld
 			for {
-				_, _, err := l.AcquirePath(agent, flagIntent, path, defaultHookTTL)
+				_, _, err := l.AcquirePath(agent, flagIntent, path, defaultAcquireTTL)
 				if err == nil {
 					return nil
 				}
