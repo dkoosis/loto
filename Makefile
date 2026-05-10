@@ -54,7 +54,7 @@ help: ## Show this help
 		/^## [^-]/ { printf "\n%s\n", substr($$0, 4) } \
 		/^[a-zA-Z0-9_-]+:.*?## / { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-check: vet lint test ## Full repo: vet + lint + test + build
+check: vet lint arch test ## Full repo: vet + lint + arch + test + build
 	@go build -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/loto
 	@echo "=== check pass ==="
 
@@ -79,6 +79,13 @@ report-human: ## Same as report, rendered for humans (always exits 0)
 
 vet: ## Run go vet
 	go vet $(PKG)
+
+arch: ## Enforce layering (.go-arch-lint.yml)
+	@if ! command -v go-arch-lint >/dev/null 2>&1; then \
+		echo "go-arch-lint not installed; 'go install github.com/fe3dback/go-arch-lint/v3@latest'"; \
+		exit 1; \
+	fi
+	@go-arch-lint check
 
 lint: ## Run golangci-lint (full)
 	@if ! command -v golangci-lint >/dev/null 2>&1; then \
