@@ -174,11 +174,16 @@ func tryCmd() *cobra.Command {
 				maybeEmitTimeout(err, wait, mode)
 				exit(err)
 			}
-			emitTrySuccess("file", target, flagAgent, lock.Conflicts)
 			if hold {
-				waitForSignal()
+				c, stop := installSignalHandler()
+				defer stop()
+				defer func() { _ = lock.Unlock() }()
+				emitTrySuccess("file", target, flagAgent, lock.Conflicts)
+				<-c
+				return nil
 			}
-			_ = lock.Unlock()
+			defer func() { _ = lock.Unlock() }()
+			emitTrySuccess("file", target, flagAgent, lock.Conflicts)
 			return nil
 		},
 	}
@@ -195,11 +200,16 @@ func tryCmd() *cobra.Command {
 				maybeEmitTimeout(err, wait, mode)
 				exit(err)
 			}
-			emitTrySuccess(kindGlobal, kindGlobal, flagAgent, nil)
 			if hold {
-				waitForSignal()
+				c, stop := installSignalHandler()
+				defer stop()
+				defer func() { _ = lock.Unlock() }()
+				emitTrySuccess(kindGlobal, kindGlobal, flagAgent, nil)
+				<-c
+				return nil
 			}
-			_ = lock.Unlock()
+			defer func() { _ = lock.Unlock() }()
+			emitTrySuccess(kindGlobal, kindGlobal, flagAgent, nil)
 			return nil
 		},
 	}
@@ -889,8 +899,13 @@ func emitInstalled(path string) {
 	_ = render.EmitJSON(os.Stdout, map[string]any{keyInstalled: true, keyFile: path})
 }
 
-func waitForSignal() {
+// installSignalHandler returns a channel receiving SIGINT/SIGTERM and a stop
+// func that deregisters the handler. Callers MUST `defer stop()` BEFORE
+// `defer Unlock()` so LIFO ordering runs Unlock first; the handler stays live
+// across cleanup, absorbing a second SIGINT that would otherwise hit Go's
+// default handler and kill the process mid-unlock.
+func installSignalHandler() (chan os.Signal, func()) {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
-	<-c
+	return c, func() { signal.Stop(c) }
 }
