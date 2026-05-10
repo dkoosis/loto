@@ -165,7 +165,7 @@ block is appended (or updated in place if already present).`,
 		if err := writeGitPreCommitHook(); err != nil {
 			exit(err)
 		}
-		printJSON(map[string]any{"installed": true, "file": ".git/hooks/pre-commit"})
+		printJSON(map[string]any{keyInstalled: true, keyFile: ".git/hooks/pre-commit"})
 		return nil
 	},
 }

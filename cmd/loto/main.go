@@ -35,13 +35,18 @@ var errInvalidImportance = errors.New("--importance must be one of: low, normal,
 
 // Repeated string literals consolidated for goconst.
 const (
-	statusFree  = "free"
-	kindGlobal  = "global"
-	keyCommand  = "command"
-	keyAgent    = "agent"
-	keyTarget   = "target"
-	keyReleased = "released"
-	keyAcquired = "acquired"
+	statusFree   = "free"
+	kindGlobal   = "global"
+	keyCommand   = "command"
+	keyAgent     = "agent"
+	keyTarget    = "target"
+	keyReleased  = "released"
+	keyAcquired  = "acquired"
+	keyMatcher   = "matcher"
+	keyHooks     = "hooks"
+	keyType      = "type"
+	keyInstalled = "installed"
+	keyFile      = "file"
 )
 
 func main() {
@@ -93,7 +98,7 @@ func init() {
 		releaseCmd(),      // main.go
 		inboxCmd(),        // main.go
 		msgCmd(),          // main.go
-		installHookCmd,    // main.go
+		installHookCmd(),  // install_hook.go
 		hookCmd(),         // hook.go
 		helloCmd(),        // hello.go
 		reserveCmd(),      // reserve.go
@@ -540,22 +545,8 @@ func msgCmd() *cobra.Command {
 }
 
 // ── install-hook ──────────────────────────────────────────────────────────────
-
-var installHookCmd = &cobra.Command{
-	Use:   "install-hook",
-	Short: "install SessionStart/End hooks for Claude Code",
-	Long: `Writes loto hook configuration to .claude/settings.json (project-level).
-
-SessionStart: runs 'loto whoami --ensure' and exports LOTO_AGENT_ID.
-SessionStop:  runs 'loto release --all-mine' to clean up this session's locks.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := writeClaudeHooks(); err != nil {
-			exit(err)
-		}
-		emitInstalled(".claude/settings.json")
-		return nil
-	},
-}
+// installHookCmd lives in install_hook.go; writeClaudeHooks below is the
+// project-local SessionStart/Stop installer used by the default form.
 
 func writeClaudeHooks() error {
 	if err := os.MkdirAll(".claude", 0o755); err != nil {
@@ -569,7 +560,7 @@ func writeClaudeHooks() error {
 		_ = json.Unmarshal(existing, &settings)
 	}
 
-	hooks, _ := settings["hooks"].(map[string]any)
+	hooks, _ := settings[keyHooks].(map[string]any)
 	if hooks == nil {
 		hooks = map[string]any{}
 	}
@@ -579,10 +570,10 @@ func writeClaudeHooks() error {
 	// JSONL, so no env-var injection is required.
 	hooks["SessionStart"] = []any{
 		map[string]any{
-			"matcher": "",
-			"hooks": []any{
+			keyMatcher: "",
+			keyHooks: []any{
 				map[string]any{
-					"type":     keyCommand,
+					keyType:    keyCommand,
 					keyCommand: "loto whoami --ensure >/dev/null 2>&1 || true",
 				},
 			},
@@ -592,17 +583,17 @@ func writeClaudeHooks() error {
 	// SessionStop: release all locks held by this agent.
 	hooks["Stop"] = []any{
 		map[string]any{
-			"matcher": "",
-			"hooks": []any{
+			keyMatcher: "",
+			keyHooks: []any{
 				map[string]any{
-					"type":     keyCommand,
+					keyType:    keyCommand,
 					keyCommand: "loto release --all-mine --json >/dev/null 2>&1 || true",
 				},
 			},
 		},
 	}
 
-	settings["hooks"] = hooks
+	settings[keyHooks] = hooks
 
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
@@ -892,7 +883,7 @@ func emitInstalled(path string) {
 		_ = render.EmitLLMInstalled(os.Stdout, path)
 		return
 	}
-	_ = render.EmitJSON(os.Stdout, map[string]any{"installed": true, "file": path})
+	_ = render.EmitJSON(os.Stdout, map[string]any{keyInstalled: true, keyFile: path})
 }
 
 func waitForSignal() {
