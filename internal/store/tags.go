@@ -11,6 +11,8 @@ import (
 
 const tagCols = `target_canonical,target_kind,id,kind,event,author_uuid,addressee_uuid,previous_owner_uuid,intent,created_at,expires_at`
 
+var ErrTagNotAuthorOrMissing = errors.New("not author or tag missing")
+
 func (s *Store) AddTag(ctx context.Context, tg domain.TagRecord) (string, error) {
 	if tg.ID == "" {
 		tg.ID = newTagID(tg.AuthorUUID, tg.CreatedAt, tg.Intent)
@@ -45,7 +47,7 @@ func (s *Store) RemoveTag(ctx context.Context, t domain.Target, id, byAgent stri
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return errors.New("not author or tag missing")
+		return ErrTagNotAuthorOrMissing
 	}
 	return nil
 }

@@ -30,7 +30,7 @@ func Open(p string) (*Store, error) {
 	}
 	moved, mvErr := MoveCorruptAside(p, time.Now())
 	if mvErr != nil {
-		return nil, fmt.Errorf("corrupt DB and move-aside failed: %v (orig: %w)", mvErr, err)
+		return nil, fmt.Errorf("corrupt DB and move-aside failed: %w (orig: %w)", mvErr, err)
 	}
 	fmt.Fprintf(os.Stderr, "loto: corrupt DB moved aside to %s; creating fresh DB\n", moved)
 	return openOnce(p)

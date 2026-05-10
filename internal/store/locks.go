@@ -26,7 +26,7 @@ func (s *Store) AcquireLock(ctx context.Context, l domain.LockRecord, live domai
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	caseSensitive, err := s.fsCaseSensitiveTx(tx)
 	if err != nil {
@@ -95,7 +95,7 @@ func (s *Store) ReleaseLock(ctx context.Context, t domain.Target, byAgent string
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	res, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ?`, t.Canonical, byAgent)
 	if err != nil {
@@ -113,7 +113,7 @@ func (s *Store) BreakLock(ctx context.Context, t domain.Target, byAgent string, 
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.QueryContext(ctx, `SELECT `+lockCols+` FROM locks WHERE target_canonical = ?`, t.Canonical)
 	if err != nil {
@@ -215,11 +215,7 @@ func loadLocksTx(ctx context.Context, tx *sql.Tx) ([]domain.LockRecord, error) {
 	return out, rows.Err()
 }
 
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
-func scanLock(r rowScanner) (domain.LockRecord, error) {
+func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	var l domain.LockRecord
 	var canonical, kindStr string
 	var createdNs, expiresNs int64

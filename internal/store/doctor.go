@@ -23,9 +23,9 @@ func (s *Store) DoctorAudit(ctx context.Context, thisHost string, live domain.Pi
 		return nil, err
 	}
 	now := time.Now()
-	for _, l := range locks {
-		if domain.IsStale(l, now, thisHost, live) {
-			r.StaleLocks = append(r.StaleLocks, l)
+	for i := range locks {
+		if domain.IsStale(locks[i], now, thisHost, live) {
+			r.StaleLocks = append(r.StaleLocks, locks[i])
 		}
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tags WHERE expires_at IS NOT NULL AND expires_at < ?`, now.UnixNano()).Scan(&r.ExpiredTagCount); err != nil {
@@ -45,16 +45,16 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	all, err := loadLocksTx(ctx, tx)
 	if err != nil {
 		return err
 	}
 	now := time.Now()
-	for _, l := range all {
-		if domain.IsStale(l, now, thisHost, live) {
-			if err := reclaimStaleTx(ctx, tx, l, byAgent, now); err != nil {
+	for i := range all {
+		if domain.IsStale(all[i], now, thisHost, live) {
+			if err := reclaimStaleTx(ctx, tx, all[i], byAgent, now); err != nil {
 				return err
 			}
 		}

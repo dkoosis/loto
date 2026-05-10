@@ -14,7 +14,7 @@ func TestReleaseLock(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	live := func(string, int) bool { return true }
-	l := mkLock("a.go", "alice", time.Hour)
+	l := mkLock("a.go", tcAlice, time.Hour)
 	if _, err := s.AcquireLock(ctx, l, live); err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +22,7 @@ func TestReleaseLock(t *testing.T) {
 	if err := s.ReleaseLock(ctx, l.Target, "bob"); err == nil {
 		t.Fatal("non-owner release must fail")
 	}
-	if err := s.ReleaseLock(ctx, l.Target, "alice"); err != nil {
+	if err := s.ReleaseLock(ctx, l.Target, tcAlice); err != nil {
 		t.Fatalf("owner release: %v", err)
 	}
 	got, _ := s.LockAt(ctx, l.Target)
@@ -35,7 +35,7 @@ func TestBreakLockStaleOnly(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	live := func(string, int) bool { return true }
-	l := mkLock("a.go", "alice", time.Hour)
+	l := mkLock("a.go", tcAlice, time.Hour)
 	if _, err := s.AcquireLock(ctx, l, live); err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestAcquireOverlapBlocks(t *testing.T) {
 	ctx := context.Background()
 	live := func(string, int) bool { return true }
 
-	if _, err := s.AcquireLock(ctx, mkLock("internal/store/", "alice", time.Hour), live); err != nil {
+	if _, err := s.AcquireLock(ctx, mkLock("internal/store/", tcAlice, time.Hour), live); err != nil {
 		t.Fatalf("alice acquire: %v", err)
 	}
 	res, err := s.AcquireLock(ctx, mkLock("internal/store/store.go", "bob", time.Hour), live)
@@ -93,7 +93,7 @@ func TestAcquireOverlapBlocks(t *testing.T) {
 	if !errors.As(err, &conflict) {
 		t.Fatalf("expected *ConflictError; got %T", err)
 	}
-	if len(conflict.Blockers) != 1 || conflict.Blockers[0].OwnerUUID != "alice" {
+	if len(conflict.Blockers) != 1 || conflict.Blockers[0].OwnerUUID != tcAlice {
 		t.Fatalf("expected single blocker alice; got %+v", conflict.Blockers)
 	}
 }
@@ -103,7 +103,7 @@ func TestAcquireSameAgentRefreshes(t *testing.T) {
 	ctx := context.Background()
 	live := func(string, int) bool { return true }
 
-	first := mkLock("a.go", "alice", time.Hour)
+	first := mkLock("a.go", tcAlice, time.Hour)
 	if _, err := s.AcquireLock(ctx, first, live); err != nil {
 		t.Fatal(err)
 	}

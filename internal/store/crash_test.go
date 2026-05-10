@@ -20,7 +20,7 @@ func TestCrash_FailedAddTagDoesNotAdvanceCursor(t *testing.T) {
 	// Seed a baseline cursor row.
 	tg := domain.TagRecord{
 		ID: "t-aaaa1111", Target: tgt, Kind: domain.TagNote,
-		AuthorUUID: "alice", AddresseeUUID: "bob", Intent: "first", CreatedAt: time.Now(),
+		AuthorUUID: tcAlice, AddresseeUUID: "bob", Intent: "first", CreatedAt: time.Now(),
 	}
 	if _, err := s.AddTag(ctx, tg); err != nil {
 		t.Fatal(err)
@@ -52,7 +52,7 @@ func TestCrash_AcquireConflictNoPartialRow(t *testing.T) {
 	ctx := context.Background()
 	live := func(string, int) bool { return true }
 
-	if _, err := s.AcquireLock(ctx, mkLock("internal/store/", "alice", time.Hour), live); err != nil {
+	if _, err := s.AcquireLock(ctx, mkLock("internal/store/", tcAlice, time.Hour), live); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.AcquireLock(ctx, mkLock("internal/store/store.go", "bob", time.Hour), live); err == nil {
@@ -73,7 +73,7 @@ func TestCrash_BreakLockAtomic(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	live := func(string, int) bool { return true }
-	if _, err := s.AcquireLock(ctx, mkLock("a.go", "alice", time.Hour), live); err != nil {
+	if _, err := s.AcquireLock(ctx, mkLock("a.go", tcAlice, time.Hour), live); err != nil {
 		t.Fatal(err)
 	}
 	tgt, _ := domain.Canonicalize("a.go")
@@ -81,7 +81,7 @@ func TestCrash_BreakLockAtomic(t *testing.T) {
 		t.Fatal("expected break-without-force on live lock to fail")
 	}
 	got, _ := s.LockAt(ctx, tgt)
-	if got == nil || got.OwnerUUID != "alice" {
+	if got == nil || got.OwnerUUID != tcAlice {
 		t.Fatalf("lock should still belong to alice; got %+v", got)
 	}
 	tags, _ := s.TagsOnTarget(ctx, tgt)

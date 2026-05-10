@@ -37,8 +37,7 @@ func TestConcurrentOverlappingAcquire(t *testing.T) {
 	var done sync.WaitGroup
 	done.Add(N)
 
-	for i := 0; i < N; i++ {
-		i := i
+	for i := range N {
 		go func() {
 			defer done.Done()
 			ready.Done()

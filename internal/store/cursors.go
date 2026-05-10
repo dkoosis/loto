@@ -35,7 +35,7 @@ func (s *Store) MarkRead(ctx context.Context, agent string, t domain.Target) err
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var maxNs sql.NullInt64
 	err = tx.QueryRowContext(ctx, `SELECT MAX(created_at) FROM tags WHERE target_canonical = ? AND addressee_uuid = ?`, t.Canonical, agent).Scan(&maxNs)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
