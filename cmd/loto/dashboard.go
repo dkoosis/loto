@@ -42,6 +42,9 @@ Press q or ctrl+c to quit.`,
 			if currentFormat == render.FormatLLM {
 				return runDashboardStream(ctx, l, cutoff, agent)
 			}
+			if !stdoutIsTerminal() {
+				return denyDashboardWithoutTerminal()
+			}
 			return runDashboardTUI(ctx, l, cutoff, agent)
 		},
 	}

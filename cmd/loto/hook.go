@@ -78,6 +78,9 @@ acquires a record-tier hold, then exits:
 LOTO_HOOK_WAIT sets the max wait (default 10s).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if stdinIsTerminal() {
+				return denyHookFromTerminal("pre-write")
+			}
 			path, ok := readHookFilePath(os.Stdin)
 			if !ok {
 				return nil
@@ -126,6 +129,9 @@ Always exits 0 — post-hook failures must not surface as tool errors.
 Robust to pre-write being bypassed: tries release, swallows errors.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if stdinIsTerminal() {
+				return denyHookFromTerminal("post-write")
+			}
 			path, ok := readHookFilePath(os.Stdin)
 			if !ok {
 				return nil
