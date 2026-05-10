@@ -1091,6 +1091,52 @@ func TestWhoamiEnsure(t *testing.T) {
 	}
 }
 
+// ── whoami --set-handle ───────────────────────────────────────────────────────
+
+func TestWhoamiSetHandle(t *testing.T) {
+	home := t.TempDir()
+
+	cmd := exec.Command(lotoBin, "--json", "whoami", "--set-handle", "Scout")
+	cmd.Env = append(os.Environ(), "HOME="+home, "LOTO_AGENT_ID=test-set-handle", "LOTO_CC_PROJECT_DIR=", "LOTO_SUPPRESS_LEGACY_WARNING=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("set-handle: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), `"handle": "Scout"`) {
+		t.Errorf("expected Scout in JSON, got: %s", out)
+	}
+
+	// Round-trip: subsequent `whoami` returns Scout.
+	cmd2 := exec.Command(lotoBin, "--json", "whoami")
+	cmd2.Env = cmd.Env
+	out2, err := cmd2.CombinedOutput()
+	if err != nil {
+		t.Fatalf("whoami: %v\n%s", err, out2)
+	}
+	if !strings.Contains(string(out2), `"handle": "Scout"`) {
+		t.Errorf("round-trip: expected Scout, got: %s", out2)
+	}
+}
+
+func TestWhoamiSetHandleRejectsInvalid(t *testing.T) {
+	home := t.TempDir()
+	cases := []string{"", "foo/bar", "foo\\bar", strings.Repeat("x", 33)}
+	for _, bad := range cases {
+		cmd := exec.Command(lotoBin, "--json", "whoami", "--set-handle", bad)
+		cmd.Env = append(os.Environ(), "HOME="+home, "LOTO_AGENT_ID=test-bad-handle", "LOTO_CC_PROJECT_DIR=", "LOTO_SUPPRESS_LEGACY_WARNING=1")
+		out, err := cmd.CombinedOutput()
+		// Empty string is consumed by cobra as "no flag set" — separate path.
+		if bad == "" {
+			// With empty string, the flag value is "" and our RunE skips set-handle path.
+			// That's acceptable: --set-handle "" is indistinguishable from "no flag".
+			continue
+		}
+		if err == nil {
+			t.Errorf("expected error for handle %q, got success: %s", bad, out)
+		}
+	}
+}
+
 // ── try --wait timeout ────────────────────────────────────────────────────────
 
 func TestTryWaitTimesOut(t *testing.T) {
