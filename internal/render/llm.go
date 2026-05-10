@@ -224,6 +224,32 @@ func EmitLLMBlocked(w io.Writer, in BlockedInput) error {
 	return err
 }
 
+// EmitLLMTimeout writes a wait-timeout report keyed by the suggested next
+// action ("abort" | "proceed" | "msg-and-switch"). Shape parallels
+// EmitLLMBlocked but uses a distinct ✗ token so callers can branch on policy
+// without consulting exit codes alone.
+func EmitLLMTimeout(w io.Writer, in BlockedInput, suggestedAction string) error {
+	if err := writeHeader(w); err != nil {
+		return err
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "✗ timeout | %s | %s | by:%s | intent:%s | held-since:%s",
+		in.Kind, in.Target, in.AgentID, truncIntent(in.Intent), rfc3339UTC(in.HeldSince))
+	appendTTL(&b, in.ExpiresAt)
+	if in.Branch != "" {
+		fmt.Fprintf(&b, " | branch:%s", in.Branch)
+	}
+	if in.Host != "" {
+		fmt.Fprintf(&b, " | host:%s", in.Host)
+	}
+	if in.PID != 0 {
+		fmt.Fprintf(&b, " | pid:%d", in.PID)
+	}
+	fmt.Fprintf(&b, " | suggested-action:%s\n", suggestedAction)
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
 // StatusEntry is one row of `loto status <targets...>` output.
 type StatusEntry struct {
 	Target  string

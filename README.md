@@ -103,7 +103,12 @@ pinned to `.git/.loto-slug` on first use. Override with `LOTO_BASE`.
 | 0 | success |
 | 1 | advisory conflict (lock held by another agent) |
 | 2 | usage error |
-| 3 | IO / system error |
+| 3 | IO / system error · `--wait` timeout (default `--on-timeout block`) |
+
+`loto try --wait` and `loto acquire --wait` accept `--on-timeout {block,warn,switch}` to
+choose what happens when the wait elapses. `block` (default) exits 3, `warn` exits 0
+with a structured warning on stderr, `switch` exits 1 with a `suggested-action:msg-and-switch`
+hint for callers running a tiebreaker policy.
 
 ## session identity
 
