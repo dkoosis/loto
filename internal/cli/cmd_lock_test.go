@@ -56,7 +56,7 @@ func TestLockHappyPath(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 	var out, errBuf bytes.Buffer
-	code := Run([]string{"lock", "a.go", "--ttl", "10m", "--intent", "test"}, &out, &errBuf)
+	code := Run([]string{tcCmdLock, tcTargetA, "--ttl", "10m", tcFlagIntent, "test"}, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("exit %d, out=%q err=%q", code, out.String(), errBuf.String())
 	}
@@ -68,7 +68,7 @@ func TestLockHappyPath(t *testing.T) {
 func TestLockConflictBetweenAgents(t *testing.T) {
 	withTempProject(t)
 	alice := pinAgent(t)
-	if code := Run([]string{"lock", "a.go"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdLock, tcTargetA}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("alice initial lock failed, exit %d", code)
 	}
 
@@ -77,7 +77,7 @@ func TestLockConflictBetweenAgents(t *testing.T) {
 	pinAgent(t)
 
 	var out, errBuf bytes.Buffer
-	code := Run([]string{"lock", "a.go"}, &out, &errBuf)
+	code := Run([]string{tcCmdLock, tcTargetA}, &out, &errBuf)
 	if code != 1 {
 		t.Fatalf("expected exit 1, got %d; out=%q err=%q", code, out.String(), errBuf.String())
 	}
@@ -91,11 +91,11 @@ func TestLockConflictBetweenAgents(t *testing.T) {
 func TestUnlockOwner(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
-	if code := Run([]string{"lock", "a.go"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdLock, tcTargetA}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("lock failed")
 	}
 	var out, errBuf bytes.Buffer
-	code := Run([]string{"unlock", "a.go"}, &out, &errBuf)
+	code := Run([]string{tcCmdUnlock, tcTargetA}, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("unlock exit %d; err=%q", code, errBuf.String())
 	}

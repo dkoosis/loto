@@ -11,7 +11,7 @@ import (
 	"loto/internal/identity"
 )
 
-func init() {
+func init() { //nolint:gochecknoinits // command registry pattern
 	register("tag", cmdTag)
 	register("untag", cmdUntag)
 }

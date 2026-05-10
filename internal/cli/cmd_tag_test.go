@@ -10,7 +10,7 @@ func TestTagAndUntag(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 	var out bytes.Buffer
-	if code := Run([]string{"tag", "a.go", "ping me"}, &out, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{"tag", tcTargetA, "ping me"}, &out, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("tag failed: %d %q", code, out.String())
 	}
 	if !strings.Contains(out.String(), "t-") {
@@ -18,13 +18,13 @@ func TestTagAndUntag(t *testing.T) {
 	}
 	id := extractTagID(out.String())
 	out.Reset()
-	if code := Run([]string{"untag", "a.go", id}, &out, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{"untag", tcTargetA, id}, &out, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("untag failed: %d %q", code, out.String())
 	}
 }
 
 func extractTagID(s string) string {
-	for _, f := range strings.Fields(s) {
+	for f := range strings.FieldsSeq(s) {
 		if strings.HasPrefix(f, "t-") {
 			return f
 		}

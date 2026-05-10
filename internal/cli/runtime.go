@@ -15,7 +15,7 @@ import (
 type runtime struct {
 	Agent    *identity.Agent
 	Store    *store.Store
-	Ctx      context.Context
+	Ctx      context.Context //nolint:containedctx // request-scope handle for the CLI invocation; threading it through every cmd_*.go signature would be uniformly noise
 	Host     string
 	StateDir string
 }

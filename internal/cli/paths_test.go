@@ -21,7 +21,7 @@ func TestProjectSlugFromOriginRemote(t *testing.T) {
 	run("remote", "add", "origin", "git@github.com:dkoosis/loto.git")
 
 	got := ProjectSlug(dir)
-	if got != "dkoosis-loto" {
+	if got != tcSlugDKLoto {
 		t.Errorf("ProjectSlug = %q; want dkoosis-loto", got)
 	}
 }
@@ -53,9 +53,9 @@ func TestStateDirRespectsLOTO_BASE(t *testing.T) {
 
 func TestNormalizeURLVariants(t *testing.T) {
 	cases := map[string]string{
-		"git@github.com:dkoosis/loto.git":     "dkoosis-loto",
-		"https://github.com/dkoosis/loto":     "dkoosis-loto",
-		"https://github.com/dkoosis/loto.git": "dkoosis-loto",
+		"git@github.com:dkoosis/loto.git":     tcSlugDKLoto,
+		"https://github.com/dkoosis/loto":     tcSlugDKLoto,
+		"https://github.com/dkoosis/loto.git": tcSlugDKLoto,
 		"":                                    unnamedSlug,
 	}
 	for in, want := range cases {

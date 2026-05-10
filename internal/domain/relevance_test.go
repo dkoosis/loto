@@ -10,13 +10,13 @@ func TestRelevantTagsForLockAcquire(t *testing.T) {
 	other, _ := Canonicalize("c/d.go")
 	now := time.Now()
 	tags := []TagRecord{
-		{ID: "t-1", Target: target, AddresseeUUID: "alice", CreatedAt: now},
+		{ID: "t-1", Target: target, AddresseeUUID: tcAlice, CreatedAt: now},
 		{ID: "t-2", Target: target, AddresseeUUID: "", CreatedAt: now},
 		{ID: "t-3", Target: target, AddresseeUUID: "bob", CreatedAt: now},
-		{ID: "t-4", Target: other, AddresseeUUID: "alice", CreatedAt: now},
-		{ID: "t-5", Target: target, AddresseeUUID: "alice", ExpiresAt: ptrTime(now.Add(-1)), CreatedAt: now},
+		{ID: "t-4", Target: other, AddresseeUUID: tcAlice, CreatedAt: now},
+		{ID: "t-5", Target: target, AddresseeUUID: tcAlice, ExpiresAt: ptrTime(now.Add(-1)), CreatedAt: now},
 	}
-	got := RelevantTags(tags, "alice", target, RelevanceLockAcquire, now, false)
+	got := RelevantTags(tags, tcAlice, target, RelevanceLockAcquire, now, false)
 	gotIDs := map[string]bool{}
 	for _, tr := range got {
 		gotIDs[tr.ID] = true

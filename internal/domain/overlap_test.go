@@ -16,11 +16,11 @@ func TestOverlap(t *testing.T) {
 		{"a/", "b/c.go", false, "dir-vs-disjoint"},
 		{"a/", "a/", true, "dir-eq"},
 		{"a/", "a/b/", true, "dir-vs-subdir"},
-		{"internal/**/*.go", "internal/store/x.go", true, "glob-vs-literal"},
-		{"internal/**/*.go", "cmd/loto/x.go", false, "glob-vs-disjoint"},
+		{tcGlobInternal, "internal/store/x.go", true, "glob-vs-literal"},
+		{tcGlobInternal, "cmd/loto/x.go", false, "glob-vs-disjoint"},
 		{"**", "anything/here.go", true, "global-vs-anything"},
-		{"a/**", "a/**", true, "glob-eq"},
-		{"a/**", "a/b/**", true, "glob-prefix-contain"},
+		{tcGlobADoubleStar, tcGlobADoubleStar, true, "glob-eq"},
+		{tcGlobADoubleStar, "a/b/**", true, "glob-prefix-contain"},
 		{"a/x.go", "b/x.go", false, "literal-disjoint"},
 	}
 	for _, c := range cases {

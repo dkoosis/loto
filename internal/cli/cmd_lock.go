@@ -13,7 +13,7 @@ import (
 	"loto/internal/store"
 )
 
-func init() {
+func init() { //nolint:gochecknoinits // command registry pattern
 	register("lock", cmdLock)
 }
 
@@ -77,7 +77,8 @@ func emitConflict(w io.Writer, ce *store.ConflictError) {
 		return
 	}
 	fmt.Fprintf(w, "✗ blocked target=%s\n", ce.Blockers[0].Target.Canonical)
-	for _, b := range ce.Blockers {
+	for i := range ce.Blockers {
+		b := &ce.Blockers[i]
 		fmt.Fprintf(w, "⚠ blocker=%s target=%s intent=%q held_since=%s expires_at=%s host=%s pid=%d\n",
 			b.OwnerUUID, b.Target.Canonical, b.Intent,
 			b.CreatedAt.UTC().Format(time.RFC3339), b.ExpiresAt.UTC().Format(time.RFC3339),
@@ -88,7 +89,8 @@ func emitConflict(w io.Writer, ce *store.ConflictError) {
 func emitLockSuccess(w io.Writer, rt *runtime, t domain.Target) {
 	fmt.Fprintf(w, "✓ locked target=%s\n", t.Canonical)
 	tags, _ := rt.Store.UnreadTagsForAddressee(rt.Ctx, rt.Agent.UUID, t)
-	for _, tg := range tags {
+	for i := range tags {
+		tg := &tags[i]
 		fmt.Fprintf(w, "ℹ tag=%s intent=%q\n", tg.ID, strings.TrimSpace(tg.Intent))
 	}
 	if len(tags) > 0 {

@@ -1,14 +1,12 @@
 # Boot
-updated: 2026-05-10 (late late)
+updated: 2026-05-10 (overnight)
 
-→ dk reviews v2 spec one more pass; on approval, `/writing-plans` against it
-
-state: φ docs/superpowers/specs/2026-05-10-loto-v2-design.md
+→ ship Tasks 21+22 (hooks + install-hook); v1 wiped, no fallback. Start: `rg -n "Task 21" docs/superpowers/plans/2026-05-10-loto-v2.md`
 
 ✓ done
-- 4th review round integrated: dir-overlap, case-insensitive FS, read_cursors in DB, multi-blocker, corrupt-DB moved-aside
+- v2 plan Tasks 0–20, 23–25: domain, store, identity, CLI, acceptance + concurrent + crash tests
+- v1 deleted; main.go → v2 dispatcher; smoke green
 
 ‡ traps
-- ✗ project mutex / per-target flock wording — SQLite WAL replaced both; old phrasing keeps creeping back
-- ✗ commit `internal/render/llm.go` — pre-session WIP, not ours
-- ✗ re-add v1 data migration — explicitly cut
+- `LOTO_AGENT_ID=""` (set+empty) forces new identity; unset → most-recent on host
+- `make check` ~58 lint (goconst glyphs, rangeValCopy, G115). Batch via /polish.

@@ -8,7 +8,7 @@ import (
 	"loto/internal/domain"
 )
 
-func init() { register("break", cmdBreak) }
+func init() { register("break", cmdBreak) } //nolint:gochecknoinits // command registry pattern
 
 func cmdBreak(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("break", flag.ContinueOnError)

@@ -9,8 +9,8 @@ import (
 func randomHandle() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
-	adj := adjectives[binary.BigEndian.Uint32(b[0:4])%uint32(len(adjectives))]
-	animal := animals[binary.BigEndian.Uint32(b[4:8])%uint32(len(animals))]
+	adj := adjectives[binary.BigEndian.Uint32(b[0:4])%uint32(len(adjectives))] //nolint:gosec // G115: word list bounded <1k entries
+	animal := animals[binary.BigEndian.Uint32(b[4:8])%uint32(len(animals))]    //nolint:gosec // G115: word list bounded <1k entries
 	return toTitle(adj) + toTitle(animal)
 }
 

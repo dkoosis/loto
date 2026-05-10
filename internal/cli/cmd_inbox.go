@@ -10,7 +10,7 @@ import (
 	"loto/internal/domain"
 )
 
-func init() { register("inbox", cmdInbox) }
+func init() { register("inbox", cmdInbox) } //nolint:gochecknoinits // command registry pattern
 
 func cmdInbox(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("inbox", flag.ContinueOnError)
@@ -32,41 +32,54 @@ func cmdInbox(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	now := time.Now()
 
-	// Filter: addressed to me. For --unread, also strip tags older than the cursor.
+	mine := filterAddresseeTags(all, rt.Agent.UUID)
+	if *unread {
+		mine = filterUnreadTags(rt, mine)
+	}
+	sortInboxTags(mine)
+	printInboxTags(stdout, mine)
+
+	if *markRead {
+		markInboxRead(rt, mine)
+	}
+	return 0
+}
+
+func filterAddresseeTags(all []domain.TagRecord, agentUUID string) []domain.TagRecord {
 	mine := make([]domain.TagRecord, 0, len(all))
-	for _, tg := range all {
-		if tg.AddresseeUUID != rt.Agent.UUID {
+	for i := range all {
+		if all[i].AddresseeUUID == agentUUID {
+			mine = append(mine, all[i])
+		}
+	}
+	return mine
+}
+
+func filterUnreadTags(rt *runtime, mine []domain.TagRecord) []domain.TagRecord {
+	byTarget := map[string][]domain.TagRecord{}
+	order := []string{}
+	for i := range mine {
+		c := mine[i].Target.Canonical
+		if _, ok := byTarget[c]; !ok {
+			order = append(order, c)
+		}
+		byTarget[c] = append(byTarget[c], mine[i])
+	}
+	sort.Strings(order)
+	var filtered []domain.TagRecord
+	for _, c := range order {
+		t := domain.Target{Canonical: c, Kind: byTarget[c][0].Target.Kind}
+		unr, err := rt.Store.UnreadTagsForAddressee(rt.Ctx, rt.Agent.UUID, t)
+		if err != nil {
 			continue
 		}
-		mine = append(mine, tg)
+		filtered = append(filtered, unr...)
 	}
+	return filtered
+}
 
-	if *unread {
-		// Group by target, query cursor per target.
-		byTarget := map[string][]domain.TagRecord{}
-		order := []string{}
-		for _, tg := range mine {
-			c := tg.Target.Canonical
-			if _, ok := byTarget[c]; !ok {
-				order = append(order, c)
-			}
-			byTarget[c] = append(byTarget[c], tg)
-		}
-		sort.Strings(order)
-		var filtered []domain.TagRecord
-		for _, c := range order {
-			t := domain.Target{Canonical: c, Kind: byTarget[c][0].Target.Kind}
-			unr, err := rt.Store.UnreadTagsForAddressee(rt.Ctx, rt.Agent.UUID, t)
-			if err != nil {
-				continue
-			}
-			filtered = append(filtered, unr...)
-		}
-		mine = filtered
-	}
-
+func sortInboxTags(mine []domain.TagRecord) {
 	sort.Slice(mine, func(i, j int) bool {
 		if mine[i].Target.Canonical != mine[j].Target.Canonical {
 			return mine[i].Target.Canonical < mine[j].Target.Canonical
@@ -76,27 +89,28 @@ func cmdInbox(args []string, stdout, stderr io.Writer) int {
 		}
 		return mine[i].ID < mine[j].ID
 	})
+}
 
+func printInboxTags(stdout io.Writer, mine []domain.TagRecord) {
 	if len(mine) == 0 {
 		fmt.Fprintln(stdout, "✓ no unread")
-	} else {
-		fmt.Fprintf(stdout, "ℹ tags count=%d\n", len(mine))
-		for _, tg := range mine {
-			fmt.Fprintf(stdout, "ℹ target=%s tag=%s author=%s intent=%q created_at=%s\n",
-				tg.Target.Canonical, tg.ID, tg.AuthorUUID, tg.Intent,
-				tg.CreatedAt.UTC().Format(time.RFC3339))
-		}
+		return
 	}
+	fmt.Fprintf(stdout, "ℹ tags count=%d\n", len(mine))
+	for i := range mine {
+		tg := &mine[i]
+		fmt.Fprintf(stdout, "ℹ target=%s tag=%s author=%s intent=%q created_at=%s\n",
+			tg.Target.Canonical, tg.ID, tg.AuthorUUID, tg.Intent,
+			tg.CreatedAt.UTC().Format(time.RFC3339))
+	}
+}
 
-	if *markRead {
-		seen := map[string]domain.Target{}
-		for _, tg := range mine {
-			seen[tg.Target.Canonical] = tg.Target
-		}
-		for _, t := range seen {
-			_ = rt.Store.MarkRead(rt.Ctx, rt.Agent.UUID, t)
-		}
+func markInboxRead(rt *runtime, mine []domain.TagRecord) {
+	seen := map[string]domain.Target{}
+	for i := range mine {
+		seen[mine[i].Target.Canonical] = mine[i].Target
 	}
-	_ = now
-	return 0
+	for _, t := range seen {
+		_ = rt.Store.MarkRead(rt.Ctx, rt.Agent.UUID, t)
+	}
 }

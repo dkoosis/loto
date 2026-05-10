@@ -30,13 +30,13 @@ func TestInboxListsUnread(t *testing.T) {
 	alice, bob := twoAgents(t)
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
-	if code := Run([]string{"tag", "a.go", "--to", bob.UUID, "ping"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdTag, tcTargetA, "--to", bob.UUID, "ping"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("alice tag failed")
 	}
 
 	t.Setenv("LOTO_AGENT_ID", bob.UUID)
 	var out bytes.Buffer
-	code := Run([]string{"inbox"}, &out, &bytes.Buffer{})
+	code := Run([]string{tcCmdInbox}, &out, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("inbox exit %d: %q", code, out.String())
 	}
@@ -50,16 +50,16 @@ func TestInboxMarkReadHidesPrior(t *testing.T) {
 	alice, bob := twoAgents(t)
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
-	if code := Run([]string{"tag", "a.go", "--to", bob.UUID, "first"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdTag, tcTargetA, "--to", bob.UUID, "first"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("tag failed")
 	}
 
 	t.Setenv("LOTO_AGENT_ID", bob.UUID)
-	if code := Run([]string{"inbox", "--unread", "--mark-read"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdInbox, "--unread", "--mark-read"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("first inbox failed")
 	}
 	var out bytes.Buffer
-	if code := Run([]string{"inbox", "--unread"}, &out, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdInbox, "--unread"}, &out, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("second inbox exit %d", code)
 	}
 	if !strings.Contains(out.String(), "✓ no unread") {

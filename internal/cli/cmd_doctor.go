@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func init() { register("doctor", cmdDoctor) }
+func init() { register("doctor", cmdDoctor) } //nolint:gochecknoinits // command registry pattern
 
 func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
@@ -51,7 +51,8 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	} else {
 		fmt.Fprintf(stdout, "ℹ stale_locks=%d expired_tags=%d integrity=%s\n",
 			len(report.StaleLocks), report.ExpiredTagCount, report.IntegrityDetail)
-		for _, l := range report.StaleLocks {
+		for i := range report.StaleLocks {
+			l := &report.StaleLocks[i]
 			fmt.Fprintf(stdout, "⚠ stale target=%s owner=%s expires_at=%s host=%s pid=%d\n",
 				l.Target.Canonical, l.OwnerUUID, l.ExpiresAt.UTC().Format(time.RFC3339), l.Host, l.PID)
 		}

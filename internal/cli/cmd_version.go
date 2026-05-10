@@ -6,7 +6,7 @@ import (
 	"runtime/debug"
 )
 
-func init() { register("version", cmdVersion) }
+func init() { register("version", cmdVersion) } //nolint:gochecknoinits // command registry pattern
 
 func cmdVersion(args []string, stdout, stderr io.Writer) int {
 	rev, when := "unknown", "unknown"

@@ -12,7 +12,7 @@ func TestCanonicalize(t *testing.T) {
 		{"a//b", "a/b", KindFile},
 		{"internal/store/", "internal/store/", KindDir},
 		{"internal/store", "internal/store", KindFile},
-		{"internal/**/*.go", "internal/**/*.go", KindGlob},
+		{tcGlobInternal, tcGlobInternal, KindGlob},
 		{"./internal/**/foo.go", "internal/**/foo.go", KindGlob},
 	}
 	for _, c := range cases {

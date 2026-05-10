@@ -6,8 +6,8 @@ import (
 )
 
 func TestAuthorizeUnlock(t *testing.T) {
-	l := LockRecord{OwnerUUID: "alice"}
-	if err := AuthorizeUnlock(l, "alice"); err != nil {
+	l := LockRecord{OwnerUUID: tcAlice}
+	if err := AuthorizeUnlock(l, tcAlice); err != nil {
 		t.Fatalf("owner unlock must succeed: %v", err)
 	}
 	if err := AuthorizeUnlock(l, "bob"); err == nil {
@@ -17,8 +17,8 @@ func TestAuthorizeUnlock(t *testing.T) {
 
 func TestAuthorizeBreak(t *testing.T) {
 	now := time.Now()
-	stale := LockRecord{OwnerUUID: "alice", ExpiresAt: now.Add(-time.Minute), Host: "h", PID: 1}
-	live := LockRecord{OwnerUUID: "alice", ExpiresAt: now.Add(time.Hour), Host: "h", PID: 1}
+	stale := LockRecord{OwnerUUID: tcAlice, ExpiresAt: now.Add(-time.Minute), Host: "h", PID: 1}
+	live := LockRecord{OwnerUUID: tcAlice, ExpiresAt: now.Add(time.Hour), Host: "h", PID: 1}
 	probe := func(string, int) bool { return true }
 
 	if err := AuthorizeBreak(stale, "bob", false, now, "h", probe); err != nil {

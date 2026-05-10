@@ -7,7 +7,7 @@ import (
 	"loto/internal/identity"
 )
 
-func init() { register("whoami", cmdWhoami) }
+func init() { register("whoami", cmdWhoami) } //nolint:gochecknoinits // command registry pattern
 
 func cmdWhoami(args []string, stdout, stderr io.Writer) int {
 	a, err := identity.Ensure()

@@ -21,15 +21,22 @@ type Target struct {
 
 var ErrRepoEscape = errors.New("target resolves outside the repository")
 
+var (
+	ErrEmptyTarget      = errors.New("empty target")
+	ErrTargetHasNUL     = errors.New("target contains NUL")
+	ErrTargetBackslash  = errors.New("target contains backslash; use POSIX separators")
+	ErrTargetIsRepoRoot = errors.New("target must not be the repo root")
+)
+
 func Canonicalize(in string) (Target, error) {
 	if in == "" {
-		return Target{}, errors.New("empty target")
+		return Target{}, ErrEmptyTarget
 	}
 	if strings.ContainsRune(in, 0) {
-		return Target{}, errors.New("target contains NUL")
+		return Target{}, ErrTargetHasNUL
 	}
 	if strings.ContainsRune(in, '\\') {
-		return Target{}, errors.New("target contains backslash; use POSIX separators")
+		return Target{}, ErrTargetBackslash
 	}
 	if strings.HasPrefix(in, "/") {
 		return Target{}, ErrRepoEscape
@@ -41,7 +48,7 @@ func Canonicalize(in string) (Target, error) {
 		return Target{}, ErrRepoEscape
 	}
 	if cleaned == "." {
-		return Target{}, errors.New("target must not be the repo root")
+		return Target{}, ErrTargetIsRepoRoot
 	}
 	switch {
 	case hasGlob:

@@ -22,7 +22,7 @@ func TestDoctorHealthyEmpty(t *testing.T) {
 func TestDoctorDryRunDoesNotMutate(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
-	if code := Run([]string{"lock", "a.go"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdLock, tcTargetA}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("lock failed")
 	}
 	var out bytes.Buffer
@@ -33,7 +33,7 @@ func TestDoctorDryRunDoesNotMutate(t *testing.T) {
 		t.Errorf("expected dry-run line: %q", out.String())
 	}
 	out.Reset()
-	if code := Run([]string{"status", "--mine"}, &out, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{"status", tcFlagMine}, &out, &bytes.Buffer{}); code != 0 {
 		t.Fatal("status failed")
 	}
 	if !strings.Contains(out.String(), "target=a.go") {

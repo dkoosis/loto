@@ -10,7 +10,7 @@ import (
 	"loto/internal/domain"
 )
 
-func init() { register("status", cmdStatus) }
+func init() { register("status", cmdStatus) } //nolint:gochecknoinits // command registry pattern
 
 func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
@@ -48,13 +48,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		return 3
 	}
 	if *mine || *session {
-		filtered := all[:0]
-		for _, l := range all {
-			if l.OwnerUUID == rt.Agent.UUID {
-				filtered = append(filtered, l)
-			}
-		}
-		all = filtered
+		all = filterLocksByOwner(all, rt.Agent.UUID)
 	}
 	sort.Slice(all, func(i, j int) bool {
 		if all[i].Target.Canonical != all[j].Target.Canonical {
@@ -62,19 +56,33 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		}
 		return all[i].CreatedAt.Before(all[j].CreatedAt)
 	})
+	printStatusLocks(stdout, all)
+	return 0
+}
 
+func filterLocksByOwner(all []domain.LockRecord, ownerUUID string) []domain.LockRecord {
+	filtered := all[:0]
+	for i := range all {
+		if all[i].OwnerUUID == ownerUUID {
+			filtered = append(filtered, all[i])
+		}
+	}
+	return filtered
+}
+
+func printStatusLocks(stdout io.Writer, all []domain.LockRecord) {
 	if len(all) == 0 {
 		fmt.Fprintln(stdout, "✓ no locks")
-		return 0
+		return
 	}
 	fmt.Fprintf(stdout, "ℹ locks count=%d\n", len(all))
-	for _, l := range all {
+	for i := range all {
+		l := &all[i]
 		fmt.Fprintf(stdout, "ℹ target=%s owner=%s intent=%q held_since=%s expires_at=%s host=%s pid=%d\n",
 			l.Target.Canonical, l.OwnerUUID, l.Intent,
 			l.CreatedAt.UTC().Format(time.RFC3339), l.ExpiresAt.UTC().Format(time.RFC3339),
 			l.Host, l.PID)
 	}
-	return 0
 }
 
 func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
@@ -92,9 +100,9 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 	caseInsensitive := !caseSensitive
 
 	var overlapping []domain.LockRecord
-	for _, l := range all {
-		if domain.Overlap(l.Target, t, caseInsensitive) {
-			overlapping = append(overlapping, l)
+	for i := range all {
+		if domain.Overlap(all[i].Target, t, caseInsensitive) {
+			overlapping = append(overlapping, all[i])
 		}
 	}
 	sort.Slice(overlapping, func(i, j int) bool {
@@ -105,7 +113,8 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 		return 0
 	}
 	fmt.Fprintf(w, "ℹ overlap count=%d target=%s\n", len(overlapping), t.Canonical)
-	for _, l := range overlapping {
+	for i := range overlapping {
+		l := &overlapping[i]
 		fmt.Fprintf(w, "ℹ holder target=%s owner=%s intent=%q expires_at=%s\n",
 			l.Target.Canonical, l.OwnerUUID, l.Intent, l.ExpiresAt.UTC().Format(time.RFC3339))
 	}

@@ -40,21 +40,9 @@ func (s *Store) AcquireLock(ctx context.Context, l domain.LockRecord, live domai
 	}
 	now := time.Now()
 
-	var blockers []domain.LockRecord
-	for _, ex := range all {
-		if !domain.Overlap(ex.Target, l.Target, caseInsensitive) {
-			continue
-		}
-		if ex.OwnerUUID == l.OwnerUUID {
-			continue
-		}
-		if domain.IsStale(ex, now, l.Host, live) {
-			if err := reclaimStaleTx(ctx, tx, ex, l.OwnerUUID, now); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		blockers = append(blockers, ex)
+	blockers, err := collectBlockers(ctx, tx, all, l, caseInsensitive, now, live)
+	if err != nil {
+		return nil, err
 	}
 	if len(blockers) > 0 {
 		sort.Slice(blockers, func(i, j int) bool {
@@ -66,7 +54,36 @@ func (s *Store) AcquireLock(ctx context.Context, l domain.LockRecord, live domai
 		return nil, &ConflictError{Blockers: blockers}
 	}
 
-	if _, err := tx.ExecContext(ctx, `
+	if err := insertOrRefreshLock(ctx, tx, l); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &l, nil
+}
+
+func collectBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, l domain.LockRecord, caseInsensitive bool, now time.Time, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
+	var blockers []domain.LockRecord
+	for i := range all {
+		ex := &all[i]
+		if !domain.Overlap(ex.Target, l.Target, caseInsensitive) || ex.OwnerUUID == l.OwnerUUID {
+			continue
+		}
+		if domain.IsStale(*ex, now, l.Host, live) {
+			if err := reclaimStaleTx(ctx, tx, *ex, l.OwnerUUID, now); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		blockers = append(blockers, all[i])
+	}
+	return blockers, nil
+}
+
+func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord) error {
+	_, err := tx.ExecContext(ctx, `
 INSERT INTO locks(target_canonical, target_kind, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, branch)
 VALUES (?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(target_canonical) DO UPDATE SET
@@ -80,14 +97,8 @@ WHERE locks.owner_uuid = excluded.owner_uuid`,
 		l.Target.Canonical, kindString(l.Target.Kind), l.OwnerUUID, l.SessionUUID,
 		l.Intent, l.CreatedAt.UnixNano(), l.ExpiresAt.UnixNano(),
 		l.Host, l.PID, l.Branch,
-	); err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return &l, nil
+	)
+	return err
 }
 
 func (s *Store) ReleaseLock(ctx context.Context, t domain.Target, byAgent string) error {

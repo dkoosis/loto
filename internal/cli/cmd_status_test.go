@@ -10,7 +10,7 @@ func TestStatusEmpty(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 	var out bytes.Buffer
-	code := Run([]string{"status"}, &out, &bytes.Buffer{})
+	code := Run([]string{tcCmdStatus}, &out, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
@@ -24,11 +24,11 @@ func TestStatusEmpty(t *testing.T) {
 func TestStatusMineFilters(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
-	if code := Run([]string{"lock", "a.go"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{"lock", tcTargetA}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("lock failed")
 	}
 	var out bytes.Buffer
-	code := Run([]string{"status", "--mine"}, &out, &bytes.Buffer{})
+	code := Run([]string{tcCmdStatus, tcFlagMine}, &out, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("exit %d: %q", code, out.String())
 	}
@@ -41,7 +41,7 @@ func TestStatusSingleTargetFree(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 	var out bytes.Buffer
-	code := Run([]string{"status", "a.go"}, &out, &bytes.Buffer{})
+	code := Run([]string{tcCmdStatus, tcTargetA}, &out, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
