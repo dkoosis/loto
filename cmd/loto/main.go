@@ -104,6 +104,7 @@ func init() {
 	// creates identity on demand, so the flag is a no-op (kept to avoid breaking
 	// existing hook scripts).
 	whoamiCmd.Flags().Bool("ensure", false, "create identity if missing, then exit 0 (for SessionStart hooks)")
+	whoamiCmd.Flags().String("set-handle", "", "assign a human-readable handle to the current agent")
 }
 
 // parseDurationOrExit parses a duration flag value, exiting 2 with a usage
@@ -612,6 +613,15 @@ var whoamiCmd = &cobra.Command{
 	Short: "show current agent identity (creates one if LOTO_AGENT_ID is unset)",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if name, _ := cmd.Flags().GetString("set-handle"); name != "" {
+			id, _ := resolveAgentID()
+			a, err := setHandle(id, name)
+			if err != nil {
+				exit(&loto.ErrSystem{Op: "whoami: set-handle", Err: err})
+			}
+			emitWhoami(a)
+			return nil
+		}
 		a, err := currentAgent()
 		if err != nil {
 			exit(err)

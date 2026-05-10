@@ -185,3 +185,110 @@ func TestSessionUUID_DistinctInputs(t *testing.T) {
 		t.Error("expected distinct UUIDs for distinct session IDs")
 	}
 }
+
+// ── validateHandle ────────────────────────────────────────────────────────────
+
+func TestValidateHandle(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		ok   bool
+	}{
+		{"empty", "", false},
+		{"slash", "foo/bar", false},
+		{"backslash", "foo\\bar", false},
+		{"control-tab", "foo\tbar", false},
+		{"control-null", "foo\x00bar", false},
+		{"too-long", "abcdefghijabcdefghijabcdefghijabc", false}, // 33 chars
+		{"max-length", "abcdefghijabcdefghijabcdefghijab", true}, // 32 chars
+		{"simple", "Scout", true},
+		{"with-digit", "Scout2", true},
+		{"with-dash", "blue-oak", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateHandle(tc.in)
+			if tc.ok && err != nil {
+				t.Errorf("validateHandle(%q) = %v, want nil", tc.in, err)
+			}
+			if !tc.ok && err == nil {
+				t.Errorf("validateHandle(%q) = nil, want error", tc.in)
+			}
+		})
+	}
+}
+
+// ── setHandle ────────────────────────────────────────────────────────────────
+
+func TestSetHandle_RoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LOTO_AGENT_ID", "test-agent-id")
+	t.Setenv("LOTO_CC_PROJECT_DIR", "")
+
+	if _, err := setHandle("test-agent-id", "Scout"); err != nil {
+		t.Fatalf("setHandle: %v", err)
+	}
+
+	a, err := currentAgent()
+	if err != nil {
+		t.Fatalf("currentAgent: %v", err)
+	}
+	if a.Handle != "Scout" {
+		t.Errorf("Handle = %q, want %q", a.Handle, "Scout")
+	}
+	if a.ID != "test-agent-id" {
+		t.Errorf("ID = %q, want %q", a.ID, "test-agent-id")
+	}
+}
+
+func TestSetHandle_CreatesIfMissing(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	a, err := setHandle("brand-new-id", "Newbie")
+	if err != nil {
+		t.Fatalf("setHandle: %v", err)
+	}
+	if a.Handle != "Newbie" {
+		t.Errorf("Handle = %q, want Newbie", a.Handle)
+	}
+	if a.ID != "brand-new-id" {
+		t.Errorf("ID = %q, want brand-new-id", a.ID)
+	}
+
+	// Verify on-disk presence.
+	home, _ := os.UserHomeDir()
+	if _, err := os.Stat(filepath.Join(home, ".loto", "agents", "brand-new-id.json")); err != nil {
+		t.Errorf("agent file not written: %v", err)
+	}
+}
+
+func TestSetHandle_UpdatesExisting(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LOTO_AGENT_ID", "stable-id")
+	t.Setenv("LOTO_CC_PROJECT_DIR", "")
+
+	first, err := currentAgent()
+	if err != nil {
+		t.Fatalf("currentAgent: %v", err)
+	}
+	originalCreated := first.CreatedAt
+
+	a, err := setHandle("stable-id", "Renamed")
+	if err != nil {
+		t.Fatalf("setHandle: %v", err)
+	}
+	if a.Handle != "Renamed" {
+		t.Errorf("Handle = %q, want Renamed", a.Handle)
+	}
+	// CreatedAt should be preserved (not reset to now).
+	if !a.CreatedAt.Equal(originalCreated) {
+		t.Errorf("CreatedAt mutated: was %v, now %v", originalCreated, a.CreatedAt)
+	}
+}
+
+func TestSetHandle_RejectsInvalid(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if _, err := setHandle("any-id", "foo/bar"); err == nil {
+		t.Error("expected error for invalid handle, got nil")
+	}
+}

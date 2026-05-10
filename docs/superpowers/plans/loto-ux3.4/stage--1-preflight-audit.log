@@ -1,0 +1,30 @@
+go vet ./...
+golangci-lint run ./...
+acquire.go:37:61: do not define dynamic errors, use wrapped static errors instead: "errors.New(\"ttl must be positive\")" (err113)
+		return nil, nil, &ErrSystem{Op: "acquire-path: ttl", Err: errors.New("ttl must be positive")}
+		                                                          ^
+release.go:107:2: missing cases in switch of type loto.tagStatus: loto.tagOK (exhaustive)
+	switch status {
+	^
+doctor.go:266:16: Function 'examineTagPair' is too long (81 > 80) (funlen)
+func (l *LOTO) examineTagPair(lockPath, tagPath, displayTarget string, tag *Tag, byAgent string, mode DoctorMode, isGlobal bool) ([]Finding, error) {
+               ^
+loto.go:201:1: cognitive complexity 16 of func `(*LOTO).TryFileLock` is high (> 15) (gocognit)
+func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (*ActiveLock, error) {
+^
+cmd/loto/acquire.go:138:3: string `acquired` has 3 occurrences, make it a constant (goconst)
+		"acquired":   true,
+		^
+cmd/loto/main.go:693:27: string `acquired` has 3 occurrences, make it a constant (goconst)
+		result = map[string]any{"acquired": true, "kind": kindGlobal, keyAgent: agent}
+		                        ^
+internal/render/llm_test.go:61:14: string `GreenCastle` has 4 occurrences, make it a constant (goconst)
+		AgentID:   "GreenCastle",
+		           ^
+7 issues:
+* err113: 1
+* exhaustive: 1
+* funlen: 1
+* gocognit: 1
+* goconst: 3
+make: *** [lint] Error 1

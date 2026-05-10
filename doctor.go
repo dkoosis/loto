@@ -261,37 +261,6 @@ func missingTargetFinding(lockPath, tagPath string, tag *Tag, mode DoctorMode) (
 	return f, true
 }
 
-// zombieFinding detects activity-based staleness on a held lock with a live PID.
-// Returns (finding, true) when idle exceeds the threshold; otherwise (_, false).
-func (l *LOTO) zombieFinding(tagPath, displayTarget string, tag *Tag, byAgent string, mode DoctorMode, isGlobal bool) (Finding, bool) {
-	var msgsPath, target string
-	if !isGlobal {
-		target = displayTarget
-		if mp, perr := l.msgsPath(displayTarget); perr == nil {
-			msgsPath = mp
-		}
-	}
-	la := lastActivity(tag, msgsPath, target)
-	if la.IsZero() || time.Since(la) <= l.zombieIdleThreshold() {
-		return Finding{}, false
-	}
-	idle := time.Since(la).Round(time.Second)
-	fi := Finding{
-		Class:   DriftZombieHeld,
-		Path:    tagPath,
-		Target:  displayTarget,
-		AgentID: tag.AgentID,
-		Detail:  fmt.Sprintf("lock held by pid %d (agent %s) but no activity since %s (idle %s > threshold %s)", tag.PID, tag.AgentID, la.Format(time.RFC3339), idle, l.zombieIdleThreshold()),
-	}
-	applyMode(&fi, mode, func() error {
-		body := fmt.Sprintf("doctor: lock on %q force-broken by %s: zombie (no activity since %s)", displayTarget, byAgent, la.Format(time.RFC3339))
-		_ = l.sendMsgBestEffort(displayTarget, byAgent, tag.AgentID, body, isGlobal)
-		return l.breakHeldLock(displayTarget, byAgent, tagPath, isGlobal,
-			fmt.Sprintf("doctor: zombie idle %s", idle))
-	})
-	return fi, true
-}
-
 // examineTagPair checks a lock+tag pair for drift classes 1, 2, and 5.
 // isGlobal=true skips ForceBreak (which only handles file targets).
 func (l *LOTO) examineTagPair(lockPath, tagPath, displayTarget string, tag *Tag, byAgent string, mode DoctorMode, isGlobal bool) ([]Finding, error) {
@@ -347,8 +316,8 @@ func (l *LOTO) examineTagPair(lockPath, tagPath, displayTarget string, tag *Tag,
 		return []Finding{fi}, nil
 	}
 
-	if fi, ok := l.zombieFinding(tagPath, displayTarget, tag, byAgent, mode, isGlobal); ok {
-		return []Finding{fi}, nil
+	if zombie := l.examineZombie(tagPath, displayTarget, tag, byAgent, mode, isGlobal); zombie != nil {
+		return []Finding{*zombie}, nil
 	}
 
 	// Soft-TTL expiry: report-only.
@@ -363,6 +332,37 @@ func (l *LOTO) examineTagPair(lockPath, tagPath, displayTarget string, tag *Tag,
 	}
 
 	return nil, nil
+}
+
+// examineZombie returns a Finding when a held lock has gone idle past the
+// zombie threshold (process alive, no recent tag/mail/target activity).
+func (l *LOTO) examineZombie(tagPath, displayTarget string, tag *Tag, byAgent string, mode DoctorMode, isGlobal bool) *Finding {
+	var msgsPath, target string
+	if !isGlobal {
+		target = displayTarget
+		if mp, perr := l.msgsPath(displayTarget); perr == nil {
+			msgsPath = mp
+		}
+	}
+	la := lastActivity(tag, msgsPath, target)
+	if la.IsZero() || time.Since(la) <= l.zombieIdleThreshold() {
+		return nil
+	}
+	idle := time.Since(la).Round(time.Second)
+	fi := Finding{
+		Class:   DriftZombieHeld,
+		Path:    tagPath,
+		Target:  displayTarget,
+		AgentID: tag.AgentID,
+		Detail:  fmt.Sprintf("lock held by pid %d (agent %s) but no activity since %s (idle %s > threshold %s)", tag.PID, tag.AgentID, la.Format(time.RFC3339), idle, l.zombieIdleThreshold()),
+	}
+	applyMode(&fi, mode, func() error {
+		body := fmt.Sprintf("doctor: lock on %q force-broken by %s: zombie (no activity since %s)", displayTarget, byAgent, la.Format(time.RFC3339))
+		_ = l.sendMsgBestEffort(displayTarget, byAgent, tag.AgentID, body, isGlobal)
+		return l.breakHeldLock(displayTarget, byAgent, tagPath, isGlobal,
+			fmt.Sprintf("doctor: zombie idle %s", idle))
+	})
+	return &fi
 }
 
 // examineLayout checks for unexpected entries directly in the coordination base.

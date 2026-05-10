@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -206,6 +207,74 @@ func createAgent(dir, id string) (*Agent, error) {
 		return nil, fmt.Errorf("loto: marshal agent: %w", err)
 	}
 	path := filepath.Join(dir, id+".json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return nil, fmt.Errorf("loto: write agent file: %w", err)
+	}
+	return a, nil
+}
+
+// maxHandleLength caps user-set handles. Long enough for adjective+animal +
+// an arbitrary suffix; short enough that LLM display lines stay scannable.
+const maxHandleLength = 32
+
+var (
+	errHandleEmpty   = errors.New("handle must not be empty")
+	errHandleTooLong = fmt.Errorf("handle longer than %d bytes", maxHandleLength)
+	errHandleControl = errors.New("handle contains control character")
+	errHandleSlash   = errors.New("handle contains path separator")
+)
+
+// validateHandle enforces the rules accepted by `loto whoami --set-handle`.
+// Returns an error describing the first violation.
+func validateHandle(name string) error {
+	if name == "" {
+		return errHandleEmpty
+	}
+	if len(name) > maxHandleLength {
+		return errHandleTooLong
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return errHandleControl
+		}
+		if r == '/' || r == '\\' {
+			return errHandleSlash
+		}
+	}
+	return nil
+}
+
+// setHandle assigns name as the Handle on the agent record for id, creating
+// the record if missing. Validates name first; returns the updated *Agent on
+// success.
+func setHandle(id, name string) (*Agent, error) {
+	if err := validateHandle(name); err != nil {
+		return nil, err
+	}
+	dir, err := agentHome()
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, id+".json")
+
+	a := &Agent{ID: id}
+	if data, rerr := os.ReadFile(path); rerr == nil {
+		_ = json.Unmarshal(data, a) // best-effort; missing/corrupt → fresh record
+	}
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = time.Now().UTC()
+	}
+	if a.Host == "" {
+		host, _ := os.Hostname()
+		a.Host = host
+	}
+	a.ID = id
+	a.Handle = name
+
+	data, err := json.MarshalIndent(a, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("loto: marshal agent: %w", err)
+	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return nil, fmt.Errorf("loto: write agent file: %w", err)
 	}

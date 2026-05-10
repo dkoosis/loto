@@ -12,6 +12,8 @@ const (
 	defaultMaxInterval  = 2 * time.Second
 )
 
+var errTTLNonPositive = errors.New("ttl must be positive")
+
 // Acquire blocks until it can acquire a file lock on target, ctx is cancelled,
 // or the context deadline is exceeded. It polls with exponential backoff
 // capped at defaultMaxInterval.
