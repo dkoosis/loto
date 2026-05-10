@@ -174,11 +174,11 @@ func tryCmd() *cobra.Command {
 				maybeEmitTimeout(err, wait, mode)
 				exit(err)
 			}
+			defer func() { _ = lock.Unlock() }()
 			emitTrySuccess("file", target, flagAgent, lock.Conflicts)
 			if hold {
 				waitForSignal()
 			}
-			_ = lock.Unlock()
 			return nil
 		},
 	}
@@ -195,11 +195,11 @@ func tryCmd() *cobra.Command {
 				maybeEmitTimeout(err, wait, mode)
 				exit(err)
 			}
+			defer func() { _ = lock.Unlock() }()
 			emitTrySuccess(kindGlobal, kindGlobal, flagAgent, nil)
 			if hold {
 				waitForSignal()
 			}
-			_ = lock.Unlock()
 			return nil
 		},
 	}
@@ -890,7 +890,12 @@ func emitInstalled(path string) {
 }
 
 func waitForSignal() {
+	// Notify stays live across the caller's deferred Unlock: a second SIGINT
+	// arriving mid-cleanup is silently dropped (chan full) instead of falling
+	// through to Go's default handler. signal.Stop runs only after Unlock,
+	// via defer ordering in the RunE closures.
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(c)
 	<-c
 }

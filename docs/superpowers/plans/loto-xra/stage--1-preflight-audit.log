@@ -1,0 +1,22 @@
+go vet ./...
+golangci-lint run ./...
+0 issues.
+module: [32mloto[0m
+linters:
+[32m   On[0m[90m | [0mBase: component imports[90m # always on[0m
+[33m  Off[0m[90m | [0mAdvanced: vendor imports[90m # switch 'allow.depOnAnyVendor = false' (or delete) to on[0m
+[32m   On[0m[90m | [0mAdvanced: method calls and dependency injections[90m # switch 'allow.deepScan = true' (or delete) to on[0m
+
+[32mOK - No warnings found[0m
+go test -count=1 -cover ./...
+ok  	loto	6.632s	coverage: 70.5% of statements
+ok  	loto/cmd/loto	8.790s	coverage: 22.4% of statements
+ok  	loto/internal/render	0.462s	coverage: 66.0% of statements
+=== check pass ===
+go test -race -timeout=5m -count=1 ./...
+ok  	loto	13.471s
+ok  	loto/cmd/loto	8.454s
+ok  	loto/internal/render	1.477s
+govulncheck ./...
+No vulnerabilities found.
+=== audit pass ===
