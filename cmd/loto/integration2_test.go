@@ -895,8 +895,12 @@ func TestReserveTTL(t *testing.T) {
 	if err := json.Unmarshal(out, &result); err != nil {
 		t.Fatalf("parse output: %v\n%s", err, out)
 	}
-	// Should have an expires_at field.
-	if result["expires_at"] == nil {
+	// Should have an expires_at field on the reservation.
+	res, ok := result["reservation"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected wrapped reservation, got %v", result)
+	}
+	if res["expires_at"] == nil {
 		t.Errorf("expected expires_at in reservation, got %v", result)
 	}
 }

@@ -440,12 +440,29 @@ func writeReservationRow(w io.Writer, prefix string, e ReservationEntry) error {
 	return err
 }
 
-// EmitLLMReserveAdded confirms an advisory reservation was added.
-func EmitLLMReserveAdded(w io.Writer, e ReservationEntry) error {
+// EmitLLMReserveAdded confirms an advisory reservation was added. When
+// overlaps is non-empty, surfaces them as a ⚠ block with triage count on the
+// first body line so callers can spot pattern intersections without parsing
+// the full reservation list.
+func EmitLLMReserveAdded(w io.Writer, e ReservationEntry, overlaps []ReservationEntry) error {
 	if err := writeHeader(w); err != nil {
 		return err
 	}
-	return writeReservationRow(w, "✔ reserved |", e)
+	if err := writeReservationRow(w, "✔ reserved |", e); err != nil {
+		return err
+	}
+	if len(overlaps) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintf(w, "⚠ overlaps existing | n:%d\n", len(overlaps)); err != nil {
+		return err
+	}
+	for _, o := range overlaps {
+		if err := writeReservationRow(w, "→", o); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // EmitLLMReserveReleased confirms an advisory reservation was removed.

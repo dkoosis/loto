@@ -33,11 +33,15 @@ Subcommands: add, release, list`,
 				dur = parseDurationOrExit("ttl", ttl)
 			}
 			l := newLOTO()
+			overlaps, err := l.OverlappingReservations(pattern)
+			if err != nil {
+				exit(err)
+			}
 			r, err := l.Reserve(flagAgent, flagIntent, pattern, dur)
 			if err != nil {
 				exit(err)
 			}
-			emitReserveAdded(r)
+			emitReserveAdded(r, overlaps)
 			return nil
 		},
 	}
@@ -91,12 +95,27 @@ func reservationEntry(r *loto.Reservation) render.ReservationEntry {
 	return e
 }
 
-func emitReserveAdded(r *loto.Reservation) {
+func emitReserveAdded(r *loto.Reservation, overlaps []*loto.Reservation) {
+	filtered := make([]*loto.Reservation, 0, len(overlaps))
+	for _, o := range overlaps {
+		if o.Pattern == r.Pattern && o.AgentID == r.AgentID {
+			continue
+		}
+		filtered = append(filtered, o)
+	}
+	sort.SliceStable(filtered, func(i, j int) bool {
+		return filtered[i].Pattern < filtered[j].Pattern
+	})
+
 	if currentFormat == render.FormatLLM {
-		_ = render.EmitLLMReserveAdded(os.Stdout, reservationEntry(r))
+		entries := make([]render.ReservationEntry, len(filtered))
+		for i, o := range filtered {
+			entries[i] = reservationEntry(o)
+		}
+		_ = render.EmitLLMReserveAdded(os.Stdout, reservationEntry(r), entries)
 		return
 	}
-	_ = render.EmitJSON(os.Stdout, r)
+	_ = render.EmitJSON(os.Stdout, map[string]any{"reservation": r, "overlaps": filtered})
 }
 
 func emitReserveReleased(pattern string) {
