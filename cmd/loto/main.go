@@ -144,6 +144,7 @@ func tryCmd() *cobra.Command {
 	var hold bool
 	var wait string
 	var ttl string
+	var onTimeout string
 
 	c := &cobra.Command{
 		Use:   "try",
@@ -156,10 +157,12 @@ func tryCmd() *cobra.Command {
 		Short: "acquire a file lock",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			mode := parseOnTimeout(onTimeout)
 			l := newLOTO()
 			target := args[0]
 			lock, err := acquireFile(l, flagAgent, flagIntent, target, ttl, wait)
 			if err != nil {
+				maybeEmitTimeout(err, wait, mode)
 				exit(err)
 			}
 			emitTrySuccess("file", target, flagAgent, lock.Conflicts)
@@ -176,9 +179,11 @@ func tryCmd() *cobra.Command {
 		Short: "acquire the global lock",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			mode := parseOnTimeout(onTimeout)
 			l := newLOTO()
 			lock, err := acquireGlobal(l, flagAgent, flagIntent, ttl, wait)
 			if err != nil {
+				maybeEmitTimeout(err, wait, mode)
 				exit(err)
 			}
 			emitTrySuccess(kindGlobal, kindGlobal, flagAgent, nil)
@@ -195,6 +200,7 @@ func tryCmd() *cobra.Command {
 		sub.Flags().BoolVar(&hold, "hold", false, "hold lock until SIGINT/SIGTERM (foreground)")
 		sub.Flags().StringVar(&wait, "wait", "", "block until acquired (e.g. 30s, 5m); empty = non-blocking")
 		sub.Flags().StringVar(&ttl, "ttl", "", "advisory expiry on the tag (e.g. 10m, 1h); empty = no expiry")
+		sub.Flags().StringVar(&onTimeout, "on-timeout", "", "policy when --wait elapses: block (exit 3, default) | warn (exit 0) | switch (exit 1, msg-and-switch)")
 	}
 	return c
 }

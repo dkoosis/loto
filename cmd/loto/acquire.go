@@ -29,7 +29,7 @@ const (
 // the holder releases or the timer expires; exit 3 distinguishes "ran
 // out of wait time" from immediate conflict (exit 1).
 func acquireCmd() *cobra.Command {
-	var ttl, wait string
+	var ttl, wait, onTimeout string
 	c := &cobra.Command{
 		Use:   "acquire <path>",
 		Short: "record-tier hold on a path (survives process exit, TTL-bounded)",
@@ -46,8 +46,9 @@ Default TTL is 5m. Exit codes: 0 success · 1 conflict · 2 usage · 3 wait time
 			if ttl != "" {
 				d = parseDurationOrExit("ttl", ttl)
 			}
+			mode := parseOnTimeout(onTimeout)
 			l := newLOTO()
-			tag, conflicts, err := acquireWithWait(l, target, d, wait)
+			tag, conflicts, err := acquireWithWait(l, target, d, wait, mode)
 			if err != nil {
 				exit(err)
 			}
@@ -57,6 +58,7 @@ Default TTL is 5m. Exit codes: 0 success · 1 conflict · 2 usage · 3 wait time
 	}
 	c.Flags().StringVar(&ttl, "ttl", "", "TTL duration (default 5m)")
 	c.Flags().StringVar(&wait, "wait", "", "block until acquired (e.g. 30s, 5m); empty = non-blocking")
+	c.Flags().StringVar(&onTimeout, "on-timeout", "", "policy when --wait elapses: block (exit 3, default) | warn (exit 0) | switch (exit 1, msg-and-switch)")
 	return c
 }
 
@@ -65,7 +67,7 @@ Default TTL is 5m. Exit codes: 0 success · 1 conflict · 2 usage · 3 wait time
 // timer expires. On wait expiry it emits the last-observed holder report to
 // stderr and exits with code 3 (distinct from ErrHeld's exit 1) so callers
 // can distinguish "told us it could wait but ran out" from "tried and lost".
-func acquireWithWait(l *loto.LOTO, target string, ttl time.Duration, wait string) (*loto.Tag, []*loto.Reservation, error) {
+func acquireWithWait(l *loto.LOTO, target string, ttl time.Duration, wait string, mode onTimeoutMode) (*loto.Tag, []*loto.Reservation, error) {
 	if wait == "" {
 		return l.AcquirePath(flagAgent, flagIntent, target, ttl)
 	}
@@ -84,7 +86,7 @@ func acquireWithWait(l *loto.LOTO, target string, ttl time.Duration, wait string
 		lastHeld = held
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			emitWaitTimeout(lastHeld)
+			emitTimeout(lastHeld, mode)
 		}
 		time.Sleep(min(interval, remaining))
 		interval *= 2
@@ -92,28 +94,6 @@ func acquireWithWait(l *loto.LOTO, target string, ttl time.Duration, wait string
 			interval = acquirePollMax
 		}
 	}
-}
-
-// emitWaitTimeout writes the last-observed holder report to stderr and exits
-// with code 3. Mirrors the held-report shape from exit() so callers parsing
-// stderr see identical structure to a conflict — only the exit code differs.
-func emitWaitTimeout(held *loto.ErrHeld) {
-	if currentFormat == render.FormatLLM {
-		in := render.BlockedInput{Kind: held.Kind, Target: held.Target}
-		if held.Tag != nil {
-			in.AgentID = displayAgent(held.Tag.AgentID)
-			in.Intent = held.Tag.Intent
-			in.HeldSince = held.Tag.Timestamp
-			in.ExpiresAt = held.Tag.ExpiresAt
-			in.Branch = held.Tag.Branch
-			in.Host = held.Tag.Host
-			in.PID = held.Tag.PID
-		}
-		_ = render.EmitLLMBlocked(os.Stderr, in)
-		os.Exit(3)
-	}
-	_ = render.EmitJSON(os.Stderr, held)
-	os.Exit(3)
 }
 
 func emitAcquired(target string, tag *loto.Tag, conflicts []*loto.Reservation) {
