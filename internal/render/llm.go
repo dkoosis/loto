@@ -685,3 +685,46 @@ func EmitLLMStatusTargets(w io.Writer, entries []StatusEntry) error {
 	}
 	return nil
 }
+
+// HelloRecipient is one row of `loto hello` per-sibling status.
+type HelloRecipient struct {
+	Handle string `json:"handle"`
+	Sent   bool   `json:"sent"`
+	Error  string `json:"error,omitempty"`
+}
+
+// HelloResult is the structured outcome of `loto hello`.
+type HelloResult struct {
+	Glob       string           `json:"glob"`
+	Intent     string           `json:"intent"`
+	Agent      string           `json:"agent"`
+	Handle     string           `json:"handle"`
+	Recipients []HelloRecipient `json:"to,omitempty"`
+}
+
+// EmitLLMHello reports the outcome of a hello: reservation line, then one
+// line per sibling. Sibling lines are pre-sorted by the caller (sent first,
+// then alpha by handle).
+func EmitLLMHello(w io.Writer, r HelloResult) error {
+	if err := writeHeader(w); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "✓ hello | glob:%s | handle:%s | intent:%s\n", r.Glob, r.Handle, truncIntent(r.Intent)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, "  reserved"); err != nil {
+		return err
+	}
+	for _, rr := range r.Recipients {
+		if rr.Sent {
+			if _, err := fmt.Fprintf(w, "  sent | %s\n", rr.Handle); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "  failed | %s | reason:%s\n", rr.Handle, rr.Error); err != nil {
+			return err
+		}
+	}
+	return nil
+}
