@@ -1,16 +1,22 @@
 // On-disk shape (reservations):
 //
-//	<baseDir>/reservations/<sha256(pattern)>.tag   JSON Reservation, advisory
+//	<baseDir>/reservations/<sha256(pattern)>.tag    JSON Reservation, advisory
+//	<baseDir>/reservations/<sha256(pattern)>.lock   companion flock for the
+//	                                                write-vs-lazy-GC critical
+//	                                                section (gh#19, loto-77q)
 //
 // One file per reservation. Body is a JSON-encoded Reservation (see struct
-// for fields). Mode 0600. No flock — reservations are purely advisory hints
-// for tooling/UI; conflicts surface at TryFileLock time, not at Reserve time.
-// Two agents may hold reservations whose patterns overlap. Expired tags
-// (ExpiresAt past) are pruned lazily on read.
+// for fields). Mode 0600. Conflicts between concurrent reservations remain
+// purely advisory — overlap is allowed and only surfaces at TryFileLock time.
+// The flock is narrow: it serializes Reserve's atomic-rename against
+// readReservation's lazy-GC-of-expired so a refresh-write is never deleted
+// by a stale reader. Expired tags (ExpiresAt past) are still pruned lazily
+// on read.
 
 package loto
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -24,7 +30,10 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 )
 
-const reservationExt = ".tag"
+const (
+	reservationExt     = ".tag"
+	reservationLockExt = ".lock"
+)
 
 // ErrInvalidGlob is returned when a reservation pattern is not a valid doublestar glob.
 var ErrInvalidGlob = errors.New("invalid glob pattern")
@@ -68,10 +77,33 @@ func (l *LOTO) Reserve(agentID, intent, pattern string, ttl time.Duration) (*Res
 		return nil, &ErrSystem{Op: "reserve: marshal", Err: err}
 	}
 	tagPath := filepath.Join(resDir, hashPattern(pattern)+reservationExt)
-	if err := l.atomicWriteReservation(tagPath, append(data, '\n')); err != nil {
+	if err := withReservationLock(tagPath, func() error {
+		return l.atomicWriteReservation(tagPath, append(data, '\n'))
+	}); err != nil {
 		return nil, &ErrSystem{Op: "reserve: write", Err: err}
 	}
 	return r, nil
+}
+
+// withReservationLock takes a blocking exclusive flock on <tagPath>.lock for
+// the duration of fn. The lock file is created on demand (mode 0600) and is
+// never removed — the .lock companion stays alongside the .tag and is
+// skipped by ListReservations (which filters by reservationExt). The flock
+// scope is narrow: it bounds Reserve's atomic write against
+// readReservation's lazy-GC-of-expired removal, eliminating the race where
+// a reader's stale view drove the deletion of a freshly-rewritten tag.
+func withReservationLock(tagPath string, fn func() error) error {
+	lockPath := tagPath + reservationLockExt
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	if err := flockExclusiveBlocking(f); err != nil {
+		return err
+	}
+	defer func() { _ = flockRelease(f) }()
+	return fn()
 }
 
 // atomicWriteReservation writes payload to tagPath via a temp-file + rename
@@ -271,9 +303,19 @@ func (l *LOTO) readReservation(tagPath string) (*Reservation, error) {
 	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, err
 	}
-	// Drop expired reservations (lazy GC on read).
+	// Drop expired reservations (lazy GC on read). A concurrent Reserve
+	// refresh could have replaced the tag with fresh non-expired content
+	// between our ReadFile above and now (gh#19); take the per-pattern
+	// flock and re-confirm under the lock before unlinking. If the bytes
+	// have changed, abort GC — leaving the fresh tag intact. The
+	// expired-status returned to the caller still reflects what *we* read.
 	if r.ExpiresAt != nil && time.Now().After(*r.ExpiresAt) {
-		_ = os.Remove(tagPath)
+		_ = withReservationLock(tagPath, func() error {
+			if fresh, err := os.ReadFile(tagPath); err == nil && bytes.Equal(fresh, data) {
+				_ = os.Remove(tagPath)
+			}
+			return nil
+		})
 		return nil, ErrReservationExpired
 	}
 	return &r, nil
