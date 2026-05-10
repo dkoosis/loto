@@ -46,17 +46,26 @@ sibling worktrees of the same repo can't see each other. With it, they
 coordinate transparently — no per-tree config, no `--base` argument in the
 common case.
 
-‡ **Three coordination tiers**, weakest to strongest:
+‡ **Four coordination tiers**, weakest to strongest:
 
-| Tier | Mechanism | Truth source | Use case |
-|------|-----------|--------------|----------|
-| Reservation | tag at `reservations/<hash>.tag` matching a glob | tag presence | "I plan to refactor `internal/store/**` over the next hour" |
-| File lock | flock(2) exclusive on `files/<hash>.lock` + tag | flock | "I am editing this specific file right now" |
-| Global lock | flock(2) exclusive on `global.lock` + tag | flock | "Sweep across the whole tree; everyone else stand down" |
+| Tier | Mechanism | Truth source | Other agents | Use case |
+|------|-----------|--------------|--------------|----------|
+| Reservation | tag at `reservations/<hash>.tag` matching a glob | tag presence | warns only | "I plan to refactor `internal/store/**` over the next hour" |
+| Acquire (record-tier) | tag at `files/<hash>.tag` with non-zero, unexpired `ExpiresAt` | tag + TTL (lazy) | **blocks** | "I'm about to edit this file across two events (PreToolUse → PostToolUse) — no foreground process to hold flock" |
+| File lock | flock(2) exclusive on `files/<hash>.lock` + tag | flock | blocks | "I am editing this specific file right now" |
+| Global lock | flock(2) exclusive on `global.lock` + tag | flock | blocks | "Sweep across the whole tree; everyone else stand down" |
 
-‡ **Tags are descriptive, flock is authoritative.** Tags can lie (writer
-crashed mid-write, tag rotted past TTL). flock cannot — if you can acquire
-it, no one holds it. Every protocol decision flows from this.
+‡ **Tags are descriptive, flock is authoritative — with one bounded
+exception.** Tags can lie (writer crashed mid-write, tag rotted past TTL).
+flock cannot — if you can acquire it, no one holds it. Every protocol
+decision flows from this *except* the record-tier carve-out: a tag with a
+non-zero, unexpired `ExpiresAt` is authoritative for that TTL window. The
+carve-out exists because process-independent coordination across two
+events (PreToolUse → PostToolUse hooks, scheduled retries, etc.) cannot
+be served by flock, which is process-bound. TTL is the staleness guard:
+no daemon, no sweep, just a lazy check on next access. Foreground holds
+remain flock-authoritative; record-tier holds are TTL-authoritative; the
+two coexist.
 
 ## the operating loop (Claude's POV)
 
@@ -205,9 +214,15 @@ agent's lazy GC or by a periodic `loto doctor --repair`.
 
 ## design invariants (load-bearing)
 
-1. **flock is truth.** Every protocol decision must remain valid if every
-   tag on disk is wrong or missing. (✗ never read a tag and trust it for
-   safety; only for description.)
+1. **flock is truth, with one bounded exception.** Every protocol
+   decision involving a *foreground* hold must remain valid if every tag
+   on disk is wrong or missing. (✗ never read a tag and trust it for the
+   safety of a foreground operation; only for description.) **Exception:**
+   tags carrying a non-zero, unexpired `ExpiresAt` are authoritative for
+   that TTL window — this is the record-tier (acquire) carve-out and
+   exists because flock is process-bound and cannot persist past process
+   exit. The flock principle still governs foreground holds; TTL governs
+   record-tier holds.
 2. **Single host.** All paths are absolute on this machine. ✗ NFS, ✗ remote.
 3. **No daemon.** Every operation is a fresh process. State lives on disk.
 4. **JSON-first I/O.** Human formatting is opt-in. Exit codes are stable.
@@ -237,7 +252,7 @@ If you find yourself writing one of these, stop and reconsider:
 
 - A new daemon, listener, or background process
 - A protocol that requires *both* agents to be running
-- A code path that trusts a tag for a *correctness* decision
+- A code path that trusts a tag for a *correctness* decision **outside the record-tier carve-out** (foreground holds: flock is truth; record-tier acquires: TTL is truth — anything else, stop)
 - A schema migration tool for the on-disk layout
 - A `--unsafe-disable-flock` flag
 

@@ -3,6 +3,7 @@ package loto
 import (
 	"context"
 	"errors"
+	"os"
 	"time"
 )
 
@@ -20,7 +21,79 @@ func (l *LOTO) Acquire(ctx context.Context, agentID, intent, target string, opts
 	})
 }
 
-// AcquireGlobal blocks until the global lock is acquired or ctx is done.
+// AcquirePath records a record-tier (acquire'd) hold on target with the
+// given TTL and returns immediately. The hold survives process exit and
+// remains authoritative until ttl elapses (lazy check; no daemon).
+//
+// On conflict (another agent holds the path via either foreground flock
+// or an unexpired record-tier tag), returns *ErrHeld surfacing the holder.
+// Same-agent re-acquire is idempotent and extends the TTL.
+//
+// The returned []*Reservation lists advisory reservations whose globs
+// match target — the hook adapter's primary use case is to surface
+// these to the editing agent before it touches the file.
+func (l *LOTO) AcquirePath(agentID, intent, target string, ttl time.Duration, opts ...TagOptions) (*Tag, []*Reservation, error) {
+	if ttl <= 0 {
+		return nil, nil, &ErrSystem{Op: "acquire-path: ttl", Err: errors.New("ttl must be positive")}
+	}
+
+	globalLockPath, _ := l.globalPaths()
+	fileLockPath, fileTagPath, err := l.filePaths(target)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Take global shared (consistency with TryFileLock — blocks during a global sweep).
+	globalFile, err := os.OpenFile(globalLockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, nil, &ErrSystem{Op: "acquire-path: open global lock", Err: err}
+	}
+	defer globalFile.Close()
+	if err := flockShared(globalFile); err != nil {
+		if !isFlockContention(err) {
+			return nil, nil, &ErrSystem{Op: "acquire-path: flock global", Err: err}
+		}
+		tag, _ := l.ReadGlobalTag()
+		return nil, nil, &ErrHeld{Tag: tag, Kind: kindGlobal, Target: kindGlobal}
+	}
+
+	// Take file flock briefly for atomic tag write.
+	fileFile, err := os.OpenFile(fileLockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, nil, &ErrSystem{Op: "acquire-path: open file lock", Err: err}
+	}
+	defer fileFile.Close()
+	if err := flockExclusive(fileFile); err != nil {
+		if !isFlockContention(err) {
+			return nil, nil, &ErrSystem{Op: "acquire-path: flock file", Err: err}
+		}
+		// Foreground holder has the flock — surface their identity.
+		tag, _ := l.ReadTag(target)
+		return nil, nil, &ErrHeld{Tag: tag, Kind: kindFile, Target: target}
+	}
+
+	// Record-tier guard: existing tag from a different agent, still authoritative?
+	if existing, _ := l.ReadTag(target); existing != nil &&
+		existing.IsRecordTier() && existing.AgentID != agentID {
+		return nil, nil, &ErrHeld{Tag: existing, Kind: kindFile, Target: target}
+	}
+
+	// Compose effective TagOptions: the explicit ttl wins.
+	effOpts := TagOptions{TTL: ttl}
+	if len(opts) > 0 && opts[0].TTL > effOpts.TTL {
+		effOpts.TTL = opts[0].TTL
+	}
+	tag := l.newTag(agentID, intent, target, kindFile, effOpts)
+	if err := writeTagAtomic(fileTagPath, tag); err != nil {
+		return nil, nil, err
+	}
+
+	// Advisory: matching reservations for the hook adapter's pre-write signal.
+	conflicts, _ := l.ConflictingReservations(target)
+
+	// Both flocks released by deferred Close. Tag carries authority via TTL.
+	return &tag, conflicts, nil
+}
 func (l *LOTO) AcquireGlobal(ctx context.Context, agentID, intent string, opts ...TagOptions) (*ActiveLock, error) {
 	return pollAcquire(ctx, "acquire-global: context cancelled", func() (*ActiveLock, error) {
 		return l.TryGlobalLock(agentID, intent, opts...)

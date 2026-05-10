@@ -74,6 +74,76 @@ func TestDoctorStaleTag(t *testing.T) {
 	}
 }
 
+// TestDoctorAcquiredHoldNotClassifiedAsStale: a record-tier acquire'd hold
+// (tag with non-zero, unexpired ExpiresAt; flock free; PID may be dead)
+// must NOT be reported as DriftStaleTag and must NOT be reaped under
+// --repair. North-star carve-out: TTL is authoritative for record-tier.
+func TestDoctorAcquiredHoldNotClassifiedAsStale(t *testing.T) {
+	l := newTestLOTO(t)
+
+	// AcquirePath is used against real paths; create the target file
+	// so the orphan check doesn't false-positive.
+	target := filepath.Join(t.TempDir(), "live.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tag mimics what AcquirePath writes: future ExpiresAt, dead PID
+	// (PID 0 since the holder process is no longer with us).
+	tagPath := writeRawTag(t, l, target, Tag{
+		AgentID:   deadAgent,
+		Target:    target,
+		PID:       0,
+		Timestamp: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(5 * time.Minute),
+	})
+
+	// Doctor (check) must report clean.
+	rep, err := l.Doctor("test-agent", DoctorCheck)
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	if !rep.Clean {
+		t.Fatalf("expected clean report for record-tier hold; got %+v", rep.Findings)
+	}
+
+	// Doctor --repair must not remove the tag (it is authoritative for TTL).
+	if _, err := l.Doctor("test-agent", DoctorRepair); err != nil {
+		t.Fatalf("Doctor repair: %v", err)
+	}
+	if _, err := os.Stat(tagPath); err != nil {
+		t.Fatalf("tag was removed by doctor repair: %v", err)
+	}
+}
+
+// TestDoctorAcquiredHoldExpiredIsStale: once the record-tier TTL elapses,
+// the tag becomes a normal stale_tag and doctor should reap it.
+func TestDoctorAcquiredHoldExpiredIsStale(t *testing.T) {
+	l := newTestLOTO(t)
+
+	target := filepath.Join(t.TempDir(), "expired.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tagPath := writeRawTag(t, l, target, Tag{
+		AgentID:   deadAgent,
+		Target:    target,
+		PID:       0,
+		Timestamp: time.Now().Add(-time.Hour).UTC(),
+		ExpiresAt: time.Now().Add(-time.Minute).UTC(), // expired
+	})
+
+	rep, err := l.Doctor("test-agent", DoctorCheck)
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	if rep.Clean || len(rep.Findings) != 1 || rep.Findings[0].Class != DriftStaleTag {
+		t.Fatalf("expected stale_tag finding for expired record-tier; got %+v", rep.Findings)
+	}
+	_ = tagPath
+}
+
 // TestDoctorRepairStaleTag: --repair removes the stale tag.
 func TestDoctorRepairStaleTag(t *testing.T) {
 	l := newTestLOTO(t)

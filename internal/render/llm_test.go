@@ -53,6 +53,45 @@ func TestEmitLLMTrySuccessWithReservationWarnings(t *testing.T) {
 	}
 }
 
+func TestEmitLLMAcquired(t *testing.T) {
+	var buf bytes.Buffer
+	expires := time.Date(2026, 5, 9, 14, 30, 0, 0, time.UTC)
+	e := AcquireEntry{
+		Target:    testStorePath,
+		AgentID:   "GreenCastle",
+		Intent:    "edit store",
+		ExpiresAt: expires,
+	}
+	if err := EmitLLMAcquired(&buf, e); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.HasPrefix(got, "loto:llm:v1\n") {
+		t.Fatalf("missing header:\n%s", got)
+	}
+	want := "✔ acquired | internal/store/store.go | by:GreenCastle | intent:edit store | ttl:2026-05-09T14:30:00Z\n"
+	if !strings.Contains(got, want) {
+		t.Fatalf("unexpected body:\n%s\nwant: %s", got, want)
+	}
+}
+
+func TestEmitLLMAcquiredWithConflicts(t *testing.T) {
+	var buf bytes.Buffer
+	e := AcquireEntry{
+		Target:    testStorePath,
+		AgentID:   "GreenCastle",
+		ExpiresAt: time.Date(2026, 5, 9, 14, 30, 0, 0, time.UTC),
+		Conflicts: []ReservationWarning{{Pattern: testStorePattern, AgentID: testAgentBlueOak}},
+	}
+	if err := EmitLLMAcquired(&buf, e); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "⚠ reservation | internal/store/** | held-by:BlueOak\n") {
+		t.Fatalf("missing conflict line:\n%s", got)
+	}
+}
+
 func TestEmitLLMBlocked(t *testing.T) {
 	var buf bytes.Buffer
 	heldSince := time.Date(2026, 4, 28, 14, 32, 11, 0, time.UTC)
@@ -160,6 +199,20 @@ func TestEmitLLMReleasedWithErrors(t *testing.T) {
 	got := buf.String()
 	if !strings.Contains(got, "✗ release-error | permission denied\n") {
 		t.Fatalf("got:\n%s", got)
+	}
+}
+
+func TestEmitLLMReleasedPath(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitLLMReleasedPath(&buf, testStorePath); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.HasPrefix(got, "loto:llm:v1\n") {
+		t.Fatalf("missing header; got:\n%s", got)
+	}
+	if !strings.Contains(got, "✔ released | internal/store/store.go\n") {
+		t.Fatalf("unexpected body:\n%s", got)
 	}
 }
 

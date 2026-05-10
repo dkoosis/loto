@@ -104,7 +104,7 @@ func emitReserveReleased(pattern string) {
 		_ = render.EmitLLMReserveReleased(os.Stdout, pattern)
 		return
 	}
-	_ = render.EmitJSON(os.Stdout, map[string]any{"released": true, "pattern": pattern})
+	_ = render.EmitJSON(os.Stdout, map[string]any{keyReleased: true, "pattern": pattern})
 }
 
 func emitReserveList(reservations []*loto.Reservation) {

@@ -35,11 +35,12 @@ var errInvalidImportance = errors.New("--importance must be one of: low, normal,
 
 // Repeated string literals consolidated for goconst.
 const (
-	statusFree = "free"
-	kindGlobal = "global"
-	keyCommand = "command"
-	keyAgent   = "agent"
-	keyTarget  = "target"
+	statusFree  = "free"
+	kindGlobal  = "global"
+	keyCommand  = "command"
+	keyAgent    = "agent"
+	keyTarget   = "target"
+	keyReleased = "released"
 )
 
 func main() {
@@ -83,6 +84,7 @@ func init() {
 	// Subcommand → defining file. Keep alphabetical-ish by file for orientation.
 	rootCmd.AddCommand(
 		tryCmd(),          // main.go
+		acquireCmd(),      // acquire.go
 		statusCmd,         // main.go
 		reapCmd,           // main.go
 		breakCmd(),        // main.go
@@ -332,12 +334,23 @@ to record why the break was necessary.`,
 func releaseCmd() *cobra.Command {
 	var allMine bool
 	c := &cobra.Command{
-		Use:   "release",
+		Use:   "release [path]",
 		Short: "release held locks",
-		Long:  "Release locks held by this agent. Use --all-mine to release all locks for LOTO_AGENT_ID.",
+		Long: `Release locks held by this agent.
+
+Two forms:
+  release <path>       — clear a record-tier hold previously taken with 'acquire'.
+  release --all-mine   — clear every lock held by LOTO_AGENT_ID across the base.
+
+Exit codes: 0 success · 1 cross-agent rejection (not the holder) · 2 usage · 3 system.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !allMine {
-				fmt.Fprintln(os.Stderr, "loto: release: specify --all-mine (per-handle release coming in a future version)")
+			if allMine && len(args) > 0 {
+				fmt.Fprintln(os.Stderr, "loto: release: --all-mine and <path> are mutually exclusive")
+				os.Exit(2)
+			}
+			if !allMine && len(args) == 0 {
+				fmt.Fprintln(os.Stderr, "loto: release: specify <path> or --all-mine")
 				os.Exit(2)
 			}
 			agent := flagAgent
@@ -345,6 +358,19 @@ func releaseCmd() *cobra.Command {
 				agent, _ = resolveAgentID()
 			}
 			l := newLOTO()
+			if len(args) == 1 {
+				target := args[0]
+				if err := l.ReleasePath(agent, target); err != nil {
+					var notMine *loto.ErrNotMine
+					if errors.As(err, &notMine) {
+						emitNotMine(notMine)
+						os.Exit(1)
+					}
+					exit(err)
+				}
+				emitReleasedPath(target)
+				return nil
+			}
 			released, errs := l.ReleaseAllMine(agent)
 			emitReleased(agent, released, errsToStrings(errs))
 			if len(errs) > 0 {
@@ -771,7 +797,25 @@ func emitReleased(agent string, released []string, errs []string) {
 		_ = render.EmitLLMReleased(os.Stdout, displayAgent(agent), len(released), errs)
 		return
 	}
-	_ = render.EmitJSON(os.Stdout, map[string]any{keyAgent: agent, "released": released, "errors": errs})
+	_ = render.EmitJSON(os.Stdout, map[string]any{keyAgent: agent, keyReleased: released, "errors": errs})
+}
+
+func emitReleasedPath(target string) {
+	if currentFormat == render.FormatLLM {
+		_ = render.EmitLLMReleasedPath(os.Stdout, render.RelPath(target))
+		return
+	}
+	_ = render.EmitJSON(os.Stdout, map[string]any{keyReleased: true, keyTarget: target})
+}
+
+// emitNotMine writes the cross-agent rejection report to stderr. JSON mode
+// uses ErrNotMine.MarshalJSON; LLM mode uses the typed error line.
+func emitNotMine(e *loto.ErrNotMine) {
+	if currentFormat == render.FormatLLM {
+		_ = render.EmitLLMError(os.Stderr, "release", e.Error())
+		return
+	}
+	_ = render.EmitJSON(os.Stderr, e)
 }
 
 func emitReaped(target string) {

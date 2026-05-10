@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"loto"
 )
 
 const (
@@ -185,6 +187,131 @@ func TestStatusFileHeld(t *testing.T) {
 	}
 	if entry["agent_id"] != "status-holder" {
 		t.Errorf("expected agent_id=status-holder, got %v", entry["agent_id"])
+	}
+}
+
+// ── acquire (record-tier) ─────────────────────────────────────────────────────
+
+// TestAcquireHappyPath: 'loto acquire <path>' returns 0 with JSON carrying
+// acquired:true and expires_at, then a second-agent 'try' is blocked
+// surfacing the original holder.
+func TestAcquireHappyPath(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(t.TempDir(), "acquired-cli.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := lotoCmd(base, flagAgentLong, "alpha", "acquire", target)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("acquire: %v\n%s", err, out)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("parse: %v\n%s", err, out)
+	}
+	if got["acquired"] != true {
+		t.Errorf("expected acquired=true, got %v", got["acquired"])
+	}
+	if got["target"] != target {
+		t.Errorf("expected target=%s, got %v", target, got["target"])
+	}
+	if got["agent"] != "alpha" {
+		t.Errorf("expected agent=alpha, got %v", got["agent"])
+	}
+	if _, ok := got["expires_at"]; !ok {
+		t.Errorf("expected expires_at in output, got %v", got)
+	}
+
+	// Second agent's try must be blocked by the record-tier tag.
+	tryCmd := lotoCmd(base, flagAgentLong, "beta", "try", "file", target)
+	tryOut, tryErr := tryCmd.Output()
+	if tryErr == nil {
+		t.Fatalf("expected non-zero exit from beta try, got success: %s", tryOut)
+	}
+	var ee *exec.ExitError
+	if !errors.As(tryErr, &ee) {
+		t.Fatalf("unexpected error type: %v", tryErr)
+	}
+	if ee.ExitCode() != 1 {
+		t.Errorf("expected exit 1, got %d", ee.ExitCode())
+	}
+	if !strings.Contains(string(ee.Stderr), "alpha") {
+		t.Errorf("blocked report missing holder agent: %s", ee.Stderr)
+	}
+}
+
+// TestAcquireConflict: a second-agent acquire on a path already held by
+// alpha returns exit 1 with holder identity.
+func TestAcquireConflict(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(t.TempDir(), "conflict-cli.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := lotoCmd(base, flagAgentLong, "alpha", "acquire", target).Output(); err != nil {
+		t.Fatalf("alpha acquire: %v\n%s", err, out)
+	}
+
+	cmd := lotoCmd(base, flagAgentLong, "beta", "acquire", target)
+	out, err := cmd.Output()
+	if err == nil {
+		t.Fatalf("expected conflict, got success: %s", out)
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	if ee.ExitCode() != 1 {
+		t.Errorf("expected exit 1, got %d", ee.ExitCode())
+	}
+	if !strings.Contains(string(ee.Stderr), "alpha") {
+		t.Errorf("conflict report missing holder agent: %s", ee.Stderr)
+	}
+}
+
+// TestStatusAcquiredRendersAsHeld verifies S2 indistinguishability: a
+// record-tier acquire'd hold (no foreground flock, ExpiresAt set) renders
+// in `loto status` with the same display shape as a try'd hold — same
+// agent_id and intent fields surfaced, no false "free".
+func TestStatusAcquiredRendersAsHeld(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(t.TempDir(), "acquired.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	l, err := loto.New(base)
+	if err != nil {
+		t.Fatalf("loto.New: %v", err)
+	}
+	if _, _, err := l.AcquirePath("acquire-holder", "edit", target, 5*time.Minute); err != nil {
+		t.Fatalf("AcquirePath: %v", err)
+	}
+
+	cmd := lotoCmd(base, "status", target)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse output: %v\n%s", err, out)
+	}
+	entry, ok := result[target].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map for acquired target (not free), got %T: %v", result[target], result[target])
+	}
+	if entry["agent_id"] != "acquire-holder" {
+		t.Errorf("expected agent_id=acquire-holder, got %v", entry["agent_id"])
+	}
+	if entry["intent"] != "edit" {
+		t.Errorf("expected intent=edit, got %v", entry["intent"])
+	}
+	if _, hasExpiry := entry["expires_at"]; !hasExpiry {
+		t.Errorf("expected acquire'd tag to carry expires_at; entry=%v", entry)
 	}
 }
 
@@ -1180,5 +1307,110 @@ func TestTryReleaseLifecycle(t *testing.T) {
 	}
 	if !strings.Contains(string(statOut2), statusFree) {
 		t.Errorf("expected free after release, got: %s", statOut2)
+	}
+}
+
+// ── release <path> (record-tier per Step 11) ─────────────────────────────────
+
+// TestReleasePathHappyPath: alpha acquires, alpha 'release <path>' returns 0
+// with JSON {released:true, target:<path>}, then beta's try succeeds.
+func TestReleasePathHappyPath(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(t.TempDir(), "release-happy.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := lotoCmd(base, flagAgentLong, "alpha", "acquire", target).Output(); err != nil {
+		t.Fatalf("alpha acquire: %v\n%s", err, out)
+	}
+
+	out, err := lotoCmd(base, flagAgentLong, "alpha", "release", target).Output()
+	if err != nil {
+		t.Fatalf("alpha release: %v\n%s", err, out)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("parse: %v\n%s", err, out)
+	}
+	if got["released"] != true {
+		t.Errorf("expected released=true, got %v", got["released"])
+	}
+	if got["target"] != target {
+		t.Errorf("expected target=%s, got %v", target, got["target"])
+	}
+
+	// Beta's try should now succeed (record-tier hold cleared).
+	tryOut, err := lotoCmd(base, flagAgentLong, "beta", "try", "file", target).Output()
+	if err != nil {
+		t.Fatalf("beta try after release: %v\n%s", err, tryOut)
+	}
+}
+
+// TestReleasePathCrossAgentRejected: beta cannot release alpha's hold; exit 1
+// and stderr surfaces alpha as the holder.
+func TestReleasePathCrossAgentRejected(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(t.TempDir(), "release-xagent.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := lotoCmd(base, flagAgentLong, "alpha", "acquire", target).Output(); err != nil {
+		t.Fatalf("alpha acquire: %v\n%s", err, out)
+	}
+
+	cmd := lotoCmd(base, flagAgentLong, "beta", "release", target)
+	out, err := cmd.Output()
+	if err == nil {
+		t.Fatalf("expected non-zero exit, got success: %s", out)
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	if ee.ExitCode() != 1 {
+		t.Errorf("expected exit 1, got %d", ee.ExitCode())
+	}
+	if !strings.Contains(string(ee.Stderr), "alpha") {
+		t.Errorf("rejection report missing holder agent: %s", ee.Stderr)
+	}
+
+	// Alpha's hold must still be present (no silent steal): beta try blocked.
+	tryCmd := lotoCmd(base, flagAgentLong, "beta", "try", "file", target)
+	if out, err := tryCmd.Output(); err == nil {
+		t.Fatalf("beta try should still be blocked after rejected release; got: %s", out)
+	}
+}
+
+// TestReleasePathUnheldIdempotent: releasing a path with no tag returns 0.
+func TestReleasePathUnheldIdempotent(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(t.TempDir(), "release-unheld.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := lotoCmd(base, flagAgentLong, "alpha", "release", target).Output()
+	if err != nil {
+		t.Fatalf("release of un-held path: %v\n%s", err, out)
+	}
+}
+
+// TestReleaseUsageBothFormsRejected: passing both --all-mine and a path is exit 2.
+func TestReleaseUsageBothFormsRejected(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(t.TempDir(), "release-bothforms.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := lotoCmd(base, flagAgentLong, "alpha", "release", "--all-mine", target)
+	out, err := cmd.Output()
+	if err == nil {
+		t.Fatalf("expected usage error, got success: %s", out)
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	if ee.ExitCode() != 2 {
+		t.Errorf("expected exit 2, got %d", ee.ExitCode())
 	}
 }
