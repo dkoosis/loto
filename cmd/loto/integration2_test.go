@@ -797,6 +797,9 @@ func TestInstallHookWritesSettings(t *testing.T) {
 	if hooks["Stop"] == nil {
 		t.Error("expected Stop hook")
 	}
+	if hooks["SubagentStop"] == nil {
+		t.Error("expected SubagentStop hook")
+	}
 }
 
 func TestInstallHookIdempotentSettings(t *testing.T) {

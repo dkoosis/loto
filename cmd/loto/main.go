@@ -580,8 +580,9 @@ func writeClaudeHooks() error {
 		},
 	}
 
-	// SessionStop: release all locks held by this agent.
-	hooks["Stop"] = []any{
+	// SessionStop / SubagentStop: release all locks + reservations held by
+	// this agent (bead loto-df8 — reservations cleared too, not just locks).
+	stopEntry := []any{
 		map[string]any{
 			keyMatcher: "",
 			keyHooks: []any{
@@ -592,6 +593,8 @@ func writeClaudeHooks() error {
 			},
 		},
 	}
+	hooks["Stop"] = stopEntry
+	hooks["SubagentStop"] = stopEntry
 
 	settings[keyHooks] = hooks
 

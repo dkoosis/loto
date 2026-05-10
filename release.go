@@ -60,7 +60,49 @@ func (l *LOTO) ReleaseAllMine(agentID string) (released []string, errs []error) 
 		released = append(released, "global")
 	}
 
+	// Reservations: advisory glob holds belonging to this agent. Cleared on
+	// session stop so a crashed agent's reservations don't linger past its
+	// lifetime (bead loto-df8).
+	resPatterns, resErrs := l.unreserveAllMine(agentID)
+	for _, p := range resPatterns {
+		released = append(released, "reservation:"+p)
+	}
+	errs = append(errs, resErrs...)
+
 	return released, errs
+}
+
+// unreserveAllMine removes every reservation file whose agent_id matches.
+// Returns the patterns released. Best-effort: per-file errors are collected.
+func (l *LOTO) unreserveAllMine(agentID string) (patterns []string, errs []error) {
+	resDir := l.reservationsDir()
+	entries, err := os.ReadDir(resDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, []error{&ErrSystem{Op: "release-all-mine: read reservations dir", Err: err}}
+	}
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) != reservationExt {
+			continue
+		}
+		tagPath := filepath.Join(resDir, e.Name())
+		r, readErr := l.readReservation(tagPath)
+		if readErr != nil {
+			// expired/corrupt/etc — skip silently; ListReservations handles quarantine.
+			continue
+		}
+		if r == nil || r.AgentID != agentID {
+			continue
+		}
+		if err := os.Remove(tagPath); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, &ErrSystem{Op: "release-all-mine: remove reservation", Err: err})
+			continue
+		}
+		patterns = append(patterns, r.Pattern)
+	}
+	return patterns, errs
 }
 
 // reapTagIfMine reads tagPath, and if the tag belongs to agentID, releases
