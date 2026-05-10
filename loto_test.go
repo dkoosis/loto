@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+const testAgentB = "agent-b"
+
 func newTestLOTO(t *testing.T) *LOTO {
 	t.Helper()
 	l, err := New(filepath.Join(t.TempDir(), "coord"))
@@ -37,10 +39,10 @@ func TestPathNormalizationCollides(t *testing.T) {
 	}
 	defer a.Unlock()
 
-	if _, err := l.TryFileLock("agent-b", "edit", "./src/foo.go"); err == nil {
+	if _, err := l.TryFileLock(testAgentB, "edit", "./src/foo.go"); err == nil {
 		t.Fatal("expected ./src/foo.go to collide with src/foo.go")
 	}
-	if _, err := l.TryFileLock("agent-b", "edit", abs); err == nil {
+	if _, err := l.TryFileLock(testAgentB, "edit", abs); err == nil {
 		t.Fatal("expected absolute path to collide with relative path")
 	}
 }
@@ -363,7 +365,7 @@ func TestForceBreak(t *testing.T) {
 	// agent-b force-breaks in a goroutine (it will block until agent-a releases).
 	breakDone := make(chan error, 1)
 	go func() {
-		breakDone <- l.ForceBreak(target, "agent-b", "taking over for review")
+		breakDone <- l.ForceBreak(target, testAgentB, "taking over for review")
 	}()
 
 	// Let agent-b reach the blocking flock call.
@@ -390,7 +392,7 @@ func TestForceBreak(t *testing.T) {
 	if !m.System {
 		t.Errorf("expected system message, got system=%v", m.System)
 	}
-	if m.From != "agent-b" {
+	if m.From != testAgentB {
 		t.Errorf("expected From=agent-b, got %q", m.From)
 	}
 	if m.To != "agent-a" {
@@ -422,6 +424,48 @@ func TestReserveAndList(t *testing.T) {
 	}
 	if got[0].Pattern != "internal/auth/**" {
 		t.Fatalf("pattern = %q", got[0].Pattern)
+	}
+}
+
+// TestReleaseAllMine_ClearsReservations: Stop-hook semantics — when an agent
+// stops, its reservations should also be released, not just its locks.
+// (bead loto-df8)
+func TestReleaseAllMine_ClearsReservations(t *testing.T) {
+	l := newTestLOTO(t)
+	if _, err := l.Reserve("agent-a", "auth work", "internal/auth/**", 0); err != nil {
+		t.Fatalf("Reserve a: %v", err)
+	}
+	if _, err := l.Reserve("agent-a", "store work", "internal/store/**", 0); err != nil {
+		t.Fatalf("Reserve a2: %v", err)
+	}
+	if _, err := l.Reserve(testAgentB, "render work", "internal/render/**", 0); err != nil {
+		t.Fatalf("Reserve b: %v", err)
+	}
+
+	released, errs := l.ReleaseAllMine("agent-a")
+	if len(errs) > 0 {
+		t.Fatalf("ReleaseAllMine errs: %v", errs)
+	}
+	// Both of agent-a's reservations should appear in released as "reservation:<pattern>".
+	gotPatterns := map[string]bool{}
+	for _, r := range released {
+		if len(r) > len("reservation:") && r[:len("reservation:")] == "reservation:" {
+			gotPatterns[r[len("reservation:"):]] = true
+		}
+	}
+	for _, want := range []string{"internal/auth/**", "internal/store/**"} {
+		if !gotPatterns[want] {
+			t.Errorf("expected reservation:%s in released; got %v", want, released)
+		}
+	}
+
+	// agent-b's reservation should still be present.
+	remaining, err := l.ListReservations()
+	if err != nil {
+		t.Fatalf("ListReservations: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].AgentID != testAgentB {
+		t.Fatalf("expected only agent-b reservation remaining; got %+v", remaining)
 	}
 }
 
@@ -514,7 +558,7 @@ func TestTryFileLockSurfacesConflictingReservation(t *testing.T) {
 
 	absTarget, _ := filepath.Abs(target)
 	pattern := filepath.Join(filepath.Dir(filepath.Dir(absTarget)), "**")
-	if _, err := l.Reserve("agent-b", "refactoring store", pattern, 0); err != nil {
+	if _, err := l.Reserve(testAgentB, "refactoring store", pattern, 0); err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
 
@@ -527,7 +571,7 @@ func TestTryFileLockSurfacesConflictingReservation(t *testing.T) {
 	if len(lock.Conflicts) == 0 {
 		t.Fatal("expected advisory conflict from reservation, got none")
 	}
-	if lock.Conflicts[0].AgentID != "agent-b" {
+	if lock.Conflicts[0].AgentID != testAgentB {
 		t.Fatalf("conflicting agent = %q", lock.Conflicts[0].AgentID)
 	}
 }
