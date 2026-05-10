@@ -707,7 +707,7 @@ func emitTrySuccess(kind, target, agent string, warnings []*loto.Reservation) {
 	}
 	var result map[string]any
 	if kind == kindGlobal {
-		result = map[string]any{keyAcquired: true, "kind": kindGlobal, keyAgent: agent}
+		result = map[string]any{keyAcquired: true, "kind": kindGlobal, keyAgent: agent} //nolint:goconst // payload key shared across emitters
 	} else {
 		result = map[string]any{keyAcquired: true, keyTarget: target, keyAgent: agent}
 	}

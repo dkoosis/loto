@@ -23,6 +23,7 @@ func toTitle(s string) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
+//nolint:goconst // word list; coincidental matches with protocol keys are not refactor candidates
 var adjectives = []string{
 	"able", "agile", "alert", "amber", "ample",
 	"apt", "arch", "ardent", "arid", "avid",
