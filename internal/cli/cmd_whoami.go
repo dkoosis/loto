@@ -1,0 +1,20 @@
+package cli
+
+import (
+	"fmt"
+	"io"
+
+	"loto/internal/identity"
+)
+
+func init() { register("whoami", cmdWhoami) }
+
+func cmdWhoami(args []string, stdout, stderr io.Writer) int {
+	a, err := identity.Ensure()
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ identity: %v\n", err)
+		return 3
+	}
+	fmt.Fprintf(stdout, "handle: %s\nuuid:   %s\nhost:   %s\n", a.Handle, a.UUID, a.Host)
+	return 0
+}

@@ -1,0 +1,25 @@
+package cli
+
+import (
+	"fmt"
+	"io"
+	"runtime/debug"
+)
+
+func init() { register("version", cmdVersion) }
+
+func cmdVersion(args []string, stdout, stderr io.Writer) int {
+	rev, when := "unknown", "unknown"
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				rev = s.Value
+			case "vcs.time":
+				when = s.Value
+			}
+		}
+	}
+	fmt.Fprintf(stdout, "loto rev=%s built=%s\n", rev, when)
+	return 0
+}
