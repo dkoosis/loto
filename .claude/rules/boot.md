@@ -1,14 +1,10 @@
 # Boot
 updated: 2026-05-09
 
-→ pick next from `bd ready` — loto-ux3.1 implementation done; ux3.2/3/4/5/6 ready.
-
-state: φ docs/superpowers/plans/loto-ux3.1/
+→ pick next from `bd ready` — ux3.6 shipped (PR #12), ux3.2/3/5 still ready.
 
 ✓ done
-- Step 12 acquire --wait + exit-3 timeout (#10, 5a62ea5)
-- Steps 8/10/11 record-tier acquire/release (#9, af0546b)
+- ux3.6 --on-timeout {block,warn,switch} (#12, c2cedf3)
 
 ‡ traps
-- exit-3 = wait timeout (acquire), exit-1 = immediate conflict — ux3.6 inherits
-- bead loto-ux3.1 still IN_PROGRESS; close after final-sweep judgement
+- merged worktrees leave stale golangci-lint cache → `golangci-lint cache clean` if `loto-ux3.N/` paths appear in lint output
