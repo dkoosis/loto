@@ -67,18 +67,12 @@ func TestLockHappyPath(t *testing.T) {
 
 func TestLockConflictBetweenAgents(t *testing.T) {
 	withTempProject(t)
-
-	// Two HOMEs (two registries), shared state dir from withTempProject.
-	aliceHome := t.TempDir()
-	bobHome := t.TempDir()
-
-	t.Setenv("HOME", aliceHome)
-	pinAgent(t)
+	alice := pinAgent(t)
 	if code := Run([]string{"lock", "a.go"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("alice initial lock failed, exit %d", code)
 	}
 
-	t.Setenv("HOME", bobHome)
+	// Second agent in the same HOME.
 	t.Setenv("LOTO_AGENT_ID", "")
 	pinAgent(t)
 
@@ -91,6 +85,7 @@ func TestLockConflictBetweenAgents(t *testing.T) {
 	if !strings.Contains(combined, "✗ blocked") || !strings.Contains(combined, "blocker=") {
 		t.Errorf("expected blocker report: %q", combined)
 	}
+	_ = alice
 }
 
 func TestUnlockOwner(t *testing.T) {
