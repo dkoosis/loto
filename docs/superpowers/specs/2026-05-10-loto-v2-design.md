@@ -37,23 +37,27 @@ Forms 1 and 2 cover almost every real use case ("this file" or "this subtree"). 
 - **Canonical target.** Every operation canonicalizes the target before lookup or write (see Target canonicalization). Equivalent spellings (`./a`, `a`, `a/./`) refer to the same lock; mismatched spellings cannot fragment a lock's identity.
 - **Overlap blocks.** A `lock` attempt fails (exit 1) if its canonical target overlaps any existing lock owned by a different agent. Overlap is symmetric: any path that could match both targets counts. Same-agent re-lock is idempotent (refreshes intent/TTL in place).
 - **TTL.** Every lock carries an expiry. Default `--ttl` is `30m` when not specified — long enough for a typical edit session, short enough that crashed agents don't strand locks for hours. The owner re-issues `lock` against the same canonical target to extend (idempotent refresh). Past TTL the lock is *stale*: it still occupies the slot until reclaimed.
-- **Stale reclaim.** Stale locks (past TTL or with a dead pid on this host) are eligible for reclaim. `lock` reclaims a stale lock as part of acquiring the target (one operation, no separate step). `break` reclaims without acquiring. `doctor --repair` reclaims at scale. Reads — `status`, `inbox`, `check-paths` — never reclaim.
+- **Stale reclaim.** Stale locks (past TTL or with a dead pid on this host) are eligible for reclaim. When acquiring a target, `lock` reclaims **every stale lock that overlaps the requested target** before evaluating remaining live conflicts — same target or broader subtree alike. Each reclaim writes its own system tag. (Without this, a stale subtree lock would block a same-agent retry forever even after the holder crashes.) `break` reclaims without acquiring. `doctor --repair` reclaims at scale. Reads — `status`, `inbox`, `check-paths` — never reclaim.
 - **Recovery break.** `break <target> --reason "..."` reclaims a *stale* lock and writes a system-authored tag explaining the reclaim. Fails (exit 1) if the lock is live. This is the normal recovery path.
-- **Forced live takeover.** `break <target> --force --reason "..."` reclaims a *live* lock owned by another agent. The binary writes a system-authored tag on the same target — `kind: "system"`, `author_uuid = breaker`, `previous_owner_uuid = displaced`, `addressee_uuid = displaced` — naming the breaker and the reason. Tag is appended **before** the lock is replaced. No silent dispossession, ever. No forged authorship, ever.
+- **Forced live takeover.** `break <target> --force --reason "..."` reclaims a *live* lock owned by another agent. The binary writes a system-authored tag on the same target — `kind: "system"`, `author_uuid = breaker`, `previous_owner_uuid = displaced`, `addressee_uuid = displaced` — naming the breaker and the reason. The break-takeover transaction inserts the system tag and replaces the lock atomically; observers never see one without the other. No silent dispossession, ever. No forged authorship, ever.
 - **Branch metadata is display-only.** The lock record carries the breaker's branch for orientation; it never affects overlap, takeover, or any other safety decision. Worktrees on different branches still share the same project state and the same overlap rules.
-- **Persistence.** Stored as a JSON file under `$XDG_STATE_HOME/loto/projects/<slug>/locks/`, owner-stamped, atomically written via tmp+rename, under the project mutex (see Concurrency contract).
+- **Persistence.** Stored as a row in the project SQLite database. All lock-set mutations occur inside a `BEGIN IMMEDIATE` transaction (see Concurrency contract); there is no application-level project mutex.
 
-The blocked-attempt response carries a structured holder report:
+The blocked-attempt response carries a structured holder report. **Multiple blockers are surfaced together** — when a `lock` request overlaps several live locks (different agents, or one agent's stacked locks), the binary returns exit 1 with every overlapping blocker reported in deterministic order (by `held_since` ascending, then `target_canonical`). Reporting only the first blocker would force the agent into a one-conflict-at-a-time game of whack-a-mole.
 
 ```json
 {
-  "blocked_by": "GreenCastle",
-  "intent": "store refactor — beads loto-7wp.4",
-  "target": "internal/store/store.go",
-  "held_since": "2026-05-10T07:14:11Z",
-  "expires_at": "2026-05-10T07:24:11Z",
-  "host": "dk-mac",
-  "pid": 84231
+  "blockers": [
+    {
+      "blocked_by": "GreenCastle",
+      "intent": "store refactor — beads loto-7wp.4",
+      "target": "internal/store/store.go",
+      "held_since": "2026-05-10T07:14:11Z",
+      "expires_at": "2026-05-10T07:24:11Z",
+      "host": "dk-mac",
+      "pid": 84231
+    }
+  ]
 }
 ```
 
@@ -112,10 +116,10 @@ Every CLI operation canonicalizes its target argument before any lookup, compari
 |---|---|
 | Storage form | Repo-relative POSIX path. The repo root is `git rev-parse --show-toplevel` of the cwd. |
 | Path cleaning | `filepath.Clean` semantics: `./a`, `a`, `a/./`, `a//b` → all collapse to a canonical form. |
-| Trailing slash | Stripped from non-glob paths. `internal/store/` and `internal/store` are the same target. |
+| Trailing slash | A trailing slash is the type-tag distinguishing form 2 (directory prefix) from form 1 (exact path). Stored verbatim, so the two are **distinct lock keys** for independent-unlock purposes. **But overlap is conservative**: a form-2 target `x/` overlaps the form-1 target `x` and every target below `x/`. So if A holds `internal/store/` and B requests `internal/store`, B is rejected — and vice versa. Independent unlock plus conservative overlap together mean two agents can never each "lock the directory" without seeing each other. **Lock-time warning**: if the user runs `loto lock <path>` and `<path>` exists as a directory on disk, the binary emits a warning that the exact-path form does not protect the subtree, and suggests the trailing-slash form. The warning is loud but non-blocking; literal-spelling intent is still honored. |
 | Repo escape | Targets resolving outside the repo (`../../etc/passwd`) are rejected, exit 2. |
 | Symlinks | Not resolved. The literal path is what gets locked. Two symlinked names for the same file are two distinct targets — the user is responsible for picking one. (We never touch the on-disk content; we only coordinate intent.) |
-| Case sensitivity | Targets are case-sensitive. `Internal/Store` and `internal/store` are distinct. (Matches Go's filesystem assumptions and macOS HFS+/APFS default behavior.) |
+| Case sensitivity | Targets are stored case-sensitive (distinct lock keys for independent unlock), but **overlap is filesystem-aware**. On binary start, the project state directory is probed once for case-sensitivity (via a `tmp` + `tmp` create-then-stat-other-case test); the result is cached in `schema_meta` for the project. On a case-insensitive filesystem (macOS APFS default, exFAT), overlap detection treats case variants as overlapping — so locking `Foo.go` rejects a concurrent `foo.go` lock by another agent. On a case-sensitive filesystem (most Linux), case variants are treated as distinct paths. `doctor` reports both the detected mode and any case-variant pairs as findings. The detection-then-cache strategy avoids racing the probe per invocation and lets the operator override via `schema_meta` if the auto-detect is wrong. |
 | Glob preservation | Glob meta-characters (`*`, `**`, `?`, `[...]`, `{...}`) are preserved verbatim through canonicalization. `./internal/**/foo.go` and `internal/**/foo.go` canonicalize to the same target. |
 | Windows | Out of scope. `loto` is Unix-first per non-goals. |
 
@@ -150,7 +154,9 @@ loto doctor [--repair] [--dry-run]
 
 **Read-only commands never mutate state.** `status`, `inbox`, `check-paths`, `whoami`, and bare `doctor` are pure reads. They surface stale or dead-pid locks in their output but do not reclaim. Reclamation belongs to `lock`, `break`, and `doctor --repair`.
 
-`unlock --session` releases every lock with a `session_uuid` matching this session. Used by the SessionEnd hook so cleanup is precisely scoped to the dying session, not to every lock the agent's uuid has ever placed. `unlock --all-mine` is the broader manual escape — useful when an agent identity persists across multiple shells. `--session` is preferred for automation.
+`unlock --session` releases every lock with a `session_uuid` matching this session. Used by the SessionEnd hook so cleanup is precisely scoped to the dying session, not to every lock the agent's uuid has ever placed. `unlock --all-mine` is the broader manual escape — useful when an agent identity persists across multiple shells. `--session` is preferred for automation. (Under the current identity model — one Claude session = new uuid at SessionStart — `--session` and `--all-mine` release the same set; keeping them distinct preserves the abstraction if identities ever persist across sessions.)
+
+**Addressee resolution accepts both forms.** Anywhere a tag addressee is named (e.g. `tag --to`), the CLI resolves either a handle (display form) or a uuid (canonical form) at write time. Agents commonly see uuids in holder reports for sessions whose handle is unknown to this host; the address path must accept those uuids without a workaround. The exact flag shape is a CLI ergonomics choice; the principle is what's load-bearing.
 
 `status <target>` is the diagnostic command — the answer to "why can't I touch this?". Output includes: the exact lock at this target if any (live, stale, dead-pid); overlapping locks owned by others; tags on this target (own, addressed-to-me, system-authored); tags on overlapping targets relevant to me. It is the one command an agent runs when blocked.
 
@@ -181,7 +187,7 @@ Default output is the LLM format (terse, line-oriented, `loto:llm:v1` header) wh
 
 ## Lock overlap
 
-Overlap detection is conservative — false positives are tolerable (lock attempt rejected when it could have proceeded), false negatives are not (two agents' edits collide). The existing `patternsOverlap` helper from v1 is reusable; it already returns the right answer for the cases that matter (identical pattern, prefix containment, glob-matches-glob).
+Overlap detection is conservative — false positives are tolerable (lock attempt rejected when it could have proceeded), false negatives are not (two agents' edits collide). Specifically: (a) form-2 dir prefix `x/` overlaps form-1 exact `x` and every target below `x/`; (b) on a case-insensitive filesystem, case variants of the same path overlap; (c) form-3 glob overlap uses the `patternsOverlap` helper from v1, which already returns the right answer for the cases that matter (identical pattern, prefix containment, glob-matches-glob). The release-blocking grammar test matrix in the implementation notes pins these down.
 
 Overlap rules:
 
@@ -196,7 +202,7 @@ Overlap rules:
 
 **Independent unlock.** Each lock is a separate record. `unlock <target>` releases only the lock at that exact target string; overlapping locks owned by the same agent are independent and survive. So if A holds both `internal/store/**` and `internal/store/store.go`, `unlock internal/store/**` leaves the narrower one in place. This rule is intentional — it prevents `unlock`-on-a-glob from silently dropping coverage of paths the agent never named.
 
-**Dead-pid detection.** A lock carries `(host, pid)`. When evaluating staleness, if `host == this host` and `kill(pid, 0)` reports the pid is not running, the lock is **stale** regardless of its TTL. Stale locks are surfaced by reads (`status`) and reclaimed by writes (`lock`, `break`, `doctor --repair`) — never by reads themselves. Reclamation INSERTs a system tag and DELETEs the stale row in one transaction. This restores the v1 `--hold` crash-recovery behavior that flock provided automatically. (Cross-host pid checks are out of scope per non-goals.)
+**Dead-pid detection.** A lock carries `(host, pid)`. When evaluating staleness, if `host == this host` and `kill(pid, 0)` reports the pid is not running, the lock is **stale** regardless of its TTL. Stale locks are surfaced by reads (`status`) and reclaimed by writes (`lock`, `break`, `doctor --repair`) — never by reads themselves. Reclamation INSERTs a system tag and DELETEs the stale row in one transaction. This restores the v1 `--hold` crash-recovery behavior that flock provided automatically. (Cross-host pid checks are out of scope per non-goals. **Hostname-change footnote:** locks placed under a hostname that no longer matches `os.Hostname()` — VM clones, container restarts, laptop renames — fall through dead-pid reclaim and persist until TTL expiry. Acceptable; documented so a future debugger isn't surprised.)
 
 Overlapping tags are always allowed (tags don't enforce); on `tag add`, the binary surfaces existing tags on the same or overlapping targets as a `⚠ overlaps existing` block in the response so the author sees who else is in the area.
 
@@ -212,11 +218,12 @@ $XDG_STATE_HOME/loto/                              # canonical, shared across wo
     └── loto.db-shm                                # SQLite shared-memory index (managed by SQLite)
 
 ~/.loto/agents/
-    ├── <uuid>.json                                # host-global session identity record
-    └── <uuid>/read-cursor.json                    # per-target last-read tag id (this agent)
+    └── <uuid>.json                                # host-global session identity record
 ```
 
-The backing store is **SQLite in WAL mode**, accessed via the pure-Go `modernc.org/sqlite` driver (no CGO). SQLite WAL natively provides:
+The backing store is **SQLite in WAL mode**, accessed via the pure-Go `modernc.org/sqlite` driver (no CGO). SQLite is used not because loto is a database-shaped application, but because the central invariant is transactional: observe the lock set, decide overlap, and mutate the lock/tag state as one serialized operation. The alternative would be homemade concurrency code (project mutex + per-file flock + tmp+rename + JSONL append discipline), which v1 attempted; SQLite WAL retires that machinery wholesale.
+
+SQLite WAL natively provides:
 
 - Concurrent readers that don't block writers
 - Serialized writers via a single `BEGIN IMMEDIATE` transaction
@@ -226,9 +233,9 @@ The backing store is **SQLite in WAL mode**, accessed via the pure-Go `modernc.o
 
 This replaces the v1 design's project-mutex + per-target tag-flock + tmp+rename + JSONL-append-with-PIPE_BUF dance. The Concurrency contract bullets describe the guarantees; SQLite WAL is the mechanism that delivers them.
 
-Trade: lose `cat`-style debugging of per-target files. Mitigated by `loto status <target>` (the diagnostic command) covering the human-inspect case; `sqlite3 loto.db` is available for forensics. Identity records and the read cursor stay as JSON files because they're per-agent (not per-project) and require no concurrency story.
+Trade: lose `cat`-style debugging of per-target files. Mitigated by `loto status <target>` (the diagnostic command) covering the human-inspect case; `sqlite3 loto.db` is available for forensics. Identity records stay as host-global JSON files (they're genuinely per-agent, host-scoped, never project-scoped). `modernc.org/sqlite` adds ~2–3 MB to the binary vs the v1 no-DB design; acceptable cost for the coordination guarantees.
 
-**Project slug derivation.** Slug = `<owner>-<repo>` from the first `git remote get-url origin` host-path; falls back to `local-<sha256(repo-toplevel-abspath)[:8]>` when no `origin` remote exists. Multiple remotes use `origin` regardless of order. Detached worktrees and submodules resolve via `git rev-parse --show-toplevel` of the cwd. The exact derivation must match v1's existing implementation (see `loto.go:projectSlug`); the v2 spec adopts v1's behavior verbatim.
+**Project slug derivation.** Slug = `<owner>-<repo>` from the first `git remote get-url origin` host-path; falls back to `local-<sha256(repo-toplevel-abspath)[:8]>` when no `origin` remote exists. Multiple remotes use `origin` regardless of order. Detached worktrees and submodules resolve via `git rev-parse --show-toplevel` of the cwd. The exact derivation must match v1's existing implementation (see the existing `projectSlug` in `cmd/loto/base.go`); the v2 spec adopts v1's behavior verbatim. Verify the symbol still resolves at implementation time — package layout has been churning.
 
 ### Schemas
 
@@ -252,8 +259,8 @@ CREATE INDEX idx_locks_session  ON locks(session_uuid);
 CREATE INDEX idx_locks_expires  ON locks(expires_at);
 
 CREATE TABLE tags (
-  id                  TEXT PRIMARY KEY,         -- 't-<8-hex>' (see Tag id)
   target_canonical    TEXT NOT NULL,
+  id                  TEXT NOT NULL,            -- 't-<8-hex>' (see Tag id)
   kind                TEXT NOT NULL,            -- 'note' | 'system'
   event               TEXT,                     -- non-null when kind='system' (e.g. 'lock_broken')
   author_uuid         TEXT NOT NULL,
@@ -261,18 +268,29 @@ CREATE TABLE tags (
   previous_owner_uuid TEXT,                     -- non-null for system tags about a prior owner
   intent              TEXT NOT NULL,
   created_at          INTEGER NOT NULL,         -- unix nanoseconds
-  expires_at          INTEGER                   -- nullable; non-null = expirable
+  expires_at          INTEGER,                  -- nullable; non-null = expirable
+  PRIMARY KEY (target_canonical, id)            -- per-target uniqueness; collision math is per-target, not global
 );
 CREATE INDEX idx_tags_target     ON tags(target_canonical, created_at);
 CREATE INDEX idx_tags_addressee  ON tags(addressee_uuid, created_at);
 CREATE INDEX idx_tags_expires    ON tags(expires_at);
 
+CREATE TABLE read_cursors (
+  agent_uuid       TEXT NOT NULL,
+  target_canonical TEXT NOT NULL,
+  last_read_at     INTEGER NOT NULL,             -- unix nanoseconds; max created_at this agent has acknowledged on this target
+  PRIMARY KEY (agent_uuid, target_canonical)
+);
+CREATE INDEX idx_cursors_agent ON read_cursors(agent_uuid);
+
 CREATE TABLE schema_meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
--- schema_version, created_at, etc.
+-- schema_version, created_at, fs_case_sensitive, etc.
 ```
+
+Cursor lives in the project DB, not in `~/.loto/agents/`, because it is per-(agent, project, target) — not host-global agent state. Putting it here also lets `inbox --mark-read` advance the cursor and read tags in the same `BEGIN IMMEDIATE` transaction, so a crash mid-update can't tear.
 
 Logical-record view (what gets *recorded*, regardless of column layout):
 
@@ -327,18 +345,9 @@ System-authored tag (e.g. break-takeover):
 }
 ```
 
-**Tag id** is `t-<short-hash>` where short-hash = first 8 hex chars of `sha256(author_uuid || created_at_unix_nano || intent)`. Stable, user-quotable, and unique-enough for the small number of tags per target. Collision probability for 8-hex within one target's tag log is negligible at any realistic scale.
+**Tag id** is `t-<short-hash>` where short-hash = first 8 hex chars of `sha256(author_uuid || created_at_unix_nano || intent)`. Stable, user-quotable, and per-target unique by virtue of the composite primary key `(target_canonical, id)`. The 8-hex collision space is sized against the per-target tag log (small — tens to hundreds at most), not the global tag count, so the negligible-collision claim and the storage shape now agree. INSERT conflicts on the composite PK are not expected in practice; the binary surfaces them as exit 3 (IO/system error) rather than papering over with a salted retry.
 
-**Read cursor** (`~/.loto/agents/<uuid>/read-cursor.json`):
-
-```json
-{
-  "<sha256(target)>": "t-9c4f...",
-  "<sha256(target2)>": "t-3e1a..."
-}
-```
-
-Maps target hash → most-recent tag id this agent has read. `inbox --unread` returns tags newer than the cursor on each target where the agent is the addressee. `inbox --mark-read` advances the cursor to the latest tag id seen.
+**Read cursor** is stored as `read_cursors(agent_uuid, target_canonical, last_read_at)` rows in the project DB (DDL above). One row per (agent, target). `inbox --unread` returns addressed, non-expired tags whose `created_at` is later than `last_read_at` for the agent on that target — pure SELECT, no cursor mutation. `inbox --mark-read` advances `last_read_at` to the latest `created_at` seen, in the same `BEGIN IMMEDIATE` transaction as the read so the cursor advance can't tear against concurrent tag inserts. If no row exists for a (agent, target) pair, all addressed non-expired tags on that target are unread.
 
 **Agent identity** (`~/.loto/agents/<uuid>.json`):
 
@@ -355,6 +364,8 @@ Maps target hash → most-recent tag id this agent has read. `inbox --unread` re
 
 - Stale locks (past TTL or with a dead pid on this host) are reclaimed by `lock` (when acquiring the same target), by `break`, and by `doctor --repair`. Reclamation INSERTs a system tag explaining the reclaim and DELETEs the stale row in the same SQLite transaction. **Read-only commands surface stale rows in output but never delete them.**
 - Expired tags (rows with `expires_at IS NOT NULL AND expires_at < now()`) are deleted lazily by `doctor --repair`, or opportunistically by any write that already holds the SQLite writer lock. Reads filter expired tags via `WHERE expires_at IS NULL OR expires_at > now()`.
+- **Adhoc identity prune.** `~/.loto/agents/<uuid>.json` records accumulate one-per-invocation when `bash -c "loto …"` runs without `LOTO_AGENT_ID` (cron, scheduled tasks, manual shells). `doctor --repair` deletes any agent record whose uuid has no live lock and no recent (within last 30d) authored tag in any project DB on this host. Read-only `doctor` lists candidates without removing them.
+- **DB integrity.** `doctor` runs `PRAGMA integrity_check` and reports the result. On failure, `doctor --repair` **moves the corrupt file aside** (`loto.db.corrupt.<RFC3339-Z>`) and creates a fresh DB. Forensic recovery stays possible (open the moved-aside file with `sqlite3` and salvage what's recoverable); the active project DB returns to a clean known state. v1 file-per-target localized corruption to one record; v2 trades that for transactional safety, so the repair path has to handle whole-DB loss without feeling cavalier about it.
 - No daemon, no sweep, no application-level background work. SQLite's `PRAGMA wal_autocheckpoint` handles WAL checkpointing automatically.
 
 ## Concurrency contract
@@ -384,8 +395,8 @@ The table below is verification of the rule, not the source of it.
 | Surface relevant tags on lock release | **binary** | `loto unlock` reads tags on the target before returning; if any have an addressee, prints a `→ notify` block listing each so the releasing agent sees who's waiting |
 | Periodic inbox check during a long session | `Stop` hook + binary | binary already surfaces on every lock/unlock; hook covers sessions with no lock activity. See concrete shape below. |
 | `break <target> --reason` reclaims stale only | **binary** | exit 1 if the target's lock is live; the recovery path stays safe by default |
-| `break --force --reason` permits live takeover | **binary** | system-authored tag (`kind: system`, `event: lock_broken`, truthful `author_uuid`/`previous_owner_uuid`) is appended **before** the lock is replaced; `--reason` is required for both forms |
-| Same-agent same-target re-lock | **binary** | idempotent refresh of intent/TTL, under the per-target lock-file flock to serialize against break |
+| `break --force --reason` permits live takeover | **binary** | system-authored tag (`kind: system`, `event: lock_broken`, truthful `author_uuid`/`previous_owner_uuid`) is inserted in the same transaction that replaces the lock; observers never see one without the other; `--reason` is required for both forms |
+| Same-agent same-target re-lock | **binary** | idempotent refresh of intent/TTL via `UPDATE … WHERE owner_uuid = ?` inside a `BEGIN IMMEDIATE` transaction; SQLite writer serialization (not any application-level mutex) is what orders refresh against `break` |
 | Tag id stable + author-only `untag` | **binary** | id = `t-<8-hex of sha256(author_uuid‖created_at_nano‖intent)>`; `untag` rejects (exit 1) if author_uuid != me, with `doctor --repair` as the GC escape |
 
 The pre-edit and pre-commit hooks are the load-bearing safety net. They turn "remember to check before editing" (paper shield) into an enforced exit-2 refusal.
@@ -471,12 +482,12 @@ A fresh Claude dropped into any worktree of a project where four other Claudes a
 
 1. Run `loto status` and understand who's locked what in <1s, with a project-identity header so cross-worktree orientation is immediate.
 2. `loto lock <path>` with confidence that overlap is a hard refusal, not a silent overwrite — including under concurrent invocation by another agent on an overlapping target.
-3. Receive a useful holder report when blocked — including held-since, TTL, intent, host, breaker's branch (display only).
+3. Receive a useful holder report when blocked — every overlapping blocker listed in deterministic order, each with held-since, TTL, intent, host, branch (display only).
 4. Receive any addressed tags / want-next signals automatically on every `lock` and `unlock`, without remembering to check.
 5. Tag a held file with "ping me when you're free" and trust the holder will see it on their next `unlock`.
 6. Crash, restart, and resume — stale locks reclaim on the next `lock`/`break`/`doctor --repair`; no human cleanup, and `status` never silently mutates.
 7. Have edits to another agent's locked paths refused at `PreToolUse`, before any disk write happens.
-8. Two agents cannot concurrently acquire overlapping locks, even when `loto lock` is invoked at the same moment on different targets (project mutex serializes the critical section).
+8. Two agents cannot concurrently acquire overlapping locks, even when `loto lock` is invoked at the same moment on different targets. (Mechanism lives in implementation notes; acceptance is behavioral.)
 9. Equivalent path spellings normalize to the same target before lock, unlock, status, check-paths, and tag lookup.
 10. Read-only commands (`status`, `inbox`, `check-paths`, `whoami`, bare `doctor`) never mutate lock or tag state.
 11. `loto status <target>` makes it obvious why a target is clear, blocked, stale, or socially annotated.
@@ -497,7 +508,6 @@ Mechanics that support the Concurrency contract; not part of the contract itself
   ```sql
   PRAGMA journal_mode = WAL;
   PRAGMA synchronous  = NORMAL;
-  PRAGMA foreign_keys = ON;
   PRAGMA busy_timeout = 5000;       -- ms; tolerate brief writer contention
   PRAGMA wal_autocheckpoint = 1000; -- pages; default behavior
   ```
@@ -525,8 +535,9 @@ The SQLite adapter, CLI parser, and hook wrappers compose around this core. Test
 
 ### Read cursor
 
-- `~/.loto/agents/<uuid>/read-cursor.json` is rewritten via `tmp + rename` on `--mark-read`. Concurrent processes for the same agent are unexpected (one session = one process running CLI commands serially); if it ever happens, last-write-wins on the cursor is acceptable — losing a cursor advance just means re-seeing already-read tags, never missing a tag.
-- The cursor file is per-agent, not in the SQLite database, because it's host-global agent state, not project state. Keeps the project DB free of agent identity.
+- Stored as `read_cursors` rows in the project DB; advances atomically with the underlying read in one `BEGIN IMMEDIATE` transaction. No tmp+rename, no last-write-wins window — the cursor cannot tear against concurrent tag inserts.
+- An agent's cursor for a target is namespaced by `agent_uuid`, so two agents reading the same target keep independent positions.
+- An earlier draft kept the cursor as `~/.loto/agents/<uuid>/read-cursor.json`. That mis-scoped the data: a cursor entry is per-(agent, project, target), so storing it under the per-agent host-global directory caused cross-project key collisions when the same target path appeared in multiple projects. Project DB storage fixes this and removes a JSON file from the layout.
 
 ### Hook script details
 
@@ -534,4 +545,4 @@ The Stop hook (see Behavioral enforcement) emits JSON with `additionalContext` p
 
 ### Patterns overlap test matrix
 
-The release-blocking test matrix (Concurrency contract item 6) lives in the `domain` package's `overlap_test.go`. At minimum it must cover: identical patterns; prefix containment in both directions; `**`-vs-literal; `**`-vs-`**`; literal-vs-literal disjoint; literal-vs-glob with shared literal prefix; brace expansion if our doublestar dependency supports it; dot-segment edge cases; trailing-slash variants; mixed file/dir/glob target forms (e.g. file lock vs glob, dir-prefix vs nested file). The bar is **zero documented false-negatives**; any false-negative blocks v2 release.
+The release-blocking test matrix (Concurrency contract item 6) lives in the `domain` package's `overlap_test.go`. At minimum it must cover: identical patterns; prefix containment in both directions; `**`-vs-literal; `**`-vs-`**`; literal-vs-literal disjoint; literal-vs-glob with shared literal prefix; brace expansion if our doublestar dependency supports it; dot-segment edge cases; **form-2 dir-prefix `x/` vs form-1 exact `x`** (must overlap); **form-2 dir-prefix `x/` vs nested file `x/a/b.go`** (must overlap); case variants under both case-sensitive and case-insensitive filesystem modes; mixed file/dir/glob target forms. The bar is **zero documented false-negatives**; any false-negative blocks v2 release.
