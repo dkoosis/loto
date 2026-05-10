@@ -4,12 +4,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+var ErrAgentNotFound = errors.New("no such agent on this host")
 
 type Agent struct {
 	UUID      string    `json:"uuid"`
@@ -40,7 +43,7 @@ func Ensure() (*Agent, error) {
 			return a, nil
 		}
 	}
-	return newAgent("")
+	return newAgent()
 }
 
 func mostRecentAgent() (*Agent, error) {
@@ -73,22 +76,12 @@ func mostRecentAgent() (*Agent, error) {
 	return best, nil
 }
 
-// EnsureAdhoc creates an Adhoc-prefixed identity for non-Claude shells.
-func EnsureAdhoc() (*Agent, error) {
-	return newAgent("Adhoc-")
-}
-
-func newAgent(handlePrefix string) (*Agent, error) {
+func newAgent() (*Agent, error) {
 	if err := os.MkdirAll(registryDir(), 0o700); err != nil {
 		return nil, err
 	}
 	uuid := newUUID()
-	handle := handlePrefix
-	if handle == "" {
-		handle = randomHandle()
-	} else {
-		handle = handle + uuid[:8]
-	}
+	handle := randomHandle()
 	host, _ := os.Hostname()
 	a := &Agent{UUID: uuid, Handle: handle, CreatedAt: time.Now().UTC(), Host: host}
 	if err := writeAgent(a); err != nil {
@@ -110,7 +103,7 @@ func loadByUUID(uuid string) (*Agent, error) {
 	return &a, nil
 }
 
-func ResolveByHandle(handle string) (*Agent, error) {
+func resolveByHandle(handle string) (*Agent, error) {
 	entries, err := os.ReadDir(registryDir())
 	if err != nil {
 		return nil, err
@@ -131,7 +124,7 @@ func ResolveByHandle(handle string) (*Agent, error) {
 			return &a, nil
 		}
 	}
-	return nil, fmt.Errorf("no such agent on this host: %q", handle)
+	return nil, fmt.Errorf("%w: %q", ErrAgentNotFound, handle)
 }
 
 // Resolve accepts either a uuid or a handle.
@@ -139,7 +132,7 @@ func Resolve(s string) (*Agent, error) {
 	if a, err := loadByUUID(s); err == nil {
 		return a, nil
 	}
-	return ResolveByHandle(s)
+	return resolveByHandle(s)
 }
 
 func writeAgent(a *Agent) error {

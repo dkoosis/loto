@@ -40,11 +40,11 @@ func TestResolveHandleByUUID(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	a, _ := Ensure()
-	got, err := ResolveByHandle(a.Handle)
+	got, err := resolveByHandle(a.Handle)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.UUID != a.UUID {
-		t.Errorf("ResolveByHandle: got %s want %s", got.UUID, a.UUID)
+		t.Errorf("resolveByHandle: got %s want %s", got.UUID, a.UUID)
 	}
 }
