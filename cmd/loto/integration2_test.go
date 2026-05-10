@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"loto"
 )
 
 const (
@@ -185,6 +187,49 @@ func TestStatusFileHeld(t *testing.T) {
 	}
 	if entry["agent_id"] != "status-holder" {
 		t.Errorf("expected agent_id=status-holder, got %v", entry["agent_id"])
+	}
+}
+
+// TestStatusAcquiredRendersAsHeld verifies S2 indistinguishability: a
+// record-tier acquire'd hold (no foreground flock, ExpiresAt set) renders
+// in `loto status` with the same display shape as a try'd hold — same
+// agent_id and intent fields surfaced, no false "free".
+func TestStatusAcquiredRendersAsHeld(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(t.TempDir(), "acquired.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	l, err := loto.New(base)
+	if err != nil {
+		t.Fatalf("loto.New: %v", err)
+	}
+	if _, _, err := l.AcquirePath("acquire-holder", "edit", target, 5*time.Minute); err != nil {
+		t.Fatalf("AcquirePath: %v", err)
+	}
+
+	cmd := lotoCmd(base, "status", target)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse output: %v\n%s", err, out)
+	}
+	entry, ok := result[target].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map for acquired target (not free), got %T: %v", result[target], result[target])
+	}
+	if entry["agent_id"] != "acquire-holder" {
+		t.Errorf("expected agent_id=acquire-holder, got %v", entry["agent_id"])
+	}
+	if entry["intent"] != "edit" {
+		t.Errorf("expected intent=edit, got %v", entry["intent"])
+	}
+	if _, hasExpiry := entry["expires_at"]; !hasExpiry {
+		t.Errorf("expected acquire'd tag to carry expires_at; entry=%v", entry)
 	}
 }
 
