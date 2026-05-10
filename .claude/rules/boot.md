@@ -1,8 +1,11 @@
 # Boot
-updated: 2026-04-30
+updated: 2026-05-09
 
-→ check `bd ready`. Empty → review backlog with dk or pick a polish item from prior wrap notes.
+→ `bd ready`. Empty → review backlog with dk.
 
 ✓ done
-- check-paths emits `[status: ok]` on empty result (9b4e3dc)
-- design.md violations audit — 1 fix shipped, several polish items surfaced
+- magloop sweep: goconst×33 + modernize + nolintlint extracted to consts (b57d86a, unpushed)
+- removed stale `loto-ux3.1/` worktree that was poisoning lint cache
+
+‡ traps
+- `make audit` may be lying about lint state if golangci-lint cache is poisoned by a sibling worktree of the same module — clear with `golangci-lint cache clean` then `rm -rf ~/Library/Caches/golangci-lint/*`
