@@ -68,7 +68,7 @@ func (l *LOTO) Reserve(agentID, intent, pattern string, ttl time.Duration) (*Res
 		return nil, &ErrSystem{Op: "reserve: marshal", Err: err}
 	}
 	tagPath := filepath.Join(resDir, hashPattern(pattern)+reservationExt)
-	if err := atomicWriteReservation(tagPath, append(data, '\n')); err != nil {
+	if err := l.atomicWriteReservation(tagPath, append(data, '\n')); err != nil {
 		return nil, &ErrSystem{Op: "reserve: write", Err: err}
 	}
 	return r, nil
@@ -76,9 +76,12 @@ func (l *LOTO) Reserve(agentID, intent, pattern string, ttl time.Duration) (*Res
 
 // atomicWriteReservation writes payload to tagPath via a temp-file + rename
 // so concurrent readers never observe a partial file (which would otherwise
-// be quarantined as corrupt). Bead loto-8ru surfaced this via stress.
-func atomicWriteReservation(tagPath string, payload []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(tagPath), filepath.Base(tagPath)+".tmp-*")
+// be quarantined as corrupt). Temp file lives in stagingDir() so the rename
+// fires a clean CREATE event in the watched reservations dir — fsnotify on
+// darwin (kqueue) coalesces or drops CREATE-on-rename when the source is in
+// the same dir (#35). Bead loto-8ru surfaced the original atomicity need.
+func (l *LOTO) atomicWriteReservation(tagPath string, payload []byte) error {
+	tmp, err := os.CreateTemp(l.stagingDir(), filepath.Base(tagPath)+".tmp-*")
 	if err != nil {
 		return err
 	}

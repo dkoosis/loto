@@ -178,6 +178,14 @@ func runWatch(ctx context.Context, l *LOTO, w *fsnotify.Watcher, filesDir, resDi
 	defer close(out)
 	defer w.Close()
 
+	// Polling reconcile: fsnotify on macOS (kqueue) drops Remove events under
+	// load — observed 200 deletes → 56 events delivered (#35). Periodic scan
+	// catches dropped Remove/Rename and emits synthesized release/unreserve
+	// events so cache stays consistent with disk. 500ms is a balance between
+	// flake recovery (test timeout 2s) and idle CPU cost.
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -190,6 +198,48 @@ func runWatch(ctx context.Context, l *LOTO, w *fsnotify.Watcher, filesDir, resDi
 		case _, ok := <-w.Errors:
 			if !ok {
 				return
+			}
+		case <-tick.C:
+			reconcileDashboardCaches(filesDir, resDir, tagCache, resCache, out)
+		}
+	}
+}
+
+// reconcileDashboardCaches scans the watched dirs and emits synthesized
+// release/unreserve events for cache entries whose backing files have
+// disappeared. This is a fallback for fsnotify event drops on macOS.
+func reconcileDashboardCaches(filesDir, resDir string,
+	tagCache map[string]Tag, resCache map[string]Reservation, out chan<- Event,
+) {
+	for path := range tagCache {
+		if filepath.Dir(path) != filesDir {
+			continue
+		}
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			prev := tagCache[path]
+			delete(tagCache, path)
+			out <- Event{
+				Time:   time.Now().UTC(),
+				Kind:   EventReleased,
+				Agent:  prev.AgentID,
+				Target: prev.Target,
+				Intent: prev.Intent,
+			}
+		}
+	}
+	for path := range resCache {
+		if filepath.Dir(path) != resDir {
+			continue
+		}
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			prev := resCache[path]
+			delete(resCache, path)
+			out <- Event{
+				Time:   time.Now().UTC(),
+				Kind:   EventUnreserved,
+				Agent:  prev.AgentID,
+				Target: prev.Pattern,
+				Intent: prev.Intent,
 			}
 		}
 	}

@@ -274,7 +274,7 @@ func TestAcquirePathCrossProcessSameAgent(t *testing.T) {
 		t.Fatalf("loadTag: status=%v", status)
 	}
 	t1.PID = 1
-	if err := writeTagAtomic(fileTagPath, t1); err != nil {
+	if err := l.writeTagAtomic(fileTagPath, t1); err != nil {
 		t.Fatal(err)
 	}
 

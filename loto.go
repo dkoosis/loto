@@ -197,7 +197,19 @@ func New(baseDir string) (*LOTO, error) {
 	if err := os.MkdirAll(filepath.Join(baseDir, "files"), 0o700); err != nil {
 		return nil, &ErrSystem{Op: "create base dir", Err: err}
 	}
+	if err := os.MkdirAll(filepath.Join(baseDir, ".staging"), 0o700); err != nil {
+		return nil, &ErrSystem{Op: "create staging dir", Err: err}
+	}
 	return &LOTO{baseDir: baseDir}, nil
+}
+
+// stagingDir is a sibling of files/ and reservations/ used for temp files
+// during atomic-write (temp + rename). Keeping temp files outside the watched
+// dirs prevents fsnotify on darwin (kqueue) from coalescing or dropping the
+// rename's CREATE event on the destination — which manifested as flaky
+// dashboard Watch tests on macOS CI (#35).
+func (l *LOTO) stagingDir() string {
+	return filepath.Join(l.baseDir, ".staging")
 }
 
 // flockOrHeld attempts the given flock op; on contention returns *ErrHeld
@@ -265,7 +277,7 @@ func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (
 	if !preserveTag {
 		lazyReapTag(fileTagPath)
 		tag := l.newTag(agentID, intent, target, kindFile, opts...)
-		if err := writeTagAtomic(fileTagPath, tag); err != nil {
+		if err := l.writeTagAtomic(fileTagPath, tag); err != nil {
 			return nil, err
 		}
 	}
@@ -326,7 +338,7 @@ func (l *LOTO) TryGlobalLock(agentID, intent string, opts ...TagOptions) (*Activ
 	lazyReapTag(globalTagPath)
 
 	tag := l.newTag(agentID, intent, kindGlobal, kindGlobal, opts...)
-	if err := writeTagAtomic(globalTagPath, tag); err != nil {
+	if err := l.writeTagAtomic(globalTagPath, tag); err != nil {
 		return nil, err
 	}
 
@@ -547,17 +559,16 @@ func (l *LOTO) newTag(agentID, intent, target, kind string, opts ...TagOptions) 
 	return tag
 }
 
-func writeTagAtomic(tagPath string, tag Tag) error {
+func (l *LOTO) writeTagAtomic(tagPath string, tag Tag) error {
 	data, err := json.Marshal(tag)
 	if err != nil {
 		return &ErrSystem{Op: "marshal tag", Err: err}
 	}
-	tmpPath := tagPath + ".tmp"
-	tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	tmp, err := os.CreateTemp(l.stagingDir(), filepath.Base(tagPath)+".tmp-*")
 	if err != nil {
 		return &ErrSystem{Op: "create tmp tag", Err: err}
 	}
-	// On any error past this point, drop the half-written temp file.
+	tmpPath := tmp.Name()
 	fail := func(op string, err error) error {
 		_ = os.Remove(tmpPath)
 		return &ErrSystem{Op: op + " tmp tag", Err: err}

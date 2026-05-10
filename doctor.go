@@ -380,6 +380,7 @@ func (l *LOTO) examineLayout() ([]Finding, error) {
 		"global.tag":   true,
 		"files":        true,
 		"reservations": true,
+		".staging":     true,
 	}
 
 	var findings []Finding

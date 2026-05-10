@@ -241,11 +241,14 @@ func TestLazyGCOnAcquireAfterCrash(t *testing.T) {
 
 func TestErrHeldContainsTag(t *testing.T) {
 	l := newTestLOTO(t)
-	_, err := l.TryFileLock("holder-agent", "doing-work", "x.go")
+	holder, err := l.TryFileLock("holder-agent", "doing-work", "x.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Don't unlock — leave it held.
+	// Keep holder alive — discarding via `_` makes the *os.File (and its
+	// flock) eligible for GC finalizer close, which on macOS occasionally
+	// fired between the two TryFileLock calls and released the lock (#35).
+	t.Cleanup(func() { _ = holder.Unlock() })
 
 	_, err = l.TryFileLock("other", "try", "x.go")
 	if err == nil {
