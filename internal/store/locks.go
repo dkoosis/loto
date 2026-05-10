@@ -1,0 +1,190 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"sort"
+	"time"
+
+	"loto/internal/domain"
+)
+
+type ConflictError struct {
+	Blockers []domain.LockRecord
+}
+
+func (e *ConflictError) Error() string {
+	return fmt.Sprintf("lock conflict: %d blocker(s)", len(e.Blockers))
+}
+
+func (s *Store) AcquireLock(ctx context.Context, l domain.LockRecord, live domain.PidLiveProbe) (*domain.LockRecord, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	caseSensitive, err := s.fsCaseSensitiveTx(tx)
+	if err != nil {
+		return nil, err
+	}
+	caseInsensitive := !caseSensitive
+
+	all, err := loadLocksTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+
+	var blockers []domain.LockRecord
+	for _, ex := range all {
+		if !domain.Overlap(ex.Target, l.Target, caseInsensitive) {
+			continue
+		}
+		if ex.OwnerUUID == l.OwnerUUID {
+			continue
+		}
+		if domain.IsStale(ex, now, l.Host, live) {
+			if err := reclaimStaleTx(ctx, tx, ex, l.OwnerUUID, now); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		blockers = append(blockers, ex)
+	}
+	if len(blockers) > 0 {
+		sort.Slice(blockers, func(i, j int) bool {
+			if !blockers[i].CreatedAt.Equal(blockers[j].CreatedAt) {
+				return blockers[i].CreatedAt.Before(blockers[j].CreatedAt)
+			}
+			return blockers[i].Target.Canonical < blockers[j].Target.Canonical
+		})
+		return nil, &ConflictError{Blockers: blockers}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO locks(target_canonical, target_kind, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, branch)
+VALUES (?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(target_canonical) DO UPDATE SET
+  intent=excluded.intent,
+  expires_at=excluded.expires_at,
+  session_uuid=excluded.session_uuid,
+  host=excluded.host,
+  pid=excluded.pid,
+  branch=excluded.branch
+WHERE locks.owner_uuid = excluded.owner_uuid`,
+		l.Target.Canonical, kindString(l.Target.Kind), l.OwnerUUID, l.SessionUUID,
+		l.Intent, l.CreatedAt.UnixNano(), l.ExpiresAt.UnixNano(),
+		l.Host, l.PID, l.Branch,
+	); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &l, nil
+}
+
+func (s *Store) LockAt(ctx context.Context, t domain.Target) (*domain.LockRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+lockCols+` FROM locks WHERE target_canonical = ?`, t.Canonical)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, nil
+	}
+	l, err := scanLock(rows)
+	return &l, err
+}
+
+const lockCols = `target_canonical,target_kind,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,branch`
+
+func loadLocksTx(ctx context.Context, tx *sql.Tx) ([]domain.LockRecord, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT `+lockCols+` FROM locks`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.LockRecord
+	for rows.Next() {
+		l, err := scanLock(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanLock(r rowScanner) (domain.LockRecord, error) {
+	var l domain.LockRecord
+	var canonical, kindStr string
+	var createdNs, expiresNs int64
+	if err := r.Scan(&canonical, &kindStr, &l.OwnerUUID, &l.SessionUUID, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &l.Branch); err != nil {
+		return l, err
+	}
+	l.Target = domain.Target{Canonical: canonical, Kind: parseKind(kindStr)}
+	l.CreatedAt = time.Unix(0, createdNs).UTC()
+	l.ExpiresAt = time.Unix(0, expiresNs).UTC()
+	return l, nil
+}
+
+func kindString(k domain.TargetKind) string {
+	switch k {
+	case domain.KindFile:
+		return "file"
+	case domain.KindDir:
+		return "dir"
+	case domain.KindGlob:
+		return "glob"
+	}
+	return "file"
+}
+
+func parseKind(s string) domain.TargetKind {
+	switch s {
+	case "dir":
+		return domain.KindDir
+	case "glob":
+		return domain.KindGlob
+	default:
+		return domain.KindFile
+	}
+}
+
+func reclaimStaleTx(ctx context.Context, tx *sql.Tx, stale domain.LockRecord, byAgent string, now time.Time) error {
+	tagID := newTagID(byAgent, now, "lock_reclaimed_stale")
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO tags(target_canonical,target_kind,id,kind,event,author_uuid,addressee_uuid,previous_owner_uuid,intent,created_at,expires_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,NULL)`,
+		stale.Target.Canonical, kindString(stale.Target.Kind), tagID, "system", "lock_reclaimed_stale",
+		byAgent, stale.OwnerUUID, stale.OwnerUUID,
+		"reclaimed stale lock", now.UnixNano(),
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ?`, stale.Target.Canonical, stale.OwnerUUID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) fsCaseSensitiveTx(tx *sql.Tx) (bool, error) {
+	var v string
+	err := tx.QueryRow(`SELECT value FROM schema_meta WHERE key = 'fs_case_sensitive'`).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return v == "true", nil
+}
