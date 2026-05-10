@@ -1,19 +1,14 @@
 # Boot
 updated: 2026-05-10 (late late)
 
-→ `bd ready` for next P1. Open: #35 (macOS fsnotify regression from atomic-write).
+→ dk reviews v2 spec one more pass; on approval, `/writing-plans` against it
 
-```
-gh issue view 35
-bd ready
-```
+state: φ docs/superpowers/specs/2026-05-10-loto-v2-design.md
 
-✓ shipped this session
-- 6 PRs merged: #16 #17 #18 #33 #34 (rebased from closed #32) #36
-- gemini fixes applied to #16: trailing-slash in `isPathPrefix`, self-overlap filter, unified JSON schema
-- filed #35 — `TestWatchEmitsReservedAndUnreserved` flakes on macOS post-#34
-- gitignored `.claude/scheduled_tasks.lock`; dropped `docs/feedback/` (stale review artifacts)
+✓ done
+- 4th review round integrated: dir-overlap, case-insensitive FS, read_cursors in DB, multi-blocker, corrupt-DB moved-aside
 
 ‡ traps
-- ✗ ignore #35 — atomic-write needs the temp file out of the watched dir, or kqueue keeps dropping CREATE-on-rename
-- ✗ rebase a stale branch onto post-merged main without `git rebase --onto main <old-base> <branch>` — squashed commits cause conflict cascade
+- ✗ project mutex / per-target flock wording — SQLite WAL replaced both; old phrasing keeps creeping back
+- ✗ commit `internal/render/llm.go` — pre-session WIP, not ours
+- ✗ re-add v1 data migration — explicitly cut
