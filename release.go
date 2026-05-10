@@ -91,3 +91,47 @@ func reapLockFile(lockPath, tagPath string) error {
 	_ = os.Remove(tagPath)
 	return nil
 }
+
+// ReleasePath releases an acquire'd record-tier hold on target by agentID.
+// Idempotent: returns nil if no tag exists (per bead, hooks may bypass
+// pre-write and post-write must not error). Returns *ErrNotMine if the
+// existing tag belongs to a different agent — the call refuses to release
+// (no silent steal).
+func (l *LOTO) ReleasePath(agentID, target string) error {
+	fileLockPath, fileTagPath, err := l.filePaths(target)
+	if err != nil {
+		return err
+	}
+
+	tag, status := loadTag(fileTagPath)
+	switch status {
+	case tagMissing:
+		return nil // idempotent silent success
+	case tagCorrupt:
+		// Treat corrupt as not-mine; refuse rather than wipe blindly.
+		return &ErrNotMine{Target: target}
+	}
+	if tag.AgentID != agentID {
+		t := tag
+		return &ErrNotMine{Tag: &t, Target: target}
+	}
+
+	// Same agent — take flock briefly then remove.
+	f, err := os.OpenFile(fileLockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return &ErrSystem{Op: "release-path: open file lock", Err: err}
+	}
+	defer f.Close()
+	if err := flockExclusive(f); err != nil {
+		// flock held — a foreground holder under the same agentID is using
+		// the file right now. Don't yank the tag from under them.
+		if isFlockContention(err) {
+			return &ErrSystem{Op: "release-path: flock", Err: err}
+		}
+		return &ErrSystem{Op: "release-path: flock", Err: err}
+	}
+	if err := os.Remove(fileTagPath); err != nil && !os.IsNotExist(err) {
+		return &ErrSystem{Op: "release-path: remove tag", Err: err}
+	}
+	return nil
+}

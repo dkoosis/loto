@@ -99,6 +99,40 @@ type ErrSystem struct {
 func (e *ErrSystem) Error() string { return fmt.Sprintf("loto: %s: %v", e.Op, e.Err) }
 func (e *ErrSystem) Unwrap() error { return e.Err }
 
+// ErrNotMine is returned by ReleasePath when the caller is not the holder
+// of the named target. Distinct from ErrHeld so callers and the CLI can
+// route it to a different exit code/message ("you don't own this lock").
+//
+//nolint:errname // sentinel-style name kept for API stability
+type ErrNotMine struct {
+	Tag    *Tag   // holder's tag (descriptive)
+	Target string // the requested target path
+}
+
+func (e *ErrNotMine) Error() string {
+	if e.Tag != nil {
+		return fmt.Sprintf("loto: %s held by %s, not by caller — refusing to release", e.Target, e.Tag.AgentID)
+	}
+	return fmt.Sprintf("loto: %s not held by caller", e.Target)
+}
+
+// MarshalJSON emits a structured shape suitable for CLI stderr.
+func (e *ErrNotMine) MarshalJSON() ([]byte, error) {
+	type report struct {
+		HeldBy string `json:"held_by,omitempty"`
+		Intent string `json:"intent,omitempty"`
+		Target string `json:"target"`
+		PID    int    `json:"pid,omitempty"`
+	}
+	r := report{Target: e.Target}
+	if e.Tag != nil {
+		r.HeldBy = e.Tag.AgentID
+		r.Intent = e.Tag.Intent
+		r.PID = e.Tag.PID
+	}
+	return json.Marshal(r)
+}
+
 // Tag describes the holder of a lock.
 type Tag struct {
 	AgentID   string    `json:"agent_id"`
@@ -117,6 +151,15 @@ type Tag struct {
 // A soft-stale tag may still hold the flock (flock remains authoritative).
 func (t *Tag) SoftStale() bool {
 	return !t.ExpiresAt.IsZero() && time.Now().After(t.ExpiresAt)
+}
+
+// IsRecordTier reports whether the tag represents a record-tier acquire'd
+// hold whose authority is currently in force. True iff the tag carries a
+// non-zero ExpiresAt that is still in the future — see north-star
+// "Tags are descriptive, flock is authoritative — with one bounded
+// exception" carve-out.
+func (t *Tag) IsRecordTier() bool {
+	return !t.ExpiresAt.IsZero() && !t.SoftStale()
 }
 
 // LOTO coordinates locks under a shared base directory.
@@ -199,7 +242,16 @@ func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (
 		return nil, &ErrHeld{Tag: tag, Kind: kindFile, Target: target}
 	}
 
+	// Record-tier guard: a tag with a non-zero, unexpired ExpiresAt
+	// belongs to an acquire'd hold (north-star carve-out). Honor it
+	// even though flock is free — that is the whole point of the
+	// record tier. Same-agent re-Try succeeds; cross-agent fails.
+	if tag, _ := l.ReadTag(target); tag != nil && tag.IsRecordTier() && tag.AgentID != agentID {
+		return nil, &ErrHeld{Tag: tag, Kind: kindFile, Target: target}
+	}
+
 	// Lazy-GC: flock succeeded but a stale tag from a dead process remains.
+	// Honors record-tier (won't reap a live acquire'd tag).
 	lazyReapTag(fileTagPath)
 
 	tag := l.newTag(agentID, intent, target, kindFile, opts...)
@@ -242,6 +294,8 @@ func (l *LOTO) TryGlobalLock(agentID, intent string, opts ...TagOptions) (*Activ
 		return nil, &ErrHeld{Tag: tag, Kind: kindGlobal, Target: kindGlobal}
 	}
 
+	// Global tier is process-lifetime only; TTL respect here is incidental,
+	// not a contract — no current code path puts TTL on a global tag.
 	lazyReapTag(globalTagPath)
 
 	tag := l.newTag(agentID, intent, kindGlobal, kindGlobal, opts...)
@@ -324,8 +378,10 @@ func (l *LOTO) ReapIfDead(target string) error {
 	return l.Reap(target)
 }
 
-// lazyReapTag silently removes a tag file if its recorded PID is dead.
-// Called after a successful flock acquire to clean up crash leftovers.
+// lazyReapTag silently removes a tag file if its recorded PID is dead AND
+// the tag does not represent a live record-tier acquire'd hold (non-zero,
+// unexpired ExpiresAt). Called after a successful flock acquire to clean
+// up crash leftovers without destroying valid acquire'd holds.
 func lazyReapTag(tagPath string) {
 	data, err := os.ReadFile(tagPath)
 	if err != nil {
@@ -335,9 +391,14 @@ func lazyReapTag(tagPath string) {
 	if json.Unmarshal(data, &tag) != nil {
 		return
 	}
-	if !pidAlive(tag.PID) {
-		_ = os.Remove(tagPath)
+	if pidAlive(tag.PID) {
+		return
 	}
+	// Process is dead. Spare the tag if it's a still-live record-tier hold.
+	if tag.IsRecordTier() {
+		return
+	}
+	_ = os.Remove(tagPath)
 }
 
 // Reap removes a stale tag on target when no live process holds the lock.

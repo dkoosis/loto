@@ -277,6 +277,14 @@ func (l *LOTO) examineTagPair(lockPath, tagPath, displayTarget string, tag *Tag,
 	}
 
 	if lockFree {
+		// Record-tier (acquire'd) hold: tag carries authority via a
+		// non-zero, unexpired ExpiresAt. Lock is free by design — the
+		// holder process may be gone. Don't classify as drift; do not
+		// reap. See north-star "Tags are descriptive, flock is
+		// authoritative — with one bounded exception."
+		if tag.IsRecordTier() {
+			return nil, nil
+		}
 		// Class 1: stale_tag — lock is free but a tag was left behind.
 		fi := Finding{
 			Class:   DriftStaleTag,
