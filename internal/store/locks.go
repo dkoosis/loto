@@ -88,6 +88,85 @@ WHERE locks.owner_uuid = excluded.owner_uuid`,
 	return &l, nil
 }
 
+func (s *Store) ReleaseLock(ctx context.Context, t domain.Target, byAgent string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ?`, t.Canonical, byAgent)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return domain.ErrNotOwner
+	}
+	return tx.Commit()
+}
+
+func (s *Store) BreakLock(ctx context.Context, t domain.Target, byAgent string, force bool, reason string, live domain.PidLiveProbe) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `SELECT `+lockCols+` FROM locks WHERE target_canonical = ?`, t.Canonical)
+	if err != nil {
+		return err
+	}
+	if !rows.Next() {
+		rows.Close()
+		return errors.New("no lock at target")
+	}
+	l, err := scanLock(rows)
+	rows.Close()
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	if err := domain.AuthorizeBreak(l, byAgent, force, now, l.Host, live); err != nil {
+		return err
+	}
+
+	event := "lock_broken"
+	if !force {
+		event = "lock_reclaimed_stale"
+	}
+	tagID := newTagID(byAgent, now, reason)
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO tags(target_canonical,target_kind,id,kind,event,author_uuid,addressee_uuid,previous_owner_uuid,intent,created_at,expires_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,NULL)`,
+		t.Canonical, kindString(l.Target.Kind), tagID, "system", event, byAgent, l.OwnerUUID, l.OwnerUUID, reason, now.UnixNano(),
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ?`, t.Canonical, l.OwnerUUID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ListLocks(ctx context.Context) ([]domain.LockRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+lockCols+` FROM locks`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.LockRecord
+	for rows.Next() {
+		l, err := scanLock(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) LockAt(ctx context.Context, t domain.Target) (*domain.LockRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+lockCols+` FROM locks WHERE target_canonical = ?`, t.Canonical)
 	if err != nil {
