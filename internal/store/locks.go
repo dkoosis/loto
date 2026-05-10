@@ -11,6 +11,8 @@ import (
 	"loto/internal/domain"
 )
 
+var ErrNoLockAtTarget = errors.New("no lock at target")
+
 type ConflictError struct {
 	Blockers []domain.LockRecord
 }
@@ -117,13 +119,18 @@ func (s *Store) BreakLock(ctx context.Context, t domain.Target, byAgent string, 
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 	if !rows.Next() {
-		rows.Close()
-		return errors.New("no lock at target")
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return ErrNoLockAtTarget
 	}
 	l, err := scanLock(rows)
-	rows.Close()
 	if err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
 		return err
 	}
 
@@ -174,10 +181,19 @@ func (s *Store) LockAt(ctx context.Context, t domain.Target) (*domain.LockRecord
 	}
 	defer rows.Close()
 	if !rows.Next() {
-		return nil, nil
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, nil //nolint:nilnil // (nil, nil) signals "no row"; explicit not-found
 	}
 	l, err := scanLock(rows)
-	return &l, err
+	if err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return &l, nil
 }
 
 const lockCols = `target_canonical,target_kind,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,branch`
@@ -258,7 +274,7 @@ VALUES (?,?,?,?,?,?,?,?,?,?,NULL)`,
 
 func (s *Store) fsCaseSensitiveTx(tx *sql.Tx) (bool, error) {
 	var v string
-	err := tx.QueryRow(`SELECT value FROM schema_meta WHERE key = 'fs_case_sensitive'`).Scan(&v)
+	err := tx.QueryRowContext(context.Background(), `SELECT value FROM schema_meta WHERE key = 'fs_case_sensitive'`).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return true, nil
 	}

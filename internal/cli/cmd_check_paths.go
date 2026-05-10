@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -24,7 +25,7 @@ func cmdCheckPaths(args []string, stdout, stderr io.Writer) int {
 
 	var paths []string
 	if *staged {
-		out, err := exec.Command("git", "diff", "--cached", "--name-only", "-z").Output()
+		out, err := exec.CommandContext(context.Background(), "git", "diff", "--cached", "--name-only", "-z").Output()
 		if err != nil {
 			fmt.Fprintf(stderr, "✗ git diff: %v\n", err)
 			return 3

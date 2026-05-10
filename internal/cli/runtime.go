@@ -44,7 +44,7 @@ func openRuntime() (*runtime, error) {
 }
 
 func repoTopForCwd() (string, error) {
-	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	out, err := exec.CommandContext(context.Background(), "git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		return "", err
 	}
@@ -54,7 +54,7 @@ func repoTopForCwd() (string, error) {
 func (r *runtime) Close() error { return r.Store.Close() }
 
 func stateDirForCwd() (string, error) {
-	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	out, err := exec.CommandContext(context.Background(), "git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		return "", fmt.Errorf("not in a git repo: %w", err)
 	}

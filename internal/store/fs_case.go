@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"os"
@@ -11,7 +12,7 @@ import (
 func (s *Store) FSCaseSensitive(probeDir string) (bool, error) {
 	const key = "fs_case_sensitive"
 	var v string
-	err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key = ?`, key).Scan(&v)
+	err := s.db.QueryRowContext(context.Background(), `SELECT value FROM schema_meta WHERE key = ?`, key).Scan(&v)
 	if err == nil {
 		b, perr := strconv.ParseBool(v)
 		return b, perr
@@ -23,7 +24,7 @@ func (s *Store) FSCaseSensitive(probeDir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	_, err = s.db.Exec(`INSERT OR REPLACE INTO schema_meta(key,value) VALUES (?,?)`, key, strconv.FormatBool(probed))
+	_, err = s.db.ExecContext(context.Background(), `INSERT OR REPLACE INTO schema_meta(key,value) VALUES (?,?)`, key, strconv.FormatBool(probed))
 	return probed, err
 }
 

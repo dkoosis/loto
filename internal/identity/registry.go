@@ -25,12 +25,52 @@ func registryDir() string {
 // Ensure returns the current session's agent. If LOTO_AGENT_ID is set and
 // resolves, returns it. Otherwise creates a new identity, writes it.
 func Ensure() (*Agent, error) {
-	if u := os.Getenv("LOTO_AGENT_ID"); u != "" {
+	u, set := os.LookupEnv("LOTO_AGENT_ID")
+	if set && u != "" {
 		if a, err := loadByUUID(u); err == nil {
 			return a, nil
 		}
 	}
+	// Empty-but-set LOTO_AGENT_ID means "force new agent" (test fixtures use
+	// this to spin distinct identities). Unset means "interactive shell, no
+	// hook" — fall back to the most recent agent on this host so lock/unlock
+	// can pair across invocations.
+	if !set {
+		if a, err := mostRecentAgent(); err == nil && a != nil {
+			return a, nil
+		}
+	}
 	return newAgent("")
+}
+
+func mostRecentAgent() (*Agent, error) {
+	entries, err := os.ReadDir(registryDir())
+	if err != nil {
+		return nil, err
+	}
+	host, _ := os.Hostname()
+	var best *Agent
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(registryDir(), e.Name()))
+		if err != nil {
+			continue
+		}
+		var a Agent
+		if err := json.Unmarshal(body, &a); err != nil {
+			continue
+		}
+		if a.Host != host {
+			continue
+		}
+		if best == nil || a.CreatedAt.After(best.CreatedAt) {
+			cp := a
+			best = &cp
+		}
+	}
+	return best, nil
 }
 
 // EnsureAdhoc creates an Adhoc-prefixed identity for non-Claude shells.

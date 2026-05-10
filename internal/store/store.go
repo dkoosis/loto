@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -40,7 +41,7 @@ func openOnce(p string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sql.Open: %w", err)
 	}
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(context.Background()); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
@@ -65,7 +66,7 @@ func isCorruptDB(err error) bool {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) migrate() error {
-	if _, err := s.db.Exec(schemaSQL); err != nil {
+	if _, err := s.db.ExecContext(context.Background(), schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
 	return nil
