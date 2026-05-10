@@ -135,7 +135,7 @@ func emitAcquired(target string, tag *loto.Tag, conflicts []*loto.Reservation) {
 		return
 	}
 	result := map[string]any{
-		"acquired":   true,
+		keyAcquired:  true,
 		keyTarget:    target,
 		keyAgent:     tag.AgentID,
 		"expires_at": tag.ExpiresAt,

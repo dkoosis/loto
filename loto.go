@@ -194,6 +194,24 @@ func New(baseDir string) (*LOTO, error) {
 	return &LOTO{baseDir: baseDir}, nil
 }
 
+// flockOrHeld attempts the given flock op; on contention returns *ErrHeld
+// populated from the appropriate tag, on other errors returns *ErrSystem.
+func (l *LOTO) flockOrHeld(op func(*os.File) error, f *os.File, sysOp, kind, target string) error {
+	if err := op(f); err != nil {
+		if !isFlockContention(err) {
+			return &ErrSystem{Op: sysOp, Err: err}
+		}
+		var tag *Tag
+		if kind == kindGlobal {
+			tag, _ = l.ReadGlobalTag()
+		} else {
+			tag, _ = l.ReadTag(target)
+		}
+		return &ErrHeld{Tag: tag, Kind: kind, Target: target}
+	}
+	return nil
+}
+
 // TryFileLock non-blockingly acquires a shared global lock and an
 // exclusive lock on target. On failure, callers may use ReadTag /
 // ReadGlobalTag to discover the blocker.
@@ -216,12 +234,8 @@ func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (
 		}
 	}()
 
-	if err := flockShared(globalFile); err != nil {
-		if !isFlockContention(err) {
-			return nil, &ErrSystem{Op: "flock global", Err: err}
-		}
-		tag, _ := l.ReadGlobalTag()
-		return nil, &ErrHeld{Tag: tag, Kind: kindGlobal, Target: kindGlobal}
+	if err := l.flockOrHeld(flockShared, globalFile, "flock global", kindGlobal, kindGlobal); err != nil {
+		return nil, err
 	}
 
 	fileFile, err := os.OpenFile(fileLockPath, os.O_CREATE|os.O_RDWR, 0o600)
@@ -234,12 +248,8 @@ func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (
 		}
 	}()
 
-	if err := flockExclusive(fileFile); err != nil {
-		if !isFlockContention(err) {
-			return nil, &ErrSystem{Op: "flock file", Err: err}
-		}
-		tag, _ := l.ReadTag(target)
-		return nil, &ErrHeld{Tag: tag, Kind: kindFile, Target: target}
+	if err := l.flockOrHeld(flockExclusive, fileFile, "flock file", kindFile, target); err != nil {
+		return nil, err
 	}
 
 	// Record-tier guard: a tag with a non-zero, unexpired ExpiresAt
