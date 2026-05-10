@@ -19,7 +19,7 @@ include .sandbox/lib/Makefile.doctor.mk
 include .sandbox/lib/Makefile.cross.mk
 
 .PHONY: help scan check audit deploy report report-human \
-        vet lint test race vuln \
+        vet lint test race vuln stress \
         build install tidy clean
 
 BIN_DIR := bin
@@ -92,6 +92,9 @@ test: ## Run tests with coverage
 
 race: ## Run tests with race detector (slow)
 	go test -race -timeout=5m -count=1 $(PKG)
+
+stress: ## Concurrent-agent conformance gauntlet (build-tag stress)
+	go test -tags=stress -race -run TestStress -count=1 -timeout=2m ./...
 
 vuln: ## Scan for known vulnerabilities
 	@if ! command -v govulncheck >/dev/null 2>&1; then \
