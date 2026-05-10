@@ -68,10 +68,39 @@ func (l *LOTO) Reserve(agentID, intent, pattern string, ttl time.Duration) (*Res
 		return nil, &ErrSystem{Op: "reserve: marshal", Err: err}
 	}
 	tagPath := filepath.Join(resDir, hashPattern(pattern)+reservationExt)
-	if err := os.WriteFile(tagPath, append(data, '\n'), 0o600); err != nil {
+	if err := atomicWriteReservation(tagPath, append(data, '\n')); err != nil {
 		return nil, &ErrSystem{Op: "reserve: write", Err: err}
 	}
 	return r, nil
+}
+
+// atomicWriteReservation writes payload to tagPath via a temp-file + rename
+// so concurrent readers never observe a partial file (which would otherwise
+// be quarantined as corrupt). Bead loto-8ru surfaced this via stress.
+func atomicWriteReservation(tagPath string, payload []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(tagPath), filepath.Base(tagPath)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, werr := tmp.Write(payload); werr != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return werr
+	}
+	if cerr := tmp.Close(); cerr != nil {
+		_ = os.Remove(tmpName)
+		return cerr
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, tagPath); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
 // Unreserve removes the reservation for the given pattern, if it exists.

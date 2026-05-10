@@ -1,11 +1,12 @@
 # Boot
 updated: 2026-05-10
 
-→ pick from `bd ready` — epic loto-ux3 fully shipped (6/6); only loto-0fb (P2, cc-plugins repo) remains.
+→ resume `bd ready` — 4 new P1 audit beads (loto-c4f, loto-77q, loto-tbx, loto-xra) ahead of loto-8ru stress work.
 
 ✓ done
-- merged PR #14 (loto-ux3.2 hook pre/post-write) and PR #15 (loto-ux3.3 install-hook --write-gate); closed epic loto-ux3
-- pruned stale `/sessions/fervent-*` worktree + `loto-ux3.5` worktree, deleted remote `loto-ux3.2` branch
+- /bug-audit shipped 13 GH issues (#19-#31) + tracking beads
+- audit nug 246e31ed78c7
 
 ‡ traps
-- ✗ claim "shipped" until `gh pr view N --json state` returns MERGED
+- branch `loto-8ru` has uncommitted stress_test.go + Makefile + release.go + reservation.go from prior session — confirm intent before commit
+- one helper `atomicJSONUpdate` clears 5 audit beads (loto-0wb, loto-3d5, loto-ylv, loto-w8n, loto-ctr) in one PR
