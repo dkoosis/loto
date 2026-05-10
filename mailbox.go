@@ -184,14 +184,15 @@ func stampReadAt(all []Msg, agentID string) bool {
 func filterVisible(all []Msg, agentID string) []Msg {
 	cutoff := time.Now().Add(-mailboxMaxAge)
 	var out []Msg
-	for _, m := range all {
+	for i := range all {
+		m := &all[i]
 		if m.Timestamp.Before(cutoff) {
 			continue
 		}
 		if m.To != RecipientAll && m.To != agentID {
 			continue
 		}
-		out = append(out, m)
+		out = append(out, *m)
 	}
 	return out
 }
@@ -249,7 +250,8 @@ func (l *LOTO) ReadAllMsgs(agentID string, since time.Time) ([]Msg, error) {
 func filterSince(all []Msg, agentID string, since time.Time) []Msg {
 	cutoff := time.Now().Add(-mailboxMaxAge)
 	var out []Msg
-	for _, m := range all {
+	for i := range all {
+		m := &all[i]
 		if m.Timestamp.Before(cutoff) {
 			continue
 		}
@@ -259,7 +261,7 @@ func filterSince(all []Msg, agentID string, since time.Time) []Msg {
 		if m.To != RecipientAll && m.To != agentID {
 			continue
 		}
-		out = append(out, m)
+		out = append(out, *m)
 	}
 	return out
 }
@@ -459,7 +461,8 @@ func rewriteMsgs(msgsPath string, msgs []Msg) error {
 	if err != nil {
 		return &ErrSystem{Op: "msg: compact create", Err: err}
 	}
-	for _, m := range msgs {
+	for i := range msgs {
+		m := &msgs[i]
 		data, err := json.Marshal(m)
 		if err != nil {
 			f.Close()
@@ -526,7 +529,8 @@ func compactFileLocked(msgsPath string) error {
 	// Dedupe by MsgID, keeping the first occurrence (preserves arrival order).
 	// Legacy messages without MsgID are never deduped — they pass through.
 	seen := make(map[string]struct{}, len(msgs))
-	for _, m := range msgs {
+	for i := range msgs {
+		m := &msgs[i]
 		if m.Timestamp.Before(cutoff) {
 			continue
 		}
@@ -536,7 +540,7 @@ func compactFileLocked(msgsPath string) error {
 			}
 			seen[m.MsgID] = struct{}{}
 		}
-		keep = append(keep, m)
+		keep = append(keep, *m)
 	}
 	return rewriteMsgs(msgsPath, keep)
 }
