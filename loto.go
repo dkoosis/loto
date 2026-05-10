@@ -180,6 +180,12 @@ type ActiveLock struct {
 	globalTagPath string   // set only for a global lock
 	fileTagPath   string   // set only for a file lock
 
+	// preserveTag is set when TryFileLock layered atop an existing record-tier
+	// tag belonging to this same agent. Unlock then releases the flock without
+	// removing the tag — the caller's foreground use must not destroy the
+	// underlying acquire'd record-tier authority. (bead loto-c4f / gh-31)
+	preserveTag bool
+
 	// Conflicts lists advisory reservations that overlap the locked target.
 	// Non-nil only when reservations exist that match the path; the lock is
 	// still granted (reservations are advisory).
@@ -252,21 +258,16 @@ func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (
 		return nil, err
 	}
 
-	// Record-tier guard: a tag with a non-zero, unexpired ExpiresAt
-	// belongs to an acquire'd hold (north-star carve-out). Honor it
-	// even though flock is free — that is the whole point of the
-	// record tier. Same-agent re-Try succeeds; cross-agent fails.
-	if tag, _ := l.ReadTag(target); tag != nil && tag.IsRecordTier() && tag.AgentID != agentID {
-		return nil, &ErrHeld{Tag: tag, Kind: kindFile, Target: target}
-	}
-
-	// Lazy-GC: flock succeeded but a stale tag from a dead process remains.
-	// Honors record-tier (won't reap a live acquire'd tag).
-	lazyReapTag(fileTagPath)
-
-	tag := l.newTag(agentID, intent, target, kindFile, opts...)
-	if err := writeTagAtomic(fileTagPath, tag); err != nil {
+	preserveTag, err := l.recordTierGuard(target, agentID)
+	if err != nil {
 		return nil, err
+	}
+	if !preserveTag {
+		lazyReapTag(fileTagPath)
+		tag := l.newTag(agentID, intent, target, kindFile, opts...)
+		if err := writeTagAtomic(fileTagPath, tag); err != nil {
+			return nil, err
+		}
 	}
 
 	success = true
@@ -274,10 +275,26 @@ func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (
 		globalFile:  globalFile,
 		fileFile:    fileFile,
 		fileTagPath: fileTagPath,
+		preserveTag: preserveTag,
 	}
 	// Advisory: attach any conflicting reservations so callers can warn.
 	lock.Conflicts, _ = l.ConflictingReservations(target)
 	return lock, nil
+}
+
+// recordTierGuard checks for an existing record-tier tag at target.
+// Returns preserveTag=true when the same agent already holds a record-tier
+// tag (the foreground try must layer on top, not overwrite). Returns
+// ErrHeld when a different agent holds it. (bead loto-c4f / gh-31)
+func (l *LOTO) recordTierGuard(target, agentID string) (bool, error) {
+	existing, _ := l.ReadTag(target)
+	if existing == nil || !existing.IsRecordTier() {
+		return false, nil
+	}
+	if existing.AgentID != agentID {
+		return false, &ErrHeld{Tag: existing, Kind: kindFile, Target: target}
+	}
+	return true, nil
 }
 
 // TryGlobalLock non-blockingly acquires an exclusive global lock.
@@ -331,12 +348,12 @@ func (al *ActiveLock) Unlock() error {
 		}
 	}
 
-	if al.fileTagPath != "" {
+	if al.fileTagPath != "" && !al.preserveTag {
 		if err := os.Remove(al.fileTagPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			note(err)
 		}
-		al.fileTagPath = ""
 	}
+	al.fileTagPath = ""
 	if al.globalTagPath != "" {
 		if err := os.Remove(al.globalTagPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			note(err)

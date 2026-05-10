@@ -68,6 +68,57 @@ func TestAcquirePathSameAgentReturnsTag(t *testing.T) {
 	}
 }
 
+// TestSameAgentTryDoesNotClobberRecordTier: an AcquirePath sets a record-tier
+// tag with TTL; a same-agent TryFileLock followed by Unlock must NOT remove
+// the tag. After Unlock the path is still authoritatively held until TTL
+// expires. (bead loto-c4f / gh-31)
+func TestSameAgentTryDoesNotClobberRecordTier(t *testing.T) {
+	l := newTestLOTO(t)
+	target := filepath.Join(t.TempDir(), "record.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Record-tier acquire by agent-A.
+	if _, _, err := l.AcquirePath("agent-A", "edit", target, 5*time.Minute); err != nil {
+		t.Fatalf("AcquirePath: %v", err)
+	}
+	tagBefore, err := l.ReadTag(target)
+	if err != nil {
+		t.Fatalf("ReadTag before: %v", err)
+	}
+	if !tagBefore.IsRecordTier() {
+		t.Fatalf("expected record-tier tag, got %+v", tagBefore)
+	}
+
+	// 2. Same agent foreground try, then unlock.
+	lock, err := l.TryFileLock("agent-A", "test", target)
+	if err != nil {
+		t.Fatalf("same-agent TryFileLock: %v", err)
+	}
+	if err := lock.Unlock(); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+
+	// 3. Tag must survive — TTL authority preserved.
+	tagAfter, err := l.ReadTag(target)
+	if err != nil {
+		t.Fatalf("ReadTag after Unlock: %v (tag should still be present)", err)
+	}
+	if !tagAfter.IsRecordTier() {
+		t.Fatalf("tag lost record-tier status; got %+v", tagAfter)
+	}
+	if !tagAfter.ExpiresAt.Equal(tagBefore.ExpiresAt) {
+		t.Fatalf("ExpiresAt changed across foreground try: before=%v after=%v",
+			tagBefore.ExpiresAt, tagAfter.ExpiresAt)
+	}
+
+	// 4. Cross-agent try must still see the record-tier tag and be denied.
+	if _, err := l.TryFileLock("agent-B", "intrude", target); err == nil {
+		t.Fatal("cross-agent TryFileLock should be blocked by surviving record-tier tag")
+	}
+}
+
 // TestAcquirePathTTLExpiry: after TTL expires, another agent's try succeeds.
 func TestAcquirePathTTLExpiry(t *testing.T) {
 	l := newTestLOTO(t)
