@@ -133,7 +133,7 @@ func TestReapRefusesHeldLock(t *testing.T) {
 	if !errors.As(err, &held) {
 		t.Fatalf("expected ErrHeld, got %T: %v", err, err)
 	}
-	if held.Kind != "file" {
+	if held.Kind != kindFile {
 		t.Errorf("expected Kind=file, got %q", held.Kind)
 	}
 }
@@ -253,7 +253,7 @@ func TestErrHeldContainsTag(t *testing.T) {
 	if !errors.As(err, &held) {
 		t.Fatalf("expected *ErrHeld, got %T: %v", err, err)
 	}
-	if held.Kind != "file" {
+	if held.Kind != kindFile {
 		t.Errorf("Kind=%q, want file", held.Kind)
 	}
 	if held.Tag == nil {
@@ -279,7 +279,7 @@ func TestErrHeldGlobalContainsTag(t *testing.T) {
 	if !errors.As(err, &held) {
 		t.Fatalf("expected *ErrHeld, got %T: %v", err, err)
 	}
-	if held.Kind != "global" {
+	if held.Kind != kindGlobal {
 		t.Errorf("Kind=%q, want global", held.Kind)
 	}
 }

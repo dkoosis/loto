@@ -12,7 +12,7 @@ import (
 // File descriptors fit comfortably in int on every supported platform; the
 // uintptr→int conversion cannot overflow in practice.
 func fdAsInt(f *os.File) int {
-	return int(f.Fd()) //nolint:gosec // G115: fd always fits in int
+	return int(f.Fd())
 }
 
 // flockShared takes a non-blocking shared (read) lock on f.

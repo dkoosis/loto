@@ -35,7 +35,7 @@ var adjectives = []string{
 	"eager", "early", "east", "elder", "elite",
 	"even", "exact", "fair", "fast", "feral",
 	"firm", "fixed", "flat", "fleet", "focal",
-	"fond", "free", "fresh", "frugal", "full",
+	"fond", statusFree, "fresh", "frugal", "full",
 	"gale", "gentle", "gold", "grand", "gray",
 	"great", "green", "grim", "gross", "hardy",
 	"harsh", "heady", "high", "hollow", "honest",

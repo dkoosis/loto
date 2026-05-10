@@ -7,13 +7,15 @@ import (
 	"time"
 )
 
+const testAgentBraveOtter = "BraveOtter"
+
 func TestEmitLLMDashboardEventHeld(t *testing.T) {
 	var buf bytes.Buffer
 	ev := DashboardEvent{
 		Time:   time.Date(2026, 4, 30, 14, 32, 0, 0, time.UTC),
-		Kind:   "held",
-		Agent:  "BraveOtter",
-		Target: "internal/store/store.go",
+		Kind:   kindHeld,
+		Agent:  testAgentBraveOtter,
+		Target: testStorePath,
 		Intent: "edit store",
 	}
 	if err := EmitLLMDashboardEvent(&buf, ev); err != nil {
@@ -31,9 +33,9 @@ func TestEmitLLMDashboardEventMsg(t *testing.T) {
 	var buf bytes.Buffer
 	ev := DashboardEvent{
 		Time:  time.Date(2026, 4, 30, 14, 34, 0, 0, time.UTC),
-		Kind:  "msg",
+		Kind:  kindMsg,
 		Agent: "AmberFalcon",
-		To:    "BraveOtter",
+		To:    testAgentBraveOtter,
 		Body:  "need 5min on store.go",
 	}
 	if err := EmitLLMDashboardEvent(&buf, ev); err != nil {
@@ -51,9 +53,9 @@ func TestEmitHumanDashboardEventReserved(t *testing.T) {
 	var buf bytes.Buffer
 	ev := DashboardEvent{
 		Time:   time.Date(2026, 4, 30, 14, 32, 0, 0, time.UTC),
-		Kind:   "reserved",
-		Agent:  "BraveOtter",
-		Target: "internal/store/**",
+		Kind:   kindReserved,
+		Agent:  testAgentBraveOtter,
+		Target: testStorePattern,
 		Intent: "scan",
 	}
 	if err := EmitHumanDashboardEvent(&buf, ev); err != nil {

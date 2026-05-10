@@ -38,6 +38,12 @@ import (
 	"time"
 )
 
+// Repeated kind/target string literals consolidated for goconst.
+const (
+	kindGlobal = "global"
+	kindFile   = "file"
+)
+
 // ErrHeld is returned when a lock is currently held by another agent.
 // Use errors.As to extract the holder's Tag and Kind.
 //
@@ -172,7 +178,7 @@ func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (
 			return nil, &ErrSystem{Op: "flock global", Err: err}
 		}
 		tag, _ := l.ReadGlobalTag()
-		return nil, &ErrHeld{Tag: tag, Kind: "global", Target: "global"}
+		return nil, &ErrHeld{Tag: tag, Kind: kindGlobal, Target: kindGlobal}
 	}
 
 	fileFile, err := os.OpenFile(fileLockPath, os.O_CREATE|os.O_RDWR, 0o600)
@@ -190,13 +196,13 @@ func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (
 			return nil, &ErrSystem{Op: "flock file", Err: err}
 		}
 		tag, _ := l.ReadTag(target)
-		return nil, &ErrHeld{Tag: tag, Kind: "file", Target: target}
+		return nil, &ErrHeld{Tag: tag, Kind: kindFile, Target: target}
 	}
 
 	// Lazy-GC: flock succeeded but a stale tag from a dead process remains.
 	lazyReapTag(fileTagPath)
 
-	tag := l.newTag(agentID, intent, target, "file", opts...)
+	tag := l.newTag(agentID, intent, target, kindFile, opts...)
 	if err := writeTagAtomic(fileTagPath, tag); err != nil {
 		return nil, err
 	}
@@ -233,12 +239,12 @@ func (l *LOTO) TryGlobalLock(agentID, intent string, opts ...TagOptions) (*Activ
 			return nil, &ErrSystem{Op: "flock global", Err: err}
 		}
 		tag, _ := l.ReadGlobalTag()
-		return nil, &ErrHeld{Tag: tag, Kind: "global", Target: "global"}
+		return nil, &ErrHeld{Tag: tag, Kind: kindGlobal, Target: kindGlobal}
 	}
 
 	lazyReapTag(globalTagPath)
 
-	tag := l.newTag(agentID, intent, "global", "global", opts...)
+	tag := l.newTag(agentID, intent, kindGlobal, kindGlobal, opts...)
 	if err := writeTagAtomic(globalTagPath, tag); err != nil {
 		return nil, err
 	}
@@ -313,7 +319,7 @@ func (l *LOTO) ReapIfDead(target string) error {
 		return &ErrSystem{Op: "reap-if-dead: read tag", Err: err}
 	}
 	if pidAlive(tag.PID) {
-		return &ErrHeld{Tag: tag, Kind: "file", Target: target}
+		return &ErrHeld{Tag: tag, Kind: kindFile, Target: target}
 	}
 	return l.Reap(target)
 }
@@ -355,7 +361,7 @@ func (l *LOTO) Reap(target string) error {
 			return &ErrSystem{Op: "reap: flock", Err: err}
 		}
 		tag, _ := l.ReadTag(target)
-		return &ErrHeld{Tag: tag, Kind: "file", Target: target}
+		return &ErrHeld{Tag: tag, Kind: kindFile, Target: target}
 	}
 	if err := os.Remove(fileTagPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return &ErrSystem{Op: "reap: remove tag", Err: err}

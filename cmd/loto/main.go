@@ -33,6 +33,15 @@ var (
 
 var errInvalidImportance = errors.New("--importance must be one of: low, normal, urgent")
 
+// Repeated string literals consolidated for goconst.
+const (
+	statusFree = "free"
+	kindGlobal = "global"
+	keyCommand = "command"
+	keyAgent   = "agent"
+	keyTarget  = "target"
+)
+
 func main() {
 	if err := rootCmd.Execute(); err != nil {
 		// Cobra prints the error; we just exit. RunE commands call exit()
@@ -161,7 +170,7 @@ func tryCmd() *cobra.Command {
 	}
 
 	globalCmd := &cobra.Command{
-		Use:   "global",
+		Use:   kindGlobal,
 		Short: "acquire the global lock",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -170,7 +179,7 @@ func tryCmd() *cobra.Command {
 			if err != nil {
 				exit(err)
 			}
-			emitTrySuccess("global", "global", flagAgent, nil)
+			emitTrySuccess(kindGlobal, kindGlobal, flagAgent, nil)
 			if hold {
 				waitForSignal()
 			}
@@ -249,7 +258,7 @@ var statusCmd = &cobra.Command{
 			tag, err := l.ReadTag(t)
 			if err != nil {
 				entries = append(entries, render.StatusEntry{Target: t, Free: true})
-				jsonResult[t] = "free"
+				jsonResult[t] = statusFree
 			} else {
 				entries = append(entries, render.StatusEntry{Target: t, Free: false, AgentID: tag.AgentID, Intent: tag.Intent})
 				jsonResult[t] = tag
@@ -537,8 +546,8 @@ func writeClaudeHooks() error {
 			"matcher": "",
 			"hooks": []any{
 				map[string]any{
-					"type":    "command",
-					"command": "loto whoami --ensure >/dev/null 2>&1 || true",
+					"type":     keyCommand,
+					keyCommand: "loto whoami --ensure >/dev/null 2>&1 || true",
 				},
 			},
 		},
@@ -550,8 +559,8 @@ func writeClaudeHooks() error {
 			"matcher": "",
 			"hooks": []any{
 				map[string]any{
-					"type":    "command",
-					"command": "loto release --all-mine --json >/dev/null 2>&1 || true",
+					"type":     keyCommand,
+					keyCommand: "loto release --all-mine --json >/dev/null 2>&1 || true",
 				},
 			},
 		},
@@ -654,10 +663,10 @@ func emitTrySuccess(kind, target, agent string, warnings []*loto.Reservation) {
 		return
 	}
 	var result map[string]any
-	if kind == "global" {
-		result = map[string]any{"acquired": true, "kind": "global", "agent": agent}
+	if kind == kindGlobal {
+		result = map[string]any{"acquired": true, "kind": kindGlobal, keyAgent: agent}
 	} else {
-		result = map[string]any{"acquired": true, "target": target, "agent": agent}
+		result = map[string]any{"acquired": true, keyTarget: target, keyAgent: agent}
 	}
 	if len(warnings) > 0 {
 		patterns := make([]string, len(warnings))
@@ -675,10 +684,10 @@ func emitStatusGlobal(free bool, agent, intent string, tag *loto.Tag) {
 		return
 	}
 	if free {
-		_ = render.EmitJSON(os.Stdout, map[string]any{"global": "free"})
+		_ = render.EmitJSON(os.Stdout, map[string]any{kindGlobal: statusFree})
 		return
 	}
-	_ = render.EmitJSON(os.Stdout, map[string]any{"global": tag})
+	_ = render.EmitJSON(os.Stdout, map[string]any{kindGlobal: tag})
 }
 
 func emitStatusTargets(entries []render.StatusEntry, jsonResult map[string]any) {
@@ -752,7 +761,7 @@ func emitMsgSent(target, to string) {
 		_ = render.EmitLLMMsgSent(os.Stdout, target, displayAgent(to))
 		return
 	}
-	_ = render.EmitJSON(os.Stdout, map[string]any{"sent": true, "to": to, "target": target})
+	_ = render.EmitJSON(os.Stdout, map[string]any{"sent": true, "to": to, keyTarget: target})
 }
 
 func emitReleased(agent string, released []string, errs []string) {
@@ -760,7 +769,7 @@ func emitReleased(agent string, released []string, errs []string) {
 		_ = render.EmitLLMReleased(os.Stdout, displayAgent(agent), len(released), errs)
 		return
 	}
-	_ = render.EmitJSON(os.Stdout, map[string]any{"agent": agent, "released": released, "errors": errs})
+	_ = render.EmitJSON(os.Stdout, map[string]any{keyAgent: agent, "released": released, "errors": errs})
 }
 
 func emitReaped(target string) {
@@ -768,7 +777,7 @@ func emitReaped(target string) {
 		_ = render.EmitLLMReaped(os.Stdout, target)
 		return
 	}
-	_ = render.EmitJSON(os.Stdout, map[string]any{"reaped": true, "target": target})
+	_ = render.EmitJSON(os.Stdout, map[string]any{"reaped": true, keyTarget: target})
 }
 
 func emitBroken(target, by, reason string) {
@@ -776,7 +785,7 @@ func emitBroken(target, by, reason string) {
 		_ = render.EmitLLMBroken(os.Stdout, target, displayAgent(by), reason)
 		return
 	}
-	_ = render.EmitJSON(os.Stdout, map[string]any{"broken": true, "force": true, "target": target, "by": by, "reason": reason})
+	_ = render.EmitJSON(os.Stdout, map[string]any{"broken": true, "force": true, keyTarget: target, "by": by, "reason": reason})
 }
 
 // doctorModeLabel returns the wire form of a DoctorMode for emitter headers.

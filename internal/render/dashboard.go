@@ -6,6 +6,13 @@ import (
 	"time"
 )
 
+// Event-kind string literals consolidated for goconst.
+const (
+	kindMsg      = "msg"
+	kindHeld     = "held"
+	kindReserved = "reserved"
+)
+
 // DashboardEvent is the render-side projection of loto.Event. The render
 // package intentionally avoids importing the loto root, so callers translate.
 type DashboardEvent struct {
@@ -24,15 +31,15 @@ type DashboardEvent struct {
 func EmitLLMDashboardEvent(w io.Writer, e DashboardEvent) error {
 	ts := rfc3339UTC(e.Time)
 	switch e.Kind {
-	case "msg":
+	case kindMsg:
 		_, err := fmt.Fprintf(w, "→ ts:%s | msg | from:%s | to:%s | target:%s | %s\n",
 			ts, e.Agent, e.To, orDash(RelPath(e.Target)), collapseBody(e.Body))
 		return err
-	case "held", "released":
+	case kindHeld, "released":
 		_, err := fmt.Fprintf(w, "→ ts:%s | %s | agent:%s | target:%s | intent:%s\n",
 			ts, e.Kind, e.Agent, RelPath(e.Target), truncIntent(e.Intent))
 		return err
-	case "reserved", "unreserved":
+	case kindReserved, "unreserved":
 		_, err := fmt.Fprintf(w, "→ ts:%s | %s | agent:%s | pattern:%s | intent:%s\n",
 			ts, e.Kind, e.Agent, e.Target, truncIntent(e.Intent))
 		return err
@@ -51,16 +58,16 @@ func EmitLLMDashboardHeader(w io.Writer) error {
 func EmitHumanDashboardEvent(w io.Writer, e DashboardEvent) error {
 	hm := e.Time.Local().Format("15:04:05")
 	switch e.Kind {
-	case "msg":
+	case kindMsg:
 		_, err := fmt.Fprintf(w, "%s  %s → %s: %s\n", hm, e.Agent, e.To, collapseBody(e.Body))
 		return err
-	case "held":
+	case kindHeld:
 		_, err := fmt.Fprintf(w, "%s  %s held    %s%s\n", hm, e.Agent, RelPath(e.Target), humanIntent(e.Intent))
 		return err
 	case "released":
 		_, err := fmt.Fprintf(w, "%s  %s released %s\n", hm, e.Agent, RelPath(e.Target))
 		return err
-	case "reserved":
+	case kindReserved:
 		_, err := fmt.Fprintf(w, "%s  %s reserved %s%s\n", hm, e.Agent, e.Target, humanIntent(e.Intent))
 		return err
 	case "unreserved":

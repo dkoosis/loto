@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+const (
+	deadAgent  = "dead-agent"
+	staleGoTgt = "stale.go"
+)
+
 // writeRawTag writes a Tag directly into the files/ dir under l, bypassing the
 // flock — used to simulate crash remnants without holding the lock.
 func writeRawTag(t *testing.T, l *LOTO, target string, tag Tag) string {
@@ -51,9 +56,9 @@ func TestDoctorStaleTag(t *testing.T) {
 	l := newTestLOTO(t)
 
 	// Write a tag with a dead-ish PID (process 0 never exists on user side).
-	writeRawTag(t, l, "stale.go", Tag{
-		AgentID: "dead-agent",
-		Target:  "stale.go",
+	writeRawTag(t, l, staleGoTgt, Tag{
+		AgentID: deadAgent,
+		Target:  staleGoTgt,
 		PID:     0, // not a real pid; flock is free
 	})
 
@@ -73,9 +78,9 @@ func TestDoctorStaleTag(t *testing.T) {
 func TestDoctorRepairStaleTag(t *testing.T) {
 	l := newTestLOTO(t)
 
-	tagPath := writeRawTag(t, l, "stale.go", Tag{
-		AgentID: "dead-agent",
-		Target:  "stale.go",
+	tagPath := writeRawTag(t, l, staleGoTgt, Tag{
+		AgentID: deadAgent,
+		Target:  staleGoTgt,
 		PID:     0,
 	})
 
@@ -112,9 +117,9 @@ func TestDoctorRepairFailsPopulatesError(t *testing.T) {
 	}
 	l := newTestLOTO(t)
 
-	tagPath := writeRawTag(t, l, "stale.go", Tag{
-		AgentID: "dead-agent",
-		Target:  "stale.go",
+	tagPath := writeRawTag(t, l, staleGoTgt, Tag{
+		AgentID: deadAgent,
+		Target:  staleGoTgt,
 		PID:     0,
 	})
 
@@ -144,9 +149,9 @@ func TestDoctorRepairFailsPopulatesError(t *testing.T) {
 func TestDoctorDryRun(t *testing.T) {
 	l := newTestLOTO(t)
 
-	tagPath := writeRawTag(t, l, "stale.go", Tag{
-		AgentID: "dead-agent",
-		Target:  "stale.go",
+	tagPath := writeRawTag(t, l, staleGoTgt, Tag{
+		AgentID: deadAgent,
+		Target:  staleGoTgt,
 		PID:     0,
 	})
 

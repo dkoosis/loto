@@ -12,6 +12,12 @@ import (
 	"time"
 )
 
+const (
+	senderAlice = "alice"
+	recipBob    = "bob"
+	bodyDirect  = "direct"
+)
+
 // TestMailboxAppendCompactRace stresses the append/compact critical section.
 // Without the per-mailbox lock (loto-616), parallel appends could be lost
 // when compactFile rewrote a snapshot taken pre-write. With the lock, every
@@ -197,14 +203,14 @@ func TestReadStampsReadAtForDirectMessages(t *testing.T) {
 	l := newTestLOTO(t)
 	target := filepath.Join(t.TempDir(), "ack.go")
 
-	if err := l.SendMsgWith(target, Msg{From: "alice", To: "bob", Body: "direct", AckRequired: true}); err != nil {
+	if err := l.SendMsgWith(target, Msg{From: senderAlice, To: recipBob, Body: bodyDirect, AckRequired: true}); err != nil {
 		t.Fatalf("SendMsgWith direct: %v", err)
 	}
-	if err := l.SendMsg(target, "alice", "@all", "broadcast", false); err != nil {
+	if err := l.SendMsg(target, senderAlice, "@all", "broadcast", false); err != nil {
 		t.Fatalf("SendMsg broadcast: %v", err)
 	}
 
-	got, err := l.ReadMsgs(target, "bob")
+	got, err := l.ReadMsgs(target, recipBob)
 	if err != nil {
 		t.Fatalf("ReadMsgs: %v", err)
 	}
@@ -215,7 +221,7 @@ func TestReadStampsReadAtForDirectMessages(t *testing.T) {
 	var direct, broadcast *Msg
 	for i := range got {
 		switch got[i].Body {
-		case "direct":
+		case bodyDirect:
 			direct = &got[i]
 		case "broadcast":
 			broadcast = &got[i]
@@ -229,12 +235,12 @@ func TestReadStampsReadAtForDirectMessages(t *testing.T) {
 	}
 
 	first := *direct.ReadAt
-	got2, err := l.ReadMsgs(target, "bob")
+	got2, err := l.ReadMsgs(target, recipBob)
 	if err != nil {
 		t.Fatalf("ReadMsgs second: %v", err)
 	}
 	for _, m := range got2 {
-		if m.Body == "direct" {
+		if m.Body == bodyDirect {
 			if m.ReadAt == nil || !m.ReadAt.Equal(first) {
 				t.Errorf("ReadAt must be stable across reads: first=%v second=%v", first, m.ReadAt)
 			}
@@ -248,7 +254,7 @@ func TestReadDoesNotStampForOtherRecipient(t *testing.T) {
 	l := newTestLOTO(t)
 	target := filepath.Join(t.TempDir(), "no-stamp.go")
 
-	if err := l.SendMsgWith(target, Msg{From: "alice", To: "bob", Body: "for-bob"}); err != nil {
+	if err := l.SendMsgWith(target, Msg{From: senderAlice, To: recipBob, Body: "for-bob"}); err != nil {
 		t.Fatalf("SendMsgWith: %v", err)
 	}
 	// Carol reads — she's not bob; the message isn't even returned to her,
@@ -256,7 +262,7 @@ func TestReadDoesNotStampForOtherRecipient(t *testing.T) {
 	if _, err := l.ReadMsgs(target, "carol"); err != nil {
 		t.Fatalf("ReadMsgs carol: %v", err)
 	}
-	got, err := l.ReadMsgs(target, "bob")
+	got, err := l.ReadMsgs(target, recipBob)
 	if err != nil {
 		t.Fatalf("ReadMsgs bob: %v", err)
 	}
@@ -341,20 +347,20 @@ func TestReadAllMsgsAggregatesAcrossMailboxes(t *testing.T) {
 	a := filepath.Join(dir, "a.go")
 	b := filepath.Join(dir, "b.go")
 
-	if err := l.SendMsg(a, "alice", "bob", "direct-on-a", false); err != nil {
+	if err := l.SendMsg(a, senderAlice, recipBob, "direct-on-a", false); err != nil {
 		t.Fatalf("send direct-on-a: %v", err)
 	}
-	if err := l.SendMsg(a, "alice", "@all", "broadcast-on-a", false); err != nil {
+	if err := l.SendMsg(a, senderAlice, "@all", "broadcast-on-a", false); err != nil {
 		t.Fatalf("send broadcast-on-a: %v", err)
 	}
-	if err := l.SendMsg(b, "alice", "bob", "direct-on-b", false); err != nil {
+	if err := l.SendMsg(b, senderAlice, recipBob, "direct-on-b", false); err != nil {
 		t.Fatalf("send direct-on-b: %v", err)
 	}
-	if err := l.SendMsg(b, "alice", "carol", "not-for-bob", false); err != nil {
+	if err := l.SendMsg(b, senderAlice, "carol", "not-for-bob", false); err != nil {
 		t.Fatalf("send not-for-bob: %v", err)
 	}
 
-	got, err := l.ReadAllMsgs("bob", time.Time{})
+	got, err := l.ReadAllMsgs(recipBob, time.Time{})
 	if err != nil {
 		t.Fatalf("ReadAllMsgs: %v", err)
 	}
@@ -383,16 +389,16 @@ func TestReadAllMsgsAggregatesAcrossMailboxes(t *testing.T) {
 func TestReadAllMsgsSinceFiltersByTimestamp(t *testing.T) {
 	l := newTestLOTO(t)
 	target := filepath.Join(t.TempDir(), "since.go")
-	if err := l.SendMsg(target, "alice", "bob", "old", false); err != nil {
+	if err := l.SendMsg(target, senderAlice, recipBob, "old", false); err != nil {
 		t.Fatalf("send old: %v", err)
 	}
 	cutoff := time.Now().UTC().Add(time.Millisecond)
 	// Ensure the cutoff strictly precedes the next send.
 	time.Sleep(2 * time.Millisecond)
-	if err := l.SendMsg(target, "alice", "bob", "new", false); err != nil {
+	if err := l.SendMsg(target, senderAlice, recipBob, "new", false); err != nil {
 		t.Fatalf("send new: %v", err)
 	}
-	got, err := l.ReadAllMsgs("bob", cutoff)
+	got, err := l.ReadAllMsgs(recipBob, cutoff)
 	if err != nil {
 		t.Fatalf("ReadAllMsgs: %v", err)
 	}
@@ -406,14 +412,14 @@ func TestReadAllMsgsSinceFiltersByTimestamp(t *testing.T) {
 func TestReadAllMsgsStampsReadAtForDirect(t *testing.T) {
 	l := newTestLOTO(t)
 	target := filepath.Join(t.TempDir(), "ack.go")
-	if err := l.SendMsgWith(target, Msg{From: "alice", To: "bob", Body: "ping", AckRequired: true}); err != nil {
+	if err := l.SendMsgWith(target, Msg{From: senderAlice, To: recipBob, Body: "ping", AckRequired: true}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	if _, err := l.ReadAllMsgs("bob", time.Time{}); err != nil {
+	if _, err := l.ReadAllMsgs(recipBob, time.Time{}); err != nil {
 		t.Fatalf("ReadAllMsgs: %v", err)
 	}
 	// Re-read via per-file API — ReadAt must already be set from the cross-file read.
-	msgs, err := l.ReadMsgs(target, "bob")
+	msgs, err := l.ReadMsgs(target, recipBob)
 	if err != nil {
 		t.Fatalf("ReadMsgs: %v", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -245,8 +246,7 @@ func (m *dashModel) View() string {
 		b.WriteString(styleEmpty.Render("  (none yet — waiting on events…)"))
 		b.WriteString("\n")
 	} else {
-		for i := len(m.recent) - 1; i >= 0; i-- {
-			ev := m.recent[i]
+		for _, ev := range slices.Backward(m.recent) {
 			b.WriteString("  ")
 			b.WriteString(styleAge.Render(humanAge(m.now, ev.Time)))
 			b.WriteString("  ")

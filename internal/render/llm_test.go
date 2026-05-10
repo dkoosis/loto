@@ -7,6 +7,13 @@ import (
 	"time"
 )
 
+const (
+	testStorePath    = "internal/store/store.go"
+	testStorePattern = "internal/store/**"
+	testFooBarPath   = "foo/bar.go"
+	testAgentBlueOak = "BlueOak"
+)
+
 func TestEmitLLMWhoami(t *testing.T) {
 	var buf bytes.Buffer
 	if err := EmitLLMWhoami(&buf, "2dd46381-9c26-4c01-97ce-91beda0103d1", "RemoteSnipe", "Mac"); err != nil {
@@ -23,7 +30,7 @@ func TestEmitLLMWhoami(t *testing.T) {
 
 func TestEmitLLMTrySuccess(t *testing.T) {
 	var buf bytes.Buffer
-	if err := EmitLLMTrySuccess(&buf, "file", "internal/store/store.go", "GreenCastle", nil); err != nil {
+	if err := EmitLLMTrySuccess(&buf, "file", testStorePath, "GreenCastle", nil); err != nil {
 		t.Fatal(err)
 	}
 	got := buf.String()
@@ -35,9 +42,9 @@ func TestEmitLLMTrySuccess(t *testing.T) {
 func TestEmitLLMTrySuccessWithReservationWarnings(t *testing.T) {
 	var buf bytes.Buffer
 	warnings := []ReservationWarning{
-		{Pattern: "internal/store/**", AgentID: "BlueOak"},
+		{Pattern: testStorePattern, AgentID: testAgentBlueOak},
 	}
-	if err := EmitLLMTrySuccess(&buf, "file", "internal/store/store.go", "GreenCastle", warnings); err != nil {
+	if err := EmitLLMTrySuccess(&buf, "file", testStorePath, "GreenCastle", warnings); err != nil {
 		t.Fatal(err)
 	}
 	got := buf.String()
@@ -51,7 +58,7 @@ func TestEmitLLMBlocked(t *testing.T) {
 	heldSince := time.Date(2026, 4, 28, 14, 32, 11, 0, time.UTC)
 	expires := time.Date(2026, 4, 28, 14, 42, 11, 0, time.UTC)
 	in := BlockedInput{
-		Kind: "file", Target: "internal/store/store.go",
+		Kind: "file", Target: testStorePath,
 		AgentID: "GreenCastle", Intent: "store refactor",
 		HeldSince: heldSince, ExpiresAt: expires,
 		Branch: "store-refactor", Host: "dk-mac", PID: 84231,
@@ -111,7 +118,7 @@ func TestEmitLLMInboxEmpty(t *testing.T) {
 func TestEmitLLMInboxWithMessages(t *testing.T) {
 	var buf bytes.Buffer
 	msgs := []InboxMessage{
-		{From: "BlueOak", To: "@all", Body: "renaming Foo→Bar"},
+		{From: testAgentBlueOak, To: "@all", Body: "renaming Foo→Bar"},
 	}
 	if err := EmitLLMInbox(&buf, "store.go", msgs); err != nil {
 		t.Fatal(err)
@@ -127,7 +134,7 @@ func TestEmitLLMInboxWithMessages(t *testing.T) {
 
 func TestEmitLLMMsgSent(t *testing.T) {
 	var buf bytes.Buffer
-	if err := EmitLLMMsgSent(&buf, "store.go", "BlueOak"); err != nil {
+	if err := EmitLLMMsgSent(&buf, "store.go", testAgentBlueOak); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "✔ msg-sent | target:store.go | to:BlueOak\n") {
@@ -197,8 +204,8 @@ func TestRelPath(t *testing.T) {
 		want string
 	}{
 		{"empty passes through", "", ""},
-		{"under cwd becomes relative", cwd + "/foo/bar.go", "foo/bar.go"},
-		{"already relative passes through", "foo/bar.go", "foo/bar.go"},
+		{"under cwd becomes relative", cwd + "/foo/bar.go", testFooBarPath},
+		{"already relative passes through", testFooBarPath, testFooBarPath},
 		{"escapes cwd returns input", "/var/tmp/elsewhere", "/var/tmp/elsewhere"},
 	}
 	for _, c := range cases {
@@ -213,7 +220,7 @@ func TestRelPath(t *testing.T) {
 func TestEmitLLMDoctorTokenHint(t *testing.T) {
 	findings := make([]DoctorFinding, tokenHintThreshold+1)
 	for i := range findings {
-		findings[i] = DoctorFinding{Class: "stale_tag", Path: "/p/x", Detail: "x"}
+		findings[i] = DoctorFinding{Class: driftStaleTag, Path: "/p/x", Detail: "x"}
 	}
 	var buf bytes.Buffer
 	if err := EmitLLMDoctor(&buf, findings, "check"); err != nil {
@@ -257,9 +264,9 @@ func TestEmitLLMStatusTargets(t *testing.T) {
 
 func TestEmitLLMCheckPathsLockAndReservation(t *testing.T) {
 	conflicts := []CheckPathsConflict{
-		{Kind: "lock", Path: "internal/store/store.go", Holder: "BlueOak", Intent: "refactor"},
-		{Kind: "reservation", Path: "internal/store/store.go", Holder: "RedFox",
-			Pattern: "internal/store/**", Intent: "sweep"},
+		{Kind: "lock", Path: testStorePath, Holder: testAgentBlueOak, Intent: "refactor"},
+		{Kind: checkReservation, Path: testStorePath, Holder: "RedFox",
+			Pattern: testStorePattern, Intent: "sweep"},
 	}
 	var buf bytes.Buffer
 	if err := EmitLLMCheckPaths(&buf, conflicts); err != nil {
@@ -312,7 +319,7 @@ func TestEmitLLMDoctorClean(t *testing.T) {
 
 func TestEmitLLMDoctorTriageAndFix(t *testing.T) {
 	findings := []DoctorFinding{
-		{Class: "stale_tag", Path: "/p/a.tag", AgentID: "Alpha", Detail: "tag without lock"},
+		{Class: driftStaleTag, Path: "/p/a.tag", AgentID: "Alpha", Detail: "tag without lock"},
 		{Class: "soft_stale_held", Path: "/p/b.tag", AgentID: "Bravo", Detail: "TTL expired"},
 		{Class: "layout_drift", Path: "/p/junk", Detail: "unexpected entry"},
 	}
@@ -344,9 +351,9 @@ func TestEmitLLMDoctorTriageAndFix(t *testing.T) {
 
 func TestEmitLLMDoctorRepairStates(t *testing.T) {
 	findings := []DoctorFinding{
-		{Class: "stale_tag", Path: "/p/a.tag", Detail: "x", Repaired: true},
-		{Class: "stale_tag", Path: "/p/b.tag", Detail: "x", WouldRepair: true},
-		{Class: "stale_tag", Path: "/p/c.tag", Detail: "x", Error: "perm denied"},
+		{Class: driftStaleTag, Path: "/p/a.tag", Detail: "x", Repaired: true},
+		{Class: driftStaleTag, Path: "/p/b.tag", Detail: "x", WouldRepair: true},
+		{Class: driftStaleTag, Path: "/p/c.tag", Detail: "x", Error: "perm denied"},
 	}
 	var buf bytes.Buffer
 	if err := EmitLLMDoctor(&buf, findings, "repair"); err != nil {

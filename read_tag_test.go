@@ -12,6 +12,11 @@ import (
 	"loto"
 )
 
+const (
+	testKindGlobal  = "global"
+	testParseTagErr = "loto: parse tag"
+)
+
 func TestLOTO_ReadGlobalTag_When_TagStateVaries(t *testing.T) {
 	t.Parallel()
 
@@ -38,7 +43,7 @@ func TestLOTO_ReadGlobalTag_When_TagStateVaries(t *testing.T) {
 					t.Fatalf("write malformed tag: %v", err)
 				}
 			},
-			wantErrContains: "loto: parse tag",
+			wantErrContains: testParseTagErr,
 		},
 		{
 			name: "boundary error when global tag is empty file",
@@ -48,7 +53,7 @@ func TestLOTO_ReadGlobalTag_When_TagStateVaries(t *testing.T) {
 					t.Fatalf("write empty tag: %v", err)
 				}
 			},
-			wantErrContains: "loto: parse tag",
+			wantErrContains: testParseTagErr,
 		},
 		{
 			name: "error when global tag has invalid timestamp type",
@@ -58,7 +63,7 @@ func TestLOTO_ReadGlobalTag_When_TagStateVaries(t *testing.T) {
 					t.Fatalf("write invalid timestamp tag: %v", err)
 				}
 			},
-			wantErrContains: "loto: parse tag",
+			wantErrContains: testParseTagErr,
 		},
 		{
 			name: "happy path reads tag written by global lock",
@@ -74,7 +79,7 @@ func TestLOTO_ReadGlobalTag_When_TagStateVaries(t *testing.T) {
 					}
 				})
 			},
-			want: &loto.Tag{AgentID: "agent-a", Intent: "release", Target: "global", Kind: "global"},
+			want: &loto.Tag{AgentID: "agent-a", Intent: "release", Target: testKindGlobal, Kind: testKindGlobal},
 			inspect: func(t *testing.T, got *loto.Tag) {
 				t.Helper()
 				if got.PID <= 0 {
@@ -102,7 +107,7 @@ func TestLOTO_ReadGlobalTag_When_TagStateVaries(t *testing.T) {
 					}
 				})
 			},
-			want: &loto.Tag{AgentID: "agent-b", Intent: "release", Target: "global", Kind: "global"},
+			want: &loto.Tag{AgentID: "agent-b", Intent: "release", Target: testKindGlobal, Kind: testKindGlobal},
 			inspect: func(t *testing.T, got *loto.Tag) {
 				t.Helper()
 				if got.ExpiresAt.IsZero() {

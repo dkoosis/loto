@@ -24,6 +24,9 @@ const (
 	// avgTokensPerRow is a rough heuristic for estimating LLM token cost
 	// per output row. Tuned against typical inbox/reserve/doctor lines.
 	avgTokensPerRow = 25
+	// Repeated drift/check class strings.
+	driftStaleTag    = "stale_tag"
+	checkReservation = "reservation"
 )
 
 // RelPath returns p as a path relative to cwd when p resolves under cwd; on
@@ -424,7 +427,7 @@ type DoctorFinding struct {
 // Action-required classes get ✗; report-only get ⚠ or ℹ.
 func doctorClassGlyph(class string) string {
 	switch class {
-	case "stale_tag", "dead_pid", "orphaned", "zombie_held":
+	case driftStaleTag, "dead_pid", "orphaned", "zombie_held":
 		return "✗"
 	case "soft_stale_held":
 		return "⚠"
@@ -439,7 +442,7 @@ func doctorClassGlyph(class string) string {
 // clear this class. Used to decide whether to emit an inline fix command.
 func doctorClassRepairable(class string) bool {
 	switch class {
-	case "stale_tag", "dead_pid", "orphaned", "zombie_held":
+	case driftStaleTag, "dead_pid", "orphaned", "zombie_held":
 		return true
 	}
 	return false
@@ -550,7 +553,7 @@ func EmitLLMCheckPaths(w io.Writer, conflicts []CheckPathsConflict) error {
 	}
 	var locks, reservations int
 	for _, c := range conflicts {
-		if c.Kind == "reservation" {
+		if c.Kind == checkReservation {
 			reservations++
 		} else {
 			locks++
@@ -581,7 +584,7 @@ func writeCheckPathsRow(w io.Writer, c CheckPathsConflict) error {
 	if _, err := io.WriteString(w, b.String()); err != nil {
 		return err
 	}
-	if c.Kind == "reservation" {
+	if c.Kind == checkReservation {
 		_, err := fmt.Fprintf(w, "```bash\nloto reserve release %s\n```\n", c.Pattern)
 		return err
 	}

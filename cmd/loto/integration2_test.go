@@ -15,7 +15,12 @@ import (
 	"time"
 )
 
-const statusFree = "free"
+const (
+	flagAgentLong = "--agent"
+	flagToLong    = "--to"
+	subcmdMsg     = "msg"
+	agentSender   = "sender"
+)
 
 // lotoLLMCmd returns an *exec.Cmd that uses the LLM output format (no --json).
 func lotoLLMCmd(base string, args ...string) *exec.Cmd {
@@ -30,7 +35,7 @@ func lotoLLMCmd(base string, args ...string) *exec.Cmd {
 // Returns the running process; caller must kill + wait to clean up.
 func startHolder(t *testing.T, base, agent, target string) *exec.Cmd {
 	t.Helper()
-	holder := lotoCmd(base, "--agent", agent, "try", "file", "--hold", target)
+	holder := lotoCmd(base, flagAgentLong, agent, "try", "file", "--hold", target)
 	out, err := holder.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +65,7 @@ func startHolder(t *testing.T, base, agent, target string) *exec.Cmd {
 // startGlobalHolder launches loto try global --hold and waits for "acquired".
 func startGlobalHolder(t *testing.T, base, agent string) *exec.Cmd {
 	t.Helper()
-	holder := lotoCmd(base, "--agent", agent, "try", "global", "--hold")
+	holder := lotoCmd(base, flagAgentLong, agent, "try", kindGlobal, "--hold")
 	out, err := holder.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +107,7 @@ func killAndWait(p *exec.Cmd) {
 
 func TestTryGlobalAcquireJSON(t *testing.T) {
 	base := t.TempDir()
-	cmd := lotoCmd(base, "--agent", "agent-a", "try", "global")
+	cmd := lotoCmd(base, flagAgentLong, "agent-a", "try", kindGlobal)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("try global: %v\n%s", err, out)
@@ -114,7 +119,7 @@ func TestTryGlobalAcquireJSON(t *testing.T) {
 	if result["acquired"] != true {
 		t.Errorf("expected acquired=true, got %v", result)
 	}
-	if result["kind"] != "global" {
+	if result["kind"] != kindGlobal {
 		t.Errorf("expected kind=global, got %v", result["kind"])
 	}
 }
@@ -124,7 +129,7 @@ func TestTryGlobalContended(t *testing.T) {
 	holder := startGlobalHolder(t, base, "global-holder")
 	t.Cleanup(func() { killAndWait(holder) })
 
-	cmd := lotoCmd(base, "--agent", "global-contender", "try", "global")
+	cmd := lotoCmd(base, flagAgentLong, "global-contender", "try", kindGlobal)
 	out, err := cmd.Output()
 	if err == nil {
 		t.Fatalf("expected contender to fail, got success: %s", out)
@@ -220,8 +225,8 @@ func TestStatusGlobalFree(t *testing.T) {
 	if err := json.Unmarshal(out, &result); err != nil {
 		t.Fatalf("parse output: %v\n%s", err, out)
 	}
-	if result["global"] != statusFree {
-		t.Errorf("expected global=free, got %v", result["global"])
+	if result[kindGlobal] != statusFree {
+		t.Errorf("expected global=free, got %v", result[kindGlobal])
 	}
 }
 
@@ -239,9 +244,9 @@ func TestStatusGlobalHeld(t *testing.T) {
 	if err := json.Unmarshal(out, &result); err != nil {
 		t.Fatalf("parse output: %v\n%s", err, out)
 	}
-	globalEntry, ok := result["global"].(map[string]any)
+	globalEntry, ok := result[kindGlobal].(map[string]any)
 	if !ok {
-		t.Fatalf("expected map for held global, got %T: %v", result["global"], result["global"])
+		t.Fatalf("expected map for held global, got %T: %v", result[kindGlobal], result[kindGlobal])
 	}
 	if globalEntry["agent_id"] != "global-status-holder" {
 		t.Errorf("expected agent_id=global-status-holder, got %v", globalEntry["agent_id"])
@@ -333,7 +338,7 @@ func TestBreakForceOnDeadHolder(t *testing.T) {
 	killAndWait(holder)
 	time.Sleep(50 * time.Millisecond)
 
-	cmd := lotoCmd(base, "--agent", "breaker", "break", "--force", "--reason", "test takeover", target)
+	cmd := lotoCmd(base, flagAgentLong, "breaker", "break", "--force", "--reason", "test takeover", target)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("break --force: %v\n%s", err, out)
@@ -362,7 +367,7 @@ func TestBreakForceNotifiesDisplacedAgent(t *testing.T) {
 	killAndWait(holder)
 	time.Sleep(50 * time.Millisecond)
 
-	cmd := lotoCmd(base, "--agent", "breaker-agent", "break", "--force", "--reason", "urgent fix", target)
+	cmd := lotoCmd(base, flagAgentLong, "breaker-agent", "break", "--force", "--reason", "urgent fix", target)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("break --force: %v\n%s", err, out)
@@ -375,7 +380,7 @@ func TestBreakForceNotifiesDisplacedAgent(t *testing.T) {
 		t.Errorf("expected broken=true, got %v", result)
 	}
 	// Displaced agent should have a mailbox message with the reason.
-	inboxCmd := lotoCmd(base, "--agent", "displaced-agent", "inbox", target)
+	inboxCmd := lotoCmd(base, flagAgentLong, "displaced-agent", "inbox", target)
 	inboxOut, err := inboxCmd.Output()
 	if err != nil {
 		t.Fatalf("inbox after force break: %v\n%s", err, inboxOut)
@@ -396,14 +401,14 @@ func TestReleaseAllMine(t *testing.T) {
 
 	// Acquire both files, release immediately (no --hold).
 	for _, target := range []string{a, b} {
-		cmd := lotoCmd(base, "--agent", agent, "try", "file", target)
+		cmd := lotoCmd(base, flagAgentLong, agent, "try", "file", target)
 		if out, err := cmd.Output(); err != nil {
 			t.Fatalf("try %s: %v\n%s", target, err, out)
 		}
 	}
 
 	// Release all.
-	relCmd := lotoCmd(base, "--agent", agent, "release", "--all-mine")
+	relCmd := lotoCmd(base, flagAgentLong, agent, "release", "--all-mine")
 	out, err := relCmd.Output()
 	if err != nil {
 		t.Fatalf("release --all-mine: %v\n%s", err, out)
@@ -438,14 +443,14 @@ func TestMsgInboxRoundTrip(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "msg-target.go")
 
 	// Send a message from sender to recipient.
-	msgCmd := lotoCmd(base, "--agent", "sender", "msg", target, "please release soon",
-		"--to", "recipient")
+	msgCmd := lotoCmd(base, flagAgentLong, agentSender, subcmdMsg, target, "please release soon",
+		flagToLong, "recipient")
 	if out, err := msgCmd.Output(); err != nil {
 		t.Fatalf("msg: %v\n%s", err, out)
 	}
 
 	// Recipient reads inbox.
-	inboxCmd := lotoCmd(base, "--agent", "recipient", "inbox", target)
+	inboxCmd := lotoCmd(base, flagAgentLong, "recipient", "inbox", target)
 	out, err := inboxCmd.Output()
 	if err != nil {
 		t.Fatalf("inbox: %v\n%s", err, out)
@@ -460,13 +465,13 @@ func TestMsgInboxBroadcast(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "broadcast.go")
 
 	// Default --to is @all.
-	msgCmd := lotoCmd(base, "--agent", "broadcaster", "msg", target, "broadcast message")
+	msgCmd := lotoCmd(base, flagAgentLong, "broadcaster", subcmdMsg, target, "broadcast message")
 	if out, err := msgCmd.Output(); err != nil {
 		t.Fatalf("msg: %v\n%s", err, out)
 	}
 
 	// Any agent reading inbox should see it.
-	inboxCmd := lotoCmd(base, "--agent", "any-agent", "inbox", target)
+	inboxCmd := lotoCmd(base, flagAgentLong, "any-agent", "inbox", target)
 	out, err := inboxCmd.Output()
 	if err != nil {
 		t.Fatalf("inbox: %v\n%s", err, out)
@@ -483,10 +488,10 @@ func TestInboxBareEqualsMine(t *testing.T) {
 	dir := t.TempDir()
 	a := filepath.Join(dir, "a.go")
 
-	if out, err := lotoCmd(base, "--agent", "sender", "msg", a, "hello-bare", "--to", "recipient").Output(); err != nil {
+	if out, err := lotoCmd(base, flagAgentLong, agentSender, subcmdMsg, a, "hello-bare", flagToLong, "recipient").Output(); err != nil {
 		t.Fatalf("msg: %v\n%s", err, out)
 	}
-	out, err := lotoCmd(base, "--agent", "recipient", "inbox").Output()
+	out, err := lotoCmd(base, flagAgentLong, "recipient", "inbox").Output()
 	if err != nil {
 		t.Fatalf("bare inbox: %v\n%s", err, out)
 	}
@@ -505,16 +510,16 @@ func TestInboxMineCrossFile(t *testing.T) {
 	b := filepath.Join(dir, "b.go")
 
 	for _, send := range [][]string{
-		{"--agent", "sender", "msg", a, "for-recipient-a", "--to", "recipient"},
-		{"--agent", "sender", "msg", b, "for-recipient-b", "--to", "recipient"},
-		{"--agent", "sender", "msg", a, "for-someone-else", "--to", "other-agent"},
+		{flagAgentLong, agentSender, subcmdMsg, a, "for-recipient-a", flagToLong, "recipient"},
+		{flagAgentLong, agentSender, subcmdMsg, b, "for-recipient-b", flagToLong, "recipient"},
+		{flagAgentLong, agentSender, subcmdMsg, a, "for-someone-else", flagToLong, "other-agent"},
 	} {
 		if out, err := lotoCmd(base, send...).Output(); err != nil {
 			t.Fatalf("msg: %v\n%s", err, out)
 		}
 	}
 
-	out, err := lotoCmd(base, "--agent", "recipient", "inbox", "--mine").Output()
+	out, err := lotoCmd(base, flagAgentLong, "recipient", "inbox", "--mine").Output()
 	if err != nil {
 		t.Fatalf("inbox --mine: %v\n%s", err, out)
 	}
@@ -527,7 +532,7 @@ func TestInboxMineCrossFile(t *testing.T) {
 	}
 
 	// Second call should show no new messages — checkpoint advanced.
-	out2, err := lotoCmd(base, "--agent", "recipient", "inbox", "--mine").Output()
+	out2, err := lotoCmd(base, flagAgentLong, "recipient", "inbox", "--mine").Output()
 	if err != nil {
 		t.Fatalf("inbox --mine (2nd): %v\n%s", err, out2)
 	}
@@ -536,10 +541,10 @@ func TestInboxMineCrossFile(t *testing.T) {
 	}
 
 	// A new message arrives — only it should appear.
-	if out3, err := lotoCmd(base, "--agent", "sender", "msg", b, "fresh-one", "--to", "recipient").Output(); err != nil {
+	if out3, err := lotoCmd(base, flagAgentLong, agentSender, subcmdMsg, b, "fresh-one", flagToLong, "recipient").Output(); err != nil {
 		t.Fatalf("msg fresh: %v\n%s", err, out3)
 	}
-	out4, err := lotoCmd(base, "--agent", "recipient", "inbox", "--mine").Output()
+	out4, err := lotoCmd(base, flagAgentLong, "recipient", "inbox", "--mine").Output()
 	if err != nil {
 		t.Fatalf("inbox --mine (3rd): %v\n%s", err, out4)
 	}
@@ -618,7 +623,7 @@ func TestReserveAddListRelease(t *testing.T) {
 	agent := "reserve-agent"
 
 	// Add reservation.
-	addCmd := lotoCmd(base, "--agent", agent, "--intent", "store refactor",
+	addCmd := lotoCmd(base, flagAgentLong, agent, "--intent", "store refactor",
 		"reserve", "add", pattern)
 	if out, err := addCmd.Output(); err != nil {
 		t.Fatalf("reserve add: %v\n%s", err, out)
@@ -668,7 +673,7 @@ func TestReserveListEmpty(t *testing.T) {
 
 func TestReserveTTL(t *testing.T) {
 	base := t.TempDir()
-	addCmd := lotoCmd(base, "--agent", "ttl-agent", "reserve", "add", "src/**", "--ttl", "1h")
+	addCmd := lotoCmd(base, flagAgentLong, "ttl-agent", "reserve", "add", "src/**", "--ttl", "1h")
 	out, err := addCmd.Output()
 	if err != nil {
 		t.Fatalf("reserve add --ttl: %v\n%s", err, out)
@@ -692,7 +697,7 @@ func TestReserveWarningOnTryFile(t *testing.T) {
 	}
 
 	// Another agent stakes a glob reservation covering our target.
-	addCmd := lotoCmd(base, "--agent", "reserve-owner", "--intent", "store refactor",
+	addCmd := lotoCmd(base, flagAgentLong, "reserve-owner", "--intent", "store refactor",
 		"reserve", "add", filepath.Join(dir, "internal", "store", "**"))
 	if out, err := addCmd.Output(); err != nil {
 		t.Fatalf("reserve add: %v\n%s", err, out)
@@ -700,7 +705,7 @@ func TestReserveWarningOnTryFile(t *testing.T) {
 
 	// Different agent tries to acquire the file — should succeed (exit 0)
 	// but JSON output should include reservation_warnings.
-	tryCmd := lotoCmd(base, "--agent", "other-agent", "try", "file", target)
+	tryCmd := lotoCmd(base, flagAgentLong, "other-agent", "try", "file", target)
 	out, err := tryCmd.Output()
 	if err != nil {
 		t.Fatalf("try file with reservation: %v\n%s", err, out)
@@ -724,7 +729,7 @@ func TestReserveLLMFormat(t *testing.T) {
 
 	// add — use a UUID via --agent so we can assert UUID→handle resolution.
 	const uuid = "01234567-89ab-4cde-8f01-23456789abcd"
-	addOut, err := lotoLLMCmd(base, "--agent", uuid, "--intent", "refactor",
+	addOut, err := lotoLLMCmd(base, flagAgentLong, uuid, "--intent", "refactor",
 		"reserve", "add", pattern).Output()
 	if err != nil {
 		t.Fatalf("reserve add (LLM): %v\n%s", err, addOut)
@@ -791,7 +796,7 @@ func TestReserveLLMFormat(t *testing.T) {
 
 func TestDoctorClean(t *testing.T) {
 	base := t.TempDir()
-	cmd := lotoCmd(base, "--agent", "doctor-agent", "doctor")
+	cmd := lotoCmd(base, flagAgentLong, "doctor-agent", "doctor")
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("doctor on clean base: %v\n%s", err, out)
@@ -813,7 +818,7 @@ func TestDoctorDetectsStale(t *testing.T) {
 	killAndWait(holder)
 	time.Sleep(50 * time.Millisecond)
 
-	cmd := lotoCmd(base, "--agent", "doctor-agent", "doctor")
+	cmd := lotoCmd(base, flagAgentLong, "doctor-agent", "doctor")
 	out, err := cmd.Output()
 	// Doctor exits 1 when drift found.
 	var ee *exec.ExitError
@@ -838,7 +843,7 @@ func TestDoctorRepair(t *testing.T) {
 	killAndWait(holder)
 	time.Sleep(50 * time.Millisecond)
 
-	cmd := lotoCmd(base, "--agent", "doctor-agent", "doctor", "--repair")
+	cmd := lotoCmd(base, flagAgentLong, "doctor-agent", "doctor", "--repair")
 	out, err := cmd.Output()
 	// After repair: should exit 0 or 1. If drift was found and repaired, next
 	// run should be clean.
@@ -850,7 +855,7 @@ func TestDoctorRepair(t *testing.T) {
 	}
 
 	// Second doctor run: should be clean.
-	cmd2 := lotoCmd(base, "--agent", "doctor-agent", "doctor")
+	cmd2 := lotoCmd(base, flagAgentLong, "doctor-agent", "doctor")
 	out2, err2 := cmd2.Output()
 	if err2 != nil {
 		t.Fatalf("doctor after repair: %v\n%s", err2, out2)
@@ -886,7 +891,7 @@ func TestTryWaitTimesOut(t *testing.T) {
 	t.Cleanup(func() { killAndWait(holder) })
 
 	start := time.Now()
-	cmd := lotoCmd(base, "--agent", "waiter", "try", "file", "--wait", "200ms", target)
+	cmd := lotoCmd(base, flagAgentLong, "waiter", "try", "file", "--wait", "200ms", target)
 	out, err := cmd.Output()
 	elapsed := time.Since(start)
 
@@ -911,7 +916,7 @@ func TestTryFileTTL(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "ttl.go")
 
 	// Use --hold so the process stays alive while we check status.
-	holder := lotoCmd(base, "--agent", "ttl-agent", "try", "file", "--hold", "--ttl", "30m", target)
+	holder := lotoCmd(base, flagAgentLong, "ttl-agent", "try", "file", "--hold", "--ttl", "30m", target)
 	holderOut, err := holder.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -962,7 +967,7 @@ func TestLLMFormatTrySuccess(t *testing.T) {
 	base := t.TempDir()
 	target := filepath.Join(t.TempDir(), "llm.go")
 
-	cmd := lotoLLMCmd(base, "--agent", "llm-agent", "try", "file", target)
+	cmd := lotoLLMCmd(base, flagAgentLong, "llm-agent", "try", "file", target)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("try file (LLM): %v\n%s", err, out)
@@ -983,7 +988,7 @@ func TestLLMFormatBlocked(t *testing.T) {
 	holder := startHolder(t, base, "llm-holder", target)
 	t.Cleanup(func() { killAndWait(holder) })
 
-	cmd := lotoLLMCmd(base, "--agent", "llm-contender", "try", "file", target)
+	cmd := lotoLLMCmd(base, flagAgentLong, "llm-contender", "try", "file", target)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected blocked exit 1, got success: %s", out)
@@ -1017,7 +1022,7 @@ func TestLLMFormatStatus(t *testing.T) {
 
 func TestLLMFormatRelease(t *testing.T) {
 	base := t.TempDir()
-	cmd := lotoLLMCmd(base, "--agent", "llm-release-agent", "release", "--all-mine")
+	cmd := lotoLLMCmd(base, flagAgentLong, "llm-release-agent", "release", "--all-mine")
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("release --all-mine (LLM): %v\n%s", err, out)
@@ -1048,7 +1053,7 @@ func TestCheckPathsExplicitPathFree(t *testing.T) {
 	base := t.TempDir()
 	target := filepath.Join(t.TempDir(), "explicit.go")
 
-	cmd := lotoCmd(base, "--agent", "check-agent", "check-paths", target)
+	cmd := lotoCmd(base, flagAgentLong, "check-agent", "check-paths", target)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("check-paths (explicit free): %v\n%s", err, out)
@@ -1068,7 +1073,7 @@ func TestCheckPathsExplicitPathHeld(t *testing.T) {
 	holder := startHolder(t, base, "check-holder", target)
 	t.Cleanup(func() { killAndWait(holder) })
 
-	cmd := lotoCmd(base, "--agent", "check-other", "check-paths", target)
+	cmd := lotoCmd(base, flagAgentLong, "check-other", "check-paths", target)
 	out, err := cmd.Output()
 	if err == nil {
 		t.Fatalf("expected check-paths to exit 1 on held file, got success: %s", out)
@@ -1163,7 +1168,7 @@ func TestTryReleaseLifecycle(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Release --all-mine removes the stale tag.
-	relOut, err := lotoCmd(base, "--agent", agent, "release", "--all-mine").Output()
+	relOut, err := lotoCmd(base, flagAgentLong, agent, "release", "--all-mine").Output()
 	if err != nil {
 		t.Fatalf("release: %v\n%s", err, relOut)
 	}
