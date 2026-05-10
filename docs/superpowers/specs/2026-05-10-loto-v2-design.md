@@ -25,7 +25,13 @@ Borrow the shape. Don't translate every detail. Specifically: **no multi-lock ha
 
 ### Lock
 
-Exclusive claim by one agent on one target. Target may be a file path, a directory, or a glob — whatever scope the agent needs to touch.
+Exclusive claim by one agent on one target. Target forms, in order of preference:
+
+1. **Exact file path** — `internal/store/store.go`. Overlap is identity comparison. Trivial.
+2. **Directory prefix** — `internal/store/` (trailing slash distinguishes from a file of the same name). Locks every path under that subtree. Overlap is path-prefix comparison. Trivial.
+3. **Doublestar glob** — `internal/store/**/*.go`. Locks paths matching the pattern. Overlap requires `patternsOverlap` and is gated on the verification commitment in the Concurrency contract. **Use only when forms 1 and 2 are insufficient** — the cases where you actually need to filter by extension or pattern within a subtree, not just claim the subtree.
+
+Forms 1 and 2 cover almost every real use case ("this file" or "this subtree"). Form 3 stays available because some real refactors are extension-scoped, but the agent pays a verification tax — overlap correctness with globs is the most expensive invariant we ship.
 
 - **Single owner.** Only the placing agent releases.
 - **Canonical target.** Every operation canonicalizes the target before lookup or write (see Target canonicalization). Equivalent spellings (`./a`, `a`, `a/./`) refer to the same lock; mismatched spellings cannot fragment a lock's identity.
@@ -137,7 +143,7 @@ loto inbox [--mine] [--unread] [--mark-read]
 loto check-paths <target>...
 loto check-paths --staged
 
-loto doctor [--repair] [--dry-run] [--migrate-v1]
+loto doctor [--repair] [--dry-run]
 ```
 
 `refresh` is **not** a separate verb. Re-issuing `lock` against a target you already own refreshes intent and TTL atomically; this is the only way to extend a held lock. The verb count stays small.
@@ -156,7 +162,7 @@ repo:    /Users/dk/Projects/loto
 state:   ~/.local/state/loto/projects/dkoosis-loto
 ```
 
-Bare `loto doctor` with no flags is a read-only audit: prints stale locks, dead-pid holders, orphaned files, layout drift. `--repair` applies safe fixes; `--dry-run` shows what `--repair` would do without touching disk; `--migrate-v1` runs the one-shot v1→v2 on-disk conversion described in the migration section.
+Bare `loto doctor` with no flags is a read-only audit: prints stale locks, dead-pid holders, schema drift. `--repair` applies safe fixes (delete stale rows, write reclaim system tags, vacuum the SQLite database); `--dry-run` shows what `--repair` would do without touching disk.
 
 `loto check-paths --staged` reads `git diff --cached --name-only -z` from the repo containing the cwd; renames are checked at both source and destination paths; submodules and untracked files are skipped. Refuses (exit 1) if any staged path overlaps another agent's lock. (`--no-verify` bypasses the git pre-commit hook by design; loto is not a security boundary against a determined operator.)
 
@@ -190,7 +196,7 @@ Overlap rules:
 
 **Independent unlock.** Each lock is a separate record. `unlock <target>` releases only the lock at that exact target string; overlapping locks owned by the same agent are independent and survive. So if A holds both `internal/store/**` and `internal/store/store.go`, `unlock internal/store/**` leaves the narrower one in place. This rule is intentional — it prevents `unlock`-on-a-glob from silently dropping coverage of paths the agent never named.
 
-**Dead-pid detection on every access.** A lock carries `(host, pid)`. On any read of a lock, if `host == this host` and `kill(pid, 0)` reports the pid is not running, the lock is **stale** regardless of its TTL. The reader treats it the same as a TTL-expired lock — eligible for lazy GC, with a system-tag posted to the original owner's record on reclaim. This restores the v1 `--hold` crash-recovery behavior that flock provided automatically. (Cross-host pid checks are out of scope per non-goals.)
+**Dead-pid detection.** A lock carries `(host, pid)`. When evaluating staleness, if `host == this host` and `kill(pid, 0)` reports the pid is not running, the lock is **stale** regardless of its TTL. Stale locks are surfaced by reads (`status`) and reclaimed by writes (`lock`, `break`, `doctor --repair`) — never by reads themselves. Reclamation INSERTs a system tag and DELETEs the stale row in one transaction. This restores the v1 `--hold` crash-recovery behavior that flock provided automatically. (Cross-host pid checks are out of scope per non-goals.)
 
 Overlapping tags are always allowed (tags don't enforce); on `tag add`, the binary surfaces existing tags on the same or overlapping targets as a `⚠ overlaps existing` block in the response so the author sees who else is in the area.
 
@@ -201,27 +207,83 @@ Overlapping tags are always allowed (tags don't enforce); on `tag add`, the bina
 ```
 $XDG_STATE_HOME/loto/                              # canonical, shared across worktrees
 └── projects/<project-slug>/                       # one per logical project (git remote-derived)
-    ├── project.lock                               # project mutex; held during lock-set mutation
-    ├── locks/<sha256(canonical-target)>.json      # one per locked target
-    ├── tags/<sha256(canonical-target)>.jsonl      # append-only tag log per target
-    └── tags/<sha256(canonical-target)>.lock       # per-target advisory file lock (POSIX flock)
+    ├── loto.db                                    # SQLite, WAL mode — locks, tags, schema metadata
+    ├── loto.db-wal                                # SQLite WAL file (managed by SQLite)
+    └── loto.db-shm                                # SQLite shared-memory index (managed by SQLite)
 
 ~/.loto/agents/
     ├── <uuid>.json                                # host-global session identity record
     └── <uuid>/read-cursor.json                    # per-target last-read tag id (this agent)
 ```
 
+The backing store is **SQLite in WAL mode**, accessed via the pure-Go `modernc.org/sqlite` driver (no CGO). SQLite WAL natively provides:
+
+- Concurrent readers that don't block writers
+- Serialized writers via a single `BEGIN IMMEDIATE` transaction
+- Atomic multi-row writes (e.g., break-takeover writes the system tag and replaces the lock in one transaction)
+- Crash-safe durability without manual `fsync`/`tmp+rename` choreography
+- Range queries for overlap and `status` filters
+
+This replaces the v1 design's project-mutex + per-target tag-flock + tmp+rename + JSONL-append-with-PIPE_BUF dance. The Concurrency contract bullets describe the guarantees; SQLite WAL is the mechanism that delivers them.
+
+Trade: lose `cat`-style debugging of per-target files. Mitigated by `loto status <target>` (the diagnostic command) covering the human-inspect case; `sqlite3 loto.db` is available for forensics. Identity records and the read cursor stay as JSON files because they're per-agent (not per-project) and require no concurrency story.
+
 **Project slug derivation.** Slug = `<owner>-<repo>` from the first `git remote get-url origin` host-path; falls back to `local-<sha256(repo-toplevel-abspath)[:8]>` when no `origin` remote exists. Multiple remotes use `origin` regardless of order. Detached worktrees and submodules resolve via `git rev-parse --show-toplevel` of the cwd. The exact derivation must match v1's existing implementation (see `loto.go:projectSlug`); the v2 spec adopts v1's behavior verbatim.
 
 ### Schemas
 
-**Lock** (`locks/<sha256(canonical-target)>.json`):
+SQLite DDL (canonical):
+
+```sql
+CREATE TABLE locks (
+  target_canonical TEXT PRIMARY KEY,    -- canonical target string (file path, dir/, or glob)
+  target_kind      TEXT NOT NULL,       -- 'file' | 'dir' | 'glob'
+  owner_uuid       TEXT NOT NULL,
+  session_uuid     TEXT NOT NULL,
+  intent           TEXT NOT NULL DEFAULT '',
+  created_at       INTEGER NOT NULL,    -- unix nanoseconds
+  expires_at       INTEGER NOT NULL,    -- unix nanoseconds
+  host             TEXT NOT NULL,
+  pid              INTEGER NOT NULL,
+  branch           TEXT NOT NULL DEFAULT ''  -- display-only
+);
+CREATE INDEX idx_locks_owner    ON locks(owner_uuid);
+CREATE INDEX idx_locks_session  ON locks(session_uuid);
+CREATE INDEX idx_locks_expires  ON locks(expires_at);
+
+CREATE TABLE tags (
+  id                  TEXT PRIMARY KEY,         -- 't-<8-hex>' (see Tag id)
+  target_canonical    TEXT NOT NULL,
+  kind                TEXT NOT NULL,            -- 'note' | 'system'
+  event               TEXT,                     -- non-null when kind='system' (e.g. 'lock_broken')
+  author_uuid         TEXT NOT NULL,
+  addressee_uuid      TEXT,
+  previous_owner_uuid TEXT,                     -- non-null for system tags about a prior owner
+  intent              TEXT NOT NULL,
+  created_at          INTEGER NOT NULL,         -- unix nanoseconds
+  expires_at          INTEGER                   -- nullable; non-null = expirable
+);
+CREATE INDEX idx_tags_target     ON tags(target_canonical, created_at);
+CREATE INDEX idx_tags_addressee  ON tags(addressee_uuid, created_at);
+CREATE INDEX idx_tags_expires    ON tags(expires_at);
+
+CREATE TABLE schema_meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+-- schema_version, created_at, etc.
+```
+
+Logical-record view (what gets *recorded*, regardless of column layout):
+
+**Lock** logical record:
 
 ```json
 {
   "owner_uuid": "9e3c1e54-...",
   "session_uuid": "f70a3b22-...",
   "target": "internal/store/store.go",
+  "target_kind": "file",
   "intent": "store refactor — beads loto-7wp.4",
   "created_at": "2026-05-10T07:14:11Z",
   "expires_at": "2026-05-10T07:44:11Z",
@@ -233,7 +295,7 @@ $XDG_STATE_HOME/loto/                              # canonical, shared across wo
 
 `session_uuid` is set at SessionStart by the same hook that exports `LOTO_AGENT_ID`. With the current identity model (one Claude session = new uuid per SessionStart), `session_uuid` is effectively redundant with `owner_uuid` — but recording it explicitly future-proofs the SessionEnd hook against any later change to identity persistence. `branch` is **display-only**: shown in holder reports for orientation, never used for overlap, takeover, or any safety decision.
 
-**Tag** (one JSONL line in `tags/<sha256(canonical-target)>.jsonl`):
+**Tag** logical record (one row in the `tags` table):
 
 ```json
 {
@@ -291,21 +353,21 @@ Maps target hash → most-recent tag id this agent has read. `inbox --unread` re
 
 ### Garbage collection
 
-- Stale locks (past TTL or with a dead pid on this host, see overlap section) are pruned by any agent's next access to that target, and by `loto doctor --repair`. Pruning a stale lock posts a system tag in the original owner's name explaining the reclaim.
-- Expired tags are pruned during compaction passes triggered when a tag log exceeds 256 lines or 64 KiB, whichever first; compaction runs under the per-target tag lock (see Concurrency).
-- No daemon, no sweep, no background work.
+- Stale locks (past TTL or with a dead pid on this host) are reclaimed by `lock` (when acquiring the same target), by `break`, and by `doctor --repair`. Reclamation INSERTs a system tag explaining the reclaim and DELETEs the stale row in the same SQLite transaction. **Read-only commands surface stale rows in output but never delete them.**
+- Expired tags (rows with `expires_at IS NOT NULL AND expires_at < now()`) are deleted lazily by `doctor --repair`, or opportunistically by any write that already holds the SQLite writer lock. Reads filter expired tags via `WHERE expires_at IS NULL OR expires_at > now()`.
+- No daemon, no sweep, no application-level background work. SQLite's `PRAGMA wal_autocheckpoint` handles WAL checkpointing automatically.
 
 ## Concurrency contract
 
 The contract — what callers can rely on. Mechanics in the Implementation Notes appendix.
 
-1. **Lock-set mutation is serialized under a project mutex.** A POSIX advisory lock on `$XDG_STATE_HOME/loto/projects/<slug>/project.lock` is held for the full critical section of every operation that mutates the lock set: `lock`, `unlock`, `break`, `doctor --repair`, `doctor --migrate-v1`. Without this, two concurrent `lock` invocations on overlapping-but-distinct targets can both pass the overlap check on stale reads and both write — the central safety claim becomes false.
-2. **Lock files are written atomically.** `tmp + fsync + rename`. Readers either see the prior version or the new version, never a half-written file.
-3. **Tags are append-only under a per-target tag lock.** A per-target POSIX advisory lock serializes appends and compaction. Removes the PIPE_BUF (4 KiB) constraint on append atomicity; large intent strings are safe.
-4. **Read-only commands take no locks and mutate no state.** `status`, `inbox`, `check-paths`, `whoami`, bare `doctor` are pure reads. They surface stale state in their output but never reclaim.
-5. **Break-force ordering is tag-first.** The system-authored break tag is appended (under the tag lock) **before** the lock file is replaced (under the project mutex). The two writes are not transactional, but the order guarantees that any observable state with the lock missing has the explanatory tag present.
-6. **Refresh verifies ownership.** Re-issuing `lock` against an owned target reads the existing lock file under the project mutex, verifies `owner_uuid == me`, then writes the new lock file. A refresh cannot resurrect a lock that was just broken.
-7. **Overlap detection correctness is release-blocking.** v1's `patternsOverlap` is the basis. v2 ships only after an exhaustive grammar test matrix covering identical patterns, prefix-containment, glob-vs-glob, glob-vs-literal, dot-segments, and brace expansion if supported. Any documented false-negative blocks release — false-negative means silent overlap-collision, which violates the central lock contract. False-positives (rejecting safe overlap) are tolerable.
+1. **All state-mutating operations execute as a single SQLite transaction (`BEGIN IMMEDIATE` … `COMMIT`).** This applies to `lock`, `unlock`, `break`, `tag`, `untag`, and `doctor --repair`. WAL mode allows concurrent readers; writers serialize on the database file. Two concurrent `lock` invocations on overlapping-but-distinct targets are forced into sequence; the second observes the first's row and either rejects (different agent) or refines (same agent). The central safety claim — no concurrent acquisition of overlapping locks — is enforced by SQLite's writer-serialization, not by application-level mutex gymnastics.
+2. **Atomicity is transactional.** Multi-row writes commit together or not at all. Break-takeover (write system tag + replace lock) and stale-reclaim (write system tag + delete row + insert new row) are each one transaction. There is no observable state where a system tag exists without its corresponding lock change, or vice versa. Earlier drafts' "tag-first ordering" rule is obsolete — both writes are in one transaction.
+3. **Read-only commands take no write locks and mutate no state.** `status`, `inbox`, `check-paths`, `whoami`, bare `doctor` are pure SELECTs. They surface stale or expired rows in their output but never DELETE.
+4. **Refresh verifies ownership atomically.** Re-issuing `lock` against an owned target is `UPDATE locks SET intent = ?, expires_at = ? WHERE target_canonical = ? AND owner_uuid = ?`. A refresh that races a `break --force` either commits before the break (refresh wins; break then sees the refreshed row) or after (refresh's WHERE clause matches zero rows because owner changed; binary returns exit 1, "lock no longer mine"). A refresh cannot resurrect a broken lock.
+5. **Reads observe a consistent snapshot.** WAL mode gives readers a single point-in-time view of the database. `loto status` cannot show inconsistent state across the lock and tag tables.
+6. **Overlap detection correctness is release-blocking.** Forms 1 (exact path) and 2 (directory prefix) have trivial overlap rules — string equality and path-prefix comparison. Form 3 (globs) uses `patternsOverlap`; v2 ships only after an exhaustive grammar test matrix covering identical patterns, prefix-containment, glob-vs-glob, glob-vs-literal, dot-segments, and brace expansion if supported. Any documented false-negative blocks release — false-negative means silent overlap-collision, which violates the central lock contract. False-positives (rejecting safe overlap) are tolerable.
+7. **Domain decisions are pure functions.** Overlap detection, TTL/staleness checks, takeover authorization, and tag-relevance filtering are pure functions over their inputs. They are testable without any database, filesystem, or environment dependency. The SQLite layer, CLI parser, and hook wrappers are adapters around this pure core; the core never imports them.
 
 ## Behavioral enforcement
 
@@ -367,22 +429,24 @@ New:
 
 - **Multi-lock hasp.** A target has at most one lock-holder. Cooperation across agents on the same target uses tags, not co-locking.
 
-## Migration from v1
+## v1 → v2 surface mapping
+
+v1 coordination state is ephemeral (short-TTL locks, per-session identities, conversational mailboxes) and is not migrated. v2 starts each project with a fresh SQLite database; sessions running v1 at the moment of upgrade simply lose their (already short-lived) coordination state, the same way they would on a `rm -rf ~/.local/state/loto/`. Users who want to clean up v1 files after upgrade can `rm` them manually.
+
+What changes at the CLI:
 
 | v1 concept | v2 mapping |
 |---|---|
 | `loto try file <path> [--hold]` | `loto lock <path> [--ttl ...]`. Foreground hold (`--hold`) becomes "lock with a TTL and refresh while you're working." |
-| `loto try global` | `loto lock '**'` — globs already cover this. The `global.lock`/`global.tag` files in the layout become an ordinary lock on `**`. |
+| `loto try global` | `loto lock '**'` — globs already cover this. v1's separate `global.lock` is just a lock on `**` in v2. |
 | `loto reserve add <glob>` | `loto lock <glob>` (when claiming territory) **or** `loto tag <glob> --intent "..."` (when only declaring). Both paths exist; the agent picks based on whether they want exclusion. |
 | `loto reserve list` | `loto status` (locks) + `loto inbox` (tags addressed to me) |
 | `loto msg <target> --to <agent> "..."` | `loto tag <target> --to <agent> "..."` |
-| `loto inbox <target>` / `loto inbox --mine` | unchanged in shape; reads from the new tag store |
-| `loto break <target>` (reap-only) | unchanged; `loto break --force --reason "..."` adds the takeover capability |
-| `loto check-paths` | unchanged in shape; consults locks (overlap) and tags (informational) |
-| `loto install-hook` | unchanged; PreToolUse pre-edit gate added; PostToolUse / SessionEnd release stays |
+| `loto inbox <target>` / `loto inbox --mine` | unchanged in shape; reads from the new SQLite tag table |
+| `loto break <target>` (reap-only) | `loto break <target> --reason "..."` (stale only); `loto break --force --reason "..."` adds the live-takeover capability |
+| `loto check-paths` | unchanged in shape; consults the SQLite locks table (overlap) and tags table (informational) |
+| `loto install-hook` | unchanged surface; PreToolUse pre-edit gate added; SessionEnd uses `unlock --session` |
 | `loto install-git-hook` | unchanged |
-
-On-disk migration: the v1 `reservations/` directory contents become v2 tags (intent preserved, no addressee). The v1 `files/<hash>.tag` + `.lock` pair becomes a v2 lock entry. The v1 `files/<hash>.msgs` mailbox becomes per-target tag JSONL with addressee set. A one-shot `loto doctor --migrate-v1` handles the conversion; the layout shape is similar enough that this is mechanical.
 
 ## Deferred (explicitly out of scope for v2)
 
@@ -398,6 +462,8 @@ To stay a sharp hand-tool rather than infrastructure, these are deliberately *no
 - Permissions / authorization beyond owner-only release and `--force --reason`
 - Rich tag taxonomies beyond `note | system`
 - Prepared statements / templates for common tag intents
+- MCP server adapter for agent orchestration. The CLI + hooks combo serves agents adequately (`loto lock; if [ $? -eq 1 ]; then ...`); a typed MCP surface would double maintenance for no v2 benefit. Legitimate v3 territory if CLI ergonomics ever prove insufficient.
+- Markdown / YAML frontmatter for tag bodies. Tags are short notes; SQLite-stored TEXT is the right shape. Multiline rendering is a downstream display concern, not a storage one.
 
 ## Acceptance
 
@@ -424,22 +490,43 @@ Any **write-safety invariant** described in this spec that the binary or hook do
 
 Mechanics that support the Concurrency contract; not part of the contract itself but load-bearing for any implementer.
 
-### Lock files
+### SQLite configuration
 
-- `tmp + fsync + rename` is the atomic write primitive. The replace is atomic at the directory entry level on POSIX local filesystems.
-- The project mutex (`project.lock`) is acquired at the start of any lock-set mutation and released at the end. POSIX flock is process-bound, which matches our single-host single-fs assumption.
-- Refresh under the project mutex: open existing lock JSON → verify `owner_uuid` → write new tmp → fsync → rename. Concurrent `break --force` either waits for the mutex or wins it first; either way, a refresh never resurrects a broken lock.
+- Driver: `modernc.org/sqlite` (pure Go, no CGO).
+- On first open, the binary runs:
+  ```sql
+  PRAGMA journal_mode = WAL;
+  PRAGMA synchronous  = NORMAL;
+  PRAGMA foreign_keys = ON;
+  PRAGMA busy_timeout = 5000;       -- ms; tolerate brief writer contention
+  PRAGMA wal_autocheckpoint = 1000; -- pages; default behavior
+  ```
+- `journal_mode = WAL` is per-database and persists; the PRAGMA is idempotent.
+- `synchronous = NORMAL` is the WAL-recommended setting — durable enough for our use (loss of last few transactions on power failure is acceptable; we're not a financial ledger), much faster than `FULL`.
+- `busy_timeout = 5000` means a writer waiting for another writer retries internally for up to 5s before returning `SQLITE_BUSY`. Practical write critical sections are sub-millisecond, so this only fires under genuine contention or stuck processes.
 
-### Tag files
+### Schema management
 
-- Per-target `tags/<hash>.lock` (POSIX flock, exclusive) serializes append and compaction.
-- Append: `O_APPEND` write of one JSONL line, with the per-target lock held. The lock removes the POSIX 4 KiB PIPE_BUF atomicity ceiling — long intent strings are safe.
-- Compaction: triggered when the tag log exceeds 256 lines or 64 KiB. Holds the per-target lock, drops expired tags, rewrites via `tmp + fsync + rename`. A concurrent appender blocks until compaction completes, then appends to the rewritten file. No append is lost.
-- Read: readers do not take the lock. They tolerate compaction's rename via stat-then-reopen on `ENOENT`. JSONL parsing is line-by-line; a partial last line is dropped (under the lock invariant, partial lines occur only mid-append, and the next read sees the complete line).
+- `schema_meta` table holds `schema_version` (integer, monotonically increasing).
+- On binary start, compare on-disk version to the binary's known version. Newer on-disk → exit 3 with "loto.db is from a newer loto version; upgrade or remove the database." Older on-disk → run forward migrations sequentially in one transaction each.
+- Schema migrations live as `migrations/NNN_description.sql` in the binary (embedded via `embed.FS`). These are forward-only schema evolutions for v2 itself; v1 file-based state is not migrated (see "v1 → v2 surface mapping").
+
+### Domain core (pure functions)
+
+Per Concurrency contract item 7. The following live in a `domain` package with no imports of `database/sql`, `os`, `path/filepath`, or anything else with side effects. They take and return plain Go values.
+
+- `Overlap(a, b Target) bool` — pure overlap check across the three target forms (file/dir/glob).
+- `IsStale(lock LockRecord, now time.Time, hostPidLive func(host string, pid int) bool) bool` — TTL plus dead-pid check; the dead-pid probe is injected as a function so tests pass a fake.
+- `AuthorizeUnlock(lock LockRecord, byAgent uuid.UUID) error` — owner-only release rule.
+- `AuthorizeBreak(lock LockRecord, byAgent uuid.UUID, force bool, now time.Time) error` — stale-vs-live distinction, `--force` requirement.
+- `RelevantTags(tags []TagRecord, forAgent uuid.UUID, target Target, kind RelevanceKind) []TagRecord` — filter for `lock`/`unlock` surfacing and `inbox` queries.
+
+The SQLite adapter, CLI parser, and hook wrappers compose around this core. Tests of the core do not touch disk or shell.
 
 ### Read cursor
 
 - `~/.loto/agents/<uuid>/read-cursor.json` is rewritten via `tmp + rename` on `--mark-read`. Concurrent processes for the same agent are unexpected (one session = one process running CLI commands serially); if it ever happens, last-write-wins on the cursor is acceptable — losing a cursor advance just means re-seeing already-read tags, never missing a tag.
+- The cursor file is per-agent, not in the SQLite database, because it's host-global agent state, not project state. Keeps the project DB free of agent identity.
 
 ### Hook script details
 
@@ -447,4 +534,4 @@ The Stop hook (see Behavioral enforcement) emits JSON with `additionalContext` p
 
 ### Patterns overlap test matrix
 
-The release-blocking test matrix (Concurrency contract item 7) lives at `reservation_test.go` (or a successor module). At minimum it must cover: identical patterns; prefix containment in both directions; `**`-vs-literal; `**`-vs-`**`; literal-vs-literal disjoint; literal-vs-glob with shared literal prefix; brace expansion if our doublestar dependency supports it; dot-segment edge cases; trailing-slash variants. The bar is **zero documented false-negatives**; any false-negative blocks v2 release.
+The release-blocking test matrix (Concurrency contract item 6) lives in the `domain` package's `overlap_test.go`. At minimum it must cover: identical patterns; prefix containment in both directions; `**`-vs-literal; `**`-vs-`**`; literal-vs-literal disjoint; literal-vs-glob with shared literal prefix; brace expansion if our doublestar dependency supports it; dot-segment edge cases; trailing-slash variants; mixed file/dir/glob target forms (e.g. file lock vs glob, dir-prefix vs nested file). The bar is **zero documented false-negatives**; any false-negative blocks v2 release.
