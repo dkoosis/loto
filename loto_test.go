@@ -539,3 +539,79 @@ func TestReserveInvalidPattern(t *testing.T) {
 		t.Fatal("expected error for invalid pattern")
 	}
 }
+
+const (
+	patInternalAll  = "internal/**"
+	patInternalStor = "internal/store/**"
+)
+
+// TestPatternsOverlap exercises the symmetric overlap helper. False positives
+// are tolerable (advisory only); false negatives are not. Each case is asserted
+// in both directions to confirm symmetry.
+func TestPatternsOverlap(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"identical", patInternalAll, patInternalAll, true},
+		{"prefix match: pattern matches concrete path", patInternalStor, "internal/store/foo.go", true},
+		{"nested doublestars: parent prefix", patInternalAll, patInternalStor, true},
+		{"crosscut: anything-named-foo vs subtree", "**/foo.go", patInternalAll, true},
+		{"disjoint subtrees", patInternalAll, "cmd/**", false},
+		{"sibling subtrees", patInternalStor, "internal/render/**", false},
+		{"distinct literal files", "pkg/a.go", "pkg/b.go", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := patternsOverlap(tc.a, tc.b); got != tc.want {
+				t.Errorf("patternsOverlap(%q, %q) = %v; want %v", tc.a, tc.b, got, tc.want)
+			}
+			if got := patternsOverlap(tc.b, tc.a); got != tc.want {
+				t.Errorf("patternsOverlap(%q, %q) = %v; want %v (symmetry)", tc.b, tc.a, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestOverlappingReservationsReportsIntersect: planting a reservation, then
+// querying with a pattern that overlaps it, surfaces the existing entry.
+func TestOverlappingReservationsReportsIntersect(t *testing.T) {
+	l := newTestLOTO(t)
+	if _, err := l.Reserve("agent-a", "store work", patInternalStor, 0); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	overlaps, err := l.OverlappingReservations(patInternalAll)
+	if err != nil {
+		t.Fatalf("OverlappingReservations: %v", err)
+	}
+	if len(overlaps) != 1 || overlaps[0].Pattern != patInternalStor {
+		t.Fatalf("want one overlap on %s, got %+v", patInternalStor, overlaps)
+	}
+}
+
+// TestOverlappingReservationsDisjoint: a pattern targeting a sibling subtree
+// must not surface a non-overlapping reservation.
+func TestOverlappingReservationsDisjoint(t *testing.T) {
+	l := newTestLOTO(t)
+	if _, err := l.Reserve("agent-a", "render work", "internal/render/**", 0); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	overlaps, err := l.OverlappingReservations(patInternalStor)
+	if err != nil {
+		t.Fatalf("OverlappingReservations: %v", err)
+	}
+	if len(overlaps) != 0 {
+		t.Fatalf("want no overlaps for sibling subtree, got %+v", overlaps)
+	}
+}
+
+// TestOverlappingReservationsRejectsInvalidPattern: invalid patterns must
+// surface as ErrInvalidGlob so callers don't silently drop the warning.
+func TestOverlappingReservationsRejectsInvalidPattern(t *testing.T) {
+	l := newTestLOTO(t)
+	_, err := l.OverlappingReservations("[\x00bad")
+	if err == nil || !errors.Is(err, ErrInvalidGlob) {
+		t.Fatalf("want ErrInvalidGlob, got %v", err)
+	}
+}

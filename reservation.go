@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -152,6 +153,81 @@ func (l *LOTO) ConflictingReservations(path string) ([]*Reservation, error) {
 func matchesReservation(pattern, path string) bool {
 	ok, _ := doublestar.Match(pattern, path)
 	return ok
+}
+
+// OverlappingReservations returns active reservations whose pattern overlaps
+// with the given pattern. Symmetric: overlap(a,b) == overlap(b,a). Used to
+// surface advisory warnings when staking a new reservation that intersects
+// existing ones — never blocks (reservations remain advisory).
+func (l *LOTO) OverlappingReservations(pattern string) ([]*Reservation, error) {
+	if !doublestar.ValidatePattern(pattern) {
+		return nil, &ErrSystem{Op: "overlap: invalid pattern", Err: fmt.Errorf("%w: %q", ErrInvalidGlob, pattern)}
+	}
+	all, err := l.ListReservations()
+	if err != nil {
+		return nil, err
+	}
+	var overlaps []*Reservation
+	for _, r := range all {
+		if patternsOverlap(pattern, r.Pattern) {
+			overlaps = append(overlaps, r)
+		}
+	}
+	return overlaps, nil
+}
+
+// patternsOverlap reports whether two doublestar globs could match at least
+// one common path. Symmetric. Conservative — false positives are advisory
+// (never block), false negatives would silently miss conflicts so we err
+// toward reporting.
+//
+// Algorithm:
+//  1. Identical patterns trivially overlap.
+//  2. If either pattern matches the other treated as a literal name, overlap
+//     (handles cases like internal/** vs internal/store/**).
+//  3. Otherwise compare literal prefixes (chars before first glob meta). If
+//     one prefix is a path-prefix of the other, the meta-tails could match
+//     a common path — report overlap. Disjoint prefixes → no overlap.
+func patternsOverlap(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if ok, _ := doublestar.Match(a, b); ok {
+		return true
+	}
+	if ok, _ := doublestar.Match(b, a); ok {
+		return true
+	}
+	prefA := literalPrefix(a)
+	prefB := literalPrefix(b)
+	return isPathPrefix(prefA, prefB) || isPathPrefix(prefB, prefA)
+}
+
+// literalPrefix returns the longest path-segment prefix of pattern containing
+// no glob metacharacters. "internal/store/**" → "internal/store"; "**/foo.go"
+// → ""; "pkg/a*.go" → "pkg".
+func literalPrefix(pattern string) string {
+	segs := strings.Split(pattern, "/")
+	var literal []string
+	for _, s := range segs {
+		if strings.ContainsAny(s, "*?[{") {
+			break
+		}
+		literal = append(literal, s)
+	}
+	return strings.Join(literal, "/")
+}
+
+// isPathPrefix reports whether prefix is a path-prefix of full (or equal).
+// Empty prefix is a path-prefix of anything.
+func isPathPrefix(prefix, full string) bool {
+	if prefix == "" {
+		return true
+	}
+	if prefix == full {
+		return true
+	}
+	return strings.HasPrefix(full, prefix+"/")
 }
 
 func (l *LOTO) readReservation(tagPath string) (*Reservation, error) {

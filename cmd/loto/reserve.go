@@ -33,11 +33,15 @@ Subcommands: add, release, list`,
 				dur = parseDurationOrExit("ttl", ttl)
 			}
 			l := newLOTO()
+			overlaps, err := l.OverlappingReservations(pattern)
+			if err != nil {
+				exit(err)
+			}
 			r, err := l.Reserve(flagAgent, flagIntent, pattern, dur)
 			if err != nil {
 				exit(err)
 			}
-			emitReserveAdded(r)
+			emitReserveAdded(r, overlaps)
 			return nil
 		},
 	}
@@ -91,9 +95,20 @@ func reservationEntry(r *loto.Reservation) render.ReservationEntry {
 	return e
 }
 
-func emitReserveAdded(r *loto.Reservation) {
+func emitReserveAdded(r *loto.Reservation, overlaps []*loto.Reservation) {
 	if currentFormat == render.FormatLLM {
-		_ = render.EmitLLMReserveAdded(os.Stdout, reservationEntry(r))
+		entries := make([]render.ReservationEntry, len(overlaps))
+		for i, o := range overlaps {
+			entries[i] = reservationEntry(o)
+		}
+		sort.SliceStable(entries, func(i, j int) bool {
+			return entries[i].Pattern < entries[j].Pattern
+		})
+		_ = render.EmitLLMReserveAdded(os.Stdout, reservationEntry(r), entries)
+		return
+	}
+	if len(overlaps) > 0 {
+		_ = render.EmitJSON(os.Stdout, map[string]any{"reservation": r, "overlaps": overlaps})
 		return
 	}
 	_ = render.EmitJSON(os.Stdout, r)

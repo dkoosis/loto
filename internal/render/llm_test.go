@@ -492,3 +492,39 @@ func TestEmitLLMErrorCollapsesNewlines(t *testing.T) {
 		t.Fatalf("newline not collapsed:\n%s", got)
 	}
 }
+
+func TestEmitLLMReserveAddedNoOverlaps(t *testing.T) {
+	var buf bytes.Buffer
+	e := ReservationEntry{Pattern: testStorePattern, AgentID: testAgentBlueOak, Intent: testIntentRefactor}
+	if err := EmitLLMReserveAdded(&buf, e, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "✔ reserved | "+testStorePattern) {
+		t.Fatalf("missing confirmation row:\n%s", got)
+	}
+	if strings.Contains(got, "overlaps existing") {
+		t.Fatalf("unexpected overlap warning:\n%s", got)
+	}
+}
+
+func TestEmitLLMReserveAddedSurfacesOverlaps(t *testing.T) {
+	var buf bytes.Buffer
+	e := ReservationEntry{Pattern: "internal/**", AgentID: testAgentBlueOak, Intent: "broad sweep"}
+	overlaps := []ReservationEntry{
+		{Pattern: testStorePattern, AgentID: testAgentGreenCastle, Intent: testIntentRefactor},
+	}
+	if err := EmitLLMReserveAdded(&buf, e, overlaps); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "✔ reserved | internal/**") {
+		t.Fatalf("missing confirmation row:\n%s", got)
+	}
+	if !strings.Contains(got, "⚠ overlaps existing | n:1") {
+		t.Fatalf("missing overlap header with count:\n%s", got)
+	}
+	if !strings.Contains(got, "→ "+testStorePattern+" | by:"+testAgentGreenCastle) {
+		t.Fatalf("missing overlap row:\n%s", got)
+	}
+}
