@@ -86,7 +86,7 @@ func (l *LOTO) AcquirePath(agentID, intent, target string, ttl time.Duration, op
 		effOpts.TTL = opts[0].TTL
 	}
 	tag := l.newTag(agentID, intent, target, kindFile, effOpts)
-	if err := writeTagAtomic(fileTagPath, tag); err != nil {
+	if err := l.writeTagAtomic(fileTagPath, tag); err != nil {
 		return nil, nil, err
 	}
 
