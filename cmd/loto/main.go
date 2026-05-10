@@ -94,6 +94,7 @@ func init() {
 		inboxCmd(),        // main.go
 		msgCmd(),          // main.go
 		installHookCmd,    // main.go
+		hookCmd(),         // hook.go
 		helloCmd(),        // hello.go
 		reserveCmd(),      // reserve.go
 		checkPathsCmd(),   // gitcheck.go
