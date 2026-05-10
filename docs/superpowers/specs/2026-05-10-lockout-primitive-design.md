@@ -243,8 +243,8 @@ internal/cli/acceptance_test.go
 
 Two NORTH_STAR.md edits become true only after this lands. Both are tracked as separate beads (filed alongside this spec):
 
-- NORTH_STAR `sha256(abs-path)` → `sha256(canonical-rel-path)` in the layout block.
-- NORTH_STAR operating-loop example `loto try file <path>` → `loto lock <path>...`.
+- `loto-9ky` — NORTH_STAR `sha256(abs-path)` → `sha256(canonical-rel-path)` in the layout block.
+- `loto-qy6` — NORTH_STAR operating-loop example `loto try file <path>` → `loto lock <path>...`.
 
 Each is a one-line edit; queued so docs and code don't desync.
 
