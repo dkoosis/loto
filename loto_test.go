@@ -561,6 +561,7 @@ func TestPatternsOverlap(t *testing.T) {
 		{"disjoint subtrees", patInternalAll, "cmd/**", false},
 		{"sibling subtrees", patInternalStor, "internal/render/**", false},
 		{"distinct literal files", "pkg/a.go", "pkg/b.go", false},
+		{"trailing slash on literal prefix", "internal/", "internal/store/foo.go", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

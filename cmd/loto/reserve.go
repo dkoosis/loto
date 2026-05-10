@@ -96,22 +96,26 @@ func reservationEntry(r *loto.Reservation) render.ReservationEntry {
 }
 
 func emitReserveAdded(r *loto.Reservation, overlaps []*loto.Reservation) {
+	filtered := make([]*loto.Reservation, 0, len(overlaps))
+	for _, o := range overlaps {
+		if o.Pattern == r.Pattern && o.AgentID == r.AgentID {
+			continue
+		}
+		filtered = append(filtered, o)
+	}
+	sort.SliceStable(filtered, func(i, j int) bool {
+		return filtered[i].Pattern < filtered[j].Pattern
+	})
+
 	if currentFormat == render.FormatLLM {
-		entries := make([]render.ReservationEntry, len(overlaps))
-		for i, o := range overlaps {
+		entries := make([]render.ReservationEntry, len(filtered))
+		for i, o := range filtered {
 			entries[i] = reservationEntry(o)
 		}
-		sort.SliceStable(entries, func(i, j int) bool {
-			return entries[i].Pattern < entries[j].Pattern
-		})
 		_ = render.EmitLLMReserveAdded(os.Stdout, reservationEntry(r), entries)
 		return
 	}
-	if len(overlaps) > 0 {
-		_ = render.EmitJSON(os.Stdout, map[string]any{"reservation": r, "overlaps": overlaps})
-		return
-	}
-	_ = render.EmitJSON(os.Stdout, r)
+	_ = render.EmitJSON(os.Stdout, map[string]any{"reservation": r, "overlaps": filtered})
 }
 
 func emitReserveReleased(pattern string) {

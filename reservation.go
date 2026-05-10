@@ -227,7 +227,7 @@ func isPathPrefix(prefix, full string) bool {
 	if prefix == full {
 		return true
 	}
-	return strings.HasPrefix(full, prefix+"/")
+	return strings.HasPrefix(full, strings.TrimSuffix(prefix, "/")+"/")
 }
 
 func (l *LOTO) readReservation(tagPath string) (*Reservation, error) {
