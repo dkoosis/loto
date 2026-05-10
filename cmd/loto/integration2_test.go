@@ -190,6 +190,88 @@ func TestStatusFileHeld(t *testing.T) {
 	}
 }
 
+// ── acquire (record-tier) ─────────────────────────────────────────────────────
+
+// TestAcquireHappyPath: 'loto acquire <path>' returns 0 with JSON carrying
+// acquired:true and expires_at, then a second-agent 'try' is blocked
+// surfacing the original holder.
+func TestAcquireHappyPath(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(t.TempDir(), "acquired-cli.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := lotoCmd(base, flagAgentLong, "alpha", "acquire", target)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("acquire: %v\n%s", err, out)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("parse: %v\n%s", err, out)
+	}
+	if got["acquired"] != true {
+		t.Errorf("expected acquired=true, got %v", got["acquired"])
+	}
+	if got["target"] != target {
+		t.Errorf("expected target=%s, got %v", target, got["target"])
+	}
+	if got["agent"] != "alpha" {
+		t.Errorf("expected agent=alpha, got %v", got["agent"])
+	}
+	if _, ok := got["expires_at"]; !ok {
+		t.Errorf("expected expires_at in output, got %v", got)
+	}
+
+	// Second agent's try must be blocked by the record-tier tag.
+	tryCmd := lotoCmd(base, flagAgentLong, "beta", "try", "file", target)
+	tryOut, tryErr := tryCmd.Output()
+	if tryErr == nil {
+		t.Fatalf("expected non-zero exit from beta try, got success: %s", tryOut)
+	}
+	var ee *exec.ExitError
+	if !errors.As(tryErr, &ee) {
+		t.Fatalf("unexpected error type: %v", tryErr)
+	}
+	if ee.ExitCode() != 1 {
+		t.Errorf("expected exit 1, got %d", ee.ExitCode())
+	}
+	if !strings.Contains(string(ee.Stderr), "alpha") {
+		t.Errorf("blocked report missing holder agent: %s", ee.Stderr)
+	}
+}
+
+// TestAcquireConflict: a second-agent acquire on a path already held by
+// alpha returns exit 1 with holder identity.
+func TestAcquireConflict(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(t.TempDir(), "conflict-cli.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := lotoCmd(base, flagAgentLong, "alpha", "acquire", target).Output(); err != nil {
+		t.Fatalf("alpha acquire: %v\n%s", err, out)
+	}
+
+	cmd := lotoCmd(base, flagAgentLong, "beta", "acquire", target)
+	out, err := cmd.Output()
+	if err == nil {
+		t.Fatalf("expected conflict, got success: %s", out)
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	if ee.ExitCode() != 1 {
+		t.Errorf("expected exit 1, got %d", ee.ExitCode())
+	}
+	if !strings.Contains(string(ee.Stderr), "alpha") {
+		t.Errorf("conflict report missing holder agent: %s", ee.Stderr)
+	}
+}
+
 // TestStatusAcquiredRendersAsHeld verifies S2 indistinguishability: a
 // record-tier acquire'd hold (no foreground flock, ExpiresAt set) renders
 // in `loto status` with the same display shape as a try'd hold — same

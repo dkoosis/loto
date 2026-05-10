@@ -129,6 +129,17 @@ type ReservationWarning struct {
 	AgentID string
 }
 
+// AcquireEntry describes a successful record-tier acquire'd hold for the
+// `loto acquire <path>` LLM emitter. Conflicts carries advisory reservation
+// patterns whose globs match the target (hook-adapter pre-write signal).
+type AcquireEntry struct {
+	Target    string
+	AgentID   string
+	Intent    string
+	ExpiresAt time.Time
+	Conflicts []ReservationWarning
+}
+
 // BlockedInput is the data needed to render a holder-blocked report.
 type BlockedInput struct {
 	Kind      string // "file" | "global"
@@ -147,6 +158,30 @@ func truncIntent(s string) string {
 		return s
 	}
 	return s[:intentMax-1] + "…"
+}
+
+// EmitLLMAcquired writes a one-line record-tier acquire confirmation plus
+// optional reservation conflicts. Distinct from EmitLLMTrySuccess — that
+// emitter covers process-bound flock holds; this one carries the TTL that
+// makes record-tier authoritative across process exit.
+func EmitLLMAcquired(w io.Writer, e AcquireEntry) error {
+	if err := writeHeader(w); err != nil {
+		return err
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "✔ acquired | %s | by:%s", e.Target, e.AgentID)
+	appendIntent(&b, e.Intent)
+	appendTTL(&b, e.ExpiresAt)
+	b.WriteByte('\n')
+	if _, err := io.WriteString(w, b.String()); err != nil {
+		return err
+	}
+	for _, c := range e.Conflicts {
+		if _, err := fmt.Fprintf(w, "⚠ reservation | %s | held-by:%s\n", c.Pattern, c.AgentID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // EmitLLMTrySuccess writes a one-line acquired record plus optional reservation warnings.

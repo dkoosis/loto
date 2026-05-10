@@ -83,6 +83,7 @@ func init() {
 	// Subcommand → defining file. Keep alphabetical-ish by file for orientation.
 	rootCmd.AddCommand(
 		tryCmd(),          // main.go
+		acquireCmd(),      // acquire.go
 		statusCmd,         // main.go
 		reapCmd,           // main.go
 		breakCmd(),        // main.go
