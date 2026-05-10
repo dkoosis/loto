@@ -1,11 +1,11 @@
 # Boot
-updated: 2026-05-09 (post-recovery)
+updated: 2026-05-10
 
-→ pick next from `bd ready` — main is clean (b9bb69e), all PRs merged, audit passes.
+→ pick from `bd ready` — epic loto-ux3 fully shipped (6/6); only loto-0fb (P2, cc-plugins repo) remains.
 
 ✓ done
-- merged PR #11 + #12 manually after boot.md falsely claimed shipped
-- added invariant: ✗ claim "shipped" until `gh pr view N --json state` returns MERGED
+- merged PR #14 (loto-ux3.2 hook pre/post-write) and PR #15 (loto-ux3.3 install-hook --write-gate); closed epic loto-ux3
+- pruned stale `/sessions/fervent-*` worktree + `loto-ux3.5` worktree, deleted remote `loto-ux3.2` branch
 
 ‡ traps
-- merged worktrees leave stale golangci-lint cache → `golangci-lint cache clean` if `loto-ux3.N/` paths appear in lint output
+- ✗ claim "shipped" until `gh pr view N --json state` returns MERGED
