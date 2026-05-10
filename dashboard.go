@@ -86,7 +86,8 @@ func backfillMsgs(path string, since time.Time) []Event {
 		return nil
 	}
 	out := make([]Event, 0, len(msgs))
-	for _, m := range msgs {
+	for i := range msgs {
+		m := &msgs[i]
 		if m.Timestamp.Before(since) {
 			continue
 		}
@@ -226,7 +227,8 @@ func seedMsgSeen(path string) map[string]bool {
 	if err != nil {
 		return seen
 	}
-	for _, m := range msgs {
+	for i := range msgs {
+		m := &msgs[i]
 		if m.MsgID != "" {
 			seen[m.MsgID] = true
 		}
@@ -373,7 +375,8 @@ func handleMsgsEvent(ev fsnotify.Event, msgSeen map[string]map[string]bool, out 
 	if err != nil {
 		return
 	}
-	for _, m := range msgs {
+	for i := range msgs {
+		m := &msgs[i]
 		if m.MsgID != "" && seen[m.MsgID] {
 			continue
 		}

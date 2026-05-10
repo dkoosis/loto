@@ -425,9 +425,9 @@ func runInboxMine(l *loto.LOTO, sinceFlag string, noCheckpoint bool) error {
 		// Advance checkpoint to max(seen ts) so the next call returns only
 		// strictly newer messages. Empty result preserves the prior checkpoint.
 		var newest time.Time
-		for _, m := range msgs {
-			if m.Timestamp.After(newest) {
-				newest = m.Timestamp
+		for i := range msgs {
+			if msgs[i].Timestamp.After(newest) {
+				newest = msgs[i].Timestamp
 			}
 		}
 		if !newest.IsZero() {
@@ -710,7 +710,8 @@ func emitStatusTargets(entries []render.StatusEntry, jsonResult map[string]any) 
 func emitInboxMine(msgs []loto.Msg, since time.Time) {
 	if currentFormat == render.FormatLLM {
 		out := make([]render.InboxMineMessage, len(msgs))
-		for i, m := range msgs {
+		for i := range msgs {
+			m := &msgs[i]
 			out[i] = render.InboxMineMessage{
 				From:      displayAgent(m.From),
 				To:        displayAgent(m.To),
@@ -747,7 +748,8 @@ func sinceJSON(t time.Time) any {
 func emitInbox(target string, msgs []loto.Msg) {
 	if currentFormat == render.FormatLLM {
 		out := make([]render.InboxMessage, len(msgs))
-		for i, m := range msgs {
+		for i := range msgs {
+			m := &msgs[i]
 			out[i] = render.InboxMessage{From: displayAgent(m.From), To: displayAgent(m.To), Body: m.Body}
 		}
 		_ = render.EmitLLMInbox(os.Stdout, target, out)
