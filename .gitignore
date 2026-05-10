@@ -20,3 +20,8 @@ bin/
 
 # fo sidecar state (per-run diff classification)
 .fo/
+
+# scheduled task runtime lock
+.claude/scheduled_tasks.lock
+# review-artifact dump dir
+docs/feedback/
