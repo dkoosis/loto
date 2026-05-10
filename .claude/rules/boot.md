@@ -1,11 +1,18 @@
 # Boot
 updated: 2026-05-09
 
-→ `bd ready`. Empty → review backlog with dk.
+→ resume bead loto-ux3.1 Step 11 — extend `releaseCmd` for path form + `EmitLLMReleasedPath` (plan §CLI C2/R2).
+
+1. `cd /Users/vcto/projects/loto/loto-ux3.1`
+2. read `docs/superpowers/plans/loto-ux3.1/plan.md`
+3. last: `091bd12`
+
+state: φ docs/superpowers/plans/loto-ux3.1/
 
 ✓ done
-- magloop sweep: goconst×33 + modernize + nolintlint extracted to consts (b57d86a, unpushed)
-- removed stale `loto-ux3.1/` worktree that was poisoning lint cache
+- Step 8 status indistinguishability (d01da3a)
+- Step 10 acquire CLI + EmitLLMAcquired (091bd12); JSON envelope dropped
 
 ‡ traps
-- `make audit` may be lying about lint state if golangci-lint cache is poisoned by a sibling worktree of the same module — clear with `golangci-lint cache clean` then `rm -rf ~/Library/Caches/golangci-lint/*`
+- `EmitLLMReleased` exists for --all-mine; path-form needs distinct name (Go: no overloading)
+- --wait is Step 12 — release path stays immediate-fail
