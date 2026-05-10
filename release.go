@@ -110,6 +110,8 @@ func (l *LOTO) ReleasePath(agentID, target string) error {
 	case tagCorrupt:
 		// Treat corrupt as not-mine; refuse rather than wipe blindly.
 		return &ErrNotMine{Target: target}
+	case tagOK:
+		// fall through to ownership check below.
 	}
 	if tag.AgentID != agentID {
 		t := tag

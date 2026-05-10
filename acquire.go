@@ -34,7 +34,7 @@ func (l *LOTO) Acquire(ctx context.Context, agentID, intent, target string, opts
 // these to the editing agent before it touches the file.
 func (l *LOTO) AcquirePath(agentID, intent, target string, ttl time.Duration, opts ...TagOptions) (*Tag, []*Reservation, error) {
 	if ttl <= 0 {
-		return nil, nil, &ErrSystem{Op: "acquire-path: ttl", Err: errors.New("ttl must be positive")}
+		return nil, nil, &ErrSystem{Op: "acquire-path: ttl", Err: errTTLNonPositive}
 	}
 
 	globalLockPath, _ := l.globalPaths()

@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	testStorePath    = "internal/store/store.go"
-	testStorePattern = "internal/store/**"
-	testFooBarPath   = "foo/bar.go"
-	testAgentBlueOak = "BlueOak"
+	testStorePath        = "internal/store/store.go"
+	testStorePattern     = "internal/store/**"
+	testFooBarPath       = "foo/bar.go"
+	testAgentBlueOak     = "BlueOak"
+	testAgentGreenCastle = "GreenCastle"
 )
 
 func TestEmitLLMWhoami(t *testing.T) {
@@ -30,7 +31,7 @@ func TestEmitLLMWhoami(t *testing.T) {
 
 func TestEmitLLMTrySuccess(t *testing.T) {
 	var buf bytes.Buffer
-	if err := EmitLLMTrySuccess(&buf, "file", testStorePath, "GreenCastle", nil); err != nil {
+	if err := EmitLLMTrySuccess(&buf, "file", testStorePath, testAgentGreenCastle, nil); err != nil {
 		t.Fatal(err)
 	}
 	got := buf.String()
@@ -44,7 +45,7 @@ func TestEmitLLMTrySuccessWithReservationWarnings(t *testing.T) {
 	warnings := []ReservationWarning{
 		{Pattern: testStorePattern, AgentID: testAgentBlueOak},
 	}
-	if err := EmitLLMTrySuccess(&buf, "file", testStorePath, "GreenCastle", warnings); err != nil {
+	if err := EmitLLMTrySuccess(&buf, "file", testStorePath, testAgentGreenCastle, warnings); err != nil {
 		t.Fatal(err)
 	}
 	got := buf.String()
@@ -58,7 +59,7 @@ func TestEmitLLMAcquired(t *testing.T) {
 	expires := time.Date(2026, 5, 9, 14, 30, 0, 0, time.UTC)
 	e := AcquireEntry{
 		Target:    testStorePath,
-		AgentID:   "GreenCastle",
+		AgentID:   testAgentGreenCastle,
 		Intent:    "edit store",
 		ExpiresAt: expires,
 	}
@@ -79,7 +80,7 @@ func TestEmitLLMAcquiredWithConflicts(t *testing.T) {
 	var buf bytes.Buffer
 	e := AcquireEntry{
 		Target:    testStorePath,
-		AgentID:   "GreenCastle",
+		AgentID:   testAgentGreenCastle,
 		ExpiresAt: time.Date(2026, 5, 9, 14, 30, 0, 0, time.UTC),
 		Conflicts: []ReservationWarning{{Pattern: testStorePattern, AgentID: testAgentBlueOak}},
 	}
@@ -98,7 +99,7 @@ func TestEmitLLMBlocked(t *testing.T) {
 	expires := time.Date(2026, 4, 28, 14, 42, 11, 0, time.UTC)
 	in := BlockedInput{
 		Kind: "file", Target: testStorePath,
-		AgentID: "GreenCastle", Intent: "store refactor",
+		AgentID: testAgentGreenCastle, Intent: "store refactor",
 		HeldSince: heldSince, ExpiresAt: expires,
 		Branch: "store-refactor", Host: "dk-mac", PID: 84231,
 	}
@@ -136,7 +137,7 @@ func TestEmitLLMStatusGlobalFree(t *testing.T) {
 
 func TestEmitLLMStatusGlobalHeld(t *testing.T) {
 	var buf bytes.Buffer
-	if err := EmitLLMStatusGlobal(&buf, false, "GreenCastle", "sweep"); err != nil {
+	if err := EmitLLMStatusGlobal(&buf, false, testAgentGreenCastle, "sweep"); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "✗ global | by:GreenCastle | intent:sweep\n") {
@@ -183,7 +184,7 @@ func TestEmitLLMMsgSent(t *testing.T) {
 
 func TestEmitLLMReleased(t *testing.T) {
 	var buf bytes.Buffer
-	if err := EmitLLMReleased(&buf, "GreenCastle", 3, nil); err != nil {
+	if err := EmitLLMReleased(&buf, testAgentGreenCastle, 3, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "✔ released | agent:GreenCastle | n:3\n") {
@@ -298,7 +299,7 @@ func TestEmitLLMStatusTargets(t *testing.T) {
 	var buf bytes.Buffer
 	entries := []StatusEntry{
 		{Target: "a.go", Free: true},
-		{Target: "b.go", Free: false, AgentID: "GreenCastle", Intent: "store refactor"},
+		{Target: "b.go", Free: false, AgentID: testAgentGreenCastle, Intent: "store refactor"},
 	}
 	if err := EmitLLMStatusTargets(&buf, entries); err != nil {
 		t.Fatal(err)

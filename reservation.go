@@ -31,6 +31,9 @@ var ErrInvalidGlob = errors.New("invalid glob pattern")
 // ErrReservationExpired is returned when a reservation file existed but is past its TTL.
 var ErrReservationExpired = errors.New("reservation expired")
 
+// errTTLNonPositive is returned when a non-positive TTL is supplied to AcquirePath.
+var errTTLNonPositive = errors.New("ttl must be positive")
+
 // Reservation is an advisory glob-pattern hold on a subtree.
 // Stored at <baseDir>/reservations/<hash>.tag; no flock (purely advisory).
 type Reservation struct {

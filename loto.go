@@ -186,6 +186,43 @@ type ActiveLock struct {
 	Conflicts []*Reservation
 }
 
+// tryGlobalShared opens and shared-locks the global lock file. Returns
+// *ErrHeld with kind=global on contention; callers should propagate.
+func (l *LOTO) tryGlobalShared() (*os.File, error) {
+	globalLockPath, _ := l.globalPaths()
+	f, err := os.OpenFile(globalLockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, &ErrSystem{Op: "open global lock", Err: err}
+	}
+	if err := flockShared(f); err != nil {
+		_ = f.Close()
+		if !isFlockContention(err) {
+			return nil, &ErrSystem{Op: "flock global", Err: err}
+		}
+		tag, _ := l.ReadGlobalTag()
+		return nil, &ErrHeld{Tag: tag, Kind: kindGlobal, Target: kindGlobal}
+	}
+	return f, nil
+}
+
+// tryFileExclusive opens and exclusive-locks the per-file lock at fileLockPath.
+// Returns *ErrHeld with kind=file on contention.
+func tryFileExclusive(fileLockPath, target string, l *LOTO) (*os.File, error) {
+	f, err := os.OpenFile(fileLockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, &ErrSystem{Op: "open file lock", Err: err}
+	}
+	if err := flockExclusive(f); err != nil {
+		_ = f.Close()
+		if !isFlockContention(err) {
+			return nil, &ErrSystem{Op: "flock file", Err: err}
+		}
+		tag, _ := l.ReadTag(target)
+		return nil, &ErrHeld{Tag: tag, Kind: kindFile, Target: target}
+	}
+	return f, nil
+}
+
 // New creates a LOTO at baseDir, ensuring the directory layout exists.
 func New(baseDir string) (*LOTO, error) {
 	if err := os.MkdirAll(filepath.Join(baseDir, "files"), 0o700); err != nil {
@@ -199,15 +236,14 @@ func New(baseDir string) (*LOTO, error) {
 // ReadGlobalTag to discover the blocker.
 // Pass a tagOptions with TTL to set an advisory expiry on the tag.
 func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (*ActiveLock, error) {
-	globalLockPath, _ := l.globalPaths()
 	fileLockPath, fileTagPath, err := l.filePaths(target)
 	if err != nil {
 		return nil, err
 	}
 
-	globalFile, err := os.OpenFile(globalLockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	globalFile, err := l.tryGlobalShared()
 	if err != nil {
-		return nil, &ErrSystem{Op: "open global lock", Err: err}
+		return nil, err
 	}
 	success := false
 	defer func() {
@@ -216,31 +252,15 @@ func (l *LOTO) TryFileLock(agentID, intent, target string, opts ...TagOptions) (
 		}
 	}()
 
-	if err := flockShared(globalFile); err != nil {
-		if !isFlockContention(err) {
-			return nil, &ErrSystem{Op: "flock global", Err: err}
-		}
-		tag, _ := l.ReadGlobalTag()
-		return nil, &ErrHeld{Tag: tag, Kind: kindGlobal, Target: kindGlobal}
-	}
-
-	fileFile, err := os.OpenFile(fileLockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	fileFile, err := tryFileExclusive(fileLockPath, target, l)
 	if err != nil {
-		return nil, &ErrSystem{Op: "open file lock", Err: err}
+		return nil, err
 	}
 	defer func() {
 		if !success {
 			_ = fileFile.Close()
 		}
 	}()
-
-	if err := flockExclusive(fileFile); err != nil {
-		if !isFlockContention(err) {
-			return nil, &ErrSystem{Op: "flock file", Err: err}
-		}
-		tag, _ := l.ReadTag(target)
-		return nil, &ErrHeld{Tag: tag, Kind: kindFile, Target: target}
-	}
 
 	// Record-tier guard: a tag with a non-zero, unexpired ExpiresAt
 	// belongs to an acquire'd hold (north-star carve-out). Honor it
