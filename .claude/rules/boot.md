@@ -1,18 +1,17 @@
 # Boot
 updated: 2026-05-09
 
-→ resume bead loto-ux3.1 Step 11 — extend `releaseCmd` for path form + `EmitLLMReleasedPath` (plan §CLI C2/R2).
+→ resume bead loto-ux3.1 Step 12 — `acquire --wait` polling + T4 timeout test (plan §C/T4).
 
 1. `cd /Users/vcto/projects/loto/loto-ux3.1`
-2. read `docs/superpowers/plans/loto-ux3.1/plan.md`
-3. last: `091bd12`
+2. read `docs/superpowers/plans/loto-ux3.1/plan.md` §Step 12
+3. last: `259bc5b`
 
 state: φ docs/superpowers/plans/loto-ux3.1/
 
 ✓ done
-- Step 8 status indistinguishability (d01da3a)
-- Step 10 acquire CLI + EmitLLMAcquired (091bd12); JSON envelope dropped
+- Step 11 release path form + EmitLLMReleasedPath (259bc5b)
+- main synced via PRs #7 + #8
 
 ‡ traps
-- `EmitLLMReleased` exists for --all-mine; path-form needs distinct name (Go: no overloading)
-- --wait is Step 12 — release path stays immediate-fail
+- `--wait` is genuinely new — no existing `try --wait`; sets exit-3 precedent for ux3.6
