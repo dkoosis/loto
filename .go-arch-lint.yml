@@ -1,0 +1,38 @@
+version: 3
+workdir: .
+
+exclude:
+  - .sandbox
+  - bin
+  - docs
+
+# Layering invariants for loto:
+#   cmd/loto → {root (loto), internal/render}
+#   internal/render → ∅ (no internal deps)
+#   root (loto) → ∅ (no internal deps)
+#
+# Keep this simple. The whole point is to fail fast if someone introduces
+# a back-edge (e.g., root importing render, or render importing root).
+
+allow:
+  depOnAnyVendor: true
+
+components:
+  cli:
+    in: cmd/loto/**
+  core:
+    in: '.'                    # the root package "loto"
+  render:
+    in: internal/render/**
+
+deps:
+  cli:
+    mayDependOn:
+      - core
+      - render
+  core:
+    mayDependOn:
+      - core                   # external _test packages re-import root
+    anyVendorDeps: true        # root must stay leaf among internal components otherwise
+  render:
+    anyVendorDeps: true        # render must stay leaf among internal components
