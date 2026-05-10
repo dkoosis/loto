@@ -74,6 +74,9 @@ glob (no msgs sent). Default tiebreaker is "` + defaultTiebreaker + `";
 				exit(err)
 			}
 
+			// validateHandle (cmd/loto/identity.go) rejects '|' at set-handle
+			// time, so any handle reaching this point — set via whoami or
+			// auto-derived from the agent ID — is already separator-safe.
 			selfHandle := selfHandleOrID()
 			body := buildHelloBody(selfHandle, glob, intent, tb, noTiebreaker)
 

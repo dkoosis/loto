@@ -197,6 +197,7 @@ func TestValidateHandle(t *testing.T) {
 		{"empty", "", false},
 		{"slash", "foo/bar", false},
 		{"backslash", "foo\\bar", false},
+		{"pipe", "foo|bar", false}, // reserved: loto:llm:v1 field delimiter
 		{"control-tab", "foo\tbar", false},
 		{"control-null", "foo\x00bar", false},
 		{"too-long", "abcdefghijabcdefghijabcdefghijabc", false}, // 33 chars

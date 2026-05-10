@@ -218,14 +218,19 @@ func createAgent(dir, id string) (*Agent, error) {
 const maxHandleLength = 32
 
 var (
-	errHandleEmpty   = errors.New("handle must not be empty")
-	errHandleTooLong = fmt.Errorf("handle longer than %d bytes", maxHandleLength)
-	errHandleControl = errors.New("handle contains control character")
-	errHandleSlash   = errors.New("handle contains path separator")
+	errHandleEmpty     = errors.New("handle must not be empty")
+	errHandleTooLong   = fmt.Errorf("handle longer than %d bytes", maxHandleLength)
+	errHandleControl   = errors.New("handle contains control character")
+	errHandleSeparator = errors.New("handle contains reserved separator (/, \\, or |)")
 )
 
 // validateHandle enforces the rules accepted by `loto whoami --set-handle`.
 // Returns an error describing the first violation.
+//
+// The separator set is intentionally broader than filesystem path separators:
+// `|` is reserved because it's the field delimiter in loto:llm:v1 bodies
+// (e.g., `loto hello`, `EmitLLMBlocked`). Rejecting it at set-handle time
+// keeps every `|`-delimited body parser-safe without per-caller defenses.
 func validateHandle(name string) error {
 	if name == "" {
 		return errHandleEmpty
@@ -237,8 +242,8 @@ func validateHandle(name string) error {
 		if r < 0x20 || r == 0x7f {
 			return errHandleControl
 		}
-		if r == '/' || r == '\\' {
-			return errHandleSlash
+		if r == '/' || r == '\\' || r == '|' {
+			return errHandleSeparator
 		}
 	}
 	return nil

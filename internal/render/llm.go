@@ -709,7 +709,7 @@ func EmitLLMHello(w io.Writer, r HelloResult) error {
 	if err := writeHeader(w); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "✓ hello | glob:%s | handle:%s\n", r.Glob, r.Handle); err != nil {
+	if _, err := fmt.Fprintf(w, "✓ hello | glob:%s | handle:%s | intent:%s\n", r.Glob, r.Handle, truncIntent(r.Intent)); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintln(w, "  reserved"); err != nil {
