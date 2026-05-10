@@ -272,6 +272,89 @@ func TestAcquireConflict(t *testing.T) {
 	}
 }
 
+// TestAcquireWaitTimesOut covers Step 12: `loto acquire --wait` polls until
+// the holder releases or the timer expires. On timeout the exit code is 3
+// (distinct from immediate conflict's exit 1) so callers can distinguish
+// "tried briefly and failed" from "told us it could wait but ran out of time".
+func TestAcquireWaitTimesOut(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(t.TempDir(), "wait-timeout.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := lotoCmd(base, flagAgentLong, "alpha", "acquire", target).Output(); err != nil {
+		t.Fatalf("alpha acquire: %v\n%s", err, out)
+	}
+
+	start := time.Now()
+	cmd := lotoCmd(base, flagAgentLong, "beta", "acquire", "--wait", "200ms", target)
+	out, err := cmd.Output()
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("expected timeout to fail, got success: %s", out)
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	if ee.ExitCode() != 3 {
+		t.Errorf("expected exit 3 on wait timeout, got %d (stderr: %s)", ee.ExitCode(), ee.Stderr)
+	}
+	if elapsed < 150*time.Millisecond {
+		t.Errorf("expected wait of ~200ms, got %v", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("wait took implausibly long: %v", elapsed)
+	}
+	if !strings.Contains(string(ee.Stderr), "alpha") {
+		t.Errorf("timeout report should surface holder identity; stderr: %s", ee.Stderr)
+	}
+}
+
+// TestAcquireWaitSucceedsAfterRelease covers the happy path of polling: while
+// `acquire --wait` is blocked, the holder releases, and the waiter then wins
+// without further intervention.
+func TestAcquireWaitSucceedsAfterRelease(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(t.TempDir(), "wait-success.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := lotoCmd(base, flagAgentLong, "alpha", "acquire", target).Output(); err != nil {
+		t.Fatalf("alpha acquire: %v\n%s", err, out)
+	}
+
+	// beta blocks on --wait; release alpha after ~150ms; beta should succeed.
+	cmd := lotoCmd(base, flagAgentLong, "beta", "acquire", "--wait", "3s", target)
+	betaDone := make(chan error, 1)
+	var betaOut []byte
+	go func() {
+		o, e := cmd.Output()
+		betaOut = o
+		betaDone <- e
+	}()
+
+	time.Sleep(150 * time.Millisecond)
+	if out, err := lotoCmd(base, flagAgentLong, "alpha", "release", target).Output(); err != nil {
+		t.Fatalf("alpha release: %v\n%s", err, out)
+	}
+
+	select {
+	case err := <-betaDone:
+		if err != nil {
+			t.Fatalf("beta acquire --wait should succeed after alpha release: %v", err)
+		}
+		if !strings.Contains(string(betaOut), `"acquired"`) && !strings.Contains(string(betaOut), `"agent_id":"beta"`) {
+			t.Errorf("beta output missing acquired evidence: %s", betaOut)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("beta --wait did not complete within 5s after alpha released")
+	}
+}
+
 // TestStatusAcquiredRendersAsHeld verifies S2 indistinguishability: a
 // record-tier acquire'd hold (no foreground flock, ExpiresAt set) renders
 // in `loto status` with the same display shape as a try'd hold — same
