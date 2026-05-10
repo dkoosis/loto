@@ -202,6 +202,20 @@ func TestEmitLLMReleasedWithErrors(t *testing.T) {
 	}
 }
 
+func TestEmitLLMReleasedPath(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitLLMReleasedPath(&buf, testStorePath); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.HasPrefix(got, "loto:llm:v1\n") {
+		t.Fatalf("missing header; got:\n%s", got)
+	}
+	if !strings.Contains(got, "✔ released | internal/store/store.go\n") {
+		t.Fatalf("unexpected body:\n%s", got)
+	}
+}
+
 func TestEmitLLMReaped(t *testing.T) {
 	var buf bytes.Buffer
 	if err := EmitLLMReaped(&buf, "store.go"); err != nil {

@@ -346,6 +346,17 @@ func EmitLLMReleased(w io.Writer, agent string, n int, errs []string) error {
 	return nil
 }
 
+// EmitLLMReleasedPath reports a successful record-tier release of a single
+// path. Distinct from EmitLLMReleased (which reports the bulk --all-mine
+// shape: agent + count + per-error lines).
+func EmitLLMReleasedPath(w io.Writer, target string) error {
+	if err := writeHeader(w); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w, "✔ released | %s\n", target)
+	return err
+}
+
 // EmitLLMReaped confirms a reap.
 func EmitLLMReaped(w io.Writer, target string) error {
 	if err := writeHeader(w); err != nil {
