@@ -30,7 +30,7 @@ unlock: chmod(path, mode | 0200)    # restore owner-write
 
 Round-trips `0644`, `0664`, `0600`, `0640` for owner-write recovery. Group/other write bits are not preserved across a lock cycle — rare on a single-user dev box, recoverable with `chmod g+w` after. The simplification (no `original_mode` column, no migration, no stored state) is worth the lossy round-trip.
 
-**TOCTOU:** external mode changes during the `stat`→`chmod` window can be clobbered. Window is sub-millisecond; out of scope.
+**TOCTOU:** external mode changes during the `stat`→`chmod` window can be clobbered. Window is two adjacent syscalls; small enough we don't care for a single-user hand-tool.
 
 **Pathological case:** if the user manually `chmod 0000`s a locked file mid-hold, unlock leaves it at `0200` (write-only, no read). Contrived; acknowledged.
 
@@ -47,9 +47,9 @@ Rejecting directories prevents reproducing the gh#57 false-safety bug at smaller
 
 ## the lock operation
 
-`loto lock <file>... [--intent <s>] [--ttl <dur>]`
+`loto lock <file>... [flags]`
 
-`--intent` and `--ttl` apply uniformly to every target in the invocation. No per-target overrides; if a caller needs heterogeneous intent/TTL they invoke `loto lock` multiple times.
+All existing flags (`--intent`, `--ttl`, `--branch`, etc.) apply uniformly to every target in the invocation. No per-target overrides; a caller needing heterogeneous values runs `loto lock` multiple times.
 
 Pseudocode:
 
@@ -132,7 +132,7 @@ Per `design.md`: triage count first, deterministic per-row, key=value, no plural
 ✓ target=a.go state=restored
 ```
 
-If rollback itself fails on any path, that path's row shows `rolled-back=no` and a `mode_restore_failed` system tag is inserted (addressee = caller, target = the unrestored path, intent = errno string). `doctor` surfaces these tags.
+If rollback itself fails on any path, that path's row shows `rolled-back=no` and a `mode_restore_failed` system tag is inserted (addressee = caller, target = the unrestored path). The tag's `intent` column reuses the existing human-description slot: `"mode_restore_failed: EPERM on <path>"`. No schema change for the tag. `doctor` surfaces these tags.
 
 **Validation failure** (non-regular, missing — exit 2):
 ```
@@ -166,7 +166,7 @@ Operator's explicit intent restores orphan-mode bytes, not loto's heuristic. NOR
 
 Lazy GC extension: when `collectBlockers` reclaims a stale row, also `chmod(mode | 0200)` before deleting the row. Every `loto lock` quietly cleans up after dead holders.
 
-**Side-effect asymmetry:** `reclaimStaleTx` chmods inside the acquire tx. If the surrounding acquire tx later aborts (e.g. conflict on a *different* target), the chmod-restore is not rolled back — the reclaimed file stays writable. Acceptable: stale-and-dead-holder rows are not protecting anyone, so early restoration is benign. Documented so an implementer doesn't mistake it for a bug.
+**Side-effect asymmetry:** `reclaimStaleTx` chmods inside the acquire tx. If the surrounding acquire tx later aborts — conflict on a *different* target, chmod failure on a different target, any error path — the stale-reclaim chmod-restore is not rolled back. The reclaimed file stays writable and the stale row may reappear in DB after rollback. Acceptable: stale-and-dead-holder rows are not protecting anyone, so early restoration is benign. Documented so an implementer doesn't mistake it for a bug.
 
 ## migration
 
@@ -180,7 +180,7 @@ v2 has no real users. Wipe on schema bump.
 
 State sidecar paths (`lock-op.flock`, and any future per-target sidecars) hash the **canonical relative path** as produced by `domain.Canonicalize` (`internal/domain/target.go:31`). Project-scoped state directory disambiguates across projects; no need for absolute paths.
 
-**Follow-up:** NORTH_STAR's "single canonical base" section currently shows `sha256(abs-path)`. Update NORTH_STAR to match (separate doc change, not this PR).
+**Follow-up:** NORTH_STAR's "single canonical base" section currently shows `sha256(abs-path)`. Tracked: `loto-9ky`.
 
 ## schema change
 
@@ -233,6 +233,7 @@ internal/cli/acceptance_test.go
   TestRejectDirectoryTarget                         # dir → clear error, zero side effects on disk
   TestRejectNonExistentTarget                       # missing file → clear error, zero side effects on disk
   TestChmodRollback_FailureExits3                   # contrived: rollback fails → mode_restore_failed tag, exit 3
+  TestLockMultiFile_FlagsApplyToAllTargets          # --intent/--ttl recorded identically on every target row
 ```
 
 ## existing tests
@@ -261,7 +262,7 @@ Each is a one-line edit; queued so docs and code don't desync.
 - Detecting `chmod +w` bypass.
 - Multi-host coordination.
 - Windows support.
-- Reconciling `loto try` vs `loto lock` verb in NORTH_STAR (separate doc change).
+- NORTH_STAR edits (tracked: `loto-9ky`, `loto-qy6`; see *doc-debt tracking*).
 
 ## invariants preserved
 
