@@ -1,13 +1,13 @@
 # Boot
-updated: 2026-05-10 (afternoon)
+updated: 2026-05-10 (Sun morning)
 
-→ next: ship lockout primitive (gh#57). v2 has tagout (SQL) but no fs enforcement. Restore flock + chmod-readonly. Read `docs/NORTH_STAR.md` first; v2 plan drifted (marker on line 1).
+→ ship lockout primitive (gh#57). v2 has tagout, no fs enforcement. Restore flock + chmod-readonly per `docs/NORTH_STAR.md` tiers 3-4. Re-read it first.
 
 ‡ traps
-- Phase 5 (Tasks 21-22 hooks) deferred — depends on gh#57
-- `LOTO_AGENT_ID` unset → all Claude sessions share one identity (gh#45)
-- gh#46: `loto unlock` misreports missing locks as "not the owner"
+- Phase 5 hooks blocked on gh#57 — hook alone is post-it, not enforcement
+- LOTO_AGENT_ID unset → sessions share identity (gh#45)
+- gh#46: `loto unlock` mis-reports missing as "not owner"
 
 ✓ done
-- filed gh#45/#46/#57; post-mortem marker
-- 2 sweep commits + skipped regression test
+- v2 bug audit: 10 issues #47-#56 + 10 beads (loto-erj/dmk/0o6/200/l6o/7c0/16t/cwg/hwj/ri4)
+- fix order in nug 4ac644c95710; after #57, start #50/loto-200 (identity atomic write)

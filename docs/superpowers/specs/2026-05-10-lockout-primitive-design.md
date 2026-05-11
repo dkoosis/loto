@@ -34,6 +34,8 @@ Round-trips `0644`, `0664`, `0600`, `0640` for owner-write recovery. Group/other
 
 **Pathological case:** if the user manually `chmod 0000`s a locked file mid-hold, unlock leaves it at `0200` (write-only, no read). Contrived; acknowledged.
 
+**Hardlinks:** chmod is inode-level, so locking `a.go` also strips write on any hardlink pointing to the same inode. Acceptable on a single-user dev box where hardlinks are rare; acknowledged, not defended.
+
 ## scope contract
 
 `loto lock` operates on a **set of regular files, atomically**. One file or many.
@@ -42,8 +44,9 @@ Round-trips `0644`, `0664`, `0600`, `0640` for owner-write recovery. Group/other
 - ✓ multi-file is first-class. `loto lock a.go b.go c.go` → all-or-nothing acquire.
 - ✗ no directory targets, no glob expansion at the loto layer, no recursive snapshot.
 - ✗ no auto-create placeholder for non-existent paths.
+- ✗ **symlinks rejected.** Validation uses `Lstat`; if `mode&os.ModeSymlink != 0` → exit 2, `reason=symlink`. Following would let chmod reach outside the project (blast radius) and open a validate→chmod TOCTOU (swap the link, lock the wrong inode). Workaround for the rare real case: `loto lock $(readlink -f link.go)`.
 
-Rejecting directories prevents reproducing the gh#57 false-safety bug at smaller scale.
+Rejecting directories prevents reproducing the gh#57 false-safety bug at smaller scale. Rejecting symlinks keeps chmod's blast radius inside the project tree.
 
 ## the lock operation
 
@@ -112,7 +115,7 @@ Note: validation runs **before** `BEGIN tx`. Don't take a resource we might not 
 3. Release op-flock.
 4. First body line: `✓ unlocked count=<N>` (where N = successful releases). Exit 0 if zero `not-owner` rows seen, 1 otherwise.
 
-`loto break --force`: same chmod-restore + tag append (`lock_broken`), skips owner check, notifies displaced agent via mailbox (NORTH_STAR invariant 8).
+`loto break --force <file>...`: multi-target, **best-effort per target** (mirrors unlock, not acquire). For each target: chmod-restore + `DELETE` row + append `lock_broken` tag + notify displaced agent via mailbox (NORTH_STAR invariant 8). Skips owner check. One row per target in output; exit 0 if all targets had a row to break, 1 if any were no-op (no current holder).
 
 ## output shapes (failure paths)
 
@@ -134,10 +137,11 @@ Per `design.md`: triage count first, deterministic per-row, key=value, no plural
 
 If rollback itself fails on any path, that path's row shows `rolled-back=no` and a `mode_restore_failed` system tag is inserted (addressee = caller, target = the unrestored path). The tag's `intent` column reuses the existing human-description slot: `"mode_restore_failed: EPERM on <path>"`. No schema change for the tag. `doctor` surfaces these tags.
 
-**Validation failure** (non-regular, missing — exit 2):
+**Validation failure** (non-regular, missing, symlink — exit 2):
 ```
-✗ invalid count=1
+✗ invalid count=2
 ✗ target=internal/store/ reason=not-regular-file
+✗ target=link.go       reason=symlink
 ```
 
 **Unlock with mixed outcomes** (exit 1 if any not-owner):
@@ -232,6 +236,7 @@ internal/cli/acceptance_test.go
   TestConcurrentLock_SerializedByOpFlock            # two overlapping `loto lock` invocations don't interleave
   TestRejectDirectoryTarget                         # dir → clear error, zero side effects on disk
   TestRejectNonExistentTarget                       # missing file → clear error, zero side effects on disk
+  TestRejectSymlinkTarget                           # symlink → exit 2 reason=symlink, no chmod on link or target inode
   TestChmodRollback_FailureExits3                   # contrived: rollback fails → mode_restore_failed tag, exit 3
   TestLockMultiFile_FlagsApplyToAllTargets          # --intent/--ttl recorded identically on every target row
 ```
