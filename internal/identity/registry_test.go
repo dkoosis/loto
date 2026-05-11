@@ -47,8 +47,6 @@ func TestEnsureRespectsExistingEnv(t *testing.T) {
 // fix-tracking signal: once Ensure() honors CLAUDE_CODE_SESSION_ID, drop the
 // t.Skip call.
 func TestEnsureDistinctClaudeSessions(t *testing.T) {
-	t.Skip("gh#45 — Ensure() does not yet consume CLAUDE_CODE_SESSION_ID; un-skip when fix lands")
-
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("CLAUDECODE", "1")
@@ -148,6 +146,33 @@ func TestWriteAgentAtomic(t *testing.T) {
 
 	if partial > 0 {
 		t.Fatalf("writeAgent not atomic: %d partial reads observed", partial)
+	}
+}
+
+// TestEnsureSessionCachePersists asserts a session cache file is created at
+// ~/.loto/session/$SID.json and used on subsequent calls — concurrent calls
+// within one Claude session must NOT mint new identities each time
+// (loto-aa6 / gh#41).
+func TestEnsureSessionCachePersists(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "session-cache-test")
+
+	a, err := Ensure()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(dir, ".loto", "session", "session-cache-test.json")
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("session cache not written: %v", err)
+	}
+	b, err := Ensure()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.UUID != b.UUID {
+		t.Fatalf("session cache not honored: %s != %s", a.UUID, b.UUID)
 	}
 }
 
