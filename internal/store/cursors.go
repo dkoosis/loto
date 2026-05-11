@@ -30,24 +30,24 @@ ORDER BY created_at, id`,
 	return scanTags(rows)
 }
 
-func (s *Store) MarkRead(ctx context.Context, agent string, t domain.Target) error {
+// MarkRead advances the read cursor for (agent, target) to upTo. Callers
+// must pass the timestamp of the latest tag actually displayed, not query
+// MAX(created_at) themselves — see gh#47. The previous implementation
+// re-read MAX inside the write tx, which advanced the cursor past tags
+// inserted between display and MarkRead. The cursor never moves backward:
+// a stale call with an older upTo cannot regress a newer cursor.
+func (s *Store) MarkRead(ctx context.Context, agent string, t domain.Target, upTo time.Time) error {
+	if upTo.IsZero() {
+		return nil
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var maxNs sql.NullInt64
-	err = tx.QueryRowContext(ctx, `SELECT MAX(created_at) FROM tags WHERE target_canonical = ? AND addressee_uuid = ?`, t.Canonical, agent).Scan(&maxNs)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	if !maxNs.Valid {
-		return tx.Commit()
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO read_cursors(agent_uuid,target_canonical,last_read_at) VALUES (?,?,?)
-ON CONFLICT(agent_uuid,target_canonical) DO UPDATE SET last_read_at = excluded.last_read_at`,
-		agent, t.Canonical, maxNs.Int64)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO read_cursors(agent_uuid,target_canonical,last_read_at) VALUES (?,?,?)
+ON CONFLICT(agent_uuid,target_canonical) DO UPDATE SET last_read_at = MAX(read_cursors.last_read_at, excluded.last_read_at)`,
+		agent, t.Canonical, upTo.UnixNano()); err != nil {
 		return err
 	}
 	return tx.Commit()

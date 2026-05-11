@@ -106,11 +106,20 @@ func printInboxTags(stdout io.Writer, mine []domain.TagRecord) {
 }
 
 func markInboxRead(rt *runtime, mine []domain.TagRecord) {
-	seen := map[string]domain.Target{}
+	// Advance the cursor only as far as the latest tag we actually showed
+	// per target — see gh#47. Querying MAX(created_at) inside the store
+	// would race with concurrent AddTag calls landing between display and
+	// MarkRead.
+	maxByTarget := map[string]time.Time{}
+	targets := map[string]domain.Target{}
 	for i := range mine {
-		seen[mine[i].Target.Canonical] = mine[i].Target
+		c := mine[i].Target.Canonical
+		targets[c] = mine[i].Target
+		if mine[i].CreatedAt.After(maxByTarget[c]) {
+			maxByTarget[c] = mine[i].CreatedAt
+		}
 	}
-	for _, t := range seen {
-		_ = rt.Store.MarkRead(rt.Ctx, rt.Agent.UUID, t)
+	for c, t := range targets {
+		_ = rt.Store.MarkRead(rt.Ctx, rt.Agent.UUID, t, maxByTarget[c])
 	}
 }

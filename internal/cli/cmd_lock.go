@@ -89,11 +89,16 @@ func emitConflict(w io.Writer, ce *store.ConflictError) {
 func emitLockSuccess(w io.Writer, rt *runtime, t domain.Target) {
 	fmt.Fprintf(w, "✓ locked target=%s\n", t.Canonical)
 	tags, _ := rt.Store.UnreadTagsForAddressee(rt.Ctx, rt.Agent.UUID, t)
+	var maxShown time.Time
 	for i := range tags {
 		tg := &tags[i]
 		fmt.Fprintf(w, "ℹ tag=%s intent=%q\n", tg.ID, strings.TrimSpace(tg.Intent))
+		if tg.CreatedAt.After(maxShown) {
+			maxShown = tg.CreatedAt
+		}
 	}
 	if len(tags) > 0 {
-		_ = rt.Store.MarkRead(rt.Ctx, rt.Agent.UUID, t)
+		// Advance cursor only to the latest tag we actually showed — gh#47.
+		_ = rt.Store.MarkRead(rt.Ctx, rt.Agent.UUID, t, maxShown)
 	}
 }

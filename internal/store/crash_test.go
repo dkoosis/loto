@@ -25,7 +25,7 @@ func TestCrash_FailedAddTagDoesNotAdvanceCursor(t *testing.T) {
 	if _, err := s.AddTag(ctx, tg); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkRead(ctx, "bob", tgt); err != nil {
+	if err := s.MarkRead(ctx, "bob", tgt, tg.CreatedAt); err != nil {
 		t.Fatal(err)
 	}
 	var beforeCursor int64
