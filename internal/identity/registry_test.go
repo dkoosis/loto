@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -82,6 +83,71 @@ func TestEnsureDistinctClaudeSessions(t *testing.T) {
 	}
 	if a2.UUID != a.UUID {
 		t.Fatalf("same CLAUDE_CODE_SESSION_ID must produce stable uuid; got %s want %s", a2.UUID, a.UUID)
+	}
+}
+
+// TestWriteAgentAtomic asserts concurrent readers never see partial/empty
+// JSON while writeAgent rewrites the same record. Pre-fix (os.WriteFile
+// truncate-then-write), readers racing the writer observe zero-byte reads
+// or short writes and fail Unmarshal → mostRecentAgent silently drops the
+// entry → identity flap (gh#50 / loto-200).
+func TestWriteAgentAtomic(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("LOTO_AGENT_ID", "")
+
+	a, err := Ensure()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{}, 2)
+
+	// Writer: rewrite the same record repeatedly.
+	go func() {
+		defer func() { done <- struct{}{} }()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if err := writeAgent(a); err != nil {
+					t.Errorf("writeAgent: %v", err)
+					return
+				}
+			}
+		}
+	}()
+
+	// Reader: read+unmarshal repeatedly. Any partial read is a failure.
+	var partial int
+	go func() {
+		defer func() { done <- struct{}{} }()
+		path := filepath.Join(dir, ".loto", "agents", a.UUID+".json")
+		for range 2000 {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			body, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			var got Agent
+			if err := json.Unmarshal(body, &got); err != nil {
+				partial++
+			}
+		}
+	}()
+
+	<-done
+	close(stop)
+	<-done
+
+	if partial > 0 {
+		t.Fatalf("writeAgent not atomic: %d partial reads observed", partial)
 	}
 }
 

@@ -140,7 +140,33 @@ func writeAgent(a *Agent) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(registryDir(), a.UUID+".json"), body, 0o600)
+	dir := registryDir()
+	final := filepath.Join(dir, a.UUID+".json")
+	// Atomic publish: write to a sibling temp, fsync, rename over the final
+	// path. Concurrent readers see either the previous version or the new
+	// one — never a truncated/partial JSON document (gh#50 / loto-200).
+	tmp, err := os.CreateTemp(dir, a.UUID+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(body); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, final)
 }
 
 func newUUID() string {
