@@ -4,9 +4,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"loto/internal/domain"
+)
+
+const (
+	sqliteWALSuffix = "-wal"
+	sqliteSHMSuffix = "-shm"
 )
 
 type DoctorReport struct {
@@ -69,16 +75,45 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 	return err
 }
 
-// MoveCorruptAside renames a corrupt DB file (and its WAL/SHM siblings) to
-// loto.db.corrupt.<RFC3339Z> and lets the next Open() create a fresh DB.
+// MoveCorruptAside relocates a corrupt DB and its -wal/-shm siblings into
+// a single sibling directory <dbPath>.corrupt.<RFC3339Z>/. The move is
+// atomic: files are first assembled in a staging directory, which is then
+// renamed into place with one os.Rename. This eliminates the race in the
+// previous three-rename approach, where a concurrent opener could see a
+// fresh main DB paired with a stale sidecar (gh#48).
 func MoveCorruptAside(dbPath string, when time.Time) (string, error) {
+	dir := filepath.Dir(dbPath)
+	base := filepath.Base(dbPath)
 	stamp := when.UTC().Format("2006-01-02T15-04-05Z")
-	dst := fmt.Sprintf("%s.corrupt.%s", dbPath, stamp)
-	if err := os.Rename(dbPath, dst); err != nil {
-		return "", err
+	finalDir := fmt.Sprintf("%s.corrupt.%s", dbPath, stamp)
+
+	staging, err := os.MkdirTemp(dir, base+".corrupt-staging-")
+	if err != nil {
+		return "", fmt.Errorf("make staging dir: %w", err)
 	}
-	for _, sfx := range []string{"-wal", "-shm"} {
-		_ = os.Rename(dbPath+sfx, dst+sfx)
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.RemoveAll(staging)
+		}
+	}()
+
+	if err := os.Rename(dbPath, filepath.Join(staging, base)); err != nil {
+		return "", fmt.Errorf("rename main: %w", err)
 	}
-	return dst, nil
+	for _, sfx := range []string{sqliteWALSuffix, sqliteSHMSuffix} {
+		src := dbPath + sfx
+		if _, statErr := os.Stat(src); statErr != nil {
+			continue
+		}
+		if err := os.Rename(src, filepath.Join(staging, base+sfx)); err != nil {
+			return "", fmt.Errorf("rename %s: %w", sfx, err)
+		}
+	}
+
+	if err := os.Rename(staging, finalDir); err != nil {
+		return "", fmt.Errorf("commit corrupt dir: %w", err)
+	}
+	committed = true
+	return finalDir, nil
 }
