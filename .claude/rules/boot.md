@@ -1,13 +1,12 @@
 # Boot
-updated: 2026-05-10 (Sun late)
+updated: 2026-05-11
 
-→ ship loto coordination primitives: `bd show loto-nbl loto-xfx loto-036`. Pick one, plan, TDD.
+→ `bd show loto-vra.1` — draft NORTH_STAR rewrite, dk signs off before code.
 
-state: qqh.2 staged in `john-loto-qqh.2/` on branch `loto-qqh.2` — Task 11 (cmd_lock.go) bundles the commit.
+state: worktree `../loto-simplify` (branch `loto-simplify`, baseline green).
 
 ✓ done
-- loto-qqh.2 staged (AcquireLocks + 4 tests + ports)
-- 3-agent session: PRs #59 #60 #61 + filed loto-w0s family + loto-1w5
+- closed 6 superseded beads + PRs #39 #61 #62; loto-shn now deps on vra.4
 
 ‡ traps
-- `loto inbox` silently advances cursor → `--unread` polling unreliable until loto-036.
+- PR #58 (qqh.1) preserved — let it land before vra.4 touches schema
