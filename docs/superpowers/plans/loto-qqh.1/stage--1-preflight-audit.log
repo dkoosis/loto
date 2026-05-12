@@ -1,0 +1,16 @@
+=== make audit pre-flight on branch loto-qqh.1 (worktree start state) ===
+go vet ./... → clean
+golangci-lint run ./... → 0 issues
+go-arch-lint → OK - No warnings found
+go test -count=1 -cover ./... → all pkgs pass
+  loto/cmd/loto         coverage: 0.0% of statements (no test files)
+  loto/internal/cli     coverage: 67.4% of statements
+  loto/internal/domain  coverage: 89.2% of statements
+  loto/internal/identity coverage: 60.5% of statements
+  loto/internal/store   coverage: 72.5% of statements
+=== check pass ===
+go test -race -timeout=5m -count=1 ./... → all pass
+govulncheck ./... → No vulnerabilities found.
+=== audit pass ===
+
+Status: GREEN at pre-flight. No profile-mismatched findings to surface.
