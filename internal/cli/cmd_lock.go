@@ -25,14 +25,13 @@ func cmdLock(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
-	if fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: loto lock <target> [--ttl 30m] [--intent ...]")
+	if fs.NArg() < 1 {
+		fmt.Fprintln(stderr, "usage: loto lock <target>... [--ttl 30m] [--intent ...]")
 		return 2
 	}
-	target, err := domain.Canonicalize(fs.Arg(0))
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ target: %v\n", err)
-		return 2
+	targets, code := canonicalizeTargets(fs.Args(), stderr)
+	if code != 0 {
+		return code
 	}
 	rt, err := openRuntime()
 	if err != nil {
@@ -48,52 +47,87 @@ func cmdLock(args []string, stdout, stderr io.Writer) int {
 		return pidLive(pid)
 	}
 	now := time.Now()
-	rec := domain.LockRecord{
-		Target:      target,
-		OwnerUUID:   rt.Agent.UUID,
-		SessionUUID: rt.Agent.UUID,
-		Intent:      *intent,
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(*ttl),
-		Host:        rt.Host,
-		PID:         os.Getpid(),
-	}
-	_, err = rt.Store.AcquireLock(rt.Ctx, rec, live)
+	recs := buildLockRecords(targets, rt, *intent, now, *ttl)
+	acquired, err := rt.Store.AcquireLocks(rt.Ctx, recs, live)
 	if err != nil {
-		var ce *store.ConflictError
-		if errors.As(err, &ce) {
-			emitConflict(stdout, ce)
+		var mce *store.MultiConflictError
+		if errors.As(err, &mce) {
+			emitMultiConflict(stdout, mce)
 			return 1
+		}
+		var cfe *store.ChmodFailureError
+		if errors.As(err, &cfe) {
+			emitChmodFailure(stdout, cfe)
+			return 3
 		}
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	emitLockSuccess(stdout, rt, target)
+	emitLockSuccess(stdout, rt, acquired)
 	return 0
 }
 
-func emitConflict(w io.Writer, ce *store.ConflictError) {
-	if len(ce.Blockers) == 0 {
-		return
+func canonicalizeTargets(args []string, stderr io.Writer) ([]domain.Target, int) {
+	out := make([]domain.Target, 0, len(args))
+	for _, a := range args {
+		t, err := domain.Canonicalize(a)
+		if err != nil {
+			fmt.Fprintf(stderr, "✗ target %s: %v\n", a, err)
+			return nil, 2
+		}
+		out = append(out, t)
 	}
-	fmt.Fprintf(w, "✗ blocked target=%s\n", ce.Blockers[0].Target.Canonical)
-	for i := range ce.Blockers {
-		b := &ce.Blockers[i]
-		fmt.Fprintf(w, "⚠ blocker=%s target=%s intent=%q held_since=%s expires_at=%s host=%s pid=%d\n",
+	return out, 0
+}
+
+func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now time.Time, ttl time.Duration) []domain.LockRecord {
+	recs := make([]domain.LockRecord, 0, len(targets))
+	for _, t := range targets {
+		recs = append(recs, domain.LockRecord{
+			Target:      t,
+			OwnerUUID:   rt.Agent.UUID,
+			SessionUUID: rt.Agent.UUID,
+			Intent:      intent,
+			CreatedAt:   now,
+			ExpiresAt:   now.Add(ttl),
+			Host:        rt.Host,
+			PID:         os.Getpid(),
+		})
+	}
+	return recs
+}
+
+func emitMultiConflict(w io.Writer, mce *store.MultiConflictError) {
+	fmt.Fprintf(w, "✗ blocked blockers=%d\n", len(mce.Blockers))
+	for i := range mce.Blockers {
+		b := &mce.Blockers[i]
+		fmt.Fprintf(w, "✗ blocker=%s target=%s intent=%q held_since=%s expires_at=%s host=%s pid=%d\n",
 			b.OwnerUUID, b.Target.Canonical, b.Intent,
 			b.CreatedAt.UTC().Format(time.RFC3339), b.ExpiresAt.UTC().Format(time.RFC3339),
 			b.Host, b.PID)
 	}
 }
 
-func emitLockSuccess(w io.Writer, rt *runtime, t domain.Target) {
-	fmt.Fprintf(w, "✓ locked target=%s\n", t.Canonical)
-	tags, _ := rt.Store.UnreadTagsForAddressee(rt.Ctx, rt.Agent.UUID, t)
-	for i := range tags {
-		tg := &tags[i]
-		fmt.Fprintf(w, "ℹ tag=%s intent=%q\n", tg.ID, strings.TrimSpace(tg.Intent))
+func emitChmodFailure(w io.Writer, cfe *store.ChmodFailureError) {
+	fmt.Fprintf(w, "✗ chmod_failed targets=%d\n", len(cfe.Failures))
+	for i := range cfe.Failures {
+		f := &cfe.Failures[i]
+		fmt.Fprintf(w, "✗ target=%s rolled_back=%t err=%v\n", f.Target.Canonical, f.RolledBack, f.Err)
 	}
-	if len(tags) > 0 {
-		_ = rt.Store.MarkRead(rt.Ctx, rt.Agent.UUID, t)
+}
+
+func emitLockSuccess(w io.Writer, rt *runtime, acquired []domain.LockRecord) {
+	fmt.Fprintf(w, "✓ locked count=%d\n", len(acquired))
+	for i := range acquired {
+		t := acquired[i].Target
+		fmt.Fprintf(w, "✓ locked target=%s\n", t.Canonical)
+		tags, _ := rt.Store.UnreadTagsForAddressee(rt.Ctx, rt.Agent.UUID, t)
+		for j := range tags {
+			tg := &tags[j]
+			fmt.Fprintf(w, "✓ tag=%s intent=%q\n", tg.ID, strings.TrimSpace(tg.Intent))
+		}
+		if len(tags) > 0 {
+			_ = rt.Store.MarkRead(rt.Ctx, rt.Agent.UUID, t)
+		}
 	}
 }

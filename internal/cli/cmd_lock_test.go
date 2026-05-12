@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,18 @@ func withTempProject(t *testing.T) string {
 		}
 	}
 	t.Chdir(repo)
+	// Standard target files used across CLI tests. AcquireLocks Lstat-validates
+	// KindFile targets, so these must exist on disk.
+	if err := os.WriteFile(filepath.Join(repo, "a.go"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	storeDir := filepath.Join(repo, "internal", "store")
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(storeDir, "store.go"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	return repo
 }
 

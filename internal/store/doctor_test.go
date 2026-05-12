@@ -9,14 +9,16 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"loto/internal/domain"
 )
 
 func TestDoctorListsStaleLocks(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	dead := func(string, int) bool { return false }
-	l := mkLock("a.go", "alice", time.Hour)
-	if _, err := s.AcquireLock(ctx, l, func(string, int) bool { return true }); err != nil {
+	l := mkFileLock(t, "a.go", "alice", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 
@@ -33,8 +35,8 @@ func TestDoctorRepairReclaims(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	dead := func(string, int) bool { return false }
-	l := mkLock("a.go", "alice", time.Hour)
-	if _, err := s.AcquireLock(ctx, l, func(string, int) bool { return true }); err != nil {
+	l := mkFileLock(t, "a.go", "alice", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 

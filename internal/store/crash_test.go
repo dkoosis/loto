@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -20,12 +21,12 @@ func TestCrash_FailedAddTagDoesNotAdvanceCursor(t *testing.T) {
 	// Seed a baseline cursor row.
 	tg := domain.TagRecord{
 		ID: "t-aaaa1111", Target: tgt, Kind: domain.TagNote,
-		AuthorUUID: tcAlice, AddresseeUUID: "bob", Intent: "first", CreatedAt: time.Now(),
+		AuthorUUID: tcAlice, AddresseeUUID: tcBob, Intent: "first", CreatedAt: time.Now(),
 	}
 	if _, err := s.AddTag(ctx, tg); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkRead(ctx, "bob", tgt); err != nil {
+	if err := s.MarkRead(ctx, tcBob, tgt); err != nil {
 		t.Fatal(err)
 	}
 	var beforeCursor int64
@@ -44,23 +45,40 @@ func TestCrash_FailedAddTagDoesNotAdvanceCursor(t *testing.T) {
 	}
 }
 
-// TestCrash_AcquireConflictNoPartialRow — a conflicting AcquireLock returns
-// *ConflictError without writing anything. The blocker remains, the loser's
-// row is absent.
+// TestCrash_AcquireConflictNoPartialRow — a conflicting AcquireLocks returns
+// *MultiConflictError without writing anything. The blocker remains, the
+// loser's row is absent.
 func TestCrash_AcquireConflictNoPartialRow(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(a, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	s := mustOpen(t)
 	ctx := context.Background()
 	live := func(string, int) bool { return true }
+	now := time.Now()
 
-	if _, err := s.AcquireLock(ctx, mkLock("internal/store/", tcAlice, time.Hour), live); err != nil {
+	dirLock := domain.LockRecord{
+		Target:    domain.Target{Canonical: dir + "/", Kind: domain.KindDir},
+		OwnerUUID: tcAlice, SessionUUID: tcAlice,
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour), Host: "h", PID: 1,
+	}
+	fileLock := domain.LockRecord{
+		Target:    domain.Target{Canonical: a, Kind: domain.KindFile},
+		OwnerUUID: tcBob, SessionUUID: tcBob,
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour), Host: "h", PID: 1,
+	}
+
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{dirLock}, live); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AcquireLock(ctx, mkLock("internal/store/store.go", "bob", time.Hour), live); err == nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{fileLock}, live); err == nil {
 		t.Fatal("expected conflict")
 	}
 	all, _ := s.ListLocks(ctx)
 	for _, l := range all {
-		if l.OwnerUUID == "bob" {
+		if l.OwnerUUID == tcBob {
 			t.Errorf("bob should have no lock row after conflict; got %+v", l)
 		}
 	}
@@ -70,23 +88,22 @@ func TestCrash_AcquireConflictNoPartialRow(t *testing.T) {
 // or neither does. We force a conflict (no force, live lock) and assert the
 // row is unchanged and no system tag was written.
 func TestCrash_BreakLockAtomic(t *testing.T) {
+	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
 	s := mustOpen(t)
 	ctx := context.Background()
 	live := func(string, int) bool { return true }
-	if _, err := s.AcquireLock(ctx, mkLock("a.go", tcAlice, time.Hour), live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
 		t.Fatal(err)
 	}
-	tgt, _ := domain.Canonicalize("a.go")
-	if err := s.BreakLock(ctx, tgt, "bob", false /*force*/, "x", live); err == nil {
+	if err := s.BreakLock(ctx, l.Target, tcBob, false /*force*/, "x", live); err == nil {
 		t.Fatal("expected break-without-force on live lock to fail")
 	}
-	got, _ := s.LockAt(ctx, tgt)
+	got, _ := s.LockAt(ctx, l.Target)
 	if got == nil || got.OwnerUUID != tcAlice {
 		t.Fatalf("lock should still belong to alice; got %+v", got)
 	}
-	tags, _ := s.TagsOnTarget(ctx, tgt)
+	tags, _ := s.TagsOnTarget(ctx, l.Target)
 	if len(tags) != 0 {
 		t.Errorf("no system tag should have been written; got %+v", tags)
 	}
-	_ = filepath.Separator
 }

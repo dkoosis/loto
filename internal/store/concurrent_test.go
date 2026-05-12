@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -13,7 +14,7 @@ import (
 )
 
 // TestConcurrentOverlappingAcquire — spec acceptance item 8: N goroutines hit
-// overlapping AcquireLock simultaneously through a countdown barrier; exactly
+// overlapping AcquireLocks simultaneously through a countdown barrier; exactly
 // one wins. SQLite WAL + _txlock=immediate + busy_timeout=5s should serialize
 // writers cleanly.
 func TestConcurrentOverlappingAcquire(t *testing.T) {
@@ -25,7 +26,11 @@ func TestConcurrentOverlappingAcquire(t *testing.T) {
 	defer s.Close()
 
 	const N = 16
-	tgt, _ := domain.Canonicalize("internal/store/store.go")
+	target := filepath.Join(dir, "race.go")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tgt := domain.Target{Canonical: target, Kind: domain.KindFile}
 	live := func(string, int) bool { return true }
 	now := time.Now()
 
@@ -49,10 +54,10 @@ func TestConcurrentOverlappingAcquire(t *testing.T) {
 				Intent:      "race",
 				CreatedAt:   now,
 				ExpiresAt:   now.Add(time.Hour),
-				Host:        "test",
+				Host:        tcTest,
 				PID:         1000 + i,
 			}
-			_, err := s.AcquireLock(context.Background(), rec, live)
+			_, err := s.AcquireLocks(context.Background(), []domain.LockRecord{rec}, live)
 			switch {
 			case err == nil:
 				wins.Add(1)
@@ -77,7 +82,7 @@ func TestConcurrentOverlappingAcquire(t *testing.T) {
 }
 
 func isConflictErr(err error) bool {
-	var ce *ConflictError
+	var ce *MultiConflictError
 	return errors.As(err, &ce)
 }
 
