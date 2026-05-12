@@ -1,12 +1,15 @@
 # Boot
 updated: 2026-05-11
 
-→ `bd show loto-vra.1` — draft NORTH_STAR rewrite, dk signs off before code.
+→ `bd show loto-vra.1` — NORTH_STAR republished from KG nug `0b105e61f67f`; review for dk signoff, then close.
 
-state: worktree `../loto-simplify` (branch `loto-simplify`, baseline green).
+state: main clean. `docs/NORTH_STAR.md` carries the auto-publish banner again.
 
 ✓ done
-- closed 6 superseded beads + PRs #39 #61 #62; loto-shn now deps on vra.4
+- merged PRs #58 #59 #60; pruned 7 branches; closed 8 issues superseded by vra
+- restored NORTH_STAR banner + canonical body (May-11 post-cut model); reconciler republishing
+- preserved alt "contract-first" draft in `loto-simplify` worktree stash@{0} for later promotion if dk wants
 
 ‡ traps
-- PR #58 (qqh.1) preserved — let it land before vra.4 touches schema
+- `john-loto-qqh.2` worktree has 5 uncommitted files staged on schema that now lives in main — rebase before resuming
+- loto repo lacks trixi's `check-published-files.sh` pre-commit hook → banner-strip would silently break publish again
