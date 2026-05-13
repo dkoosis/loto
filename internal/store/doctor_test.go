@@ -264,3 +264,92 @@ func TestMoveCorruptAsideAtomic(t *testing.T) {
 		}
 	}
 }
+
+func TestDoctorRepair_RestoresWriteMode(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	dead := func(string, int) bool { return false }
+	l := mkFileLock(t, "d.go", "alice", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DoctorRepair(ctx, l.Host, "doctor", dead); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(l.Target.Canonical)
+	if st.Mode().Perm()&0o200 == 0 {
+		t.Fatalf("repair must restore owner-write on reclaimed targets, got %o", st.Mode().Perm())
+	}
+}
+
+func TestDoctorRepair_MultipleStaleLocksSameOwner(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	dead := func(string, int) bool { return false }
+	a := mkFileLock(t, "a.go", "alice", time.Hour)
+	b := mkFileLock(t, "b.go", "alice", time.Hour)
+	c := mkFileLock(t, "c.go", "alice", time.Hour)
+	// All three under one transaction, same actor + same now() inside reclaim
+	// — the old deterministic event ID would collide. Verify all reclaim.
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a, b, c}, func(string, int) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DoctorRepair(ctx, a.Host, "doctor", dead); err != nil {
+		t.Fatalf("repair with multiple stale locks: %v", err)
+	}
+	for _, l := range []domain.LockRecord{a, b, c} {
+		got, _ := s.LockAt(ctx, l.Target)
+		if got != nil {
+			t.Errorf("%s: stale lock should be reclaimed, got %+v", l.Target.Canonical, got)
+		}
+	}
+}
+
+func TestMoveCorruptAside_PreservesBytesOnCommitFailure(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "loto.db")
+	corruptBytes := []byte("not a real sqlite db, but unique")
+	if err := os.WriteFile(dbPath, corruptBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dbPath+sqliteWALSuffix, []byte("wal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-create the final commit destination as a non-empty directory so the
+	// final os.Rename(staging, finalDir) fails with ENOTEMPTY. The defer must
+	// then preserve the corrupt bytes under .corrupt.failed.<stamp>/, not
+	// RemoveAll them.
+	stamp := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	finalDir := fmt.Sprintf("%s.corrupt.%s", dbPath, stamp.UTC().Format("2006-01-02T15-04-05Z"))
+	if err := os.MkdirAll(finalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(finalDir, "blocker"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := MoveCorruptAside(dbPath, stamp)
+	if err == nil {
+		t.Fatal("expected commit-rename failure")
+	}
+
+	// The corrupt bytes must still exist somewhere on disk — either in the
+	// failed-quarantine path or in the unrenamed staging dir.
+	failed := fmt.Sprintf("%s.corrupt.failed.%s", dbPath, stamp.UTC().Format("2006-01-02T15-04-05Z"))
+	found := false
+	for _, candidate := range []string{filepath.Join(failed, filepath.Base(dbPath))} {
+		if body, err := os.ReadFile(candidate); err == nil && string(body) == string(corruptBytes) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		entries, _ := os.ReadDir(dir)
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("corrupt DB bytes lost after commit-rename failure; dir contents: %v", names)
+	}
+}

@@ -46,7 +46,7 @@ DELETE FROM events WHERE id IN (
 
 func (s *Store) AppendEvent(ctx context.Context, e domain.Event) (string, error) {
 	if e.ID == "" {
-		e.ID = newEventID(e.ActorUUID, e.CreatedAt, e.Reason)
+		e.ID = newEventID()
 	}
 	var subject sql.NullString
 	if e.SubjectUUID != "" {
@@ -62,7 +62,7 @@ func (s *Store) AppendEvent(ctx context.Context, e domain.Event) (string, error)
 
 func appendEventTx(ctx context.Context, tx *sql.Tx, e domain.Event) error {
 	if e.ID == "" {
-		e.ID = newEventID(e.ActorUUID, e.CreatedAt, e.Reason)
+		e.ID = newEventID()
 	}
 	var subject sql.NullString
 	if e.SubjectUUID != "" {

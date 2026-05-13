@@ -47,7 +47,9 @@ func Open(p string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir state dir: %w", err)
 	}
-	flock, err := acquireOpFlock(opFlockPathFor(p), os.Stderr)
+	// Open is the boot path and lacks a caller ctx — relies on the flock's
+	// own LOTO_FLOCK_TIMEOUT (default 30s) as the upper bound.
+	flock, err := acquireOpFlock(context.Background(), opFlockPathFor(p), os.Stderr)
 	if err != nil {
 		return nil, err
 	}

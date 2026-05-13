@@ -47,6 +47,7 @@ func sessionDir() string {
 
 var (
 	fallbackWarnOnce    sync.Once
+	staleWarnOnce       sync.Once
 	errNoSessionCache   = errors.New("no session cache")
 	errInvalidSessionID = errors.New("invalid session id")
 )
@@ -75,6 +76,13 @@ func Ensure() (*Agent, error) {
 			if a, err := loadByUUID(u); err == nil {
 				return a, nil
 			}
+			// Stale LOTO_AGENT_ID — set but not resolvable. Falling through to
+			// ephemeral mints a fresh in-memory uuid on every call, so any
+			// locks acquired in this session can't be released (the second
+			// invocation sees a different uuid). Warn loudly (audit loto-16t).
+			staleWarnOnce.Do(func() {
+				fmt.Fprintf(os.Stderr, "⚠ loto: LOTO_AGENT_ID=%s is set but no agent record exists; using ephemeral identity (locks acquired here cannot be released by other invocations)\n", u)
+			})
 		}
 		return newEphemeralAgent()
 	}

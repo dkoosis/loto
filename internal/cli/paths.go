@@ -61,12 +61,35 @@ func pinnedSlug(repoTop string) string {
 	return strings.TrimSpace(string(data))
 }
 
+// pinSlug atomically writes the pinned slug. Worktrees sharing GIT_COMMON_DIR
+// could otherwise observe a torn read or a clobbered partial file during the
+// pre-pin window (audit loto-7c0). Errors are silenced here because the caller
+// uses the slug it just computed regardless — but the temp+rename guarantees
+// readers never see a half-written file.
 func pinSlug(repoTop, slug string) {
 	pinFile := gitCommonDirFile(repoTop, ".loto-slug")
 	if pinFile == "" {
 		return
 	}
-	_ = os.WriteFile(pinFile, []byte(slug+"\n"), 0o600)
+	dir := filepath.Dir(pinFile)
+	tmp, err := os.CreateTemp(dir, ".loto-slug.*.tmp")
+	if err != nil {
+		return
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.WriteString(slug + "\n"); err != nil {
+		tmp.Close()
+		return
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		return
+	}
+	_ = os.Rename(tmpName, pinFile)
 }
 
 func gitCommonDirFile(repoTop, name string) string {
@@ -136,7 +159,10 @@ func slugFromDir(repoTop string) string {
 }
 
 func gitCmd(repoTop string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Derive from runtimeCtx so SIGINT propagates into the git subprocess
+	// (audit loto-p7j). Boot-path callers — ProjectSlug, gitCommonDirFile —
+	// still get a 10s upper bound on top of any ambient cancellation.
+	ctx, cancel := context.WithTimeout(runtimeCtx(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if repoTop != "" {
