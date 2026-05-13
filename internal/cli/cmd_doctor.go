@@ -112,16 +112,22 @@ func doRepair(rt *runtime, live domain.PidLiveProbe, restoreOrphan bool, orphans
 	}
 	fmt.Fprintln(stdout, "✓ repaired")
 	if restoreOrphan && len(orphans) > 0 {
-		restored := rt.Store.RestoreOrphanMode(orphans)
-		fmt.Fprintf(stdout, "✓ restored-orphan-mode count=%d\n", len(restored))
+		restored, failures := rt.Store.RestoreOrphanMode(orphans)
+		fmt.Fprintf(stdout, "✓ restored-orphan-mode count=%d failed=%d\n", len(restored), len(failures))
+		for _, f := range failures {
+			fmt.Fprintf(stdout, "✗ restore-orphan-mode target=%s err=%v\n", f.Path, f.Err)
+		}
 	}
 	return 0
 }
 
 func scanAndReportOrphans(rt *runtime, repoTop string, stdout io.Writer) []string {
 	candidates := walkRepoCandidates(repoTop)
-	orphans, _ := rt.Store.ScanOrphanModes(rt.Ctx, candidates)
-	sort.Strings(orphans)
+	orphans, err := rt.Store.ScanOrphanModes(rt.Ctx, candidates)
+	if err != nil {
+		fmt.Fprintf(stdout, "✗ scan-orphans: %v\n", err)
+		return nil
+	}
 	for _, p := range orphans {
 		rel, err := filepath.Rel(repoTop, p)
 		if err != nil {

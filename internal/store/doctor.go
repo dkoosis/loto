@@ -169,15 +169,25 @@ func (s *Store) ScanOrphanModes(ctx context.Context, paths []string) ([]string, 
 }
 
 // RestoreOrphanMode chmods the given paths back to owner-writable. Caller
-// gates this behind explicit user intent (--restore-orphan-mode).
-func (s *Store) RestoreOrphanMode(paths []string) []string {
-	var restored []string
+// gates this behind explicit user intent (--restore-orphan-mode). Returns
+// the paths it successfully chmod'd and a parallel slice of per-path failures
+// so callers can surface why a file was skipped.
+func (s *Store) RestoreOrphanMode(paths []string) (restored []string, failures []OrphanRestoreFailure) {
 	for _, p := range paths {
-		if err := restoreWrite(p); err == nil {
-			restored = append(restored, p)
+		if err := restoreWrite(p); err != nil {
+			failures = append(failures, OrphanRestoreFailure{Path: p, Err: err})
+			continue
 		}
+		restored = append(restored, p)
 	}
-	return restored
+	return restored, failures
+}
+
+// OrphanRestoreFailure pairs an orphan-mode path with the error encountered
+// while trying to chmod it back to writable.
+type OrphanRestoreFailure struct {
+	Path string
+	Err  error
 }
 
 // moveCorruptAside relocates a corrupt DB and its -wal/-shm siblings into

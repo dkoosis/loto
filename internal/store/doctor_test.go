@@ -111,9 +111,12 @@ func TestRestoreOrphanMode_ChmodsToWritable(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := mustOpen(t)
-	restored := s.RestoreOrphanMode([]string{p})
+	restored, failures := s.RestoreOrphanMode([]string{p})
 	if len(restored) != 1 || restored[0] != p {
 		t.Fatalf("restored = %v", restored)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("unexpected failures: %v", failures)
 	}
 	st, _ := os.Stat(p)
 	if st.Mode().Perm()&0o200 == 0 {
