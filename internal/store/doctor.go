@@ -142,16 +142,36 @@ func MoveCorruptAside(dbPath string, when time.Time) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("make staging dir: %w", err)
 	}
+	// holdsCorruptBytes flips true after the first os.Rename(dbPath, …) — at
+	// that point staging contains the only copy of the user's corrupt DB.
+	// Wiping it on later failure (the original RemoveAll defer) is data loss
+	// the user can't recover from (audit loto-2y6). Instead, requarantine the
+	// staging dir under a *.corrupt.failed.<stamp>/ name so the forensic bytes
+	// survive even when the final commit-rename can't proceed.
+	holdsCorruptBytes := false
 	committed := false
 	defer func() {
-		if !committed {
+		if committed {
+			return
+		}
+		if !holdsCorruptBytes {
 			_ = os.RemoveAll(staging)
+			return
+		}
+		failed := fmt.Sprintf("%s.corrupt.failed.%s", dbPath, stamp)
+		if err := os.Rename(staging, failed); err != nil {
+			// Last resort: leave staging in place. The dir name still encodes
+			// "corrupt-staging-" so it's discoverable even unrenamed.
+			fmt.Fprintf(os.Stderr, "loto: corrupt DB bytes preserved at %s (rename to %s failed: %v)\n", staging, failed, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "loto: corrupt DB bytes preserved at %s after commit-rename failure\n", failed)
 		}
 	}()
 
 	if err := os.Rename(dbPath, filepath.Join(staging, base)); err != nil {
 		return "", fmt.Errorf("rename main: %w", err)
 	}
+	holdsCorruptBytes = true
 	for _, sfx := range []string{sqliteWALSuffix, sqliteSHMSuffix} {
 		src := dbPath + sfx
 		if _, statErr := os.Stat(src); statErr != nil {

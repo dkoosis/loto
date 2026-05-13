@@ -4,6 +4,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,7 @@ func TestOpFlock_SerializesConcurrentHolders(t *testing.T) {
 
 	for i := range 3 {
 		wg.Go(func() {
-			h, err := acquireOpFlock(path, nil)
+			h, err := acquireOpFlock(context.Background(), path, nil)
 			if err != nil {
 				t.Errorf("acquire: %v", err)
 				return
@@ -43,7 +44,7 @@ func TestOpFlock_SerializesConcurrentHolders(t *testing.T) {
 func TestOpFlock_EmitsWaitNoticeAfter250ms(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lock-op.flock")
 
-	h1, err := acquireOpFlock(path, nil)
+	h1, err := acquireOpFlock(context.Background(), path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +54,7 @@ func TestOpFlock_EmitsWaitNoticeAfter250ms(t *testing.T) {
 	}()
 
 	var buf bytes.Buffer
-	h2, err := acquireOpFlock(path, &buf)
+	h2, err := acquireOpFlock(context.Background(), path, &buf)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -68,19 +69,45 @@ func TestOpFlock_TimeoutAborts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lock-op.flock")
 	t.Setenv("LOTO_FLOCK_TIMEOUT", "100ms")
 
-	h1, err := acquireOpFlock(path, nil)
+	h1, err := acquireOpFlock(context.Background(), path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer h1.release()
 
 	start := time.Now()
-	_, err = acquireOpFlock(path, nil)
+	_, err = acquireOpFlock(context.Background(), path, nil)
 	elapsed := time.Since(start)
 	if !errors.Is(err, ErrFlockTimeout) {
 		t.Fatalf("want ErrFlockTimeout, got %v", err)
 	}
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("timeout took too long: %v", elapsed)
+	}
+}
+
+func TestOpFlock_CtxCancelAborts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock-op.flock")
+	t.Setenv("LOTO_FLOCK_TIMEOUT", "10s")
+
+	h1, err := acquireOpFlock(context.Background(), path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h1.release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	_, err = acquireOpFlock(ctx, path, nil)
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+	if elapsed > time.Second {
+		t.Errorf("ctx cancel didn't preempt promptly: %v", elapsed)
 	}
 }

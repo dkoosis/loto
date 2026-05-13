@@ -3,6 +3,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -41,13 +42,8 @@ func (h *opFlock) release() {
 //
 // stderrW is passed in (rather than read from a package global) so concurrent
 // callers under `go test -race` cannot data-race on a shared writer.
-func acquireOpFlock(path string, stderrW io.Writer) (*opFlock, error) {
-	limit := flockDefaultLimit
-	if s := os.Getenv("LOTO_FLOCK_TIMEOUT"); s != "" {
-		if d, err := time.ParseDuration(s); err == nil && d > 0 {
-			limit = d
-		}
-	}
+func acquireOpFlock(ctx context.Context, path string, stderrW io.Writer) (*opFlock, error) {
+	limit := flockLimitFromEnv()
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open op-flock: %w", err)
@@ -64,13 +60,32 @@ func acquireOpFlock(path string, stderrW io.Writer) (*opFlock, error) {
 			f.Close()
 			return nil, fmt.Errorf("flock op-flock: %w", err)
 		}
-		if stderrW != nil && time.Since(start) >= flockNoticeAfter {
-			noticed.Do(func() { fmt.Fprintln(stderrW, "ℹ waiting flock=lock-op") })
-		}
+		maybeEmitWaitNotice(stderrW, start, &noticed)
 		if time.Now().After(deadline) {
 			f.Close()
 			return nil, ErrFlockTimeout
 		}
-		time.Sleep(flockPollInterval)
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return nil, ctx.Err()
+		case <-time.After(flockPollInterval):
+		}
 	}
+}
+
+func flockLimitFromEnv() time.Duration {
+	if s := os.Getenv("LOTO_FLOCK_TIMEOUT"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			return d
+		}
+	}
+	return flockDefaultLimit
+}
+
+func maybeEmitWaitNotice(stderrW io.Writer, start time.Time, noticed *sync.Once) {
+	if stderrW == nil || time.Since(start) < flockNoticeAfter {
+		return
+	}
+	noticed.Do(func() { fmt.Fprintln(stderrW, "ℹ waiting flock=lock-op") })
 }
