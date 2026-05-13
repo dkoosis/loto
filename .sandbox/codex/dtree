@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# dtree — directory overview with file counts by extension
+# Designed for LLM consumption. One line per directory, flat paths.
+# Requires: fd, python3
+
+ROOT="."
+DEPTH=""
+HIDDEN=1
+GITIGNORE=0
+OUTPUT="plain"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d|--depth)
+      if [[ $# -lt 2 || ! "$2" =~ ^[0-9]+$ ]]; then
+        echo "dtree: --depth requires a non-negative integer argument" >&2
+        exit 1
+      fi
+      DEPTH="$2"; shift 2 ;;
+    --no-hidden)
+      HIDDEN=0; shift ;;
+    --all)
+      GITIGNORE=1; shift ;;
+    --json)
+      OUTPUT="json"; shift ;;
+    -h|--help)
+      cat <<'HELP'
+Usage: dtree [path] [flags]
+
+Directory overview with file counts by extension.
+Designed for LLM consumption — flat paths, one line per dir.
+
+Defaults: include .hidden dirs, respect .gitignore, unlimited depth.
+
+Flags:
+  -d, --depth N    Max depth (default: unlimited)
+  --no-hidden      Exclude .hidden directories
+  --all            Include gitignored files/dirs
+  --json           JSONL output (one JSON object per line)
+  -h, --help       Show this help
+
+Examples:
+  dtree                        # current dir, full depth
+  dtree ~/Projects/orca        # specific path
+  dtree -d 1                   # top-level overview with rollup
+  dtree --json | jq            # machine-parseable output
+HELP
+      exit 0
+      ;;
+    -*)
+      echo "dtree: unknown flag: $1" >&2; exit 1 ;;
+    *)
+      ROOT="$1"; shift ;;
+  esac
+done
+
+if [ ! -d "$ROOT" ]; then
+  echo "dtree: not a directory: $ROOT" >&2
+  exit 1
+fi
+
+ROOT=$(cd "$ROOT" && pwd)
+
+# Build fd flags
+FD_COMMON=(--base-directory "$ROOT")
+if [ "$HIDDEN" -eq 1 ]; then FD_COMMON+=(--hidden --exclude .git); fi
+if [ "$GITIGNORE" -eq 1 ]; then FD_COMMON+=(--no-ignore); fi
+
+# Write python processor to temp file (stdin must be free for pipe data)
+PYSCRIPT=$(mktemp)
+trap 'rm -f "$PYSCRIPT"' EXIT
+
+cat > "$PYSCRIPT" <<'PYTHON'
+import sys, os, json
+from collections import defaultdict
+
+depth_env = os.environ.get("DTREE_DEPTH", "")
+max_depth = int(depth_env) if depth_env else None
+output_mode = os.environ.get("DTREE_OUTPUT", "plain")
+root_dir = os.environ.get("DTREE_ROOT", ".")
+
+# Tooling signals — well-known files/dirs that indicate project tooling
+TOOLING_SIGNALS = {
+    # AI assistants
+    ".claude":              "claude-code",
+    "CLAUDE.md":            "claude-code",
+    ".cursor":              "cursor",
+    ".gemini":              "gemini",
+    ".codex":               "codex",
+    "AGENTS.md":            "codex",
+    ".github/copilot":      "copilot",
+    # Languages & runtimes
+    "go.mod":               "go",
+    "package.json":         "node",
+    "Cargo.toml":           "rust",
+    "pyproject.toml":       "python",
+    "requirements.txt":     "python",
+    "Gemfile":              "ruby",
+    "pom.xml":              "java-maven",
+    "build.gradle":         "java-gradle",
+    # Build & task runners
+    "Makefile":             "make",
+    "magefile.go":          "mage",
+    "Taskfile.yml":         "taskfile",
+    "justfile":             "just",
+    # Linting & quality
+    ".golangci.yml":        "golangci-lint",
+    ".golangci.yaml":       "golangci-lint",
+    ".go-arch-lint.yml":    "go-arch-lint",
+    ".eslintrc.json":       "eslint",
+    ".eslintrc.js":         "eslint",
+    "eslint.config.js":     "eslint",
+    ".prettierrc":          "prettier",
+    "biome.json":           "biome",
+    # VCS & CI
+    ".git":                 "git",
+    ".github/workflows":    "github-actions",
+    ".gitlab-ci.yml":       "gitlab-ci",
+    "Jenkinsfile":          "jenkins",
+    # Containers & infra
+    "Dockerfile":           "docker",
+    "docker-compose.yml":   "docker-compose",
+    "docker-compose.yaml":  "docker-compose",
+    "terraform":            "terraform",
+    "pulumi":               "pulumi",
+    # Config & docs
+    ".obsidian":            "obsidian",
+    ".vscode":              "vscode",
+    ".idea":                "intellij",
+    ".env":                 "dotenv",
+    ".envrc":               "direnv",
+    "flake.nix":            "nix",
+    ".claspignore":         "clasp",
+    ".clasp.json":          "clasp",
+    # Testing
+    "jest.config.js":       "jest",
+    "jest.config.ts":       "jest",
+    "vitest.config.ts":     "vitest",
+    ".snipe":               "snipe",
+    # Orca
+    ".orca":                "orca",
+}
+
+# Test file suffix -> display label
+TEST_SUFFIXES = [
+    ("_test.go",  "test.go"),
+    (".spec.ts",  "spec.ts"),   (".spec.tsx", "spec.tsx"),
+    (".test.ts",  "test.ts"),   (".test.tsx", "test.tsx"),
+    (".spec.js",  "spec.js"),   (".spec.jsx", "spec.jsx"),
+    (".test.js",  "test.js"),   (".test.jsx", "test.jsx"),
+]
+
+def classify_ext(filename):
+    for suffix, label in TEST_SUFFIXES:
+        if filename.endswith(suffix):
+            return label
+    if filename.startswith("test_") and filename.endswith(".py"):
+        return "test.py"
+    _, ext = os.path.splitext(filename)
+    return ext.lstrip(".") if ext else "_none"
+
+def dir_depth(d):
+    return 0 if d == "." else d.count("/") + 1
+
+# Parse input
+files = []
+all_dirs = {"."}
+mode = None
+
+for raw in sys.stdin:
+    line = raw.rstrip("\n")
+    if line == "---FILES---":
+        mode = "f"; continue
+    elif line == "---DIRS---":
+        mode = "d"; continue
+    if not line:
+        continue
+    if mode == "f":
+        files.append(line)
+    elif mode == "d":
+        all_dirs.add(line.rstrip("/"))
+
+# Count files per directory and extension
+dir_exts = defaultdict(lambda: defaultdict(int))
+for f in files:
+    d = os.path.dirname(f) or "."
+    ext = classify_ext(os.path.basename(f))
+    dir_exts[d][ext] += 1
+    # Register all ancestor dirs
+    parts = d.split("/") if d != "." else []
+    for i in range(1, len(parts) + 1):
+        all_dirs.add("/".join(parts[:i]))
+
+# Which dirs to display
+if max_depth is not None:
+    visible = sorted(d for d in all_dirs if dir_depth(d) <= max_depth)
+else:
+    visible = sorted(all_dirs)
+
+# Roll up counts when depth-limited
+if max_depth is not None:
+    display = defaultdict(lambda: defaultdict(int))
+    child_count = defaultdict(int)
+
+    for d in sorted(all_dirs):
+        dd = dir_depth(d)
+        exts = dir_exts.get(d, {})
+
+        if dd <= max_depth:
+            for ext, c in exts.items():
+                display[d][ext] += c
+        else:
+            # Roll up to nearest visible ancestor
+            parts = d.split("/")
+            ancestor = "/".join(parts[:max_depth]) if max_depth > 0 else "."
+            for ext, c in exts.items():
+                display[ancestor][ext] += c
+
+        # Count direct children just beyond the boundary
+        if dd == max_depth + 1:
+            parts = d.split("/")
+            parent = "/".join(parts[:max_depth]) if max_depth > 0 else "."
+            child_count[parent] += 1
+else:
+    display = dir_exts
+    child_count = {}
+
+# Global summary
+total_files = 0
+global_exts = defaultdict(int)
+for d in visible:
+    for ext, c in display.get(d, {}).items():
+        global_exts[ext] += c
+        total_files += c
+
+sorted_global = sorted(global_exts.items(), key=lambda x: -x[1])
+
+# Detect tooling signals
+detected_tools = []
+seen_tools = set()
+for sigpath, tool in sorted(TOOLING_SIGNALS.items()):
+    if tool not in seen_tools and os.path.exists(os.path.join(root_dir, sigpath)):
+        detected_tools.append(tool)
+        seen_tools.add(tool)
+
+# Output
+if output_mode == "json":
+    summary = {
+        "dirs": len(visible),
+        "files": total_files,
+        "exts": dict(sorted_global),
+    }
+    if detected_tools:
+        summary["tooling"] = detected_tools
+    print(json.dumps({"summary": summary}))
+    for d in visible:
+        exts = dict(sorted(display.get(d, {}).items(), key=lambda x: -x[1]))
+        total = sum(exts.values())
+        obj = {"path": d, "files": total}
+        if exts:
+            obj["exts"] = exts
+        if d in child_count:
+            obj["subdirs"] = child_count[d]
+        print(json.dumps(obj))
+else:
+    ext_summary = " ".join(f"{e}:{c}" for e, c in sorted_global)
+    print(f"# {len(visible)} dirs  {total_files} files | {ext_summary}")
+    if detected_tools:
+        print(f"# tooling: {', '.join(detected_tools)}")
+
+    col = max((len(d) for d in visible), default=4) + 3
+    col = max(col, 20)
+
+    for d in visible:
+        exts = display.get(d, {})
+        total = sum(exts.values())
+        ext_str = " ".join(
+            f"{e}:{c}" for e, c in sorted(exts.items(), key=lambda x: -x[1])
+        )
+        path_str = d + "/"
+        sub = f" ({child_count[d]} subdirs)" if child_count.get(d, 0) > 0 else ""
+        print(f"{path_str:<{col}s} {total:>5d}    {ext_str}{sub}")
+PYTHON
+
+{
+  echo "---FILES---"
+  fd --type f "${FD_COMMON[@]}" 2>/dev/null || true
+  echo "---DIRS---"
+  fd --type d "${FD_COMMON[@]}" 2>/dev/null || true
+} | DTREE_DEPTH="$DEPTH" DTREE_OUTPUT="$OUTPUT" DTREE_ROOT="$ROOT" python3 "$PYSCRIPT"
