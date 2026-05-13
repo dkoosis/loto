@@ -2,13 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 )
 
 func TestWhoamiPrintsHandle(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("LOTO_AGENT_ID", "")
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
 	var stdout bytes.Buffer
 	code := Run([]string{"whoami"}, &stdout, &bytes.Buffer{})
 	if code != 0 {
