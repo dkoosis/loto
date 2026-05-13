@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -22,7 +23,7 @@ func TestDoctorListsStaleLocks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := s.DoctorAudit(ctx, l.Host, dead)
+	report, err := s.DoctorAuditWith(ctx, l.Host, dead, SidecarCheck{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +340,7 @@ func TestMoveCorruptAside_PreservesBytesOnCommitFailure(t *testing.T) {
 	failed := fmt.Sprintf("%s.corrupt.failed.%s", dbPath, stamp.UTC().Format("2006-01-02T15-04-05Z"))
 	found := false
 	for _, candidate := range []string{filepath.Join(failed, filepath.Base(dbPath))} {
-		if body, err := os.ReadFile(candidate); err == nil && string(body) == string(corruptBytes) {
+		if body, err := os.ReadFile(candidate); err == nil && bytes.Equal(body, corruptBytes) {
 			found = true
 			break
 		}

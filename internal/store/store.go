@@ -153,9 +153,6 @@ func isUserVersionMismatch(err error) bool { return errors.Is(err, errUserVersio
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// SetStderr lets tests override the writer used for op-flock wait notices.
-func (s *Store) SetStderr(w io.Writer) { s.stderr = w }
-
 // opFlockPath returns <db-dir>/lock-op.flock — the project-wide op-flock.
 func (s *Store) opFlockPath() string {
 	return filepath.Join(filepath.Dir(s.dbPath), "lock-op.flock")

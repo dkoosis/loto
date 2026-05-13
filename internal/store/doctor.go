@@ -31,10 +31,6 @@ type SidecarCheck struct {
 	RepoTop    string
 }
 
-func (s *Store) DoctorAudit(ctx context.Context, thisHost string, live domain.PidLiveProbe) (*DoctorReport, error) {
-	return s.DoctorAuditWith(ctx, thisHost, live, SidecarCheck{})
-}
-
 func (s *Store) DoctorAuditWith(ctx context.Context, thisHost string, live domain.PidLiveProbe, sc SidecarCheck) (*DoctorReport, error) {
 	r := &DoctorReport{}
 	locks, err := s.ListLocks(ctx)
