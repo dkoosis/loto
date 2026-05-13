@@ -17,11 +17,25 @@ const (
 
 type DoctorReport struct {
 	StaleLocks      []domain.LockRecord
+	SidecarFindings []SidecarFinding
 	IntegrityOK     bool
 	IntegrityDetail string
 }
 
+// SidecarCheck cross-checks held locks against the CC session sidecar to
+// strengthen zombie detection. SidecarDir empty disables the check; RepoTop
+// empty disables cwd-mismatch detection (no-sidecar still fires). The caller
+// is the runtime layer which knows the on-disk paths.
+type SidecarCheck struct {
+	SidecarDir string
+	RepoTop    string
+}
+
 func (s *Store) DoctorAudit(ctx context.Context, thisHost string, live domain.PidLiveProbe) (*DoctorReport, error) {
+	return s.DoctorAuditWith(ctx, thisHost, live, SidecarCheck{})
+}
+
+func (s *Store) DoctorAuditWith(ctx context.Context, thisHost string, live domain.PidLiveProbe, sc SidecarCheck) (*DoctorReport, error) {
 	r := &DoctorReport{}
 	locks, err := s.ListLocks(ctx)
 	if err != nil {
@@ -31,6 +45,12 @@ func (s *Store) DoctorAudit(ctx context.Context, thisHost string, live domain.Pi
 	for i := range locks {
 		if domain.IsStale(locks[i], now, thisHost, live) {
 			r.StaleLocks = append(r.StaleLocks, locks[i])
+			continue
+		}
+		if locks[i].Host == thisHost && sc.SidecarDir != "" {
+			if f, ok := checkSidecar(locks[i], sc); ok {
+				r.SidecarFindings = append(r.SidecarFindings, f)
+			}
 		}
 	}
 	var detail string
@@ -40,6 +60,36 @@ func (s *Store) DoctorAudit(ctx context.Context, thisHost string, live domain.Pi
 	r.IntegrityDetail = detail
 	r.IntegrityOK = detail == "ok"
 	return r, nil
+}
+
+// checkSidecar inspects ~/.claude/sessions/<pid>.json for a held lock and
+// returns a finding when the sidecar is missing or its cwd doesn't match the
+// repo the lock lives in. Indeterminate errors (e.g. permission denied) are
+// silenced — they're not actionable zombie signals.
+func checkSidecar(l domain.LockRecord, sc SidecarCheck) (SidecarFinding, bool) {
+	got, err := readSidecar(sc.SidecarDir, l.PID)
+	if err != nil {
+		if sidecarMissing(err) {
+			return SidecarFinding{
+				PID:    l.PID,
+				Target: l.Target.Canonical,
+				Reason: SidecarReasonNoSidecar,
+			}, true
+		}
+		return SidecarFinding{}, false
+	}
+	if sc.RepoTop == "" || got.CWD == "" {
+		return SidecarFinding{}, false
+	}
+	if got.CWD != sc.RepoTop {
+		return SidecarFinding{
+			PID:    l.PID,
+			Target: l.Target.Canonical,
+			Reason: SidecarReasonCwdMismatch,
+			Detail: got.CWD,
+		}, true
+	}
+	return SidecarFinding{}, false
 }
 
 func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live domain.PidLiveProbe) error {
