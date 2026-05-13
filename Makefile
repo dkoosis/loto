@@ -3,7 +3,7 @@
 # Primary: scan check audit report deploy doctor cross
 #   scan   — changed pkgs only (fast inner loop)
 #   check  — full repo: vet + lint + test + build
-#   audit  — everything: +race +vuln
+#   audit  — everything: +race +vuln +dupl +nilcheck
 # Run `make help` for full target list.
 
 .DEFAULT_GOAL := check
@@ -19,7 +19,7 @@ include .sandbox/lib/Makefile.doctor.mk
 include .sandbox/lib/Makefile.cross.mk
 
 .PHONY: help scan check audit deploy report report-human \
-        vet lint test race vuln stress \
+        vet lint test race vuln dupl nilcheck stress \
         build install tidy clean
 
 BIN_DIR := bin
@@ -58,7 +58,7 @@ check: vet lint arch test ## Full repo: vet + lint + arch + test + build
 	@go build -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/loto
 	@echo "=== check pass ==="
 
-audit: check race vuln ## Exhaustive: +race +vuln
+audit: check race vuln dupl nilcheck ## Exhaustive: +race +vuln +dupl +nilcheck
 	@echo "=== audit pass ==="
 
 deploy: install ## Build, install, and verify
@@ -109,6 +109,20 @@ vuln: ## Scan for known vulnerabilities
 		exit 1; \
 	fi
 	govulncheck ./...
+
+dupl: ## Detect duplicate code (jscpd; skips if not installed — dev-only)
+	@if ! command -v jscpd >/dev/null 2>&1; then \
+		echo "dupl: jscpd not installed — skipping (install: npm i -g jscpd)"; \
+		exit 0; \
+	fi
+	jscpd .
+
+nilcheck: ## Run nilaway (skips if not installed — dev-only)
+	@if ! command -v nilaway >/dev/null 2>&1; then \
+		echo "nilcheck: nilaway not installed — skipping (install: go install go.uber.org/nilaway/cmd/nilaway@latest)"; \
+		exit 0; \
+	fi
+	nilaway -include-pkgs=loto -test=false ./...
 
 ## ---------------------------------------------------------------------
 ## Build
