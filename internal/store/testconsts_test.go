@@ -1,3 +1,8 @@
 package store
 
-const tcAlice = "alice"
+const (
+	tcAlice = "alice"
+	tcBob   = "bob"
+	tcTest  = "test"
+	tcChmod = "chmod"
+)
