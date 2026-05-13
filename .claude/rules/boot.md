@@ -1,14 +1,12 @@
 # Boot
-updated: 2026-05-12
+updated: 2026-05-13
 
-→ `bd show loto-vra.1` — NORTH_STAR republished from KG nug `0b105e61f67f`; review for dk signoff, then close.
-
-state: main clean. No open PRs, no stash, no stale branches or worktrees.
+state: main clean. No open PRs, no stash, no stale branches or worktrees. `go test ./...` green.
 
 ✓ done
-- #63 (loto-qqh.2 AcquireLocks) merged + 2 Gemini bug fixes (dedup blockers, RolledBack flag)
-- lint fixes: rangeValCopy, funlen, doctor test missing -t
-- pushed main 02dce86; remote branch loto-qqh.2 deleted; worktree removed
+- shipped 5 PRs (#64, #65, #66, #69 ex-#67, #70 ex-#68): audit timeouts, loto-vra simplify (-1282 LOC), identity fleet, doctor CC sidecar, store hardening
+- ‡ trap learned: deleting a branch on GH auto-closes PRs targeting it. Retarget base BEFORE deleting the base branch, or recreate PRs after.
 
 ‡ traps
 - loto repo lacks `check-published-files.sh` pre-commit hook → banner-strip silently breaks publish
+- gemini-code-assist suggestions noted but not actioned: #67 `filepath.Clean` on sidecar cwd compare; #66 redundant MkdirAll + GC could include tmp files
