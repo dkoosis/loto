@@ -10,14 +10,7 @@ var (
 	ErrLiveLockNoForce = errors.New("lock is live; --force required")
 )
 
-func AuthorizeUnlock(l LockRecord, byAgent string) error {
-	if l.OwnerUUID != byAgent {
-		return ErrNotOwner
-	}
-	return nil
-}
-
-func AuthorizeBreak(l LockRecord, byAgent string, force bool, now time.Time, thisHost string, live PidLiveProbe) error {
+func AuthorizeBreak(l LockRecord, force bool, now time.Time, thisHost string, live PidLiveProbe) error {
 	if force {
 		return nil
 	}

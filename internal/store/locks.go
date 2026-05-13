@@ -338,7 +338,7 @@ func (s *Store) BreakLock(ctx context.Context, t domain.Target, byAgent string, 
 	}
 
 	now := time.Now()
-	if err := domain.AuthorizeBreak(l, byAgent, force, now, l.Host, live); err != nil {
+	if err := domain.AuthorizeBreak(l, force, now, l.Host, live); err != nil {
 		return err
 	}
 
