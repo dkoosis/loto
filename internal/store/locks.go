@@ -185,11 +185,11 @@ func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord
 		if err != nil {
 			return nil, err
 		}
-		for _, b := range bs {
-			key := b.OwnerUUID + "|" + b.Target.Canonical
+		for i := range bs {
+			key := bs[i].OwnerUUID + "|" + bs[i].Target.Canonical
 			if !seen[key] {
 				seen[key] = true
-				blockers = append(blockers, b)
+				blockers = append(blockers, bs[i])
 			}
 		}
 	}

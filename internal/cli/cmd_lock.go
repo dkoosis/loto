@@ -53,8 +53,12 @@ func cmdLock(args []string, stdout, stderr io.Writer) int {
 		}
 		return pidLive(pid)
 	}
+	return acquireBatch(rt, targets, *intent, *ttl, live, stdout, stderr)
+}
+
+func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.Duration, live func(string, int) bool, stdout, stderr io.Writer) int {
 	now := time.Now()
-	recs := buildLockRecords(targets, rt, *intent, now, *ttl)
+	recs := buildLockRecords(targets, rt, intent, now, ttl)
 	acquired, err := rt.Store.AcquireLocks(rt.Ctx, recs, live)
 	if err != nil {
 		var mce *store.MultiConflictError
