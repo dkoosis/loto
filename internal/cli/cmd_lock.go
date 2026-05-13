@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
 
 	"loto/internal/domain"
@@ -45,8 +44,6 @@ func cmdLock(args []string, stdout, stderr io.Writer) int {
 	}
 	defer rt.Close()
 
-	emitMsgBanner(stdout, rt)
-
 	live := func(host string, pid int) bool {
 		if host != rt.Host {
 			return true
@@ -74,7 +71,7 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	emitLockSuccess(stdout, rt, acquired)
+	emitLockSuccess(stdout, acquired)
 	return 0
 }
 
@@ -127,37 +124,9 @@ func emitChmodFailure(w io.Writer, cfe *store.ChmodFailureError) {
 	}
 }
 
-func emitLockSuccess(w io.Writer, rt *runtime, acquired []domain.LockRecord) {
+func emitLockSuccess(w io.Writer, acquired []domain.LockRecord) {
 	fmt.Fprintf(w, "✓ locked count=%d\n", len(acquired))
 	for i := range acquired {
-		t := acquired[i].Target
-		fmt.Fprintf(w, "✓ locked target=%s\n", t.Canonical)
-		tags, _ := rt.Store.UnreadTagsForAddressee(rt.Ctx, rt.Agent.UUID, t)
-		for j := range tags {
-			tg := &tags[j]
-			fmt.Fprintf(w, "✓ tag=%s intent=%q\n", tg.ID, strings.TrimSpace(tg.Intent))
-		}
-		if len(tags) > 0 {
-			_ = rt.Store.MarkRead(rt.Ctx, rt.Agent.UUID, t)
-		}
+		fmt.Fprintf(w, "✓ locked target=%s\n", acquired[i].Target.Canonical)
 	}
-}
-
-func emitMsgBanner(w io.Writer, rt *runtime) {
-	count, senders, err := rt.Store.UnreadMessageSummary(rt.Ctx, rt.Agent.UUID)
-	if err != nil || count == 0 {
-		return
-	}
-	names := make([]string, 0, len(senders))
-	for _, s := range senders {
-		names = append(names, shortenUUID(s))
-	}
-	fmt.Fprintf(w, "ℹ %d msg for you from %s — loto msg to read\n", count, strings.Join(names, ", "))
-}
-
-func shortenUUID(uuid string) string {
-	if len(uuid) > 8 {
-		return uuid[:8]
-	}
-	return uuid
 }

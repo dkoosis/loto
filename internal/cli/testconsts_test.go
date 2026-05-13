@@ -5,8 +5,6 @@ const (
 	tcCmdLock      = "lock"
 	tcCmdUnlock    = "unlock"
 	tcCmdStatus    = "status"
-	tcCmdMsg       = "msg"
-	tcCmdTag       = "tag"
 	tcCmdCheck     = "check"
 	tcFlagMine     = "--mine"
 	tcFlagIntent   = "--intent"

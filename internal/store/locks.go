@@ -13,6 +13,14 @@ import (
 	"loto/internal/domain"
 )
 
+const (
+	EventLockAcquired       = "lock_acquired"
+	EventLockReleased       = "lock_released"
+	EventLockBroken         = "lock_broken"
+	EventLockReclaimedStale = "lock_reclaimed_stale"
+	EventModeRestoreFailed  = "mode_restore_failed"
+)
+
 var (
 	ErrNoLockAtTarget    = errors.New("no lock at target")
 	ErrTargetSymlink     = errors.New("symlink not supported")
@@ -45,18 +53,11 @@ func (e *ChmodFailureError) Error() string {
 	return fmt.Sprintf("chmod failed on %d target(s)", len(e.Failures))
 }
 
-// chmodRestoreErr buffers a per-target restore failure so it can be turned
-// into a durable mode_restore_failed tag AFTER the acquire tx rolls back.
 type chmodRestoreErr struct {
 	path string
 	err  error
 }
 
-// AcquireLocks atomically acquires locks on all targets. Either all targets
-// are stripped-write + DB rows inserted, or none are (with chmod rollback).
-//
-// If the process dies between the chmod loop and tx.Commit, files are stripped
-// with no DB row — exactly the orphan-mode case `doctor` is designed to surface.
 func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
 	if len(recs) == 0 {
 		return nil, nil
@@ -74,7 +75,7 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 	}
 	defer flock.release()
 
-	if err := validateFileTargets(sorted); err != nil {
+	if err := validateAllFileTargets(sorted); err != nil {
 		return nil, err
 	}
 
@@ -84,19 +85,13 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	caseSensitive, err := s.fsCaseSensitiveTx(tx)
-	if err != nil {
-		return nil, err
-	}
-	caseInsensitive := !caseSensitive
-
 	all, err := loadLocksTx(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now()
 
-	blockers, err := collectAllBlockers(ctx, tx, all, sorted, caseInsensitive, now, live)
+	blockers, err := collectAllBlockers(ctx, tx, all, sorted, now, live)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +122,7 @@ func (s *Store) stripAndHandleFailure(ctx context.Context, tx *sql.Tx, sorted []
 	failures, restoreErrs := rollbackStripped(chmodErr.Target, chmodErr.Err, stripped)
 	_ = tx.Rollback()
 	for _, re := range restoreErrs {
-		_ = s.appendModeRestoreFailedTag(ctx, re.path, sorted[0].OwnerUUID, now, re.err)
+		_ = s.appendModeRestoreFailedEvent(ctx, re.path, sorted[0].OwnerUUID, now, re.err)
 	}
 	return nil, &ChmodFailureError{Failures: failures}
 }
@@ -148,11 +143,8 @@ func restoreAll(stripped []string) {
 	}
 }
 
-func validateFileTargets(sorted []domain.LockRecord) error {
+func validateAllFileTargets(sorted []domain.LockRecord) error {
 	for i := range sorted {
-		if sorted[i].Target.Kind != domain.KindFile {
-			continue
-		}
 		if err := validateFileTarget(sorted[i].Target.Canonical); err != nil {
 			return err
 		}
@@ -177,19 +169,19 @@ func validateFileTarget(p string) error {
 	return nil
 }
 
-func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, sorted []domain.LockRecord, caseInsensitive bool, now time.Time, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
+func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, sorted []domain.LockRecord, now time.Time, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
 	seen := map[string]bool{}
 	var blockers []domain.LockRecord
 	for i := range sorted {
-		bs, err := collectBlockers(ctx, tx, all, sorted[i], caseInsensitive, now, live)
+		bs, err := collectBlockers(ctx, tx, all, sorted[i], now, live)
 		if err != nil {
 			return nil, err
 		}
-		for i := range bs {
-			key := bs[i].OwnerUUID + "|" + bs[i].Target.Canonical
+		for j := range bs {
+			key := bs[j].OwnerUUID + "|" + bs[j].Target.Canonical
 			if !seen[key] {
 				seen[key] = true
-				blockers = append(blockers, bs[i])
+				blockers = append(blockers, bs[j])
 			}
 		}
 	}
@@ -202,15 +194,9 @@ func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord
 	return blockers, nil
 }
 
-// stripAll chmods write off each KindFile target in canonical order. On the
-// first failure, it returns the partial stripped list plus a ChmodFailure
-// describing the offending target. Dir/glob targets are skipped (logical-only).
 func stripAll(sorted []domain.LockRecord) ([]string, *ChmodFailure) {
 	stripped := make([]string, 0, len(sorted))
 	for i := range sorted {
-		if sorted[i].Target.Kind != domain.KindFile {
-			continue
-		}
 		p := sorted[i].Target.Canonical
 		if err := stripWrite(p); err != nil {
 			return stripped, &ChmodFailure{Target: sorted[i].Target, Err: err}
@@ -220,23 +206,20 @@ func stripAll(sorted []domain.LockRecord) ([]string, *ChmodFailure) {
 	return stripped, nil
 }
 
-// rollbackStripped reverses successful strips after a partial failure.
-// Returns the failure list (initial failure first, then rollback outcomes)
-// and any restore errors needing durable mode_restore_failed breadcrumbs.
 func rollbackStripped(failedTarget domain.Target, failedErr error, stripped []string) ([]ChmodFailure, []chmodRestoreErr) {
 	failures := []ChmodFailure{{Target: failedTarget, Err: failedErr, RolledBack: false}}
 	var restoreErrs []chmodRestoreErr
 	for _, p := range stripped {
 		if rerr := restoreWrite(p); rerr != nil {
 			failures = append(failures, ChmodFailure{
-				Target:     domain.Target{Canonical: p, Kind: domain.KindFile},
+				Target:     domain.Target{Canonical: p},
 				Err:        rerr,
 				RolledBack: false,
 			})
 			restoreErrs = append(restoreErrs, chmodRestoreErr{path: p, err: rerr})
 		} else {
 			failures = append(failures, ChmodFailure{
-				Target:     domain.Target{Canonical: p, Kind: domain.KindFile},
+				Target:     domain.Target{Canonical: p},
 				RolledBack: true,
 			})
 		}
@@ -244,26 +227,22 @@ func rollbackStripped(failedTarget domain.Target, failedErr error, stripped []st
 	return failures, restoreErrs
 }
 
-// appendModeRestoreFailedTag writes the durable breadcrumb on its own
-// connection. Callers MUST have rolled back the surrounding acquire tx first.
-func (s *Store) appendModeRestoreFailedTag(ctx context.Context, path, byAgent string, now time.Time, cause error) error {
-	tagID := newTagID(byAgent, now, "mode_restore_failed")
-	_, err := s.db.ExecContext(ctx, `
-INSERT INTO tags(target_canonical,target_kind,id,kind,event,author_uuid,addressee_uuid,previous_owner_uuid,intent,created_at,expires_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,NULL)`,
-		path, "file", tagID, "system", "mode_restore_failed",
-		byAgent, byAgent, "",
-		fmt.Sprintf("mode_restore_failed: %v on %s", cause, path),
-		now.UnixNano(),
-	)
+func (s *Store) appendModeRestoreFailedEvent(ctx context.Context, path, byAgent string, now time.Time, cause error) error {
+	_, err := s.AppendEvent(ctx, domain.Event{
+		Target:    domain.Target{Canonical: path},
+		Kind:      EventModeRestoreFailed,
+		ActorUUID: byAgent,
+		Reason:    fmt.Sprintf("mode_restore_failed: %v on %s", cause, path),
+		CreatedAt: now,
+	})
 	return err
 }
 
-func collectBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, l domain.LockRecord, caseInsensitive bool, now time.Time, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
+func collectBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, l domain.LockRecord, now time.Time, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
 	var blockers []domain.LockRecord
 	for i := range all {
 		ex := &all[i]
-		if !domain.Overlap(ex.Target, l.Target, caseInsensitive) || ex.OwnerUUID == l.OwnerUUID {
+		if !domain.Overlap(ex.Target, l.Target) || ex.OwnerUUID == l.OwnerUUID {
 			continue
 		}
 		if domain.IsStale(*ex, now, l.Host, live) {
@@ -279,8 +258,8 @@ func collectBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, l
 
 func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord) error {
 	_, err := tx.ExecContext(ctx, `
-INSERT INTO locks(target_canonical, target_kind, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, branch)
-VALUES (?,?,?,?,?,?,?,?,?,?)
+INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, branch)
+VALUES (?,?,?,?,?,?,?,?,?)
 ON CONFLICT(target_canonical) DO UPDATE SET
   intent=excluded.intent,
   expires_at=excluded.expires_at,
@@ -289,7 +268,7 @@ ON CONFLICT(target_canonical) DO UPDATE SET
   pid=excluded.pid,
   branch=excluded.branch
 WHERE locks.owner_uuid = excluded.owner_uuid`,
-		l.Target.Canonical, kindString(l.Target.Kind), l.OwnerUUID, l.SessionUUID,
+		l.Target.Canonical, l.OwnerUUID, l.SessionUUID,
 		l.Intent, l.CreatedAt.UnixNano(), l.ExpiresAt.UnixNano(),
 		l.Host, l.PID, l.Branch,
 	)
@@ -345,16 +324,18 @@ func (s *Store) BreakLock(ctx context.Context, t domain.Target, byAgent string, 
 		return err
 	}
 
-	event := "lock_broken"
+	kind := EventLockBroken
 	if !force {
-		event = "lock_reclaimed_stale"
+		kind = EventLockReclaimedStale
 	}
-	tagID := newTagID(byAgent, now, reason)
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO tags(target_canonical,target_kind,id,kind,event,author_uuid,addressee_uuid,previous_owner_uuid,intent,created_at,expires_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,NULL)`,
-		t.Canonical, kindString(l.Target.Kind), tagID, "system", event, byAgent, l.OwnerUUID, l.OwnerUUID, reason, now.UnixNano(),
-	); err != nil {
+	if err := appendEventTx(ctx, tx, domain.Event{
+		Target:      t,
+		Kind:        kind,
+		ActorUUID:   byAgent,
+		SubjectUUID: l.OwnerUUID,
+		Reason:      reason,
+		CreatedAt:   now,
+	}); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ?`, t.Canonical, l.OwnerUUID); err != nil {
@@ -402,7 +383,7 @@ func (s *Store) LockAt(ctx context.Context, t domain.Target) (*domain.LockRecord
 	return &l, nil
 }
 
-const lockCols = `target_canonical,target_kind,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,branch`
+const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,branch`
 
 func loadLocksTx(ctx context.Context, tx *sql.Tx) ([]domain.LockRecord, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT `+lockCols+` FROM locks`)
@@ -423,65 +404,30 @@ func loadLocksTx(ctx context.Context, tx *sql.Tx) ([]domain.LockRecord, error) {
 
 func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	var l domain.LockRecord
-	var canonical, kindStr string
+	var canonical string
 	var createdNs, expiresNs int64
-	if err := r.Scan(&canonical, &kindStr, &l.OwnerUUID, &l.SessionUUID, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &l.Branch); err != nil {
+	if err := r.Scan(&canonical, &l.OwnerUUID, &l.SessionUUID, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &l.Branch); err != nil {
 		return l, err
 	}
-	l.Target = domain.Target{Canonical: canonical, Kind: parseKind(kindStr)}
+	l.Target = domain.Target{Canonical: canonical}
 	l.CreatedAt = time.Unix(0, createdNs).UTC()
 	l.ExpiresAt = time.Unix(0, expiresNs).UTC()
 	return l, nil
 }
 
-func kindString(k domain.TargetKind) string {
-	switch k {
-	case domain.KindFile:
-		return "file"
-	case domain.KindDir:
-		return "dir"
-	case domain.KindGlob:
-		return "glob"
-	}
-	return "file"
-}
-
-func parseKind(s string) domain.TargetKind {
-	switch s {
-	case "dir":
-		return domain.KindDir
-	case "glob":
-		return domain.KindGlob
-	default:
-		return domain.KindFile
-	}
-}
-
 func reclaimStaleTx(ctx context.Context, tx *sql.Tx, stale domain.LockRecord, byAgent string, now time.Time) error {
-	tagID := newTagID(byAgent, now, "lock_reclaimed_stale")
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO tags(target_canonical,target_kind,id,kind,event,author_uuid,addressee_uuid,previous_owner_uuid,intent,created_at,expires_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,NULL)`,
-		stale.Target.Canonical, kindString(stale.Target.Kind), tagID, "system", "lock_reclaimed_stale",
-		byAgent, stale.OwnerUUID, stale.OwnerUUID,
-		"reclaimed stale lock", now.UnixNano(),
-	); err != nil {
+	if err := appendEventTx(ctx, tx, domain.Event{
+		Target:      stale.Target,
+		Kind:        EventLockReclaimedStale,
+		ActorUUID:   byAgent,
+		SubjectUUID: stale.OwnerUUID,
+		Reason:      "reclaimed stale lock",
+		CreatedAt:   now,
+	}); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ?`, stale.Target.Canonical, stale.OwnerUUID); err != nil {
 		return err
 	}
 	return nil
-}
-
-func (s *Store) fsCaseSensitiveTx(tx *sql.Tx) (bool, error) {
-	var v string
-	err := tx.QueryRowContext(context.Background(), `SELECT value FROM schema_meta WHERE key = 'fs_case_sensitive'`).Scan(&v)
-	if errors.Is(err, sql.ErrNoRows) {
-		return true, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return v == "true", nil
 }

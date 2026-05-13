@@ -14,32 +14,14 @@ type LockRecord struct {
 	Branch      string
 }
 
-type TagKind int
-
-const (
-	TagNote TagKind = iota
-	TagSystem
-)
-
-type Message struct {
-	ID        string
-	FromUUID  string
-	ToUUID    string
-	Body      string
-	CreatedAt time.Time
-	ExpiresAt *time.Time
-	ReadAt    *time.Time
-}
-
-type TagRecord struct {
-	ID                string
-	Target            Target
-	Kind              TagKind
-	Event             string
-	AuthorUUID        string
-	AddresseeUUID     string
-	PreviousOwnerUUID string
-	Intent            string
-	CreatedAt         time.Time
-	ExpiresAt         *time.Time
+// Event is an append-only audit row. SubjectUUID is the affected agent (for
+// lock_broken / lock_reclaimed_stale); empty otherwise.
+type Event struct {
+	ID          string
+	Target      Target
+	Kind        string
+	ActorUUID   string
+	SubjectUUID string
+	Reason      string
+	CreatedAt   time.Time
 }

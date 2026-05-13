@@ -30,7 +30,7 @@ func TestConcurrentOverlappingAcquire(t *testing.T) {
 	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tgt := domain.Target{Canonical: target, Kind: domain.KindFile}
+	tgt := domain.Target{Canonical: target}
 	live := func(string, int) bool { return true }
 	now := time.Now()
 
