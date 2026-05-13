@@ -91,6 +91,12 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 	}
 	now := time.Now()
 
+	// collectAllBlockers also performs lazy GC of stale rows. Reclaimed paths
+	// are not chmod-restored here: collectBlockers only deletes rows that
+	// overlap the requested locks, and overlapping new locks immediately
+	// re-strip the same paths. Orphan-mode (stale row reclaimed with no new
+	// overlap) cannot occur via this code path; doctor's stale-scan handles
+	// non-overlapping orphans.
 	blockers, err := collectAllBlockers(ctx, tx, all, sorted, now, live)
 	if err != nil {
 		return nil, err
@@ -286,13 +292,19 @@ func (s *Store) ReleaseLock(ctx context.Context, t domain.Target, byAgent string
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	res, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ?`, t.Canonical, byAgent)
+	var owner string
+	err = tx.QueryRowContext(ctx, `SELECT owner_uuid FROM locks WHERE target_canonical = ?`, t.Canonical).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNoLockAtTarget
+	}
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if owner != byAgent {
 		return domain.ErrNotOwner
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ?`, t.Canonical, byAgent); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err

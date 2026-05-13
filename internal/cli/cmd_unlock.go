@@ -85,6 +85,10 @@ func releaseOne(rt *runtime, target domain.Target, intent string, force bool, li
 
 	err := rt.Store.ReleaseLock(rt.Ctx, target, rt.Agent.UUID)
 	if err != nil {
+		if errors.Is(err, store.ErrNoLockAtTarget) {
+			fmt.Fprintf(stderr, "✗ no lock at target=%s\n", target.Canonical)
+			return 1
+		}
 		if errors.Is(err, domain.ErrNotOwner) {
 			if err2 := rt.Store.BreakLock(rt.Ctx, target, rt.Agent.UUID, false, intent, live); err2 != nil {
 				fmt.Fprintf(stderr, "✗ not owner and lock is live — use --force to override\n")

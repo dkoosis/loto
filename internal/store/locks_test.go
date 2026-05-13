@@ -416,3 +416,60 @@ func TestBreakLock_RestoresWriteMode(t *testing.T) {
 		t.Fatalf("break must restore owner-write, got %o", st.Mode().Perm())
 	}
 }
+
+func TestReleaseLock_NoLockVsNotOwner(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	live := func(string, int) bool { return true }
+
+	l := mkFileLock(t, "x.go", tcAlice, time.Hour)
+	if err := s.ReleaseLock(ctx, l.Target, tcAlice); !errors.Is(err, ErrNoLockAtTarget) {
+		t.Fatalf("expected ErrNoLockAtTarget, got %v", err)
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReleaseLock(ctx, l.Target, tcBob); !errors.Is(err, domain.ErrNotOwner) {
+		t.Fatalf("expected ErrNotOwner, got %v", err)
+	}
+}
+
+func TestAcquireLocks_LazyGCRestoresMode(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	dead := func(string, int) bool { return false }
+	live := func(string, int) bool { return true }
+
+	// Alice acquires (live probe), then her lock goes stale (probe dead).
+	a := mkFileLock(t, "shared.go", tcAlice, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, live); err != nil {
+		t.Fatal(err)
+	}
+	// Verify stripped.
+	st, _ := os.Stat(a.Target.Canonical)
+	if st.Mode().Perm()&0o200 != 0 {
+		t.Fatalf("acquire should strip owner-write, got %o", st.Mode().Perm())
+	}
+
+	// Bob comes along; Alice is dead → lazy GC reclaims her row, Bob acquires.
+	b := a
+	b.OwnerUUID = tcBob
+	b.SessionUUID = tcBob
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, dead); err != nil {
+		t.Fatalf("Bob acquire after stale reclaim: %v", err)
+	}
+	// Bob now holds; file should still be stripped (he owns it).
+	st, _ = os.Stat(a.Target.Canonical)
+	if st.Mode().Perm()&0o200 != 0 {
+		t.Fatalf("Bob's lock should keep write stripped, got %o", st.Mode().Perm())
+	}
+
+	// Sanity: if Bob releases, mode comes back.
+	if err := s.ReleaseLock(ctx, b.Target, tcBob); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = os.Stat(a.Target.Canonical)
+	if st.Mode().Perm()&0o200 == 0 {
+		t.Fatalf("release should restore owner-write, got %o", st.Mode().Perm())
+	}
+}
