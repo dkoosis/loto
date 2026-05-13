@@ -1,0 +1,5 @@
+Usage of doctor:
+  -dry-run
+    	report what --repair would do, without writing
+  -repair
+    	reclaim stale locks

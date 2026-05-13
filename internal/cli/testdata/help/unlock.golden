@@ -1,0 +1,9 @@
+Usage of unlock:
+  -all
+    	release every lock owned by my uuid
+  -force
+    	break another agent's lock (or a live lock)
+  -intent string
+    	intent (required)
+  -t string
+    	intent (required)
