@@ -49,6 +49,120 @@ func TestDoctorRepairReclaims(t *testing.T) {
 	}
 }
 
+func TestDoctorSidecarMissingDirIsNoOp(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	alive := func(string, int) bool { return true }
+	l := mkFileLock(t, "a.go", "alice", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
+		t.Fatal(err)
+	}
+	report, err := s.DoctorAuditWith(ctx, l.Host, alive, SidecarCheck{
+		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
+		RepoTop:    "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.SidecarFindings) != 1 || report.SidecarFindings[0].Reason != SidecarReasonNoSidecar {
+		t.Fatalf("expected one no-sidecar finding, got %+v", report.SidecarFindings)
+	}
+}
+
+func TestDoctorSidecarDisabledWhenDirEmpty(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	alive := func(string, int) bool { return true }
+	l := mkFileLock(t, "a.go", "alice", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
+		t.Fatal(err)
+	}
+	report, err := s.DoctorAuditWith(ctx, l.Host, alive, SidecarCheck{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.SidecarFindings) != 0 {
+		t.Fatalf("expected no findings when sidecar dir empty, got %+v", report.SidecarFindings)
+	}
+}
+
+func TestDoctorSidecarCwdMismatch(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	alive := func(string, int) bool { return true }
+	l := mkFileLock(t, "a.go", "alice", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	body := fmt.Sprintf(`{"pid":%d,"cwd":"/somewhere/else"}`, l.PID)
+	if err := os.WriteFile(filepath.Join(dir, "1.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := s.DoctorAuditWith(ctx, l.Host, alive, SidecarCheck{
+		SidecarDir: dir,
+		RepoTop:    "/Users/me/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.SidecarFindings) != 1 || report.SidecarFindings[0].Reason != SidecarReasonCwdMismatch {
+		t.Fatalf("expected cwd-mismatch, got %+v", report.SidecarFindings)
+	}
+	if report.SidecarFindings[0].Detail != "/somewhere/else" {
+		t.Fatalf("expected detail to carry sidecar cwd, got %q", report.SidecarFindings[0].Detail)
+	}
+}
+
+func TestDoctorSidecarHealthyWhenCwdMatches(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	alive := func(string, int) bool { return true }
+	l := mkFileLock(t, "a.go", "alice", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	repoTop := "/Users/me/repo"
+	body := fmt.Sprintf(`{"pid":%d,"cwd":%q}`, l.PID, repoTop)
+	if err := os.WriteFile(filepath.Join(dir, "1.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := s.DoctorAuditWith(ctx, l.Host, alive, SidecarCheck{
+		SidecarDir: dir,
+		RepoTop:    repoTop,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.SidecarFindings) != 0 {
+		t.Fatalf("expected no findings when cwd matches, got %+v", report.SidecarFindings)
+	}
+}
+
+func TestDoctorSidecarSkippedForStaleLocks(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	dead := func(string, int) bool { return false }
+	l := mkFileLock(t, "a.go", "alice", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	report, err := s.DoctorAuditWith(ctx, l.Host, dead, SidecarCheck{
+		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
+		RepoTop:    "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.StaleLocks) != 1 {
+		t.Fatalf("expected stale lock, got %d", len(report.StaleLocks))
+	}
+	if len(report.SidecarFindings) != 0 {
+		t.Fatalf("sidecar check should not double-report stale locks, got %+v", report.SidecarFindings)
+	}
+}
+
 func TestMoveCorruptDB(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "loto.db")
