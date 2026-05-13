@@ -178,13 +178,20 @@ func validateFileTarget(p string) error {
 }
 
 func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, sorted []domain.LockRecord, caseInsensitive bool, now time.Time, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
+	seen := map[string]bool{}
 	var blockers []domain.LockRecord
 	for i := range sorted {
 		bs, err := collectBlockers(ctx, tx, all, sorted[i], caseInsensitive, now, live)
 		if err != nil {
 			return nil, err
 		}
-		blockers = append(blockers, bs...)
+		for _, b := range bs {
+			key := b.OwnerUUID + "|" + b.Target.Canonical
+			if !seen[key] {
+				seen[key] = true
+				blockers = append(blockers, b)
+			}
+		}
 	}
 	sort.Slice(blockers, func(i, j int) bool {
 		if !blockers[i].CreatedAt.Equal(blockers[j].CreatedAt) {
@@ -227,6 +234,11 @@ func rollbackStripped(failedTarget domain.Target, failedErr error, stripped []st
 				RolledBack: false,
 			})
 			restoreErrs = append(restoreErrs, chmodRestoreErr{path: p, err: rerr})
+		} else {
+			failures = append(failures, ChmodFailure{
+				Target:     domain.Target{Canonical: p, Kind: domain.KindFile},
+				RolledBack: true,
+			})
 		}
 	}
 	return failures, restoreErrs
