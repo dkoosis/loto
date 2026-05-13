@@ -294,7 +294,21 @@ func (s *Store) ReleaseLock(ctx context.Context, t domain.Target, byAgent string
 	if n == 0 {
 		return domain.ErrNotOwner
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.restoreAndAudit(ctx, t.Canonical, byAgent)
+	return nil
+}
+
+// restoreAndAudit re-adds owner-write to a released target and emits a
+// mode_restore_failed event on failure. Spec contract (NORTH_STAR.md): strip
+// on acquire, restore on release. Callers: ReleaseLock, BreakLock,
+// reclaimStaleTx, DoctorRepair — every path that removes a `locks` row.
+func (s *Store) restoreAndAudit(ctx context.Context, path, byAgent string) {
+	if err := restoreWrite(path); err != nil {
+		_ = s.appendModeRestoreFailedEvent(ctx, path, byAgent, time.Now(), err)
+	}
 }
 
 func (s *Store) BreakLock(ctx context.Context, t domain.Target, byAgent string, force bool, reason string, live domain.PidLiveProbe) error {
@@ -345,7 +359,11 @@ func (s *Store) BreakLock(ctx context.Context, t domain.Target, byAgent string, 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ?`, t.Canonical, l.OwnerUUID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.restoreAndAudit(ctx, t.Canonical, byAgent)
+	return nil
 }
 
 func (s *Store) ListLocks(ctx context.Context) ([]domain.LockRecord, error) {

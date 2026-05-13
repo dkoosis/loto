@@ -104,11 +104,13 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 		return err
 	}
 	now := time.Now()
+	var reclaimed []string
 	for i := range all {
 		if domain.IsStale(all[i], now, thisHost, live) {
 			if err := reclaimStaleTx(ctx, tx, all[i], byAgent, now); err != nil {
 				return err
 			}
+			reclaimed = append(reclaimed, all[i].Target.Canonical)
 		}
 	}
 	if err := rotateEventsTx(ctx, tx, now); err != nil {
@@ -116,6 +118,9 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 	}
 	if err := tx.Commit(); err != nil {
 		return err
+	}
+	for _, p := range reclaimed {
+		s.restoreAndAudit(ctx, p, byAgent)
 	}
 	_, err = s.db.ExecContext(ctx, `VACUUM`)
 	return err

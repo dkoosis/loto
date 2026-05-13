@@ -264,3 +264,43 @@ func TestMoveCorruptAsideAtomic(t *testing.T) {
 		}
 	}
 }
+
+func TestDoctorRepair_RestoresWriteMode(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	dead := func(string, int) bool { return false }
+	l := mkFileLock(t, "d.go", "alice", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DoctorRepair(ctx, l.Host, "doctor", dead); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(l.Target.Canonical)
+	if st.Mode().Perm()&0o200 == 0 {
+		t.Fatalf("repair must restore owner-write on reclaimed targets, got %o", st.Mode().Perm())
+	}
+}
+
+func TestDoctorRepair_MultipleStaleLocksSameOwner(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	dead := func(string, int) bool { return false }
+	a := mkFileLock(t, "a.go", "alice", time.Hour)
+	b := mkFileLock(t, "b.go", "alice", time.Hour)
+	c := mkFileLock(t, "c.go", "alice", time.Hour)
+	// All three under one transaction, same actor + same now() inside reclaim
+	// — the old deterministic event ID would collide. Verify all reclaim.
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a, b, c}, func(string, int) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DoctorRepair(ctx, a.Host, "doctor", dead); err != nil {
+		t.Fatalf("repair with multiple stale locks: %v", err)
+	}
+	for _, l := range []domain.LockRecord{a, b, c} {
+		got, _ := s.LockAt(ctx, l.Target)
+		if got != nil {
+			t.Errorf("%s: stale lock should be reclaimed, got %+v", l.Target.Canonical, got)
+		}
+	}
+}

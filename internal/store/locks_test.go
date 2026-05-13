@@ -379,3 +379,40 @@ func TestAcquireLocks_RollbackRestoreFailureLeavesBreadcrumb(t *testing.T) {
 		t.Errorf("want 1 mode_restore_failed event for %s, got %d", a, n)
 	}
 }
+
+func TestReleaseLock_RestoresWriteMode(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	live := func(string, int) bool { return true }
+	l := mkFileLock(t, "r.go", tcAlice, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(l.Target.Canonical); st.Mode().Perm()&0o200 != 0 {
+		t.Fatalf("precondition: acquire should strip write, got %o", st.Mode().Perm())
+	}
+	if err := s.ReleaseLock(ctx, l.Target, tcAlice); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(l.Target.Canonical)
+	if st.Mode().Perm()&0o200 == 0 {
+		t.Fatalf("release must restore owner-write, got %o", st.Mode().Perm())
+	}
+}
+
+func TestBreakLock_RestoresWriteMode(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	live := func(string, int) bool { return false } // stale
+	l := mkFileLock(t, "b.go", tcAlice, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BreakLock(ctx, l.Target, tcBob, false, "stale", live); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(l.Target.Canonical)
+	if st.Mode().Perm()&0o200 == 0 {
+		t.Fatalf("break must restore owner-write, got %o", st.Mode().Perm())
+	}
+}
