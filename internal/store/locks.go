@@ -107,6 +107,10 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 	if err := insertAllLocks(ctx, tx, sorted, stripped); err != nil {
 		return nil, err
 	}
+	if err := rotateEventsTx(ctx, tx, now); err != nil {
+		restoreAll(stripped)
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		restoreAll(stripped)
 		return nil, err

@@ -5,4 +5,5 @@ const (
 	tcBob   = "bob"
 	tcTest  = "test"
 	tcChmod = "chmod"
+	tcXGo   = "x.go"
 )
