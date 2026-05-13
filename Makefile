@@ -110,19 +110,19 @@ vuln: ## Scan for known vulnerabilities
 	fi
 	govulncheck ./...
 
-dupl: ## Detect duplicate code (jscpd)
+dupl: ## Detect duplicate code (jscpd; skips if not installed — dev-only)
 	@if ! command -v jscpd >/dev/null 2>&1; then \
-		echo "jscpd not installed — skipping (install: npm i -g jscpd)"; \
+		echo "dupl: jscpd not installed — skipping (install: npm i -g jscpd)"; \
 		exit 0; \
 	fi
 	jscpd .
 
-nilcheck: ## Run nilaway (skips if not installed)
+nilcheck: ## Run nilaway (skips if not installed — dev-only)
 	@if ! command -v nilaway >/dev/null 2>&1; then \
 		echo "nilcheck: nilaway not installed — skipping (install: go install go.uber.org/nilaway/cmd/nilaway@latest)"; \
 		exit 0; \
 	fi
-	@nilaway -include-pkgs="github.com/dkoosis/loto" ./... 2>&1 || true
+	nilaway -include-pkgs=loto -test=false ./...
 
 ## ---------------------------------------------------------------------
 ## Build
