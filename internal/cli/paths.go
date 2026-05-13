@@ -181,20 +181,3 @@ func resolveTargets(arg string) ([]domain.Target, error) {
 	}
 	return []domain.Target{t}, nil
 }
-
-// RepoTop returns the top-level of the git repo containing cwd, or cwd itself
-// if not inside a git repo.
-func RepoTop() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	out, err := gitCmd(cwd, "rev-parse", "--show-toplevel")
-	if err != nil {
-		return cwd
-	}
-	if t := strings.TrimSpace(out); t != "" {
-		return t
-	}
-	return cwd
-}

@@ -19,8 +19,8 @@ func permuteWith(fs *flag.FlagSet, args []string) []string {
 		}
 		// Strip leading dashes for lookup; preserve original token in output.
 		name := strings.TrimLeft(a, "-")
-		if eq := strings.IndexByte(name, '='); eq >= 0 {
-			_ = eq // value is embedded in token; flag.Parse will split it
+		if strings.IndexByte(name, '=') >= 0 {
+			// value is embedded in token; flag.Parse will split it
 			flags = append(flags, a)
 			continue
 		}
