@@ -17,8 +17,6 @@ func TestAcceptance_GoldenHappyPath(t *testing.T) {
 		{[]string{"whoami"}, "handle:"},
 		{[]string{tcCmdLock, tcTargetA, tcFlagIntent, "smoke"}, "✓ locked target=a.go"},
 		{[]string{tcCmdStatus, tcFlagMine}, tcTargetA},
-		{[]string{tcCmdTag, tcTargetA, "-t", "note"}, "✓ tagged"},
-		{[]string{tcCmdMsg}, "✓ no messages"},
 		{[]string{tcCmdUnlock, tcTargetA, "-t", tcIntentDone}, "✓ unlocked target=a.go"},
 	}
 	for _, s := range steps {
@@ -33,15 +31,13 @@ func TestAcceptance_GoldenHappyPath(t *testing.T) {
 	}
 }
 
-// TestAcceptance_BasicMultiAgentFlow exercises the full surface across two
-// agents in sequence: alice locks, bob's lock conflicts, alice unlocks, bob
-// acquires successfully, alice's stale tag flow.
+// TestAcceptance_BasicMultiAgentFlow exercises lock/unlock/check across two agents.
 func TestAcceptance_BasicMultiAgentFlow(t *testing.T) {
 	withTempProject(t)
 	alice, bob := twoAgents(t)
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
-	if code := Run([]string{tcCmdLock, "internal/store/", tcFlagIntent, "refactor"}, io.Discard, io.Discard); code != 0 {
+	if code := Run([]string{tcCmdLock, tcStoreStoreGo, tcFlagIntent, "refactor"}, io.Discard, io.Discard); code != 0 {
 		t.Fatal("alice lock failed")
 	}
 
@@ -62,7 +58,7 @@ func TestAcceptance_BasicMultiAgentFlow(t *testing.T) {
 	}
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
-	if code := Run([]string{tcCmdUnlock, "internal/store/", "-t", tcIntentDone}, io.Discard, io.Discard); code != 0 {
+	if code := Run([]string{tcCmdUnlock, tcStoreStoreGo, "-t", tcIntentDone}, io.Discard, io.Discard); code != 0 {
 		t.Fatal("alice unlock failed")
 	}
 

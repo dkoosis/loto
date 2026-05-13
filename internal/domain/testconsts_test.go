@@ -1,7 +1,6 @@
 package domain
 
 const (
-	tcAlice           = "alice"
-	tcGlobInternal    = "internal/**/*.go"
-	tcGlobADoubleStar = "a/**"
+	tcAlice = "alice"
+	tcAxGo  = "a/x.go"
 )

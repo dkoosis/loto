@@ -13,7 +13,7 @@ func init() { register("doctor", cmdDoctor) } //nolint:gochecknoinits // command
 func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	repair := fs.Bool("repair", false, "reclaim stale locks and purge expired tags")
+	repair := fs.Bool("repair", false, "reclaim stale locks")
 	dryRun := fs.Bool("dry-run", false, "report what --repair would do, without writing")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
@@ -46,11 +46,11 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	sort.Slice(report.StaleLocks, func(i, j int) bool {
 		return report.StaleLocks[i].Target.Canonical < report.StaleLocks[j].Target.Canonical
 	})
-	if len(report.StaleLocks) == 0 && report.ExpiredTagCount == 0 && report.IntegrityOK {
+	if len(report.StaleLocks) == 0 && report.IntegrityOK {
 		fmt.Fprintln(stdout, "✓ healthy")
 	} else {
-		fmt.Fprintf(stdout, "ℹ stale_locks=%d expired_tags=%d integrity=%s\n",
-			len(report.StaleLocks), report.ExpiredTagCount, report.IntegrityDetail)
+		fmt.Fprintf(stdout, "ℹ stale_locks=%d integrity=%s\n",
+			len(report.StaleLocks), report.IntegrityDetail)
 		for i := range report.StaleLocks {
 			l := &report.StaleLocks[i]
 			fmt.Fprintf(stdout, "⚠ stale target=%s owner=%s expires_at=%s host=%s pid=%d\n",
@@ -59,8 +59,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if *dryRun {
-		fmt.Fprintf(stdout, "ℹ dry-run would_reclaim=%d would_purge_tags=%d\n",
-			len(report.StaleLocks), report.ExpiredTagCount)
+		fmt.Fprintf(stdout, "ℹ dry-run would_reclaim=%d\n", len(report.StaleLocks))
 		return 0
 	}
 	if *repair {

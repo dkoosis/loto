@@ -54,9 +54,6 @@ func openRuntime() (*runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store.Open: %w", err)
 	}
-	if repoTop, err := repoTopForCwd(); err == nil {
-		_, _ = s.FSCaseSensitive(repoTop)
-	}
 	host, _ := os.Hostname()
 	return &runtime{Agent: a, Store: s, Ctx: runtimeCtx(), Host: host, StateDir: dir}, nil
 }

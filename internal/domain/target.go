@@ -6,26 +6,18 @@ import (
 	"strings"
 )
 
-type TargetKind int
-
-const (
-	KindFile TargetKind = iota
-	KindDir
-	KindGlob
-)
-
 type Target struct {
 	Canonical string
-	Kind      TargetKind
 }
 
-var ErrRepoEscape = errors.New("target resolves outside the repository")
-
 var (
+	ErrRepoEscape       = errors.New("target resolves outside the repository")
 	ErrEmptyTarget      = errors.New("empty target")
 	ErrTargetHasNUL     = errors.New("target contains NUL")
 	ErrTargetBackslash  = errors.New("target contains backslash; use POSIX separators")
 	ErrTargetIsRepoRoot = errors.New("target must not be the repo root")
+	ErrTargetIsGlob     = errors.New("glob targets not supported; pass an explicit file path")
+	ErrTargetIsDir      = errors.New("directory targets not supported; pass an explicit file path")
 )
 
 func Canonicalize(in string) (Target, error) {
@@ -41,8 +33,12 @@ func Canonicalize(in string) (Target, error) {
 	if strings.HasPrefix(in, "/") {
 		return Target{}, ErrRepoEscape
 	}
-	hasGlob := strings.ContainsAny(in, "*?[{")
-	hadTrailingSlash := strings.HasSuffix(in, "/")
+	if strings.ContainsAny(in, "*?[{") {
+		return Target{}, ErrTargetIsGlob
+	}
+	if strings.HasSuffix(in, "/") {
+		return Target{}, ErrTargetIsDir
+	}
 	cleaned := path.Clean(in)
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 		return Target{}, ErrRepoEscape
@@ -50,12 +46,5 @@ func Canonicalize(in string) (Target, error) {
 	if cleaned == "." {
 		return Target{}, ErrTargetIsRepoRoot
 	}
-	switch {
-	case hasGlob:
-		return Target{Canonical: cleaned, Kind: KindGlob}, nil
-	case hadTrailingSlash:
-		return Target{Canonical: cleaned + "/", Kind: KindDir}, nil
-	default:
-		return Target{Canonical: cleaned, Kind: KindFile}, nil
-	}
+	return Target{Canonical: cleaned}, nil
 }

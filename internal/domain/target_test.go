@@ -1,27 +1,25 @@
 package domain
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestCanonicalize(t *testing.T) {
 	cases := []struct {
 		in, want string
-		kind     TargetKind
 	}{
-		{"./a", "a", KindFile},
-		{"a/./", "a/", KindDir},
-		{"a//b", "a/b", KindFile},
-		{"internal/store/", "internal/store/", KindDir},
-		{"internal/store", "internal/store", KindFile},
-		{tcGlobInternal, tcGlobInternal, KindGlob},
-		{"./internal/**/foo.go", "internal/**/foo.go", KindGlob},
+		{"./a", "a"},
+		{"a//b", "a/b"},
+		{"internal/store", "internal/store"},
 	}
 	for _, c := range cases {
 		got, err := Canonicalize(c.in)
 		if err != nil {
 			t.Fatalf("Canonicalize(%q) err: %v", c.in, err)
 		}
-		if got.Canonical != c.want || got.Kind != c.kind {
-			t.Errorf("Canonicalize(%q) = %+v; want canonical=%q kind=%v", c.in, got, c.want, c.kind)
+		if got.Canonical != c.want {
+			t.Errorf("Canonicalize(%q) = %+v; want canonical=%q", c.in, got, c.want)
 		}
 	}
 }
@@ -49,5 +47,23 @@ func TestCanonicalizeRejectsBackslashPath(t *testing.T) {
 func TestCanonicalizeRejectsNULTarget(t *testing.T) {
 	if _, err := Canonicalize("a\x00b"); err == nil {
 		t.Fatal("expected error for NUL byte in target")
+	}
+}
+
+func TestCanonicalizeRejectsGlob(t *testing.T) {
+	for _, in := range []string{"*.go", "a/b/*.go", "a/?.go", "a/[abc].go", "a/{x,y}.go"} {
+		_, err := Canonicalize(in)
+		if !errors.Is(err, ErrTargetIsGlob) {
+			t.Errorf("Canonicalize(%q) err=%v; want ErrTargetIsGlob", in, err)
+		}
+	}
+}
+
+func TestCanonicalizeRejectsTrailingSlash(t *testing.T) {
+	for _, in := range []string{"foo/", "a/b/"} {
+		_, err := Canonicalize(in)
+		if !errors.Is(err, ErrTargetIsDir) {
+			t.Errorf("Canonicalize(%q) err=%v; want ErrTargetIsDir", in, err)
+		}
 	}
 }

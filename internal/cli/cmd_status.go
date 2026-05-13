@@ -31,7 +31,6 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "repo:    %s\n", repoTop)
 	fmt.Fprintf(stdout, "state:   %s\n", rt.StateDir)
 
-	// Single-target form: one positional arg.
 	if fs.NArg() == 1 {
 		t, err := domain.Canonicalize(fs.Arg(0))
 		if err != nil {
@@ -90,17 +89,9 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 		fmt.Fprintf(w, "✗ %v\n", err)
 		return 3
 	}
-	caseSensitive := true
-	if repoTop, err := repoTopForCwd(); err == nil {
-		if cs, err := rt.Store.FSCaseSensitive(repoTop); err == nil {
-			caseSensitive = cs
-		}
-	}
-	caseInsensitive := !caseSensitive
-
 	var overlapping []domain.LockRecord
 	for i := range all {
-		if domain.Overlap(all[i].Target, t, caseInsensitive) {
+		if domain.Overlap(all[i].Target, t) {
 			overlapping = append(overlapping, all[i])
 		}
 	}

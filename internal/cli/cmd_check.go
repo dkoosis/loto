@@ -49,9 +49,8 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	caseInsensitive := !runtimeCaseSensitive(rt)
 
-	rows := computeCheckConflicts(paths, all, rt.Agent.UUID, caseInsensitive)
+	rows := computeCheckConflicts(paths, all, rt.Agent.UUID)
 	if len(rows) == 0 {
 		fmt.Fprintln(stdout, "✓ no conflicts")
 		return 0
@@ -80,11 +79,11 @@ func loadCheckTargets(staged bool, posArgs []string, stderr io.Writer) ([]string
 	return paths, 0
 }
 
-func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID string, caseInsensitive bool) []checkConflict {
+func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID string) []checkConflict {
 	var rows []checkConflict
 	seen := map[string]bool{}
 	for _, p := range paths {
-		rows = appendCheckConflicts(rows, seen, p, all, myUUID, caseInsensitive)
+		rows = appendCheckConflicts(rows, seen, p, all, myUUID)
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Path != rows[j].Path {
@@ -95,14 +94,14 @@ func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID strin
 	return rows
 }
 
-func appendCheckConflicts(rows []checkConflict, seen map[string]bool, p string, all []domain.LockRecord, myUUID string, caseInsensitive bool) []checkConflict {
+func appendCheckConflicts(rows []checkConflict, seen map[string]bool, p string, all []domain.LockRecord, myUUID string) []checkConflict {
 	t, err := domain.Canonicalize(p)
 	if err != nil {
 		return rows
 	}
 	for i := range all {
 		l := &all[i]
-		if l.OwnerUUID == myUUID || !domain.Overlap(l.Target, t, caseInsensitive) {
+		if l.OwnerUUID == myUUID || !domain.Overlap(l.Target, t) {
 			continue
 		}
 		key := p + "|" + l.Target.Canonical + "|" + l.OwnerUUID
@@ -113,18 +112,6 @@ func appendCheckConflicts(rows []checkConflict, seen map[string]bool, p string, 
 		rows = append(rows, checkConflict{Path: p, Blocker: all[i]})
 	}
 	return rows
-}
-
-func runtimeCaseSensitive(rt *runtime) bool {
-	repoTop, err := repoTopForCwd()
-	if err != nil {
-		return true
-	}
-	cs, err := rt.Store.FSCaseSensitive(repoTop)
-	if err != nil {
-		return true
-	}
-	return cs
 }
 
 func printCheckConflicts(stdout io.Writer, rows []checkConflict) {

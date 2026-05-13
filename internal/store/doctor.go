@@ -17,7 +17,6 @@ const (
 
 type DoctorReport struct {
 	StaleLocks      []domain.LockRecord
-	ExpiredTagCount int
 	IntegrityOK     bool
 	IntegrityDetail string
 }
@@ -33,9 +32,6 @@ func (s *Store) DoctorAudit(ctx context.Context, thisHost string, live domain.Pi
 		if domain.IsStale(locks[i], now, thisHost, live) {
 			r.StaleLocks = append(r.StaleLocks, locks[i])
 		}
-	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tags WHERE expires_at IS NOT NULL AND expires_at < ?`, now.UnixNano()).Scan(&r.ExpiredTagCount); err != nil {
-		return nil, err
 	}
 	var detail string
 	if err := s.db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&detail); err != nil {
@@ -64,9 +60,6 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 				return err
 			}
 		}
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM tags WHERE expires_at IS NOT NULL AND expires_at < ?`, now.UnixNano()); err != nil {
-		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err

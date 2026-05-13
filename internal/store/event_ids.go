@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-func newTagID(authorUUID string, t time.Time, intent string) string {
+func newEventID(actorUUID string, t time.Time, reason string) string {
 	h := sha256.New()
-	h.Write([]byte(authorUUID))
+	h.Write([]byte(actorUUID))
 	var buf [8]byte
 	ns := t.UnixNano()
 	for i := 7; i >= 0; i-- {
@@ -16,7 +16,7 @@ func newTagID(authorUUID string, t time.Time, intent string) string {
 		ns >>= 8
 	}
 	h.Write(buf[:])
-	h.Write([]byte(intent))
+	h.Write([]byte(reason))
 	sum := h.Sum(nil)
-	return "t-" + hex.EncodeToString(sum[:4])
+	return "e-" + hex.EncodeToString(sum[:4])
 }

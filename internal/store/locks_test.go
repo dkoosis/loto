@@ -52,9 +52,9 @@ func TestBreakLockStaleOnly(t *testing.T) {
 	if got != nil {
 		t.Fatalf("lock should be gone, got %+v", got)
 	}
-	tags, _ := s.TagsOnTarget(ctx, l.Target)
-	if len(tags) != 1 || tags[0].Event != "lock_broken" {
-		t.Fatalf("expected single lock_broken tag, got %+v", tags)
+	events, _ := s.EventsForTarget(ctx, l.Target)
+	if len(events) != 1 || events[0].Kind != EventLockBroken {
+		t.Fatalf("expected single lock_broken event, got %+v", events)
 	}
 }
 
@@ -80,7 +80,7 @@ func mkFileLock(t *testing.T, name, agent string, expIn time.Duration) domain.Lo
 	}
 	now := time.Now()
 	return domain.LockRecord{
-		Target:      domain.Target{Canonical: p, Kind: domain.KindFile},
+		Target:      domain.Target{Canonical: p},
 		OwnerUUID:   agent,
 		SessionUUID: agent,
 		Intent:      tcTest,
@@ -102,9 +102,8 @@ func TestAcquireOverlapBlocks(t *testing.T) {
 	live := func(string, int) bool { return true }
 	now := time.Now()
 
-	// alice locks the directory (logical only, no chmod).
-	dirLock := domain.LockRecord{
-		Target:      domain.Target{Canonical: dir + "/", Kind: domain.KindDir},
+	aliceLock := domain.LockRecord{
+		Target:      domain.Target{Canonical: a},
 		OwnerUUID:   tcAlice,
 		SessionUUID: tcAlice,
 		CreatedAt:   now,
@@ -112,21 +111,14 @@ func TestAcquireOverlapBlocks(t *testing.T) {
 		Host:        "h",
 		PID:         1,
 	}
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{dirLock}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{aliceLock}, live); err != nil {
 		t.Fatalf("alice acquire: %v", err)
 	}
 
-	// bob tries to lock a file inside that directory — must conflict.
-	fileLock := domain.LockRecord{
-		Target:      domain.Target{Canonical: a, Kind: domain.KindFile},
-		OwnerUUID:   tcBob,
-		SessionUUID: tcBob,
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(time.Hour),
-		Host:        "h",
-		PID:         1,
-	}
-	res, err := s.AcquireLocks(ctx, []domain.LockRecord{fileLock}, live)
+	bobLock := aliceLock
+	bobLock.OwnerUUID = tcBob
+	bobLock.SessionUUID = tcBob
+	res, err := s.AcquireLocks(ctx, []domain.LockRecord{bobLock}, live)
 	if err == nil {
 		t.Fatalf("expected conflict; got result %+v", res)
 	}
@@ -151,7 +143,7 @@ func TestAcquireSameAgentRefreshes(t *testing.T) {
 	now := time.Now()
 
 	first := domain.LockRecord{
-		Target:      domain.Target{Canonical: a, Kind: domain.KindFile},
+		Target:      domain.Target{Canonical: a},
 		OwnerUUID:   tcAlice,
 		SessionUUID: tcAlice,
 		Intent:      "first",
@@ -194,7 +186,7 @@ func TestAcquireLocks_MultiFile_AtomicSuccess(t *testing.T) {
 	now := time.Now()
 	mk := func(p, owner string) domain.LockRecord {
 		return domain.LockRecord{
-			Target:      domain.Target{Canonical: p, Kind: domain.KindFile},
+			Target:      domain.Target{Canonical: p},
 			OwnerUUID:   owner,
 			SessionUUID: owner,
 			CreatedAt:   now,
@@ -235,7 +227,7 @@ func TestAcquireLocks_MultiFile_ConflictAbortsNoChmod(t *testing.T) {
 	now := time.Now()
 	mk := func(p, owner string) domain.LockRecord {
 		return domain.LockRecord{
-			Target:      domain.Target{Canonical: p, Kind: domain.KindFile},
+			Target:      domain.Target{Canonical: p},
 			OwnerUUID:   owner,
 			SessionUUID: owner,
 			CreatedAt:   now,
@@ -299,7 +291,7 @@ func TestAcquireLocks_ChmodFailureRollsBack(t *testing.T) {
 	now := time.Now()
 	mk := func(p string) domain.LockRecord {
 		return domain.LockRecord{
-			Target:      domain.Target{Canonical: p, Kind: domain.KindFile},
+			Target:      domain.Target{Canonical: p},
 			OwnerUUID:   tcAlice,
 			SessionUUID: "s1",
 			CreatedAt:   now,
@@ -352,7 +344,7 @@ func TestAcquireLocks_RollbackRestoreFailureLeavesBreadcrumb(t *testing.T) {
 	now := time.Now()
 	mk := func(p string) domain.LockRecord {
 		return domain.LockRecord{
-			Target:      domain.Target{Canonical: p, Kind: domain.KindFile},
+			Target:      domain.Target{Canonical: p},
 			OwnerUUID:   tcAlice,
 			SessionUUID: "s1",
 			CreatedAt:   now,
@@ -379,11 +371,11 @@ func TestAcquireLocks_RollbackRestoreFailureLeavesBreadcrumb(t *testing.T) {
 
 	var n int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM tags WHERE target_canonical=? AND event='mode_restore_failed'`, a,
+		`SELECT COUNT(*) FROM events WHERE target_canonical=? AND event_kind='mode_restore_failed'`, a,
 	).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
-		t.Errorf("want 1 mode_restore_failed tag for %s, got %d", a, n)
+		t.Errorf("want 1 mode_restore_failed event for %s, got %d", a, n)
 	}
 }

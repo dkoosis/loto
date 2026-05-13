@@ -38,8 +38,6 @@ func cmdUnlock(args []string, stdout, stderr io.Writer) int {
 	}
 	defer rt.Close()
 
-	emitMsgBanner(stdout, rt)
-
 	if *all {
 		return unlockAll(rt, *intent, stdout, stderr)
 	}
@@ -85,11 +83,9 @@ func releaseOne(rt *runtime, target domain.Target, intent string, force bool, li
 		return 0
 	}
 
-	// Own lock release.
 	err := rt.Store.ReleaseLock(rt.Ctx, target, rt.Agent.UUID)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotOwner) {
-			// Try stale reclaim before giving up.
 			if err2 := rt.Store.BreakLock(rt.Ctx, target, rt.Agent.UUID, false, intent, live); err2 != nil {
 				fmt.Fprintf(stderr, "✗ not owner and lock is live — use --force to override\n")
 				return 1
