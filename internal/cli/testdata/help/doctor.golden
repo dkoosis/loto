@@ -1,5 +1,9 @@
 Usage of doctor:
   -dry-run
     	report what --repair would do, without writing
+  -orphan-mode
+    	scan for orphan-mode files and report them
   -repair
     	reclaim stale locks
+  -restore-orphan-mode
+    	with --repair, also restore writable mode on orphan-mode files (implies --orphan-mode)

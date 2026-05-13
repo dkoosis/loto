@@ -6,6 +6,7 @@ const (
 	tcCmdUnlock    = "unlock"
 	tcCmdStatus    = "status"
 	tcCmdCheck     = "check"
+	tcCmdDoctor    = "doctor"
 	tcFlagMine     = "--mine"
 	tcFlagIntent   = "--intent"
 	tcSlugDKLoto   = "dkoosis-loto"
