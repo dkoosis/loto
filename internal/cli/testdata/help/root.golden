@@ -1,0 +1,10 @@
+usage: loto <command> [args]
+
+commands:
+  lock     Acquire a lock on one or more targets; -t required
+  unlock   Release locks; --force to break another's, --all to release all yours
+  check    Check targets for lock conflicts; --staged reads git staged paths
+  status   Show lock state; --mine to filter to yours
+  doctor   Detect and optionally repair stale locks
+  whoami   Print agent identity
+  version  Print loto version

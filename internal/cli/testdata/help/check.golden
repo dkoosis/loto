@@ -1,0 +1,3 @@
+Usage of check:
+  -staged
+    	read paths from git diff --cached

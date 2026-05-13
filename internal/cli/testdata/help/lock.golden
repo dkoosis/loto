@@ -1,0 +1,7 @@
+Usage of lock:
+  -intent string
+    	intent (required)
+  -t string
+    	intent (required)
+  -ttl duration
+    	lock TTL (default 30m0s)
