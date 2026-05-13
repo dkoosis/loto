@@ -255,16 +255,3 @@ func TestEnsureSessionCachePersists(t *testing.T) {
 		t.Fatalf("session cache not honored: %s != %s", a.UUID, b.UUID)
 	}
 }
-
-func TestResolveHandleByUUID(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	a, _ := Ensure()
-	got, err := resolveByHandle(a.Handle)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.UUID != a.UUID {
-		t.Errorf("resolveByHandle: got %s want %s", got.UUID, a.UUID)
-	}
-}

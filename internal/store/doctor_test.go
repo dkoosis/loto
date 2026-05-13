@@ -169,7 +169,7 @@ func TestMoveCorruptDB(t *testing.T) {
 	s, _ := Open(dbPath)
 	s.Close()
 
-	moved, err := MoveCorruptAside(dbPath, time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC))
+	moved, err := moveCorruptAside(dbPath, time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestIsCorruptDB_NotFooledBySubstring(t *testing.T) {
 	}
 }
 
-// MoveCorruptAside must be all-or-nothing: either every existing sibling
+// moveCorruptAside must be all-or-nothing: either every existing sibling
 // (db, -wal, -shm) is moved aside together, or nothing moves. A concurrent
 // opener must never see a fresh loto.db paired with a stale -wal.
 
@@ -245,9 +245,9 @@ func TestMoveCorruptAsideAtomic(t *testing.T) {
 	}
 
 	when := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
-	moved, err := MoveCorruptAside(dbPath, when)
+	moved, err := moveCorruptAside(dbPath, when)
 	if err != nil {
-		t.Fatalf("MoveCorruptAside: %v", err)
+		t.Fatalf("moveCorruptAside: %v", err)
 	}
 
 	// After move-aside: the original three names must all be gone together.
@@ -329,7 +329,7 @@ func TestMoveCorruptAside_PreservesBytesOnCommitFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := MoveCorruptAside(dbPath, stamp)
+	_, err := moveCorruptAside(dbPath, stamp)
 	if err == nil {
 		t.Fatal("expected commit-rename failure")
 	}

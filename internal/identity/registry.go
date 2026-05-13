@@ -14,8 +14,6 @@ import (
 	"time"
 )
 
-var ErrAgentNotFound = errors.New("no such agent on this host")
-
 // handleShape constrains LOTO_HANDLE input to the PascalCase adjective+noun
 // form randomHandle emits. The hyphen in the second group accommodates noun
 // list entries like "aye-aye" and "musk-ox".
@@ -84,7 +82,7 @@ func Ensure() (*Agent, error) {
 				fmt.Fprintf(os.Stderr, "⚠ loto: LOTO_AGENT_ID=%s is set but no agent record exists; using ephemeral identity (locks acquired here cannot be released by other invocations)\n", u)
 			})
 		}
-		return newEphemeralAgent()
+		return mintAgent()
 	}
 	if sid := os.Getenv("CLAUDE_CODE_SESSION_ID"); sid != "" {
 		return ensureForSession(sid)
@@ -226,10 +224,6 @@ func newAgent() (*Agent, error) {
 	return a, nil
 }
 
-func newEphemeralAgent() (*Agent, error) {
-	return mintAgent()
-}
-
 func mintAgent() (*Agent, error) {
 	handle, err := chooseHandle()
 	if err != nil {
@@ -285,38 +279,6 @@ func loadByUUID(uuid string) (*Agent, error) {
 		return nil, err
 	}
 	return &a, nil
-}
-
-func resolveByHandle(handle string) (*Agent, error) {
-	entries, err := os.ReadDir(registryDir())
-	if err != nil {
-		return nil, err
-	}
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		body, err := os.ReadFile(filepath.Join(registryDir(), e.Name()))
-		if err != nil {
-			continue
-		}
-		var a Agent
-		if err := json.Unmarshal(body, &a); err != nil {
-			continue
-		}
-		if a.Handle == handle {
-			return &a, nil
-		}
-	}
-	return nil, fmt.Errorf("%w: %q", ErrAgentNotFound, handle)
-}
-
-// Resolve accepts either a uuid or a handle.
-func Resolve(s string) (*Agent, error) {
-	if a, err := loadByUUID(s); err == nil {
-		return a, nil
-	}
-	return resolveByHandle(s)
 }
 
 func writeAgent(a *Agent) error {

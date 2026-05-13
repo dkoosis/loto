@@ -13,7 +13,7 @@ import (
 // acquireRecoveryLock takes an exclusive flock on a sidecar file beside
 // dbPath. The returned release function unflocks and closes the handle.
 // Serializing recovery prevents two concurrent openers from each entering
-// MoveCorruptAside and racing each other's renames.
+// moveCorruptAside and racing each other's renames.
 //
 // Polls with LOCK_NB instead of blocking — a wedged holder (sigstopped,
 // debugger-attached) used to hang the recovery path indefinitely (audit

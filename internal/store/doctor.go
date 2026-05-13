@@ -126,13 +126,13 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 	return err
 }
 
-// MoveCorruptAside relocates a corrupt DB and its -wal/-shm siblings into
+// moveCorruptAside relocates a corrupt DB and its -wal/-shm siblings into
 // a single sibling directory <dbPath>.corrupt.<RFC3339Z>/. The move is
 // atomic: files are first assembled in a staging directory, which is then
 // renamed into place with one os.Rename. This eliminates the race in the
 // previous three-rename approach, where a concurrent opener could see a
 // fresh main DB paired with a stale sidecar (gh#48).
-func MoveCorruptAside(dbPath string, when time.Time) (string, error) {
+func moveCorruptAside(dbPath string, when time.Time) (string, error) {
 	dir := filepath.Dir(dbPath)
 	base := filepath.Base(dbPath)
 	stamp := when.UTC().Format("2006-01-02T15-04-05Z")

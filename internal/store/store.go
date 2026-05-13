@@ -85,7 +85,7 @@ func openWithRecovery(p string) (*Store, error) {
 		return nil, err2
 	}
 
-	moved, mvErr := MoveCorruptAside(p, time.Now())
+	moved, mvErr := moveCorruptAside(p, time.Now())
 	if mvErr != nil {
 		return nil, fmt.Errorf("incompatible DB and move-aside failed: %w (orig: %w)", mvErr, err)
 	}
