@@ -8,7 +8,7 @@ import (
 func TestRunBehavior_NoArgsShowsHelpAndExit2(t *testing.T) {
 	stdout, stderr, code := executeCommand()
 	if code != 2 {
-		t.Fatalf("expected exit code 3, got %d", code)
+		t.Fatalf("expected exit code 2, got %d", code)
 	}
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
@@ -21,7 +21,7 @@ func TestRunBehavior_NoArgsShowsHelpAndExit2(t *testing.T) {
 func TestRunBehavior_UnknownCommandShowsErrorAndHelp(t *testing.T) {
 	stdout, stderr, code := executeCommand("nope")
 	if code != 2 {
-		t.Fatalf("expected exit code 3, got %d", code)
+		t.Fatalf("expected exit code 2, got %d", code)
 	}
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
@@ -40,7 +40,7 @@ func TestRunBehavior_CheckInvalidFlagReturnsUsageError(t *testing.T) {
 
 	stdout, stderr, code := executeCommand(tcCmdCheck, "--bogus")
 	if code != 2 {
-		t.Fatalf("expected exit code 3, got %d", code)
+		t.Fatalf("expected exit code 2, got %d", code)
 	}
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
