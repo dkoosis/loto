@@ -1,8 +1,13 @@
 # Boot
 updated: 2026-05-13
 
-→ Pick from `bd ready` and ship. main clean, no open PRs.
+→ `bd ready` and ship. main clean (59ef6e3), 0 PRs.
 
 ✓ done
-- shipped #64–#70 (5 PRs incl. loto-vra -1282 LOC, doctor sidecar, store hardening)
-- recovered from base-branch-deleted auto-close (recreated #67→#69, #68→#70)
+- shipped #78 (ErrNoLockAtTarget vs ErrNotOwner) → closed #46
+- shipped #77 (CLI behavioral tests for dispatcher + check errors)
+- cherry-picked #75 golden help tests; closed #76 (tested deleted Resolve)
+- simplify sweep across 4 pkgs (-73 LOC dead exports)
+
+‡ traps
+- cwd may be `.claude/`, not repo root — env block can lie; `pwd` to confirm
