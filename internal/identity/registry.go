@@ -8,12 +8,27 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
 
 var ErrAgentNotFound = errors.New("no such agent on this host")
+
+// handleShape constrains LOTO_HANDLE input to the PascalCase adjective+noun
+// form randomHandle emits. The hyphen in the second group accommodates noun
+// list entries like "aye-aye" and "musk-ox".
+var handleShape = regexp.MustCompile(`^[A-Z][a-z]+(?:[A-Z][a-z-]+)+$`)
+
+var errInvalidHandle = errors.New("invalid LOTO_HANDLE")
+
+// agentsGCMaxAge bounds how long an unused agent record may linger in
+// ~/.loto/agents/ before Ensure prunes it. Anything older than this is
+// overwhelmingly likely to be dead (crashed session, ephemeral pre-fix run).
+const agentsGCMaxAge = 30 * 24 * time.Hour
+
+var agentsGCOnce sync.Once
 
 type Agent struct {
 	UUID      string    `json:"uuid"`
@@ -47,28 +62,30 @@ func sessionCachePath(sid string) (string, error) {
 }
 
 // Ensure returns the current session's agent. If LOTO_AGENT_ID is set and
-// resolves, returns it. Otherwise creates a new identity, writes it.
+// resolves, returns it. Empty-but-set LOTO_AGENT_ID requests an ephemeral
+// in-memory identity — fleet dispatchers export this to keep the registry
+// from accumulating one orphan .json per subagent. Unset falls back through
+// session cache then mostRecentAgent for interactive shells.
 func Ensure() (*Agent, error) {
+	agentsGCOnce.Do(func() { _ = gcStaleAgents(time.Now()) })
+
 	u, set := os.LookupEnv("LOTO_AGENT_ID")
-	if set && u != "" {
-		if a, err := loadByUUID(u); err == nil {
-			return a, nil
+	if set {
+		if u != "" {
+			if a, err := loadByUUID(u); err == nil {
+				return a, nil
+			}
 		}
+		return newEphemeralAgent()
 	}
-	// Empty-but-set LOTO_AGENT_ID means "force new agent" (test fixtures use
-	// this to spin distinct identities). Unset means "interactive shell, no
-	// hook" — fall back to the most recent agent on this host so lock/unlock
-	// can pair across invocations.
-	if !set {
-		if sid := os.Getenv("CLAUDE_CODE_SESSION_ID"); sid != "" {
-			return ensureForSession(sid)
-		}
-		fallbackWarnOnce.Do(func() {
-			fmt.Fprintln(os.Stderr, "⚠ loto: CLAUDE_CODE_SESSION_ID unset — using mostRecentAgent fallback; identity may not be stable across concurrent sessions")
-		})
-		if a, err := mostRecentAgent(); err == nil && a != nil {
-			return a, nil
-		}
+	if sid := os.Getenv("CLAUDE_CODE_SESSION_ID"); sid != "" {
+		return ensureForSession(sid)
+	}
+	fallbackWarnOnce.Do(func() {
+		fmt.Fprintln(os.Stderr, "⚠ loto: CLAUDE_CODE_SESSION_ID unset — using mostRecentAgent fallback; identity may not be stable across concurrent sessions")
+	})
+	if a, err := mostRecentAgent(); err == nil && a != nil {
+		return a, nil
 	}
 	return newAgent()
 }
@@ -188,17 +205,65 @@ func mostRecentAgent() (*Agent, error) {
 }
 
 func newAgent() (*Agent, error) {
+	a, err := mintAgent()
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(registryDir(), 0o700); err != nil {
 		return nil, err
 	}
-	uuid := newUUID()
-	handle := randomHandle()
-	host, _ := os.Hostname()
-	a := &Agent{UUID: uuid, Handle: handle, CreatedAt: time.Now().UTC(), Host: host}
 	if err := writeAgent(a); err != nil {
 		return nil, err
 	}
 	return a, nil
+}
+
+func newEphemeralAgent() (*Agent, error) {
+	return mintAgent()
+}
+
+func mintAgent() (*Agent, error) {
+	handle, err := chooseHandle()
+	if err != nil {
+		return nil, err
+	}
+	host, _ := os.Hostname()
+	return &Agent{UUID: newUUID(), Handle: handle, CreatedAt: time.Now().UTC(), Host: host}, nil
+}
+
+func chooseHandle() (string, error) {
+	if h, ok := os.LookupEnv("LOTO_HANDLE"); ok && h != "" {
+		if !handleShape.MatchString(h) {
+			return "", fmt.Errorf("%w: %q (want PascalCase adjective+noun, e.g. SwiftFalcon)", errInvalidHandle, h)
+		}
+		return h, nil
+	}
+	return randomHandle(), nil
+}
+
+// gcStaleAgents removes ~/.loto/agents/*.json whose mtime is older than
+// agentsGCMaxAge. Best-effort: errors are swallowed (a missing dir, a denied
+// unlink, a racing writer) — staleness is a hygiene concern, not a hard
+// invariant. Stops scanning the moment ReadDir fails.
+func gcStaleAgents(now time.Time) error {
+	entries, err := os.ReadDir(registryDir())
+	if err != nil {
+		return err
+	}
+	cutoff := now.Add(-agentsGCMaxAge)
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(registryDir(), e.Name()))
+		}
+	}
+	return nil
 }
 
 func loadByUUID(uuid string) (*Agent, error) {
@@ -252,6 +317,9 @@ func writeAgent(a *Agent) error {
 		return err
 	}
 	dir := registryDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
 	final := filepath.Join(dir, a.UUID+".json")
 	// Atomic publish: write to a sibling temp, fsync, rename over the final
 	// path. Concurrent readers see either the previous version or the new

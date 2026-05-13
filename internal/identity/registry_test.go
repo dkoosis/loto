@@ -5,9 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
-func TestEnsureIdentityCreatesRecord(t *testing.T) {
+func TestEnsureBlankAgentIDIsEphemeral(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("LOTO_AGENT_ID", "")
@@ -20,6 +21,22 @@ func TestEnsureIdentityCreatesRecord(t *testing.T) {
 		t.Fatalf("agent missing fields: %+v", a)
 	}
 	path := filepath.Join(dir, ".loto", "agents", a.UUID+".json")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("ephemeral agent must not persist; got err=%v", err)
+	}
+}
+
+func TestEnsurePersistsWhenAgentIDUnset(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+
+	a, err := Ensure()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, ".loto", "agents", a.UUID+".json")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("identity file missing: %v", err)
 	}
@@ -28,12 +45,75 @@ func TestEnsureIdentityCreatesRecord(t *testing.T) {
 func TestEnsureRespectsExistingEnv(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
 
 	first, _ := Ensure()
 	t.Setenv("LOTO_AGENT_ID", first.UUID)
 	second, _ := Ensure()
 	if second.UUID != first.UUID {
 		t.Fatalf("Ensure() must return same uuid when LOTO_AGENT_ID is set; %s != %s", second.UUID, first.UUID)
+	}
+}
+
+func TestEnsureHonorsLOTOHandle(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("LOTO_AGENT_ID", "")
+	t.Setenv("LOTO_HANDLE", "TeamTrixiAbc")
+
+	a, err := Ensure()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Handle != "TeamTrixiAbc" {
+		t.Fatalf("handle: got %q want TeamTrixiAbc", a.Handle)
+	}
+}
+
+func TestEnsureRejectsInvalidLOTOHandle(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("LOTO_AGENT_ID", "")
+	for _, bad := range []string{"lowercase", "no spaces here", "Bad_Underscore", "Single"} {
+		t.Setenv("LOTO_HANDLE", bad)
+		if _, err := Ensure(); err == nil {
+			t.Errorf("Ensure must reject LOTO_HANDLE=%q", bad)
+		}
+	}
+}
+
+func TestGCStaleAgents(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+
+	fresh, err := Ensure()
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshPath := filepath.Join(dir, ".loto", "agents", fresh.UUID+".json")
+
+	// Manually drop a stale record into the registry.
+	stale := &Agent{UUID: newUUID(), Handle: "StaleAgent", CreatedAt: time.Now().Add(-90 * 24 * time.Hour).UTC(), Host: "old"}
+	if err := writeAgent(stale); err != nil {
+		t.Fatal(err)
+	}
+	stalePath := filepath.Join(dir, ".loto", "agents", stale.UUID+".json")
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	if err := os.Chtimes(stalePath, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := gcStaleAgents(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+		t.Fatalf("stale agent not removed: err=%v", err)
+	}
+	if _, err := os.Stat(freshPath); err != nil {
+		t.Fatalf("fresh agent must survive GC: %v", err)
 	}
 }
 

@@ -2,11 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"loto/internal/identity"
 )
@@ -20,7 +23,8 @@ func withTempProject(t *testing.T) string {
 	t.Setenv("HOME", home)
 	t.Setenv("LOTO_BASE", stateBase)
 	t.Setenv("XDG_STATE_HOME", "")
-	t.Setenv("LOTO_AGENT_ID", "")
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
 
 	repo := t.TempDir()
 	for _, args := range [][]string{
@@ -51,12 +55,15 @@ func withTempProject(t *testing.T) string {
 	return repo
 }
 
-// pinAgent creates a fresh identity in the current HOME and pins
+// pinAgent creates a fresh persisted identity in the current HOME and pins
 // LOTO_AGENT_ID to it. Subsequent Run() calls will reuse this identity until
-// LOTO_AGENT_ID is reset.
+// LOTO_AGENT_ID is reset. Uses a unique CLAUDE_CODE_SESSION_ID to mint via the
+// session-cache path so the identity is written to disk (loadByUUID can find
+// it on subsequent Ensure calls).
 func pinAgent(t *testing.T) *identity.Agent {
 	t.Helper()
-	t.Setenv("LOTO_AGENT_ID", "")
+	os.Unsetenv("LOTO_AGENT_ID")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", fmt.Sprintf("pin-%d-%d", time.Now().UnixNano(), pinCounter.Add(1)))
 	a, err := identity.Ensure()
 	if err != nil {
 		t.Fatal(err)
@@ -64,6 +71,8 @@ func pinAgent(t *testing.T) *identity.Agent {
 	t.Setenv("LOTO_AGENT_ID", a.UUID)
 	return a
 }
+
+var pinCounter atomic.Int64
 
 func TestLockHappyPath(t *testing.T) {
 	withTempProject(t)
@@ -82,12 +91,13 @@ func TestLockHappyPath(t *testing.T) {
 // the same host) and returns them.
 func twoAgents(t *testing.T) (alice, bob *identity.Agent) {
 	t.Helper()
-	t.Setenv("LOTO_AGENT_ID", "")
+	os.Unsetenv("LOTO_AGENT_ID")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", fmt.Sprintf("alice-%d-%d", time.Now().UnixNano(), pinCounter.Add(1)))
 	a, err := identity.Ensure()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("LOTO_AGENT_ID", "")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", fmt.Sprintf("bob-%d-%d", time.Now().UnixNano(), pinCounter.Add(1)))
 	b, err := identity.Ensure()
 	if err != nil {
 		t.Fatal(err)
