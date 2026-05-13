@@ -4,9 +4,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
+	"path/filepath"
 	"sort"
 	"time"
 
+	"loto/internal/domain"
 	"loto/internal/store"
 )
 
@@ -50,6 +53,8 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	repair := fs.Bool("repair", false, "reclaim stale locks")
 	dryRun := fs.Bool("dry-run", false, "report what --repair would do, without writing")
+	orphanMode := fs.Bool("orphan-mode", false, "scan for orphan-mode files and report them")
+	restoreOrphan := fs.Bool("restore-orphan-mode", false, "with --repair, also restore writable mode on orphan-mode files (implies --orphan-mode)")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
@@ -83,16 +88,81 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 
 	renderDoctorReport(stdout, report)
 
+	var orphans []string
+	if *orphanMode || *restoreOrphan {
+		orphans = scanAndReportOrphans(rt, repoTop, stdout)
+	}
+
 	if *dryRun {
 		fmt.Fprintf(stdout, "ℹ dry-run would_reclaim=%d\n", len(report.StaleLocks))
 		return 0
 	}
 	if *repair {
-		if err := rt.Store.DoctorRepair(rt.Ctx, rt.Host, rt.Agent.UUID, live); err != nil {
-			fmt.Fprintf(stderr, "✗ repair: %v\n", err)
-			return 3
+		if code := doRepair(rt, live, *restoreOrphan, orphans, stdout, stderr); code != 0 {
+			return code
 		}
-		fmt.Fprintln(stdout, "✓ repaired")
 	}
 	return 0
+}
+
+func doRepair(rt *runtime, live domain.PidLiveProbe, restoreOrphan bool, orphans []string, stdout, stderr io.Writer) int {
+	if err := rt.Store.DoctorRepair(rt.Ctx, rt.Host, rt.Agent.UUID, live); err != nil {
+		fmt.Fprintf(stderr, "✗ repair: %v\n", err)
+		return 3
+	}
+	fmt.Fprintln(stdout, "✓ repaired")
+	if restoreOrphan && len(orphans) > 0 {
+		restored, failures := rt.Store.RestoreOrphanMode(orphans)
+		fmt.Fprintf(stdout, "✓ restored-orphan-mode count=%d failed=%d\n", len(restored), len(failures))
+		for _, f := range failures {
+			fmt.Fprintf(stdout, "✗ restore-orphan-mode target=%s err=%v\n", f.Path, f.Err)
+		}
+	}
+	return 0
+}
+
+func scanAndReportOrphans(rt *runtime, repoTop string, stdout io.Writer) []string {
+	candidates := walkRepoCandidates(repoTop)
+	orphans, err := rt.Store.ScanOrphanModes(rt.Ctx, candidates)
+	if err != nil {
+		fmt.Fprintf(stdout, "✗ scan-orphans: %v\n", err)
+		return nil
+	}
+	for _, p := range orphans {
+		rel, err := filepath.Rel(repoTop, p)
+		if err != nil {
+			rel = p
+		}
+		fmt.Fprintf(stdout, "⚠ orphan-mode target=%s\n", rel)
+	}
+	return orphans
+}
+
+var walkSkipDirs = map[string]bool{
+	".git": true, "node_modules": true, "vendor": true,
+	"dist": true, "build": true, "target": true, ".cache": true,
+}
+
+func walkRepoCandidates(root string) []string {
+	if root == "" {
+		return nil
+	}
+	var out []string
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil //nolint:nilerr // skip unreadable entries, continue walk
+		}
+		if d.IsDir() {
+			if walkSkipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		out = append(out, p)
+		return nil
+	})
+	return out
 }

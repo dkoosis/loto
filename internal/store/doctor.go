@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"loto/internal/domain"
@@ -120,6 +121,73 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 	}
 	_, err = s.db.ExecContext(ctx, `VACUUM`)
 	return err
+}
+
+// ScanOrphanModes returns paths that are read-only on disk but have no
+// matching lock row. Caller supplies the candidate paths (typically all
+// regular files under the repo, or a curated subset).
+func (s *Store) ScanOrphanModes(ctx context.Context, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT target_canonical FROM locks`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	owned := map[string]bool{}
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		owned[c] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var orphans []string
+	for _, p := range paths {
+		st, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if !st.Mode().IsRegular() {
+			continue
+		}
+		if st.Mode().Perm()&0o222 != 0 {
+			continue
+		}
+		if owned[p] {
+			continue
+		}
+		orphans = append(orphans, p)
+	}
+	sort.Strings(orphans)
+	return orphans, nil
+}
+
+// RestoreOrphanMode chmods the given paths back to owner-writable. Caller
+// gates this behind explicit user intent (--restore-orphan-mode). Returns
+// the paths it successfully chmod'd and a parallel slice of per-path failures
+// so callers can surface why a file was skipped.
+func (s *Store) RestoreOrphanMode(paths []string) (restored []string, failures []OrphanRestoreFailure) {
+	for _, p := range paths {
+		if err := restoreWrite(p); err != nil {
+			failures = append(failures, OrphanRestoreFailure{Path: p, Err: err})
+			continue
+		}
+		restored = append(restored, p)
+	}
+	return restored, failures
+}
+
+// OrphanRestoreFailure pairs an orphan-mode path with the error encountered
+// while trying to chmod it back to writable.
+type OrphanRestoreFailure struct {
+	Path string
+	Err  error
 }
 
 // moveCorruptAside relocates a corrupt DB and its -wal/-shm siblings into

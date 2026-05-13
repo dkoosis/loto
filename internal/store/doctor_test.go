@@ -50,6 +50,80 @@ func TestDoctorRepairReclaims(t *testing.T) {
 	}
 }
 
+func TestDoctorAudit_DetectsOrphanModeFiles(t *testing.T) {
+	dir := t.TempDir()
+	orphan := filepath.Join(dir, "orphan.go")
+	clean := filepath.Join(dir, "clean.go")
+	if err := os.WriteFile(orphan, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(clean, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := mustOpen(t)
+	orphans, err := s.ScanOrphanModes(context.Background(), []string{orphan, clean})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orphans) != 1 || orphans[0] != orphan {
+		t.Errorf("orphans = %v, want [%s]", orphans, orphan)
+	}
+}
+
+func TestScanOrphanModes_OwnedFileSkipped(t *testing.T) {
+	dir := t.TempDir()
+	owned := filepath.Join(dir, "owned.go")
+	if err := os.WriteFile(owned, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+	l := domain.LockRecord{
+		Target:      domain.Target{Canonical: owned},
+		OwnerUUID:   "alice",
+		SessionUUID: "alice",
+		Intent:      tcTest,
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(time.Hour),
+		Host:        "h",
+		PID:         1,
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+
+	orphans, err := s.ScanOrphanModes(ctx, []string{owned})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orphans) != 0 {
+		t.Errorf("owned file flagged as orphan: %v", orphans)
+	}
+}
+
+func TestRestoreOrphanMode_ChmodsToWritable(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "x.go")
+	if err := os.WriteFile(p, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	s := mustOpen(t)
+	restored, failures := s.RestoreOrphanMode([]string{p})
+	if len(restored) != 1 || restored[0] != p {
+		t.Fatalf("restored = %v", restored)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("unexpected failures: %v", failures)
+	}
+	st, _ := os.Stat(p)
+	if st.Mode().Perm()&0o200 == 0 {
+		t.Errorf("not writable: %o", st.Mode().Perm())
+	}
+}
+
 func TestDoctorSidecarMissingDirIsNoOp(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
