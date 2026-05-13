@@ -64,6 +64,7 @@ linters:
     - sloglint
     - unconvert
     - unparam
+    - unqueryvet
     - usestdlibvars
     - wastedassign
 
@@ -154,9 +155,6 @@ linters:
       # Test files: relax security, complexity, and context requirements
       - linters:
           - gosec
-          - errcheck
-          - errchkjson
-          - gocritic
         path: _test\.go
       - linters:
           - cyclop
@@ -179,7 +177,7 @@ linters:
           - gocyclo
           - nestif
           - gochecknoinits
-        path: cmd/loto/
+        path: cmd/.*/main\.go
       - linters:
           - gocritic
         path: cmd/.*/main\.go
