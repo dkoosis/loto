@@ -111,6 +111,9 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 			}
 		}
 	}
+	if err := rotateEventsTx(ctx, tx, now); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}

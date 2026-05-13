@@ -34,7 +34,34 @@ func connDSN(path string) string {
 // the existing DB and its -wal/-shm siblings are moved aside atomically
 // and a fresh DB is created. Recovery is serialized via flock on a
 // sidecar lock file so concurrent openers cannot interleave.
+//
+// First-Open is serialized on the project op-flock: two processes
+// creating the same DB simultaneously would otherwise both pass the
+// existence check and clobber each other's writes. Subsequent Opens on
+// an initialized DB take the fast path (no flock).
 func Open(p string) (*Store, error) {
+	if st, err := os.Stat(p); err == nil && st.Size() > 0 {
+		return openWithRecovery(p)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return nil, fmt.Errorf("mkdir state dir: %w", err)
+	}
+	flock, err := acquireOpFlock(opFlockPathFor(p), os.Stderr)
+	if err != nil {
+		return nil, err
+	}
+	defer flock.release()
+	return openWithRecovery(p)
+}
+
+// opFlockPathFor returns the op-flock path for a DB at p — used during
+// Open() before a *Store exists.
+func opFlockPathFor(p string) string {
+	return filepath.Join(filepath.Dir(p), "lock-op.flock")
+}
+
+func openWithRecovery(p string) (*Store, error) {
 	s, err := openOnce(p)
 	if err == nil {
 		return s, nil

@@ -58,7 +58,7 @@ func TestEvents_ModeRestoreFailedAccepted(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	_, err := s.AppendEvent(ctx, domain.Event{
-		Target:    domain.Target{Canonical: "x.go"},
+		Target:    domain.Target{Canonical: tcXGo},
 		Kind:      EventModeRestoreFailed,
 		ActorUUID: tcAlice,
 		Reason:    "EPERM",
