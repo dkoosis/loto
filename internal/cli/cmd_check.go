@@ -64,7 +64,9 @@ func loadCheckTargets(staged bool, posArgs []string, stderr io.Writer) ([]string
 	if !staged {
 		return posArgs, 0
 	}
-	out, err := exec.CommandContext(context.Background(), "git", "diff", "--cached", "--name-only", "-z").Output()
+	ctx, cancel := context.WithTimeout(runtimeCtx(), gitTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "-z").Output()
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ git diff: %v\n", err)
 		return nil, 3

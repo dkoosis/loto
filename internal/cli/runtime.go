@@ -7,10 +7,28 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"loto/internal/identity"
 	"loto/internal/store"
 )
+
+// gitTimeout caps blocking git rev-parse calls so a hung repo (stale NFS,
+// fsmonitor wedge) cannot turn the CLI into an unkillable process.
+const gitTimeout = 5 * time.Second
+
+func gitRevParseToplevel(parent context.Context) (string, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, gitTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
 
 type runtime struct {
 	Agent    *identity.Agent
@@ -40,24 +58,19 @@ func openRuntime() (*runtime, error) {
 		_, _ = s.FSCaseSensitive(repoTop)
 	}
 	host, _ := os.Hostname()
-	return &runtime{Agent: a, Store: s, Ctx: context.Background(), Host: host, StateDir: dir}, nil
+	return &runtime{Agent: a, Store: s, Ctx: runtimeCtx(), Host: host, StateDir: dir}, nil
 }
 
 func repoTopForCwd() (string, error) {
-	out, err := exec.CommandContext(context.Background(), "git", "rev-parse", "--show-toplevel").Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
+	return gitRevParseToplevel(runtimeCtx())
 }
 
 func (r *runtime) Close() error { return r.Store.Close() }
 
 func stateDirForCwd() (string, error) {
-	out, err := exec.CommandContext(context.Background(), "git", "rev-parse", "--show-toplevel").Output()
+	top, err := gitRevParseToplevel(runtimeCtx())
 	if err != nil {
 		return "", fmt.Errorf("not in a git repo: %w", err)
 	}
-	top := strings.TrimSpace(string(out))
 	return StateDir(top), nil
 }
