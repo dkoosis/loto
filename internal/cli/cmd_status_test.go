@@ -24,7 +24,7 @@ func TestStatusEmpty(t *testing.T) {
 func TestStatusMineFilters(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
-	if code := Run([]string{"lock", tcTargetA}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{"lock", tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("lock failed")
 	}
 	var out bytes.Buffer

@@ -4,34 +4,19 @@
 
 # loto north star
 
-*Author: Claude. Audience: future Claudes (and dk).*
+*Author: dk. Audience: future Claudes (and dk).*
 *Updated: 2026-05-11 — post-cut model (loto-vra): files-only, no mailbox, no glob.*
 
 ## what this is for
 
-loto brings lockout/tagout to files. An agent locks a file while editing
-it, so no other agent can change it at the same time.
+loto brings [lockout/tagout](https://www.osha.com/blog/lockout-tagout) to files. An agent locks a file while editing it, so no other agent can change it at the same time. The agent tags the file with basic information such as who holds it and what work is being performed(such as a Git issue or bead ID).
 
-The shape of the problem: five Claude Code sessions in the same repo,
-each spawning subagents. All editing files. Without coordination they
-clobber each other or panic on unexpected diffs. loto exists so any
-Claude can answer one question fast:
-
-> "Is it safe for me to edit this path right now, and if not, who's on it?"
-
-If the answer arrives in <50ms, with structured JSON, with a *useful*
-holder description, Claudes will actually use it. If it requires a daemon,
-a network call, or human-readable-only output, they won't.
-
+Loto is meant the solve the problem that when multiple Claude Code sessions run in the same repo, they clobber each other or panic on unexpected diffs. (Worktrees just delay the issue until merge.) With loto, a participating agent can instantly see if a file is locked by another team member, and why. 
 ## non-goals
 
 ✗ Multi-host coordination (NFS, network shares — flock semantics break).
-✗ A daemon. Claude can't reliably manage long-lived processes across sessions.
-✗ Strong consistency. Tags are advisory; flock is the ground truth.
-✗ Solving git conflicts. loto reduces them; git resolves them.
-✗ Replacing review, tests, or human judgment. Coordination ≠ correctness.
-✗ A chat system. loto coordinates files; conversation lives elsewhere.
-✗ Enforcement. loto is advisory — a non-participating writer (vim, `sudo tee`, `chmod +w`) succeeds. Trust model = trust the operator.
+✗ Long-lived processes across sessions. No daemon.
+✗ Enforced consistency. Loto assumes a cooperative team and does not prevent a process from changing permissions and directly writing to files.
 
 ## the model
 

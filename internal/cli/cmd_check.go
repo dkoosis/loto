@@ -13,22 +13,22 @@ import (
 	"loto/internal/domain"
 )
 
-func init() { register("check-paths", cmdCheckPaths) } //nolint:gochecknoinits // command registry pattern
+func init() { register("check", cmdCheck) } //nolint:gochecknoinits // command registry pattern
 
-type checkPathsConflict struct {
+type checkConflict struct {
 	Path    string
 	Blocker domain.LockRecord
 }
 
-func cmdCheckPaths(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("check-paths", flag.ContinueOnError)
+func cmdCheck(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	staged := fs.Bool("staged", false, "read paths from git diff --cached")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
 
-	paths, code := loadCheckPathsTargets(*staged, fs.Args(), stderr)
+	paths, code := loadCheckTargets(*staged, fs.Args(), stderr)
 	if code != 0 {
 		return code
 	}
@@ -51,16 +51,16 @@ func cmdCheckPaths(args []string, stdout, stderr io.Writer) int {
 	}
 	caseInsensitive := !runtimeCaseSensitive(rt)
 
-	rows := computeCheckPathsConflicts(paths, all, rt.Agent.UUID, caseInsensitive)
+	rows := computeCheckConflicts(paths, all, rt.Agent.UUID, caseInsensitive)
 	if len(rows) == 0 {
 		fmt.Fprintln(stdout, "✓ no conflicts")
 		return 0
 	}
-	printCheckPathsConflicts(stdout, rows)
+	printCheckConflicts(stdout, rows)
 	return 1
 }
 
-func loadCheckPathsTargets(staged bool, posArgs []string, stderr io.Writer) ([]string, int) {
+func loadCheckTargets(staged bool, posArgs []string, stderr io.Writer) ([]string, int) {
 	if !staged {
 		return posArgs, 0
 	}
@@ -78,23 +78,11 @@ func loadCheckPathsTargets(staged bool, posArgs []string, stderr io.Writer) ([]s
 	return paths, 0
 }
 
-func runtimeCaseSensitive(rt *runtime) bool {
-	repoTop, err := repoTopForCwd()
-	if err != nil {
-		return true
-	}
-	cs, err := rt.Store.FSCaseSensitive(repoTop)
-	if err != nil {
-		return true
-	}
-	return cs
-}
-
-func computeCheckPathsConflicts(paths []string, all []domain.LockRecord, myUUID string, caseInsensitive bool) []checkPathsConflict {
-	var rows []checkPathsConflict
+func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID string, caseInsensitive bool) []checkConflict {
+	var rows []checkConflict
 	seen := map[string]bool{}
 	for _, p := range paths {
-		rows = appendPathConflicts(rows, seen, p, all, myUUID, caseInsensitive)
+		rows = appendCheckConflicts(rows, seen, p, all, myUUID, caseInsensitive)
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Path != rows[j].Path {
@@ -105,7 +93,7 @@ func computeCheckPathsConflicts(paths []string, all []domain.LockRecord, myUUID 
 	return rows
 }
 
-func appendPathConflicts(rows []checkPathsConflict, seen map[string]bool, p string, all []domain.LockRecord, myUUID string, caseInsensitive bool) []checkPathsConflict {
+func appendCheckConflicts(rows []checkConflict, seen map[string]bool, p string, all []domain.LockRecord, myUUID string, caseInsensitive bool) []checkConflict {
 	t, err := domain.Canonicalize(p)
 	if err != nil {
 		return rows
@@ -120,12 +108,24 @@ func appendPathConflicts(rows []checkPathsConflict, seen map[string]bool, p stri
 			continue
 		}
 		seen[key] = true
-		rows = append(rows, checkPathsConflict{Path: p, Blocker: all[i]})
+		rows = append(rows, checkConflict{Path: p, Blocker: all[i]})
 	}
 	return rows
 }
 
-func printCheckPathsConflicts(stdout io.Writer, rows []checkPathsConflict) {
+func runtimeCaseSensitive(rt *runtime) bool {
+	repoTop, err := repoTopForCwd()
+	if err != nil {
+		return true
+	}
+	cs, err := rt.Store.FSCaseSensitive(repoTop)
+	if err != nil {
+		return true
+	}
+	return cs
+}
+
+func printCheckConflicts(stdout io.Writer, rows []checkConflict) {
 	fmt.Fprintf(stdout, "✗ conflicts count=%d\n", len(rows))
 	for i := range rows {
 		r := &rows[i]
@@ -133,7 +133,7 @@ func printCheckPathsConflicts(stdout io.Writer, rows []checkPathsConflict) {
 			r.Path, r.Blocker.OwnerUUID, r.Blocker.Target.Canonical, r.Blocker.Intent,
 			r.Blocker.ExpiresAt.UTC().Format(time.RFC3339))
 		fmt.Fprintln(stdout, "```bash")
-		fmt.Fprintf(stdout, "loto break --force --reason \"unblock\" %s\n", r.Blocker.Target.Canonical)
+		fmt.Fprintf(stdout, "loto unlock --force -t \"unblock\" %s\n", r.Blocker.Target.Canonical)
 		fmt.Fprintln(stdout, "```")
 	}
 }

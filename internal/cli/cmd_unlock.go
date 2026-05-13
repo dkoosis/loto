@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 
 	"loto/internal/domain"
+	"loto/internal/store"
 )
 
 func init() { register("unlock", cmdUnlock) } //nolint:gochecknoinits // command registry pattern
@@ -13,10 +15,22 @@ func init() { register("unlock", cmdUnlock) } //nolint:gochecknoinits // command
 func cmdUnlock(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("unlock", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	allMine := fs.Bool("all-mine", false, "release every lock owned by my uuid")
+	force := fs.Bool("force", false, "break another agent's lock (or a live lock)")
+	all := fs.Bool("all", false, "release every lock owned by my uuid")
+	intent := fs.String("t", "", "intent (required)")
+	fs.StringVar(intent, "intent", "", "intent (required)")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
+	if *intent == "" {
+		fmt.Fprintln(stderr, "✗ -t required: loto unlock <target> [<target>...] -t \"why\"")
+		return 2
+	}
+	if !*all && fs.NArg() == 0 {
+		fmt.Fprintln(stderr, "usage: loto unlock <target> [<target>...] [-t \"why\"] [--force] | --all -t \"why\"")
+		return 2
+	}
+
 	rt, err := openRuntime()
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
@@ -24,17 +38,73 @@ func cmdUnlock(args []string, stdout, stderr io.Writer) int {
 	}
 	defer rt.Close()
 
-	if *allMine {
-		return unlockAllMine(rt, stdout, stderr)
+	emitMsgBanner(stdout, rt)
+
+	if *all {
+		return unlockAll(rt, *intent, stdout, stderr)
 	}
-	if fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: loto unlock <target> | --all-mine")
-		return 2
-	}
-	return unlockSingle(rt, fs.Arg(0), stdout, stderr)
+	return unlockTargets(rt, fs.Args(), *intent, *force, stdout, stderr)
 }
 
-func unlockAllMine(rt *runtime, stdout, stderr io.Writer) int {
+func unlockTargets(rt *runtime, args []string, intent string, force bool, stdout, stderr io.Writer) int {
+	live := func(host string, pid int) bool {
+		if host != rt.Host {
+			return true
+		}
+		return pidLive(pid)
+	}
+	code := 0
+	for _, arg := range args {
+		targets, resolveErr := resolveTargets(arg)
+		if resolveErr != nil {
+			fmt.Fprintf(stderr, "✗ target %q: %v\n", arg, resolveErr)
+			code = 2
+			continue
+		}
+		for _, target := range targets {
+			if c := releaseOne(rt, target, intent, force, live, stdout, stderr); c != 0 {
+				code = c
+			}
+		}
+	}
+	return code
+}
+
+func releaseOne(rt *runtime, target domain.Target, intent string, force bool, live func(string, int) bool, stdout, stderr io.Writer) int {
+	if force {
+		err := rt.Store.BreakLock(rt.Ctx, target, rt.Agent.UUID, true, intent, live)
+		if err != nil {
+			if errors.Is(err, store.ErrNoLockAtTarget) {
+				fmt.Fprintf(stderr, "✗ no lock at target=%s\n", target.Canonical)
+				return 1
+			}
+			fmt.Fprintf(stderr, "✗ %v\n", err)
+			return 3
+		}
+		fmt.Fprintf(stdout, "✓ broken target=%s\n", target.Canonical)
+		return 0
+	}
+
+	// Own lock release.
+	err := rt.Store.ReleaseLock(rt.Ctx, target, rt.Agent.UUID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotOwner) {
+			// Try stale reclaim before giving up.
+			if err2 := rt.Store.BreakLock(rt.Ctx, target, rt.Agent.UUID, false, intent, live); err2 != nil {
+				fmt.Fprintf(stderr, "✗ not owner and lock is live — use --force to override\n")
+				return 1
+			}
+			fmt.Fprintf(stdout, "✓ reclaimed target=%s\n", target.Canonical)
+			return 0
+		}
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return 3
+	}
+	fmt.Fprintf(stdout, "✓ unlocked target=%s\n", target.Canonical)
+	return 0
+}
+
+func unlockAll(rt *runtime, intent string, stdout, stderr io.Writer) int {
 	all, err := rt.Store.ListLocks(rt.Ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
@@ -49,27 +119,6 @@ func unlockAllMine(rt *runtime, stdout, stderr io.Writer) int {
 			n++
 		}
 	}
-	fmt.Fprintf(stdout, "✓ released count=%d\n", n)
-	return 0
-}
-
-func unlockSingle(rt *runtime, arg string, stdout, stderr io.Writer) int {
-	t, err := domain.Canonicalize(arg)
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return 2
-	}
-	if err := rt.Store.ReleaseLock(rt.Ctx, t, rt.Agent.UUID); err != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return 1
-	}
-	tags, _ := rt.Store.TagsOnTarget(rt.Ctx, t)
-	for i := range tags {
-		tg := &tags[i]
-		if tg.AddresseeUUID != "" && tg.AddresseeUUID != rt.Agent.UUID {
-			fmt.Fprintf(stdout, "ℹ notify tag=%s addressee=%s\n", tg.ID, tg.AddresseeUUID)
-		}
-	}
-	fmt.Fprintf(stdout, "✓ unlocked target=%s\n", t.Canonical)
+	fmt.Fprintf(stdout, "✓ released count=%d intent=%q\n", n, intent)
 	return 0
 }

@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"loto/internal/domain"
@@ -21,11 +20,17 @@ func cmdTag(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	to := fs.String("to", "", "addressee handle or uuid")
 	ttl := fs.Duration("ttl", 0, "optional TTL (default: never expires)")
+	intent := fs.String("t", "", "note (required)")
+	fs.StringVar(intent, "intent", "", "note (required)")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
-	if fs.NArg() < 2 {
-		fmt.Fprintln(stderr, `usage: loto tag <target> [--to <agent>] [--ttl 1h] "<note>"`)
+	if *intent == "" {
+		fmt.Fprintln(stderr, `✗ -t required: loto tag <target> [--to <agent>] [--ttl 1h] -t "<note>"`)
+		return 2
+	}
+	if fs.NArg() < 1 {
+		fmt.Fprintln(stderr, `usage: loto tag <target> [--to <agent>] [--ttl 1h] -t "<note>"`)
 		return 2
 	}
 	target, err := domain.Canonicalize(fs.Arg(0))
@@ -33,17 +38,19 @@ func cmdTag(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 2
 	}
-	intent := strings.Join(fs.Args()[1:], " ")
 	rt, err := openRuntime()
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
 	defer rt.Close()
+	return tagApply(rt, target, *to, *intent, *ttl, stdout, stderr)
+}
 
+func tagApply(rt *runtime, target domain.Target, toHandle, intent string, ttl time.Duration, stdout, stderr io.Writer) int {
 	addressee := ""
-	if *to != "" {
-		ag, err := identity.Resolve(*to)
+	if toHandle != "" {
+		ag, err := identity.Resolve(toHandle)
 		if err != nil {
 			fmt.Fprintf(stderr, "✗ %v\n", err)
 			return 2
@@ -56,8 +63,8 @@ func cmdTag(args []string, stdout, stderr io.Writer) int {
 		AuthorUUID: rt.Agent.UUID, AddresseeUUID: addressee, Intent: intent,
 		CreatedAt: now,
 	}
-	if *ttl > 0 {
-		exp := now.Add(*ttl)
+	if ttl > 0 {
+		exp := now.Add(ttl)
 		tg.ExpiresAt = &exp
 	}
 	id, err := rt.Store.AddTag(rt.Ctx, tg)
@@ -70,11 +77,16 @@ func cmdTag(args []string, stdout, stderr io.Writer) int {
 }
 
 func cmdUntag(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 2 {
+	fs := flag.NewFlagSet("untag", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	if err := fs.Parse(permuteWith(fs, args)); err != nil {
+		return 2
+	}
+	if fs.NArg() != 2 {
 		fmt.Fprintln(stderr, "usage: loto untag <target> <tag-id>")
 		return 2
 	}
-	target, err := domain.Canonicalize(args[0])
+	target, err := domain.Canonicalize(fs.Arg(0))
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 2
@@ -85,10 +97,15 @@ func cmdUntag(args []string, stdout, stderr io.Writer) int {
 		return 3
 	}
 	defer rt.Close()
-	if err := rt.Store.RemoveTag(rt.Ctx, target, args[1], rt.Agent.UUID); err != nil {
+	if err := rt.Store.RemoveTag(rt.Ctx, target, fs.Arg(1), rt.Agent.UUID); err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "✓ removed target=%s tag=%s\n", target.Canonical, args[1])
+	fmt.Fprintf(stdout, "✓ removed target=%s tag=%s\n", target.Canonical, fs.Arg(1))
 	return 0
+}
+
+// cmdAnnotate is the bare-form handler: loto <target> -t "note"
+func cmdAnnotate(args []string, stdout, stderr io.Writer) int {
+	return cmdTag(args, stdout, stderr)
 }

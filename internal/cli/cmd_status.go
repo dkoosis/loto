@@ -16,7 +16,6 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	mine := fs.Bool("mine", false, "show only locks owned by my uuid")
-	session := fs.Bool("session", false, "alias for --mine in v2 (no per-session distinction)")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
@@ -47,7 +46,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	if *mine || *session {
+	if *mine {
 		all = filterLocksByOwner(all, rt.Agent.UUID)
 	}
 	sort.Slice(all, func(i, j int) bool {

@@ -56,7 +56,7 @@ func TestLockHappyPath(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 	var out, errBuf bytes.Buffer
-	code := Run([]string{tcCmdLock, tcTargetA, "--ttl", "10m", tcFlagIntent, "test"}, &out, &errBuf)
+	code := Run([]string{tcCmdLock, tcTargetA, "--ttl", "10m", tcFlagIntent, tcIntentTest}, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("exit %d, out=%q err=%q", code, out.String(), errBuf.String())
 	}
@@ -65,10 +65,27 @@ func TestLockHappyPath(t *testing.T) {
 	}
 }
 
+// twoAgents creates two agents in the shared HOME (simulating two sessions on
+// the same host) and returns them.
+func twoAgents(t *testing.T) (alice, bob *identity.Agent) {
+	t.Helper()
+	t.Setenv("LOTO_AGENT_ID", "")
+	a, err := identity.Ensure()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOTO_AGENT_ID", "")
+	b, err := identity.Ensure()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, b
+}
+
 func TestLockConflictBetweenAgents(t *testing.T) {
 	withTempProject(t)
 	alice := pinAgent(t)
-	if code := Run([]string{tcCmdLock, tcTargetA}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("alice initial lock failed, exit %d", code)
 	}
 
@@ -77,7 +94,7 @@ func TestLockConflictBetweenAgents(t *testing.T) {
 	pinAgent(t)
 
 	var out, errBuf bytes.Buffer
-	code := Run([]string{tcCmdLock, tcTargetA}, &out, &errBuf)
+	code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &out, &errBuf)
 	if code != 1 {
 		t.Fatalf("expected exit 1, got %d; out=%q err=%q", code, out.String(), errBuf.String())
 	}
@@ -91,11 +108,11 @@ func TestLockConflictBetweenAgents(t *testing.T) {
 func TestUnlockOwner(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
-	if code := Run([]string{tcCmdLock, tcTargetA}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("lock failed")
 	}
 	var out, errBuf bytes.Buffer
-	code := Run([]string{tcCmdUnlock, tcTargetA}, &out, &errBuf)
+	code := Run([]string{tcCmdUnlock, tcTargetA, "-t", tcIntentDone}, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("unlock exit %d; err=%q", code, errBuf.String())
 	}

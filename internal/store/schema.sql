@@ -1,4 +1,4 @@
--- loto v2 schema. Applied on every Open(); all DDL is IF NOT EXISTS so re-apply is a no-op.
+-- loto v4 schema. Applied on every Open(); all DDL is IF NOT EXISTS so re-apply is a no-op.
 -- No version tracking, no migrator. If schema needs to change, replace this file
 -- and start each project DB fresh.
 
@@ -49,4 +49,15 @@ CREATE TABLE IF NOT EXISTS schema_meta (
   value TEXT NOT NULL
 );
 
-PRAGMA user_version = 3;
+CREATE TABLE IF NOT EXISTS messages (
+  id         TEXT PRIMARY KEY,
+  from_uuid  TEXT NOT NULL,
+  to_uuid    TEXT NOT NULL,
+  body       TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER,
+  read_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(to_uuid, read_at);
+
+PRAGMA user_version = 4;

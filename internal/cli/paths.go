@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"loto/internal/domain"
 )
 
 const unnamedSlug = "unnamed"
@@ -142,6 +144,16 @@ func gitCmd(repoTop string, args ...string) (string, error) {
 	}
 	out, err := cmd.Output()
 	return string(out), err
+}
+
+// resolveTargets canonicalizes arg into one or more Target values.
+// Currently returns a single target; glob expansion at call time is bead loto-1wl.
+func resolveTargets(arg string) ([]domain.Target, error) {
+	t, err := domain.Canonicalize(arg)
+	if err != nil {
+		return nil, err
+	}
+	return []domain.Target{t}, nil
 }
 
 // RepoTop returns the top-level of the git repo containing cwd, or cwd itself
