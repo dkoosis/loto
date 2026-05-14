@@ -21,11 +21,19 @@ func TestReleaseLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.ReleaseLock(ctx, l.Target, tcBob); err == nil {
-		t.Fatal("non-owner release must fail")
+	bobRes, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob)
+	if err != nil {
+		t.Fatalf("ReleaseLocks(bob): %v", err)
 	}
-	if err := s.ReleaseLock(ctx, l.Target, tcAlice); err != nil {
-		t.Fatalf("owner release: %v", err)
+	if bobRes[0].State != StateNotOwner {
+		t.Fatalf("non-owner release must report StateNotOwner, got %+v", bobRes)
+	}
+	aliceRes, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice)
+	if err != nil {
+		t.Fatalf("ReleaseLocks(alice): %v", err)
+	}
+	if aliceRes[0].State != StateUnlocked {
+		t.Fatalf("owner release must report StateUnlocked, got %+v", aliceRes)
 	}
 	got, _ := s.LockAt(ctx, l.Target)
 	if got != nil {
@@ -391,8 +399,12 @@ func TestReleaseLock_RestoresWriteMode(t *testing.T) {
 	if st, _ := os.Stat(l.Target.Canonical); st.Mode().Perm()&0o200 != 0 {
 		t.Fatalf("precondition: acquire should strip write, got %o", st.Mode().Perm())
 	}
-	if err := s.ReleaseLock(ctx, l.Target, tcAlice); err != nil {
+	results, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if results[0].State != StateUnlocked {
+		t.Fatalf("expected StateUnlocked, got %+v", results)
 	}
 	st, _ := os.Stat(l.Target.Canonical)
 	if st.Mode().Perm()&0o200 == 0 {
@@ -417,20 +429,28 @@ func TestBreakLock_RestoresWriteMode(t *testing.T) {
 	}
 }
 
-func TestReleaseLock_NoLockVsNotOwner(t *testing.T) {
+func TestReleaseLocks_NoLockVsNotOwner(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	live := func(string, int) bool { return true }
 
 	l := mkFileLock(t, "x.go", tcAlice, time.Hour)
-	if err := s.ReleaseLock(ctx, l.Target, tcAlice); !errors.Is(err, ErrNoLockAtTarget) {
-		t.Fatalf("expected ErrNoLockAtTarget, got %v", err)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice)
+	if err != nil {
+		t.Fatalf("ReleaseLocks (no row): %v", err)
+	}
+	if res[0].State != StateNoLock {
+		t.Fatalf("expected StateNoLock, got %+v", res)
 	}
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReleaseLock(ctx, l.Target, tcBob); !errors.Is(err, domain.ErrNotOwner) {
-		t.Fatalf("expected ErrNotOwner, got %v", err)
+	res, err = s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob)
+	if err != nil {
+		t.Fatalf("ReleaseLocks (not owner): %v", err)
+	}
+	if res[0].State != StateNotOwner {
+		t.Fatalf("expected StateNotOwner, got %+v", res)
 	}
 }
 
@@ -465,11 +485,96 @@ func TestAcquireLocks_LazyGCRestoresMode(t *testing.T) {
 	}
 
 	// Sanity: if Bob releases, mode comes back.
-	if err := s.ReleaseLock(ctx, b.Target, tcBob); err != nil {
+	results, err := s.ReleaseLocks(ctx, []domain.Target{b.Target}, tcBob)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].State != StateUnlocked {
+		t.Fatalf("expected StateUnlocked, got %+v", results)
 	}
 	st, _ = os.Stat(a.Target.Canonical)
 	if st.Mode().Perm()&0o200 == 0 {
 		t.Fatalf("release should restore owner-write, got %o", st.Mode().Perm())
+	}
+}
+
+func TestReleaseLocks_DistinguishesMissingFromNotOwner(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	live := func(string, int) bool { return true }
+
+	a := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	c := mkFileLock(t, "c.go", tcBob, time.Hour)
+	bDir := t.TempDir()
+	bPath := filepath.Join(bDir, "b.go")
+	if err := os.WriteFile(bPath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, live); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{c}, live); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := s.ReleaseLocks(ctx, []domain.Target{
+		a.Target,
+		{Canonical: bPath},
+		c.Target,
+	}, tcAlice)
+	if err != nil {
+		t.Fatalf("ReleaseLocks: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("want 3 results, got %d", len(results))
+	}
+	want := []ReleaseOutcome{StateUnlocked, StateNoLock, StateNotOwner}
+	for i, r := range results {
+		if r.State != want[i] {
+			t.Errorf("results[%d].State = %v, want %v", i, r.State, want[i])
+		}
+	}
+	if results[2].Holder != tcBob {
+		t.Errorf("results[2].Holder = %q, want %q", results[2].Holder, tcBob)
+	}
+	stA, _ := os.Stat(a.Target.Canonical)
+	if stA.Mode().Perm()&0o200 == 0 {
+		t.Errorf("a.go not restored: %o", stA.Mode().Perm())
+	}
+	stC, _ := os.Stat(c.Target.Canonical)
+	if stC.Mode().Perm()&0o222 != 0 {
+		t.Errorf("c.go should remain stripped: %o", stC.Mode().Perm())
+	}
+}
+
+func TestReleaseLocks_RestoreFailureIsReported(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	live := func(string, int) bool { return true }
+
+	rec := mkFileLock(t, "x.go", tcAlice, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, live); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := chmodFn
+	defer func() { chmodFn = orig }()
+	chmodFn = func(path string, mode os.FileMode) error {
+		if path == rec.Target.Canonical && mode.Perm()&0o200 != 0 {
+			return &os.PathError{Op: "chmod", Path: path, Err: syscall.EPERM}
+		}
+		return orig(path, mode)
+	}
+
+	results, err := s.ReleaseLocks(ctx, []domain.Target{rec.Target}, tcAlice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].State != StateRestoreFailed {
+		t.Fatalf("want StateRestoreFailed, got %+v", results)
+	}
+	if results[0].RestoreErr == nil {
+		t.Error("RestoreErr nil")
 	}
 }
