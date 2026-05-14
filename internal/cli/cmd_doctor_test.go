@@ -53,7 +53,7 @@ func TestDoctor_OrphanModeFlaggedNotRepaired(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	code := Run([]string{tcCmdDoctor, "--repair", "--orphan-mode"}, &out, io.Discard)
+	code := Run([]string{tcCmdDoctor, tcFlagRepair, "--orphan-mode"}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, out.String())
 	}
@@ -94,7 +94,7 @@ func TestDoctor_RestoreOrphanModeFlagRepairs(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	code := Run([]string{tcCmdDoctor, "--repair", "--restore-orphan-mode"}, &out, io.Discard)
+	code := Run([]string{tcCmdDoctor, tcFlagRepair, "--restore-orphan-mode"}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, out.String())
 	}
