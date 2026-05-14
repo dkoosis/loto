@@ -15,9 +15,9 @@ func TestAcceptance_GoldenHappyPath(t *testing.T) {
 		want string
 	}{
 		{[]string{"whoami"}, "handle:"},
-		{[]string{tcCmdLock, tcTargetA, tcFlagIntent, "smoke"}, "✓ locked target=a.go"},
+		{[]string{tcCmdLock, tcTargetA, tcFlagIntent, "smoke"}, "✓ locked count=1"},
 		{[]string{tcCmdStatus, tcFlagMine}, tcTargetA},
-		{[]string{tcCmdUnlock, tcTargetA, "-t", tcIntentDone}, "✓ unlocked target=a.go"},
+		{[]string{tcCmdUnlock, tcTargetA, "-t", tcIntentDone}, "✓ unlocked count=1"},
 	}
 	for _, s := range steps {
 		var out bytes.Buffer
