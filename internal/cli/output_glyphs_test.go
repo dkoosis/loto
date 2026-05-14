@@ -31,7 +31,7 @@ func TestNoBannedGlyphsInSource(t *testing.T) {
 			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 				return nil
 			}
-			f, err := os.Open(path) //nolint:gosec // path comes from filepath.Walk over a test-local root
+			f, err := os.Open(path)
 			if err != nil {
 				return err
 			}
