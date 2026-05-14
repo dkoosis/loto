@@ -18,7 +18,8 @@
 //     be enforced at a layer the writer cannot ignore by accident — POSIX
 //     file mode, kernel flock, or filesystem-level immutability.
 //   - The tag records who holds it, the stated intent, the expiry, and
-//     a mailbox for messages from blocked peers.
+//     enough identity to make a useful blocker report (handle, host, pid,
+//     branch).
 //
 // Both halves are required. A tag without a lock is the post-it. A lock
 // without a tag is anonymous obstruction — blocked peers see only the
@@ -34,10 +35,10 @@
 //
 // # Design north star
 //
-// See docs/NORTH_STAR.md for the full design contract — four coordination
-// tiers (reservation, record/TTL, file flock, global flock), invariants
-// (flock is truth except for the bounded record-tier carve-out), and the
-// five-Claude acceptance scenario. Every change to this command must be
-// audited against that document; the doc is the contract, the code is
-// just one implementation.
+// See docs/NORTH_STAR.md for the full design contract — coordination
+// layers (tag/record-tier, chmod enforcement, op-flock; foreground file
+// flock and global lock deferred), invariants (flock is truth except for
+// the bounded record-tier carve-out), and the five-Claude acceptance
+// scenario. Every change to this command must be audited against that
+// document; the doc is the contract, the code is just one implementation.
 package main
