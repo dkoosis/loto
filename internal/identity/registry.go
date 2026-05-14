@@ -318,6 +318,11 @@ func writeAgent(a *Agent) error {
 	return os.Rename(tmpName, final)
 }
 
+// NewUUID returns a fresh RFC 4122 v4 UUID. Exported so non-identity callers
+// (e.g. CLI runtime session-id minting) can use the same generator without
+// duplicating the bit-twiddling.
+func NewUUID() string { return newUUID() }
+
 func newUUID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])

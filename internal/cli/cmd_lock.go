@@ -94,7 +94,7 @@ func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now t
 		recs = append(recs, domain.LockRecord{
 			Target:      t,
 			OwnerUUID:   rt.Agent.UUID,
-			SessionUUID: rt.Agent.UUID,
+			SessionUUID: rt.SessionUUID,
 			Intent:      intent,
 			CreatedAt:   now,
 			ExpiresAt:   now.Add(ttl),
