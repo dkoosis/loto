@@ -42,7 +42,7 @@ func withTempProject(t *testing.T) string {
 	t.Chdir(repo)
 	// Standard target files used across CLI tests. AcquireLocks Lstat-validates
 	// KindFile targets, so these must exist on disk.
-	if err := os.WriteFile(filepath.Join(repo, "a.go"), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	storeDir := filepath.Join(repo, "internal", "store")
@@ -126,6 +126,90 @@ func TestLockConflictBetweenAgents(t *testing.T) {
 		t.Errorf("expected blocker report: %q", combined)
 	}
 	_ = alice
+}
+
+func TestLock_MultiTarget_HappyPath(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	if err := os.WriteFile(filepath.Join(repo, tcTargetB), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, tcTargetA, tcTargetB, "-t", tcIntentTest}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.HasPrefix(out.String(), "✓ locked count=2\n") {
+		t.Errorf("missing triage line: %q", out.String())
+	}
+	for _, n := range []string{tcTargetA, tcTargetB} {
+		st, err := os.Stat(filepath.Join(repo, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm()&0o222 != 0 {
+			t.Errorf("%s not stripped: %o", n, st.Mode().Perm())
+		}
+	}
+}
+
+func TestLock_RejectDirectoryTarget(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, "internal/store", "-t", tcIntentTest}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	combined := out.String() + errBuf.String()
+	if !strings.Contains(combined, "not-regular-file") {
+		t.Errorf("expected reason=not-regular-file: %q", combined)
+	}
+}
+
+func TestLock_RejectNonExistentTarget(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, "missing.go", "-t", tcIntentTest}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	combined := out.String() + errBuf.String()
+	if !strings.Contains(combined, "not-found") {
+		t.Errorf("expected reason=not-found: %q", combined)
+	}
+}
+
+func TestLock_RejectsDuplicateTargets(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, tcTargetA, tcTargetA, "-t", tcIntentTest}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	combined := out.String() + errBuf.String()
+	if !strings.Contains(combined, "duplicate-target") {
+		t.Errorf("expected duplicate-target: %q", combined)
+	}
+}
+
+func TestLock_RejectsSymlinks(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	if err := os.Symlink(filepath.Join(repo, tcTargetA), filepath.Join(repo, "link.go")); err != nil {
+		t.Fatal(err)
+	}
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, "link.go", "-t", tcIntentTest}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	combined := out.String() + errBuf.String()
+	if !strings.Contains(combined, "symlink") {
+		t.Errorf("expected reason=symlink: %q", combined)
+	}
 }
 
 func TestUnlockOwner(t *testing.T) {

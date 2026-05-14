@@ -6,10 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/render"
 	"loto/internal/store"
 )
 
@@ -34,9 +36,10 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: loto lock <target> [<target>...] -t \"why\"")
 		return 2
 	}
-	targets, code := canonicalizeTargets(fs.Args(), stderr)
-	if code != 0 {
-		return code
+	targets, invalid := validateLockTargets(fs.Args())
+	if len(invalid) > 0 {
+		render.EmitInvalid(stderr, invalid)
+		return 2
 	}
 	rt, err := openRuntime(ctx)
 	if err != nil {
@@ -54,6 +57,68 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return acquireBatch(rt, targets, *intent, *ttl, live, stdout, stderr)
 }
 
+// validateLockTargets canonicalizes and Lstat-validates each path before any
+// store work, so rejection produces a single render.EmitInvalid block and
+// leaves zero side effects on disk or DB.
+func validateLockTargets(args []string) ([]domain.Target, []render.InvalidTarget) {
+	targets := make([]domain.Target, 0, len(args))
+	seen := make(map[string]bool, len(args))
+	var invalid []render.InvalidTarget
+	for _, raw := range args {
+		t, err := domain.Canonicalize(raw)
+		if err != nil {
+			invalid = append(invalid, render.InvalidTarget{Path: raw, Reason: classifyCanonicalizeErr(err)})
+			continue
+		}
+		if seen[t.Canonical] {
+			invalid = append(invalid, render.InvalidTarget{Path: t.Canonical, Reason: "duplicate-target"})
+			continue
+		}
+		seen[t.Canonical] = true
+		lst, err := os.Lstat(t.Canonical)
+		if err != nil {
+			reason := "stat-failed: " + err.Error()
+			if errors.Is(err, fs.ErrNotExist) {
+				reason = "not-found"
+			}
+			invalid = append(invalid, render.InvalidTarget{Path: t.Canonical, Reason: reason})
+			continue
+		}
+		if lst.Mode()&os.ModeSymlink != 0 {
+			invalid = append(invalid, render.InvalidTarget{Path: t.Canonical, Reason: "symlink"})
+			continue
+		}
+		if !lst.Mode().IsRegular() {
+			invalid = append(invalid, render.InvalidTarget{Path: t.Canonical, Reason: "not-regular-file"})
+			continue
+		}
+		targets = append(targets, t)
+	}
+	return targets, invalid
+}
+
+// classifyCanonicalizeErr maps domain errors to design.md reason tokens.
+func classifyCanonicalizeErr(err error) string {
+	switch {
+	case errors.Is(err, domain.ErrTargetIsDir):
+		return "not-regular-file"
+	case errors.Is(err, domain.ErrEmptyTarget):
+		return "empty-target"
+	case errors.Is(err, domain.ErrTargetHasNUL):
+		return "target-has-nul"
+	case errors.Is(err, domain.ErrTargetBackslash):
+		return "target-has-backslash"
+	case errors.Is(err, domain.ErrRepoEscape):
+		return "repo-escape"
+	case errors.Is(err, domain.ErrTargetIsGlob):
+		return "glob-not-supported"
+	case errors.Is(err, domain.ErrTargetIsRepoRoot):
+		return "repo-root"
+	default:
+		return err.Error()
+	}
+}
+
 func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.Duration, live func(string, int) bool, stdout, stderr io.Writer) int {
 	now := time.Now()
 	recs := buildLockRecords(targets, rt, intent, now, ttl)
@@ -61,32 +126,23 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 	if err != nil {
 		var mce *store.MultiConflictError
 		if errors.As(err, &mce) {
-			emitMultiConflict(stdout, mce)
+			render.EmitConflict(stdout, mce)
 			return 1
 		}
 		var cfe *store.ChmodFailureError
 		if errors.As(err, &cfe) {
-			emitChmodFailure(stdout, cfe)
+			render.EmitChmodFailure(stdout, cfe)
 			return 3
 		}
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	emitLockSuccess(stdout, acquired)
-	return 0
-}
-
-func canonicalizeTargets(args []string, stderr io.Writer) ([]domain.Target, int) {
-	out := make([]domain.Target, 0, len(args))
-	for _, a := range args {
-		t, err := domain.Canonicalize(a)
-		if err != nil {
-			fmt.Fprintf(stderr, "✗ target %s: %v\n", a, err)
-			return nil, 2
-		}
-		out = append(out, t)
+	emitted := make([]domain.Target, len(acquired))
+	for i := range acquired {
+		emitted[i] = acquired[i].Target
 	}
-	return out, 0
+	render.EmitLockSuccess(stdout, emitted)
+	return 0
 }
 
 func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now time.Time, ttl time.Duration) []domain.LockRecord {
@@ -104,30 +160,4 @@ func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now t
 		})
 	}
 	return recs
-}
-
-func emitMultiConflict(w io.Writer, mce *store.MultiConflictError) {
-	fmt.Fprintf(w, "✗ blocked blockers=%d\n", len(mce.Blockers))
-	for i := range mce.Blockers {
-		b := &mce.Blockers[i]
-		fmt.Fprintf(w, "✗ blocker=%s target=%s intent=%q held_since=%s expires_at=%s host=%s pid=%d\n",
-			b.OwnerUUID, relPath(b.Target.Canonical), b.Intent,
-			b.CreatedAt.UTC().Format(time.RFC3339), b.ExpiresAt.UTC().Format(time.RFC3339),
-			b.Host, b.PID)
-	}
-}
-
-func emitChmodFailure(w io.Writer, cfe *store.ChmodFailureError) {
-	fmt.Fprintf(w, "✗ chmod_failed targets=%d\n", len(cfe.Failures))
-	for i := range cfe.Failures {
-		f := &cfe.Failures[i]
-		fmt.Fprintf(w, "✗ target=%s rolled_back=%t err=%v\n", relPath(f.Target.Canonical), f.RolledBack, f.Err)
-	}
-}
-
-func emitLockSuccess(w io.Writer, acquired []domain.LockRecord) {
-	fmt.Fprintf(w, "✓ locked count=%d\n", len(acquired))
-	for i := range acquired {
-		fmt.Fprintf(w, "✓ locked target=%s\n", relPath(acquired[i].Target.Canonical))
-	}
 }

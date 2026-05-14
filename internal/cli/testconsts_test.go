@@ -2,6 +2,8 @@ package cli
 
 const (
 	tcTargetA      = "a.go"
+	tcTargetB      = "b.go"
+	tcTargetC      = "c.go"
 	tcCmdLock      = "lock"
 	tcCmdUnlock    = "unlock"
 	tcCmdStatus    = "status"
