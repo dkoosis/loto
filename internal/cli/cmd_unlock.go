@@ -74,13 +74,13 @@ func releaseOne(rt *runtime, target domain.Target, intent string, force bool, li
 		err := rt.Store.BreakLock(rt.Ctx, target, rt.Agent.UUID, true, intent, live)
 		if err != nil {
 			if errors.Is(err, store.ErrNoLockAtTarget) {
-				fmt.Fprintf(stderr, "✗ no lock at target=%s\n", target.Canonical)
+				fmt.Fprintf(stderr, "✗ no lock at target=%s\n", relPath(target.Canonical))
 				return 1
 			}
 			fmt.Fprintf(stderr, "✗ %v\n", err)
 			return 3
 		}
-		fmt.Fprintf(stdout, "✓ broken target=%s\n", target.Canonical)
+		fmt.Fprintf(stdout, "✓ broken target=%s\n", relPath(target.Canonical))
 		return 0
 	}
 
@@ -90,28 +90,28 @@ func releaseOne(rt *runtime, target domain.Target, intent string, force bool, li
 		return 3
 	}
 	if len(results) == 0 {
-		fmt.Fprintf(stderr, "✗ no result for target=%s\n", target.Canonical)
+		fmt.Fprintf(stderr, "✗ no result for target=%s\n", relPath(target.Canonical))
 		return 3
 	}
 	switch r := results[0]; r.State {
 	case store.StateUnlocked:
-		fmt.Fprintf(stdout, "✓ unlocked target=%s\n", target.Canonical)
+		fmt.Fprintf(stdout, "✓ unlocked target=%s\n", relPath(target.Canonical))
 		return 0
 	case store.StateNoLock:
-		fmt.Fprintf(stderr, "✗ no lock at target=%s\n", target.Canonical)
+		fmt.Fprintf(stderr, "✗ no lock at target=%s\n", relPath(target.Canonical))
 		return 1
 	case store.StateNotOwner:
 		if err2 := rt.Store.BreakLock(rt.Ctx, target, rt.Agent.UUID, false, intent, live); err2 != nil {
 			fmt.Fprintf(stderr, "✗ not owner and lock is live — use --force to override\n")
 			return 1
 		}
-		fmt.Fprintf(stdout, "✓ reclaimed target=%s\n", target.Canonical)
+		fmt.Fprintf(stdout, "✓ reclaimed target=%s\n", relPath(target.Canonical))
 		return 0
 	case store.StateRestoreFailed:
 		fmt.Fprintf(stderr, "✗ unlocked but mode-restore failed target=%s err=%v\n", relPath(target.Canonical), r.RestoreErr)
 		return 1
 	default:
-		fmt.Fprintf(stderr, "✗ unexpected release state=%d target=%s\n", r.State, target.Canonical)
+		fmt.Fprintf(stderr, "✗ unexpected release state=%d target=%s\n", r.State, relPath(target.Canonical))
 		return 3
 	}
 }
