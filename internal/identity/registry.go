@@ -268,6 +268,13 @@ func gcStaleAgents(now time.Time) error {
 	return nil
 }
 
+// LookupByUUID returns the agent record for uuid, or an error if no record
+// exists on disk. Used by render to print holder Handle alongside UUID in
+// conflict reports (loto-b3o).
+func LookupByUUID(uuid string) (*Agent, error) {
+	return loadByUUID(uuid)
+}
+
 func loadByUUID(uuid string) (*Agent, error) {
 	path := filepath.Join(registryDir(), uuid+".json")
 	body, err := os.ReadFile(path)
