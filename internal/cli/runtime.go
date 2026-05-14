@@ -31,13 +31,13 @@ func gitRevParseToplevel(parent context.Context) (string, error) {
 }
 
 type runtime struct {
-	Agent          *identity.Agent
-	Store          *store.Store
-	Ctx            context.Context //nolint:containedctx // request-scope handle for the CLI invocation; threading it through every cmd_*.go signature would be uniformly noise
-	Host           string
-	StateDir       string
-	SessionUUID    string // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID
-	SessionPinned  bool   // true iff LOTO_SESSION_ID was in env; gates session-scoped semantics
+	Agent         *identity.Agent
+	Store         *store.Store
+	Ctx           context.Context //nolint:containedctx // handle on the per-invocation ctx; threading it through every store/identity call from cmd_*.go would be uniform noise without changing semantics
+	Host          string
+	StateDir      string
+	SessionUUID   string // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID
+	SessionPinned bool   // true iff LOTO_SESSION_ID was in env; gates session-scoped semantics
 }
 
 // sessionUUID resolves the per-session id. The SessionStart hook exports
@@ -54,12 +54,12 @@ func sessionUUID() (id string, pinned bool) {
 	return identity.NewUUID(), false
 }
 
-func openRuntime() (*runtime, error) {
+func openRuntime(ctx context.Context) (*runtime, error) {
 	a, err := identity.Ensure()
 	if err != nil {
 		return nil, fmt.Errorf("identity: %w", err)
 	}
-	dir, err := stateDirForCwd()
+	dir, err := stateDirForCwd(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +75,7 @@ func openRuntime() (*runtime, error) {
 	return &runtime{
 		Agent:         a,
 		Store:         s,
-		Ctx:           runtimeCtx(),
+		Ctx:           ctx,
 		Host:          host,
 		StateDir:      dir,
 		SessionUUID:   sid,
@@ -83,14 +83,14 @@ func openRuntime() (*runtime, error) {
 	}, nil
 }
 
-func repoTopForCwd() (string, error) {
-	return gitRevParseToplevel(runtimeCtx())
+func repoTopForCwd(ctx context.Context) (string, error) {
+	return gitRevParseToplevel(ctx)
 }
 
 func (r *runtime) Close() error { return r.Store.Close() }
 
-func stateDirForCwd() (string, error) {
-	top, err := gitRevParseToplevel(runtimeCtx())
+func stateDirForCwd(ctx context.Context) (string, error) {
+	top, err := gitRevParseToplevel(ctx)
 	if err != nil {
 		return "", fmt.Errorf("not in a git repo: %w", err)
 	}

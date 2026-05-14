@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,7 +13,7 @@ import (
 
 func init() { register("unlock", cmdUnlock) } //nolint:gochecknoinits // command registry pattern
 
-func cmdUnlock(args []string, stdout, stderr io.Writer) int {
+func cmdUnlock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("unlock", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	force := fs.Bool("force", false, "break another agent's lock (or a live lock)")
@@ -31,7 +32,7 @@ func cmdUnlock(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	rt, err := openRuntime()
+	rt, err := openRuntime(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

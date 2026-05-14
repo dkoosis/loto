@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -48,7 +49,7 @@ func renderDoctorReport(stdout io.Writer, report *store.DoctorReport) {
 	}
 }
 
-func cmdDoctor(args []string, stdout, stderr io.Writer) int {
+func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	repair := fs.Bool("repair", false, "reclaim stale locks")
@@ -58,7 +59,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
-	rt, err := openRuntime()
+	rt, err := openRuntime(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
@@ -72,7 +73,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 		return pidLive(pid)
 	}
 
-	repoTop, _ := repoTopForCwd()
+	repoTop, _ := repoTopForCwd(ctx)
 	report, err := rt.Store.DoctorAuditWith(rt.Ctx, rt.Host, live, store.SidecarCheck{
 		SidecarDir: store.DefaultSidecarDir(),
 		RepoTop:    repoTop,

@@ -93,7 +93,7 @@ func pinSlug(repoTop, slug string) {
 }
 
 func gitCommonDirFile(repoTop, name string) string {
-	out, err := gitCmd(repoTop, "rev-parse", "--git-common-dir")
+	out, err := gitCmd(context.Background(), repoTop, "rev-parse", "--git-common-dir")
 	if err != nil {
 		return ""
 	}
@@ -108,9 +108,9 @@ func gitCommonDirFile(repoTop, name string) string {
 }
 
 func slugFromRemote(repoTop string) string {
-	out, err := gitCmd(repoTop, "remote", "get-url", "origin")
+	out, err := gitCmd(context.Background(), repoTop, "remote", "get-url", "origin")
 	if err != nil {
-		remotes, err2 := gitCmd(repoTop, "remote")
+		remotes, err2 := gitCmd(context.Background(), repoTop, "remote")
 		if err2 != nil || strings.TrimSpace(remotes) == "" {
 			return ""
 		}
@@ -118,7 +118,7 @@ func slugFromRemote(repoTop string) string {
 		if first != "origin" {
 			fmt.Fprintf(os.Stderr, "loto: warning: no 'origin' remote; using %q for project slug\n", first)
 		}
-		out, err = gitCmd(repoTop, "remote", "get-url", first)
+		out, err = gitCmd(context.Background(), repoTop, "remote", "get-url", first)
 		if err != nil {
 			return ""
 		}
@@ -147,7 +147,7 @@ func normalizeURL(rawURL string) string {
 }
 
 func slugFromDir(repoTop string) string {
-	if out, err := gitCmd(repoTop, "rev-parse", "--show-toplevel"); err == nil {
+	if out, err := gitCmd(context.Background(), repoTop, "rev-parse", "--show-toplevel"); err == nil {
 		if base := filepath.Base(strings.TrimSpace(out)); base != "" && base != "." {
 			return base
 		}
@@ -158,11 +158,15 @@ func slugFromDir(repoTop string) string {
 	return unnamedSlug
 }
 
-func gitCmd(repoTop string, args ...string) (string, error) {
-	// Derive from runtimeCtx so SIGINT propagates into the git subprocess
-	// (audit loto-p7j). Boot-path callers — ProjectSlug, gitCommonDirFile —
-	// still get a 10s upper bound on top of any ambient cancellation.
-	ctx, cancel := context.WithTimeout(runtimeCtx(), 10*time.Second)
+// gitCmd runs git under a 10s timeout on top of the caller-supplied ctx so
+// SIGINT propagates into the git subprocess (audit loto-p7j) and a hung repo
+// (stale NFS, fsmonitor wedge) still completes. Boot-path callers can pass
+// context.Background() — the timeout alone is sufficient there.
+func gitCmd(ctx context.Context, repoTop string, args ...string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if repoTop != "" {

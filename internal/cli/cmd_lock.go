@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,7 +17,7 @@ func init() { //nolint:gochecknoinits // command registry pattern
 	register("lock", cmdLock)
 }
 
-func cmdLock(args []string, stdout, stderr io.Writer) int {
+func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("lock", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	ttl := fs.Duration("ttl", 30*time.Minute, "lock TTL")
@@ -37,7 +38,7 @@ func cmdLock(args []string, stdout, stderr io.Writer) int {
 	if code != 0 {
 		return code
 	}
-	rt, err := openRuntime()
+	rt, err := openRuntime(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

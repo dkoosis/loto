@@ -6,33 +6,26 @@ import (
 	"io"
 )
 
-type cmd func(args []string, stdout, stderr io.Writer) int
+type cmd func(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
-var registry = map[string]cmd{}
-
-// rootCtx holds the SIGINT-aware context provided by Run. Commands read it via
-// runtimeCtx() so signal cancellation propagates into git/exec callsites without
-// threading ctx through every cmd_*.go signature.
-var rootCtx context.Context = context.Background() //nolint:gochecknoglobals // request-scope ctx set once by Run
+var registry = map[string]cmd{} //nolint:gochecknoglobals // command registry pattern
 
 func register(name string, c cmd) { registry[name] = c }
-
-func runtimeCtx() context.Context { return rootCtx }
 
 func Run(argv []string, stdout, stderr io.Writer) int {
 	return RunContext(context.Background(), argv, stdout, stderr)
 }
 
 func RunContext(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
-	if ctx != nil {
-		rootCtx = ctx //nolint:fatcontext // single CLI invocation per process — set once at startup
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	if len(argv) == 0 {
 		printHelp(stderr)
 		return 2
 	}
 	if c, ok := registry[argv[0]]; ok {
-		return c(argv[1:], stdout, stderr)
+		return c(ctx, argv[1:], stdout, stderr)
 	}
 	fmt.Fprintf(stderr, "unknown command: %s\n", argv[0])
 	printHelp(stderr)

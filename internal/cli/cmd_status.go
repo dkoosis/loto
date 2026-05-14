@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -12,21 +13,21 @@ import (
 
 func init() { register("status", cmdStatus) } //nolint:gochecknoinits // command registry pattern
 
-func cmdStatus(args []string, stdout, stderr io.Writer) int {
+func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	mine := fs.Bool("mine", false, "show only locks owned by my uuid")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
-	rt, err := openRuntime()
+	rt, err := openRuntime(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
 	defer rt.Close()
 
-	repoTop, _ := repoTopForCwd()
+	repoTop, _ := repoTopForCwd(ctx)
 	fmt.Fprintf(stdout, "project: %s\n", ProjectSlug(repoTop))
 	fmt.Fprintf(stdout, "repo:    %s\n", repoTop)
 	fmt.Fprintf(stdout, "state:   %s\n", rt.StateDir)
