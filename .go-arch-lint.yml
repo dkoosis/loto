@@ -9,7 +9,7 @@ exclude:
 # Layering invariants for loto v2:
 #   cmd/loto → internal/cli (only)
 #   internal/cli → {domain, store, identity, render}
-#   internal/render → {domain, store}
+#   internal/render → {domain, store, identity}
 #   internal/store → internal/domain
 #   internal/identity → ∅
 #   internal/domain → ∅ (pure functions, no internal deps)
@@ -47,6 +47,7 @@ deps:
     mayDependOn:
       - domain
       - store
+      - identity
   store:
     mayDependOn:
       - domain

@@ -14,8 +14,24 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/identity"
 	"loto/internal/store"
 )
+
+// holderTag formats a UUID as "Handle(uuid-prefix)" when the agent record
+// resolves on this host; otherwise returns the bare UUID. Surfaces a
+// human-readable holder name in conflict reports (loto-b3o) without losing
+// the stable UUID key for fleet automation.
+func holderTag(uuid string) string {
+	if a, err := identity.LookupByUUID(uuid); err == nil && a.Handle != "" {
+		short := uuid
+		if len(short) > 8 {
+			short = short[:8]
+		}
+		return a.Handle + "(" + short + ")"
+	}
+	return uuid
+}
 
 // relToCwd returns p relative to cwd when p is absolute and the relative form
 // is a clean descent (doesn't escape cwd). Relative inputs are returned as-is,
@@ -65,7 +81,7 @@ func EmitConflict(w io.Writer, ce *store.MultiConflictError) {
 	for i := range blockers {
 		b := &blockers[i]
 		fmt.Fprintf(w, "⚠ target=%s blocker=%s intent=%q expires_at=%s\n",
-			relToCwd(b.Target.Canonical, cwd), b.OwnerUUID, b.Intent,
+			relToCwd(b.Target.Canonical, cwd), holderTag(b.OwnerUUID), b.Intent,
 			b.ExpiresAt.UTC().Format(time.RFC3339))
 	}
 }

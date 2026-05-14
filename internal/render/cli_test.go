@@ -51,6 +51,16 @@ func TestEmitConflict_TriageFirst(t *testing.T) {
 	}
 }
 
+func TestHolderTag_FallsBackToUUIDWhenUnknown(t *testing.T) {
+	// HOME points to an empty dir → registry lookup returns ErrNotExist →
+	// holderTag returns the bare UUID.
+	t.Setenv("HOME", t.TempDir())
+	uuid := "00000000-0000-0000-0000-000000000000"
+	if got := holderTag(uuid); got != uuid {
+		t.Errorf("expected fallback to UUID, got %q", got)
+	}
+}
+
 func TestEmitReleaseResults_MixedOutcomes(t *testing.T) {
 	var buf bytes.Buffer
 	exit := EmitReleaseResults(&buf, []store.ReleaseResult{
