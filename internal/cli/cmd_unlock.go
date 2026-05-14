@@ -83,25 +83,36 @@ func releaseOne(rt *runtime, target domain.Target, intent string, force bool, li
 		return 0
 	}
 
-	err := rt.Store.ReleaseLock(rt.Ctx, target, rt.Agent.UUID)
+	results, err := rt.Store.ReleaseLocks(rt.Ctx, []domain.Target{target}, rt.Agent.UUID)
 	if err != nil {
-		if errors.Is(err, store.ErrNoLockAtTarget) {
-			fmt.Fprintf(stderr, "✗ no lock at target=%s\n", target.Canonical)
-			return 1
-		}
-		if errors.Is(err, domain.ErrNotOwner) {
-			if err2 := rt.Store.BreakLock(rt.Ctx, target, rt.Agent.UUID, false, intent, live); err2 != nil {
-				fmt.Fprintf(stderr, "✗ not owner and lock is live — use --force to override\n")
-				return 1
-			}
-			fmt.Fprintf(stdout, "✓ reclaimed target=%s\n", target.Canonical)
-			return 0
-		}
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	fmt.Fprintf(stdout, "✓ unlocked target=%s\n", target.Canonical)
-	return 0
+	if len(results) == 0 {
+		fmt.Fprintf(stderr, "✗ no result for target=%s\n", target.Canonical)
+		return 3
+	}
+	switch r := results[0]; r.State {
+	case store.StateUnlocked:
+		fmt.Fprintf(stdout, "✓ unlocked target=%s\n", target.Canonical)
+		return 0
+	case store.StateNoLock:
+		fmt.Fprintf(stderr, "✗ no lock at target=%s\n", target.Canonical)
+		return 1
+	case store.StateNotOwner:
+		if err2 := rt.Store.BreakLock(rt.Ctx, target, rt.Agent.UUID, false, intent, live); err2 != nil {
+			fmt.Fprintf(stderr, "✗ not owner and lock is live — use --force to override\n")
+			return 1
+		}
+		fmt.Fprintf(stdout, "✓ reclaimed target=%s\n", target.Canonical)
+		return 0
+	case store.StateRestoreFailed:
+		fmt.Fprintf(stderr, "⚠ unlocked but mode-restore failed target=%s err=%v\n", target.Canonical, r.RestoreErr)
+		return 1
+	default:
+		fmt.Fprintf(stderr, "✗ unexpected release state=%d target=%s\n", r.State, target.Canonical)
+		return 3
+	}
 }
 
 func unlockAll(rt *runtime, intent string, stdout, stderr io.Writer) int {
@@ -110,12 +121,20 @@ func unlockAll(rt *runtime, intent string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	n := 0
+	mine := make([]domain.Target, 0, len(all))
 	for i := range all {
-		if all[i].OwnerUUID != rt.Agent.UUID {
-			continue
+		if all[i].OwnerUUID == rt.Agent.UUID {
+			mine = append(mine, all[i].Target)
 		}
-		if err := rt.Store.ReleaseLock(rt.Ctx, all[i].Target, rt.Agent.UUID); err == nil {
+	}
+	results, err := rt.Store.ReleaseLocks(rt.Ctx, mine, rt.Agent.UUID)
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return 3
+	}
+	n := 0
+	for _, r := range results {
+		if r.State == store.StateUnlocked {
 			n++
 		}
 	}

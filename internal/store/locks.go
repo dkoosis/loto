@@ -285,38 +285,96 @@ WHERE locks.owner_uuid = excluded.owner_uuid`,
 	return err
 }
 
-func (s *Store) ReleaseLock(ctx context.Context, t domain.Target, byAgent string) error {
+// ReleaseOutcome distinguishes the per-target result of a multi-target release.
+type ReleaseOutcome int
+
+const (
+	// StateUnlocked: row deleted and chmod restore succeeded.
+	StateUnlocked ReleaseOutcome = iota
+	// StateNoLock: no row at target — caller wasn't holding it.
+	StateNoLock
+	// StateNotOwner: row exists but owned by another agent.
+	StateNotOwner
+	// StateRestoreFailed: row deleted, chmod restore failed.
+	StateRestoreFailed
+)
+
+// ReleaseResult is the per-target outcome from ReleaseLocks.
+type ReleaseResult struct {
+	Target     domain.Target
+	State      ReleaseOutcome
+	Holder     string // populated when State == StateNotOwner
+	RestoreErr error  // populated when State == StateRestoreFailed
+}
+
+// ReleaseLocks releases each target best-effort under the project op-flock.
+// Returns one ReleaseResult per input target in input order — render owns the
+// canonical sort for stable output. The returned error is non-nil only on
+// internal/SQL failures; per-target outcomes (no-lock, not-owner,
+// restore-failed) are reported via ReleaseResult.State.
+func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, byAgent string) ([]ReleaseResult, error) {
+	if len(targets) == 0 {
+		return []ReleaseResult{}, nil
+	}
+
+	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
+	if err != nil {
+		return nil, err
+	}
+	defer flock.release()
+
+	results := make([]ReleaseResult, 0, len(targets))
+	for _, t := range targets {
+		r, err := s.releaseOne(ctx, t, byAgent)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, r)
+	}
+	return results, nil
+}
+
+func (s *Store) releaseOne(ctx context.Context, t domain.Target, byAgent string) (ReleaseResult, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return ReleaseResult{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	var owner string
 	err = tx.QueryRowContext(ctx, `SELECT owner_uuid FROM locks WHERE target_canonical = ?`, t.Canonical).Scan(&owner)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNoLockAtTarget
+		return ReleaseResult{Target: t, State: StateNoLock}, nil
 	}
 	if err != nil {
-		return err
+		return ReleaseResult{}, err
 	}
 	if owner != byAgent {
-		return domain.ErrNotOwner
+		return ReleaseResult{Target: t, State: StateNotOwner, Holder: owner}, nil
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ?`, t.Canonical, byAgent); err != nil {
-		return err
+		return ReleaseResult{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return err
+		return ReleaseResult{}, err
 	}
-	s.restoreAndAudit(ctx, t.Canonical, byAgent)
-	return nil
+
+	// Chmod restore is outside the tx — lock IS released. Surface the failure
+	// via ReleaseResult AND emit a mode_restore_failed audit event (mirrors the
+	// prior single-target ReleaseLock contract: NORTH_STAR.md — every path that
+	// removes a `locks` row also tries restore + audits failure).
+	if rerr := restoreWrite(t.Canonical); rerr != nil {
+		_ = s.appendModeRestoreFailedEvent(ctx, t.Canonical, byAgent, time.Now(), rerr)
+		return ReleaseResult{Target: t, State: StateRestoreFailed, RestoreErr: rerr}, nil
+	}
+	return ReleaseResult{Target: t, State: StateUnlocked}, nil
 }
 
 // restoreAndAudit re-adds owner-write to a released target and emits a
 // mode_restore_failed event on failure. Spec contract (NORTH_STAR.md): strip
-// on acquire, restore on release. Callers: ReleaseLock, BreakLock,
-// reclaimStaleTx, DoctorRepair — every path that removes a `locks` row.
+// on acquire, restore on release. Callers: BreakLock, reclaimStaleTx,
+// DoctorRepair — every path that removes a `locks` row. ReleaseLocks inlines
+// the equivalent so it can also report per-target StateRestoreFailed.
 func (s *Store) restoreAndAudit(ctx context.Context, path, byAgent string) {
 	if err := restoreWrite(path); err != nil {
 		_ = s.appendModeRestoreFailedEvent(ctx, path, byAgent, time.Now(), err)
