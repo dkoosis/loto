@@ -2,6 +2,8 @@ package render
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,12 @@ import (
 )
 
 const aGo = "a.go"
+
+var errPermissionDenied error = permDeniedError{}
+
+type permDeniedError struct{}
+
+func (permDeniedError) Error() string { return "permission denied" }
 
 func TestEmitLockSuccess_SortedDeterministic(t *testing.T) {
 	var buf bytes.Buffer
@@ -62,5 +70,62 @@ func TestEmitReleaseResults_MixedOutcomes(t *testing.T) {
 	}
 	if !strings.Contains(got, "holder=BlueOak") {
 		t.Errorf("missing holder: %s", got)
+	}
+}
+
+func TestRelToCwd_AbsolutePathBecomesRelative(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.Join(cwd, "sub", "x.go")
+	got := relToCwd(abs, cwd)
+	if got != filepath.Join("sub", "x.go") {
+		t.Errorf("absolute should become cwd-relative, got %q", got)
+	}
+	// Already-relative input stays put.
+	if relToCwd("sub/y.go", cwd) != "sub/y.go" {
+		t.Errorf("relative input should pass through unchanged")
+	}
+	// Path that escapes cwd stays absolute.
+	outside := filepath.Join(filepath.Dir(cwd), "elsewhere.go")
+	if relToCwd(outside, cwd) != outside {
+		t.Errorf("escaping path should stay absolute, got %q", relToCwd(outside, cwd))
+	}
+}
+
+func TestEmitInvalid_DoesNotMutateInput(t *testing.T) {
+	in := []InvalidTarget{
+		{Path: "z.go", Reason: "not-found"},
+		{Path: aGo, Reason: "symlink"},
+	}
+	original := []InvalidTarget{in[0], in[1]}
+	var buf bytes.Buffer
+	EmitInvalid(&buf, in)
+	if in[0] != original[0] || in[1] != original[1] {
+		t.Errorf("EmitInvalid must not mutate caller's slice; got %+v", in)
+	}
+	if !strings.HasPrefix(buf.String(), "✗ invalid count=2\n") {
+		t.Errorf("triage first: %s", buf.String())
+	}
+}
+
+func TestEmitChmodFailure_FailedQuotedAndCountsErrOnly(t *testing.T) {
+	var buf bytes.Buffer
+	EmitChmodFailure(&buf, &store.ChmodFailureError{
+		Failures: []store.ChmodFailure{
+			{Target: domain.Target{Canonical: aGo}, Err: errPermissionDenied},
+			{Target: domain.Target{Canonical: "b.go"}, RolledBack: true},
+		},
+	})
+	got := buf.String()
+	if !strings.HasPrefix(got, "✗ chmod-failed count=1\n") {
+		t.Errorf("count should only include rows with Err != nil, got: %s", got)
+	}
+	if !strings.Contains(got, `err="permission denied"`) {
+		t.Errorf("err should be quoted: %s", got)
+	}
+	if !strings.Contains(got, "state=restored") {
+		t.Errorf("missing restored row: %s", got)
 	}
 }

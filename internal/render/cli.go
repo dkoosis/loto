@@ -1,7 +1,8 @@
 // Package render formats CLI output per docs/design.md:
 // triage count on the first body line, deterministic sort, key=value rows,
-// no pluralized prose, no ANSI. All target paths printed cwd-relative when
-// possible — absolute paths from the store are converted at the surface.
+// no pluralized prose, no ANSI. Target paths are cwd-relative when possible —
+// the store emits canonical (repo-relative) paths, but other surfaces may
+// leak absolute paths; relToCwd handles both.
 package render
 
 import (
@@ -16,13 +17,15 @@ import (
 	"loto/internal/store"
 )
 
-// relPath returns p relative to cwd if that's a clean descent; else p unchanged.
-// Uses filepath.IsLocal (Go 1.20+) to test "doesn't escape cwd" — this avoids
-// the strings.HasPrefix(rel, "..") false-positive on paths like "..foo/bar"
-// (a legitimate descent into a dir whose name starts with two dots).
-func relPath(p string) string {
-	cwd, err := os.Getwd()
-	if err != nil {
+// relToCwd returns p relative to cwd when p is absolute and the relative form
+// is a clean descent (doesn't escape cwd). Relative inputs are returned as-is,
+// since the store enforces repo-relative canonical paths and any conversion
+// requires absolute anchors that aren't available here.
+//
+// cwd is passed in so callers hoist the os.Getwd() syscall out of loops.
+// An empty cwd disables conversion.
+func relToCwd(p, cwd string) string {
+	if cwd == "" || !filepath.IsAbs(p) {
 		return p
 	}
 	rel, err := filepath.Rel(cwd, p)
@@ -32,16 +35,28 @@ func relPath(p string) string {
 	return rel
 }
 
+// getCwd returns the current working directory or "" on error.
+// Render functions degrade gracefully (absolute paths just stay absolute).
+func getCwd() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return cwd
+}
+
 func EmitLockSuccess(w io.Writer, targets []domain.Target) {
+	cwd := getCwd()
 	sorted := append([]domain.Target(nil), targets...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Canonical < sorted[j].Canonical })
 	fmt.Fprintf(w, "✓ locked count=%d\n", len(sorted))
 	for _, t := range sorted {
-		fmt.Fprintf(w, "✓ target=%s\n", relPath(t.Canonical))
+		fmt.Fprintf(w, "✓ target=%s\n", relToCwd(t.Canonical, cwd))
 	}
 }
 
 func EmitConflict(w io.Writer, ce *store.MultiConflictError) {
+	cwd := getCwd()
 	blockers := append([]domain.LockRecord(nil), ce.Blockers...)
 	sort.Slice(blockers, func(i, j int) bool {
 		return blockers[i].Target.Canonical < blockers[j].Target.Canonical
@@ -50,29 +65,29 @@ func EmitConflict(w io.Writer, ce *store.MultiConflictError) {
 	for i := range blockers {
 		b := &blockers[i]
 		fmt.Fprintf(w, "⚠ target=%s blocker=%s intent=%q expires_at=%s\n",
-			relPath(b.Target.Canonical), b.OwnerUUID, b.Intent,
+			relToCwd(b.Target.Canonical, cwd), b.OwnerUUID, b.Intent,
 			b.ExpiresAt.UTC().Format(time.RFC3339))
 	}
 }
 
 func EmitChmodFailure(w io.Writer, cfe *store.ChmodFailureError) {
+	cwd := getCwd()
 	failed := 0
 	for _, f := range cfe.Failures {
-		if !f.RolledBack && f.Err != nil {
+		if f.Err != nil {
 			failed++
 		}
 	}
 	fmt.Fprintf(w, "✗ chmod-failed count=%d\n", failed)
 	sorted := append([]store.ChmodFailure(nil), cfe.Failures...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })
+	// store.rollbackStripped invariant: RolledBack=true ⟺ Err==nil.
+	// So Err!=nil → rolled-back=no; Err==nil → state=restored.
 	for _, f := range sorted {
-		path := relPath(f.Target.Canonical)
-		switch {
-		case f.Err != nil && !f.RolledBack:
-			fmt.Fprintf(w, "✗ target=%s err=%v rolled-back=no\n", path, f.Err)
-		case f.Err != nil && f.RolledBack:
-			fmt.Fprintf(w, "✗ target=%s err=%v rolled-back=yes\n", path, f.Err)
-		default:
+		path := relToCwd(f.Target.Canonical, cwd)
+		if f.Err != nil {
+			fmt.Fprintf(w, "✗ target=%s err=%q rolled-back=no\n", path, f.Err.Error())
+		} else {
 			fmt.Fprintf(w, "✓ target=%s state=restored\n", path)
 		}
 	}
@@ -85,10 +100,12 @@ type InvalidTarget struct {
 }
 
 func EmitInvalid(w io.Writer, items []InvalidTarget) {
-	sort.Slice(items, func(i, j int) bool { return items[i].Path < items[j].Path })
-	fmt.Fprintf(w, "✗ invalid count=%d\n", len(items))
-	for _, it := range items {
-		fmt.Fprintf(w, "✗ target=%s reason=%s\n", relPath(it.Path), it.Reason)
+	cwd := getCwd()
+	sorted := append([]InvalidTarget(nil), items...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
+	fmt.Fprintf(w, "✗ invalid count=%d\n", len(sorted))
+	for _, it := range sorted {
+		fmt.Fprintf(w, "✗ target=%s reason=%s\n", relToCwd(it.Path, cwd), it.Reason)
 	}
 }
 
@@ -97,6 +114,7 @@ func EmitInvalid(w io.Writer, items []InvalidTarget) {
 // Renders canonical-sorted regardless of input order (caller passes input order;
 // render owns deterministic output).
 func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
+	cwd := getCwd()
 	sorted := append([]store.ReleaseResult(nil), results...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })
 	successCount := 0
@@ -111,7 +129,7 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 	}
 	fmt.Fprintf(w, "✓ unlocked count=%d\n", successCount)
 	for _, r := range sorted {
-		path := relPath(r.Target.Canonical)
+		path := relToCwd(r.Target.Canonical, cwd)
 		switch r.State {
 		case store.StateUnlocked:
 			fmt.Fprintf(w, "✓ target=%s\n", path)
@@ -120,8 +138,15 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 		case store.StateNotOwner:
 			fmt.Fprintf(w, "✗ target=%s state=not-owner holder=%s\n", path, r.Holder)
 		case store.StateRestoreFailed:
-			fmt.Fprintf(w, "⚠ target=%s state=restore-failed err=%v\n", path, r.RestoreErr)
+			fmt.Fprintf(w, "⚠ target=%s state=restore-failed err=%q\n", path, errString(r.RestoreErr))
 		}
 	}
 	return exit
+}
+
+func errString(e error) string {
+	if e == nil {
+		return ""
+	}
+	return e.Error()
 }
