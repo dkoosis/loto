@@ -110,7 +110,7 @@ func emitMultiConflict(w io.Writer, mce *store.MultiConflictError) {
 	for i := range mce.Blockers {
 		b := &mce.Blockers[i]
 		fmt.Fprintf(w, "✗ blocker=%s target=%s intent=%q held_since=%s expires_at=%s host=%s pid=%d\n",
-			b.OwnerUUID, b.Target.Canonical, b.Intent,
+			b.OwnerUUID, relPath(b.Target.Canonical), b.Intent,
 			b.CreatedAt.UTC().Format(time.RFC3339), b.ExpiresAt.UTC().Format(time.RFC3339),
 			b.Host, b.PID)
 	}
@@ -120,13 +120,13 @@ func emitChmodFailure(w io.Writer, cfe *store.ChmodFailureError) {
 	fmt.Fprintf(w, "✗ chmod_failed targets=%d\n", len(cfe.Failures))
 	for i := range cfe.Failures {
 		f := &cfe.Failures[i]
-		fmt.Fprintf(w, "✗ target=%s rolled_back=%t err=%v\n", f.Target.Canonical, f.RolledBack, f.Err)
+		fmt.Fprintf(w, "✗ target=%s rolled_back=%t err=%v\n", relPath(f.Target.Canonical), f.RolledBack, f.Err)
 	}
 }
 
 func emitLockSuccess(w io.Writer, acquired []domain.LockRecord) {
 	fmt.Fprintf(w, "✓ locked count=%d\n", len(acquired))
 	for i := range acquired {
-		fmt.Fprintf(w, "✓ locked target=%s\n", acquired[i].Target.Canonical)
+		fmt.Fprintf(w, "✓ locked target=%s\n", relPath(acquired[i].Target.Canonical))
 	}
 }

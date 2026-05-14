@@ -181,3 +181,22 @@ func resolveTargets(arg string) ([]domain.Target, error) {
 	}
 	return []domain.Target{t}, nil
 }
+
+// relPath returns p relative to the current working directory when both lie
+// on the same volume and the result doesn't escape cwd with "../" prefixes
+// (which would be longer than the absolute path). Falls back to p on any
+// error. Per .claude/rules/design.md — prefer relative paths in output.
+func relPath(p string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return p
+	}
+	rel, err := filepath.Rel(cwd, p)
+	if err != nil {
+		return p
+	}
+	if strings.HasPrefix(rel, "..") {
+		return p
+	}
+	return rel
+}

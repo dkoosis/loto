@@ -73,11 +73,11 @@ func printStatusLocks(stdout io.Writer, all []domain.LockRecord) {
 		fmt.Fprintln(stdout, "✓ no locks")
 		return
 	}
-	fmt.Fprintf(stdout, "ℹ locks count=%d\n", len(all))
+	fmt.Fprintf(stdout, "✓ locks count=%d\n", len(all))
 	for i := range all {
 		l := &all[i]
-		fmt.Fprintf(stdout, "ℹ target=%s owner=%s intent=%q held_since=%s expires_at=%s host=%s pid=%d\n",
-			l.Target.Canonical, l.OwnerUUID, l.Intent,
+		fmt.Fprintf(stdout, "✓ target=%s owner=%s intent=%q held_since=%s expires_at=%s host=%s pid=%d\n",
+			relPath(l.Target.Canonical), l.OwnerUUID, l.Intent,
 			l.CreatedAt.UTC().Format(time.RFC3339), l.ExpiresAt.UTC().Format(time.RFC3339),
 			l.Host, l.PID)
 	}
@@ -99,14 +99,14 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 		return overlapping[i].Target.Canonical < overlapping[j].Target.Canonical
 	})
 	if len(overlapping) == 0 {
-		fmt.Fprintf(w, "✓ free target=%s\n", t.Canonical)
+		fmt.Fprintf(w, "✓ free target=%s\n", relPath(t.Canonical))
 		return 0
 	}
-	fmt.Fprintf(w, "ℹ overlap count=%d target=%s\n", len(overlapping), t.Canonical)
+	fmt.Fprintf(w, "✗ overlap count=%d target=%s\n", len(overlapping), relPath(t.Canonical))
 	for i := range overlapping {
 		l := &overlapping[i]
-		fmt.Fprintf(w, "ℹ holder target=%s owner=%s intent=%q expires_at=%s\n",
-			l.Target.Canonical, l.OwnerUUID, l.Intent, l.ExpiresAt.UTC().Format(time.RFC3339))
+		fmt.Fprintf(w, "✗ holder target=%s owner=%s intent=%q expires_at=%s\n",
+			relPath(l.Target.Canonical), l.OwnerUUID, l.Intent, l.ExpiresAt.UTC().Format(time.RFC3339))
 	}
 	return 0
 }

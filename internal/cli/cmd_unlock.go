@@ -107,7 +107,7 @@ func releaseOne(rt *runtime, target domain.Target, intent string, force bool, li
 		fmt.Fprintf(stdout, "✓ reclaimed target=%s\n", target.Canonical)
 		return 0
 	case store.StateRestoreFailed:
-		fmt.Fprintf(stderr, "⚠ unlocked but mode-restore failed target=%s err=%v\n", target.Canonical, r.RestoreErr)
+		fmt.Fprintf(stderr, "✗ unlocked but mode-restore failed target=%s err=%v\n", relPath(target.Canonical), r.RestoreErr)
 		return 1
 	default:
 		fmt.Fprintf(stderr, "✗ unexpected release state=%d target=%s\n", r.State, target.Canonical)

@@ -79,7 +79,7 @@ func Ensure() (*Agent, error) {
 			// locks acquired in this session can't be released (the second
 			// invocation sees a different uuid). Warn loudly (audit loto-16t).
 			staleWarnOnce.Do(func() {
-				fmt.Fprintf(os.Stderr, "⚠ loto: LOTO_AGENT_ID=%s is set but no agent record exists; using ephemeral identity (locks acquired here cannot be released by other invocations)\n", u)
+				fmt.Fprintf(os.Stderr, "✗ loto: LOTO_AGENT_ID=%s is set but no agent record exists; using ephemeral identity (locks acquired here cannot be released by other invocations)\n", u)
 			})
 		}
 		return mintAgent()
@@ -88,7 +88,7 @@ func Ensure() (*Agent, error) {
 		return ensureForSession(sid)
 	}
 	fallbackWarnOnce.Do(func() {
-		fmt.Fprintln(os.Stderr, "⚠ loto: CLAUDE_CODE_SESSION_ID unset — using mostRecentAgent fallback; identity may not be stable across concurrent sessions")
+		fmt.Fprintln(os.Stderr, "✗ loto: CLAUDE_CODE_SESSION_ID unset — using mostRecentAgent fallback; identity may not be stable across concurrent sessions")
 	})
 	if a, err := mostRecentAgent(); err == nil && a != nil {
 		return a, nil

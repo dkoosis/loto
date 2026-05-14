@@ -118,11 +118,11 @@ func printCheckConflicts(stdout io.Writer, rows []checkConflict) {
 	fmt.Fprintf(stdout, "✗ conflicts count=%d\n", len(rows))
 	for i := range rows {
 		r := &rows[i]
-		fmt.Fprintf(stdout, "⚠ path=%s blocker=%s holder_target=%s intent=%q expires_at=%s\n",
-			r.Path, r.Blocker.OwnerUUID, r.Blocker.Target.Canonical, r.Blocker.Intent,
+		fmt.Fprintf(stdout, "✗ path=%s blocker=%s holder_target=%s intent=%q expires_at=%s\n",
+			relPath(r.Path), r.Blocker.OwnerUUID, relPath(r.Blocker.Target.Canonical), r.Blocker.Intent,
 			r.Blocker.ExpiresAt.UTC().Format(time.RFC3339))
 		fmt.Fprintln(stdout, "```bash")
-		fmt.Fprintf(stdout, "loto unlock --force -t \"unblock\" %s\n", r.Blocker.Target.Canonical)
+		fmt.Fprintf(stdout, "loto unlock --force -t \"unblock\" %s\n", relPath(r.Blocker.Target.Canonical))
 		fmt.Fprintln(stdout, "```")
 	}
 }
