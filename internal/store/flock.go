@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"sync"
 	"syscall"
@@ -18,7 +19,9 @@ import (
 var ErrFlockTimeout = errors.New("loto: op-flock acquire timed out")
 
 const (
-	flockPollInterval = 50 * time.Millisecond
+	flockPollInitial  = 25 * time.Millisecond
+	flockPollMax      = 250 * time.Millisecond
+	flockJitterFactor = 0.25 // ±25% — desync wakeups when many agents share an op-flock
 	flockNoticeAfter  = 250 * time.Millisecond
 	flockDefaultLimit = 30 * time.Second
 )
@@ -51,7 +54,13 @@ func acquireOpFlock(ctx context.Context, path string, stderrW io.Writer) (*opFlo
 	var noticed sync.Once
 	deadline := time.Now().Add(limit)
 	start := time.Now()
+	backoff := flockPollInitial
 	for {
+		// Notice check sits at the top so a long-cumulative wait that ends in a
+		// successful try still emits — the user was waiting, even if the next
+		// flock call wins. Otherwise the wakeup→success path skips notice and
+		// the test (and CLI UX) gets nondeterministic feedback.
+		maybeEmitWaitNotice(stderrW, start, &noticed)
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
 			return &opFlock{f: f}, nil
@@ -60,7 +69,6 @@ func acquireOpFlock(ctx context.Context, path string, stderrW io.Writer) (*opFlo
 			f.Close()
 			return nil, fmt.Errorf("flock op-flock: %w", err)
 		}
-		maybeEmitWaitNotice(stderrW, start, &noticed)
 		if time.Now().After(deadline) {
 			f.Close()
 			return nil, ErrFlockTimeout
@@ -69,9 +77,31 @@ func acquireOpFlock(ctx context.Context, path string, stderrW io.Writer) (*opFlo
 		case <-ctx.Done():
 			f.Close()
 			return nil, ctx.Err()
-		case <-time.After(flockPollInterval):
+		case <-time.After(jitter(backoff)):
 		}
+		backoff = nextBackoff(backoff)
 	}
+}
+
+// nextBackoff doubles up to flockPollMax. Cheap to compute, no overshoot risk
+// on long waits — once at the cap we stay there.
+func nextBackoff(d time.Duration) time.Duration {
+	if d >= flockPollMax {
+		return flockPollMax
+	}
+	d *= 2
+	if d > flockPollMax {
+		d = flockPollMax
+	}
+	return d
+}
+
+// jitter applies ±flockJitterFactor randomization so concurrent agents woken
+// at the same instant (release of a shared op-flock) don't re-collide on the
+// next syscall. Uniform in [d*(1-f), d*(1+f)].
+func jitter(d time.Duration) time.Duration {
+	delta := time.Duration(float64(d) * flockJitterFactor * (rand.Float64()*2 - 1)) //nolint:gosec // jitter for poll desync, not security
+	return d + delta
 }
 
 func flockLimitFromEnv() time.Duration {

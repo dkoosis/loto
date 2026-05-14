@@ -47,6 +47,6 @@ func acquireRecoveryLock(dbPath string) (func(), error) {
 			f.Close()
 			return nil, ErrFlockTimeout
 		}
-		time.Sleep(flockPollInterval)
+		time.Sleep(jitter(flockPollInitial))
 	}
 }

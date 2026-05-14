@@ -86,6 +86,42 @@ func TestOpFlock_TimeoutAborts(t *testing.T) {
 	}
 }
 
+func TestNextBackoff_DoublesUpToCap(t *testing.T) {
+	cases := []struct {
+		in, want time.Duration
+	}{
+		{flockPollInitial, 50 * time.Millisecond},
+		{50 * time.Millisecond, 100 * time.Millisecond},
+		{200 * time.Millisecond, flockPollMax},
+		{flockPollMax, flockPollMax},
+		{flockPollMax + time.Second, flockPollMax},
+	}
+	for _, c := range cases {
+		if got := nextBackoff(c.in); got != c.want {
+			t.Errorf("nextBackoff(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestJitter_StaysWithinBand(t *testing.T) {
+	const base = 100 * time.Millisecond
+	const lo = time.Duration(float64(base) * (1 - flockJitterFactor))
+	const hi = time.Duration(float64(base) * (1 + flockJitterFactor))
+	differs := false
+	for range 64 {
+		got := jitter(base)
+		if got < lo || got > hi {
+			t.Errorf("jitter(%v) = %v, want in [%v, %v]", base, got, lo, hi)
+		}
+		if got != base {
+			differs = true
+		}
+	}
+	if !differs {
+		t.Error("jitter never deviated from base; randomness may be broken")
+	}
+}
+
 func TestOpFlock_CtxCancelAborts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lock-op.flock")
 	t.Setenv("LOTO_FLOCK_TIMEOUT", "10s")
