@@ -87,7 +87,9 @@ func breakTargets(rt *runtime, args []string, intent string, stdout, stderr io.W
 			fmt.Fprintf(stdout, "✓ broken target=%s\n", relPath(t.Canonical))
 		case errors.Is(err, store.ErrNoLockAtTarget):
 			fmt.Fprintf(stderr, "✗ no lock at target=%s\n", relPath(t.Canonical))
-			exit = 1
+			if exit < 1 {
+				exit = 1
+			}
 		default:
 			fmt.Fprintf(stderr, "✗ target=%s err=%v\n", relPath(t.Canonical), err)
 			exit = 3
