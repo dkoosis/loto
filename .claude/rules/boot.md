@@ -1,13 +1,11 @@
 # Boot
-updated: 2026-05-13
+updated: 2026-05-14
 
-→ `bd ready` and ship. main clean (59ef6e3), 0 PRs.
+→ check PR #82 status; merge if approved (`gh pr merge 82 --squash --delete-branch`), then `bd ready`.
 
 ✓ done
-- shipped #78 (ErrNoLockAtTarget vs ErrNotOwner) → closed #46
-- shipped #77 (CLI behavioral tests for dispatcher + check errors)
-- cherry-picked #75 golden help tests; closed #76 (tested deleted Resolve)
-- simplify sweep across 4 pkgs (-73 LOC dead exports)
+- shipped epic loto-253 (north-star drift cleanup, 7 children) + loto-81n (P1 session-uuid scoping) as PR #82
+- closed stale loto-ddp, loto-flg (post-cut files gone)
 
 ‡ traps
-- cwd may be `.claude/`, not repo root — env block can lie; `pwd` to confirm
+- editing files in /Users/vcto/Projects/loto/ root fails inside a worktree session — Edit tool routes to worktree path; use `git worktree list` to confirm cwd.

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -9,7 +10,7 @@ import (
 
 func init() { register("whoami", cmdWhoami) } //nolint:gochecknoinits // command registry pattern
 
-func cmdWhoami(args []string, stdout, stderr io.Writer) int {
+func cmdWhoami(_ context.Context, _ []string, stdout, stderr io.Writer) int {
 	a, err := identity.Ensure()
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ identity: %v\n", err)

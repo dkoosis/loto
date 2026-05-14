@@ -20,7 +20,7 @@ type checkConflict struct {
 	Blocker domain.LockRecord
 }
 
-func cmdCheck(args []string, stdout, stderr io.Writer) int {
+func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	staged := fs.Bool("staged", false, "read paths from git diff --cached")
@@ -28,7 +28,7 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	paths, code := loadCheckTargets(*staged, fs.Args(), stderr)
+	paths, code := loadCheckTargets(ctx, *staged, fs.Args(), stderr)
 	if code != 0 {
 		return code
 	}
@@ -37,7 +37,7 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	rt, err := openRuntime()
+	rt, err := openRuntime(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
@@ -59,11 +59,11 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	return 1
 }
 
-func loadCheckTargets(staged bool, posArgs []string, stderr io.Writer) ([]string, int) {
+func loadCheckTargets(ctx context.Context, staged bool, posArgs []string, stderr io.Writer) ([]string, int) {
 	if !staged {
 		return posArgs, 0
 	}
-	ctx, cancel := context.WithTimeout(runtimeCtx(), gitTimeout)
+	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "-z").Output()
 	if err != nil {
@@ -118,11 +118,11 @@ func printCheckConflicts(stdout io.Writer, rows []checkConflict) {
 	fmt.Fprintf(stdout, "✗ conflicts count=%d\n", len(rows))
 	for i := range rows {
 		r := &rows[i]
-		fmt.Fprintf(stdout, "⚠ path=%s blocker=%s holder_target=%s intent=%q expires_at=%s\n",
-			r.Path, r.Blocker.OwnerUUID, r.Blocker.Target.Canonical, r.Blocker.Intent,
+		fmt.Fprintf(stdout, "✗ path=%s blocker=%s holder_target=%s intent=%q expires_at=%s\n",
+			relPath(r.Path), r.Blocker.OwnerUUID, relPath(r.Blocker.Target.Canonical), r.Blocker.Intent,
 			r.Blocker.ExpiresAt.UTC().Format(time.RFC3339))
 		fmt.Fprintln(stdout, "```bash")
-		fmt.Fprintf(stdout, "loto unlock --force -t \"unblock\" %s\n", r.Blocker.Target.Canonical)
+		fmt.Fprintf(stdout, "loto unlock --force -t \"unblock\" %s\n", relPath(r.Blocker.Target.Canonical))
 		fmt.Fprintln(stdout, "```")
 	}
 }

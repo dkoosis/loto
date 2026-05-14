@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"runtime/debug"
@@ -8,7 +9,7 @@ import (
 
 func init() { register("version", cmdVersion) } //nolint:gochecknoinits // command registry pattern
 
-func cmdVersion(args []string, stdout, stderr io.Writer) int {
+func cmdVersion(_ context.Context, _ []string, stdout, _ io.Writer) int {
 	rev, when := "unknown", "unknown"
 	if info, ok := debug.ReadBuildInfo(); ok {
 		for _, s := range info.Settings {

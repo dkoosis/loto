@@ -87,5 +87,5 @@ func maybeEmitWaitNotice(stderrW io.Writer, start time.Time, noticed *sync.Once)
 	if stderrW == nil || time.Since(start) < flockNoticeAfter {
 		return
 	}
-	noticed.Do(func() { fmt.Fprintln(stderrW, "ℹ waiting flock=lock-op") })
+	noticed.Do(func() { fmt.Fprintln(stderrW, "✓ waiting flock=lock-op") })
 }

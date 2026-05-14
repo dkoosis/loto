@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -29,26 +30,26 @@ func renderDoctorReport(stdout io.Writer, report *store.DoctorReport) {
 		fmt.Fprintln(stdout, "✓ healthy")
 		return
 	}
-	fmt.Fprintf(stdout, "ℹ stale_locks=%d sidecar_findings=%d integrity=%s\n",
+	fmt.Fprintf(stdout, "✗ stale_locks=%d sidecar_findings=%d integrity=%s\n",
 		len(report.StaleLocks), len(report.SidecarFindings), report.IntegrityDetail)
 	for i := range report.StaleLocks {
 		l := &report.StaleLocks[i]
-		fmt.Fprintf(stdout, "⚠ stale target=%s owner=%s expires_at=%s host=%s pid=%d\n",
-			l.Target.Canonical, l.OwnerUUID, l.ExpiresAt.UTC().Format(time.RFC3339), l.Host, l.PID)
+		fmt.Fprintf(stdout, "✗ stale target=%s owner=%s expires_at=%s host=%s pid=%d\n",
+			relPath(l.Target.Canonical), l.OwnerUUID, l.ExpiresAt.UTC().Format(time.RFC3339), l.Host, l.PID)
 	}
 	for i := range report.SidecarFindings {
 		f := &report.SidecarFindings[i]
 		if f.Detail != "" {
-			fmt.Fprintf(stdout, "⚠ zombie_held target=%s pid=%d reason=%s cwd=%s\n",
-				f.Target, f.PID, f.Reason, f.Detail)
+			fmt.Fprintf(stdout, "✗ zombie_held target=%s pid=%d reason=%s cwd=%s\n",
+				relPath(f.Target), f.PID, f.Reason, f.Detail)
 		} else {
-			fmt.Fprintf(stdout, "⚠ zombie_held target=%s pid=%d reason=%s\n",
-				f.Target, f.PID, f.Reason)
+			fmt.Fprintf(stdout, "✗ zombie_held target=%s pid=%d reason=%s\n",
+				relPath(f.Target), f.PID, f.Reason)
 		}
 	}
 }
 
-func cmdDoctor(args []string, stdout, stderr io.Writer) int {
+func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	repair := fs.Bool("repair", false, "reclaim stale locks")
@@ -58,7 +59,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
-	rt, err := openRuntime()
+	rt, err := openRuntime(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
@@ -72,7 +73,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 		return pidLive(pid)
 	}
 
-	repoTop, _ := repoTopForCwd()
+	repoTop, _ := repoTopForCwd(ctx)
 	report, err := rt.Store.DoctorAuditWith(rt.Ctx, rt.Host, live, store.SidecarCheck{
 		SidecarDir: store.DefaultSidecarDir(),
 		RepoTop:    repoTop,
@@ -94,7 +95,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if *dryRun {
-		fmt.Fprintf(stdout, "ℹ dry-run would_reclaim=%d\n", len(report.StaleLocks))
+		fmt.Fprintf(stdout, "✓ dry-run would_reclaim=%d\n", len(report.StaleLocks))
 		return 0
 	}
 	if *repair {
@@ -133,7 +134,7 @@ func scanAndReportOrphans(rt *runtime, repoTop string, stdout io.Writer) []strin
 		if err != nil {
 			rel = p
 		}
-		fmt.Fprintf(stdout, "⚠ orphan-mode target=%s\n", rel)
+		fmt.Fprintf(stdout, "✗ orphan-mode target=%s\n", rel)
 	}
 	return orphans
 }

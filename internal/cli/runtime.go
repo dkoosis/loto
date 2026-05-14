@@ -31,19 +31,35 @@ func gitRevParseToplevel(parent context.Context) (string, error) {
 }
 
 type runtime struct {
-	Agent    *identity.Agent
-	Store    *store.Store
-	Ctx      context.Context //nolint:containedctx // request-scope handle for the CLI invocation; threading it through every cmd_*.go signature would be uniformly noise
-	Host     string
-	StateDir string
+	Agent         *identity.Agent
+	Store         *store.Store
+	Ctx           context.Context //nolint:containedctx // handle on the per-invocation ctx; threading it through every store/identity call from cmd_*.go would be uniform noise without changing semantics
+	Host          string
+	StateDir      string
+	SessionUUID   string // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID
+	SessionPinned bool   // true iff LOTO_SESSION_ID was in env; gates session-scoped semantics
 }
 
-func openRuntime() (*runtime, error) {
+// sessionUUID resolves the per-session id. The SessionStart hook exports
+// LOTO_SESSION_ID so every shell-out from one Claude session shares an id
+// distinct from Agent.UUID; release --all then scopes to that session,
+// satisfying NORTH_STAR invariant 5 (per-session identity). Without the env
+// var (single-shot CLI use), mint a fresh id but signal `pinned=false` so
+// callers know not to use it as a release filter — keeps --all working as
+// an agent-scoped fallback for direct invocation.
+func sessionUUID() (id string, pinned bool) {
+	if v := os.Getenv("LOTO_SESSION_ID"); v != "" {
+		return v, true
+	}
+	return identity.NewUUID(), false
+}
+
+func openRuntime(ctx context.Context) (*runtime, error) {
 	a, err := identity.Ensure()
 	if err != nil {
 		return nil, fmt.Errorf("identity: %w", err)
 	}
-	dir, err := stateDirForCwd()
+	dir, err := stateDirForCwd(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -55,17 +71,26 @@ func openRuntime() (*runtime, error) {
 		return nil, fmt.Errorf("store.Open: %w", err)
 	}
 	host, _ := os.Hostname()
-	return &runtime{Agent: a, Store: s, Ctx: runtimeCtx(), Host: host, StateDir: dir}, nil
+	sid, pinned := sessionUUID()
+	return &runtime{
+		Agent:         a,
+		Store:         s,
+		Ctx:           ctx,
+		Host:          host,
+		StateDir:      dir,
+		SessionUUID:   sid,
+		SessionPinned: pinned,
+	}, nil
 }
 
-func repoTopForCwd() (string, error) {
-	return gitRevParseToplevel(runtimeCtx())
+func repoTopForCwd(ctx context.Context) (string, error) {
+	return gitRevParseToplevel(ctx)
 }
 
 func (r *runtime) Close() error { return r.Store.Close() }
 
-func stateDirForCwd() (string, error) {
-	top, err := gitRevParseToplevel(runtimeCtx())
+func stateDirForCwd(ctx context.Context) (string, error) {
+	top, err := gitRevParseToplevel(ctx)
 	if err != nil {
 		return "", fmt.Errorf("not in a git repo: %w", err)
 	}
