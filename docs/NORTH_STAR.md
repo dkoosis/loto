@@ -5,7 +5,7 @@
 # loto north star
 
 *Author: dk. Audience: future Claudes (and dk).*
-*Updated: 2026-05-11 — post-cut model (loto-vra): files-only, no mailbox, no glob.*
+*Updated: 2026-05-14 — drift cleanup: install-hook/check-paths struck (cut in v2 commit 3d5f3de); KV output replaces JSON-first claim.*
 
 ## what this is for
 
@@ -104,9 +104,10 @@ Multi-file lock is all-or-nothing: any blocker aborts the set, no chmod
 side effects, no rows inserted. Unlock is per-target best-effort
 (missing and not-owner are distinct outcomes — gh#46).
 
-Every command emits JSON when stdout is not a tty (or when `--json`).
-Exit codes are stable: `0` success, `1` advisory conflict, `2` usage,
-`3` IO/system. Holder identity always rides on the error.
+Output is Claude-optimized KV: deterministic order, one record per line,
+fixed glyphs per `.claude/rules/design.md`. Exit codes are stable:
+`0` success, `1` advisory conflict, `2` usage, `3` IO/system. Holder
+identity always rides on the error.
 
 ## what makes this Claude-friendly
 
@@ -118,30 +119,15 @@ locks taken by `bash -c "loto lock ..."` and locks taken by a subagent
 worktree are owned by the same identity. This is the keystone — without
 it, "release my locks on session end" is meaningless.
 
-**Useful holder reports.** When a Claude is blocked, it should not see
-`flock: EWOULDBLOCK`. It should see:
-
-```json
-{
-  "blocked_by": "GreenCastle",
-  "intent": "refactor store package — see beads loto-7wp.4",
-  "kind": "file",
-  "target": "/Users/dk/Projects/foo/internal/store/store.go",
-  "held_since": "2026-04-28T14:32:11Z",
-  "expires_at": "2026-04-28T14:42:11Z",
-  "branch": "store-refactor",
-  "host": "dk-mac",
-  "pid": 84231
-}
-```
-
-The blocked Claude can then decide: wait or work elsewhere. Both are one
-command away.
+**Useful holder reports.** When a Claude is blocked, it sees a KV row
+with everything it needs to decide: handle, intent, target, held_since,
+expires_at, branch, host, pid. The blocked Claude can then decide: wait
+or work elsewhere. Both are one command away.
 
 **Soft-TTL on rows.** A `locks` row carries `expires_at`. Past expiry
 it's *soft-stale*: still present, flagged in status output, eligible for
 GC on next acquirer's pass. Lets a Claude declare "I'll touch this within
-10min" without holding a process open the whole time. For the file-flock
+30min" without holding a process open the whole time. For the file-flock
 tier (deferred), flock will remain authoritative for *currently* held;
 TTL just bounds *advisory* signals on the record tier.
 
@@ -152,12 +138,11 @@ design, no `original_mode` column, no migration. Defeats naive writers
 and editors that honor perms; trivially bypassable by `chmod +w`. That's
 fine: trust model = trust the operator.
 
-**Pre-commit hook as the safety net.** `loto install-hook` writes a git
-pre-commit that runs `loto check-paths --staged` and refuses the commit
-if any staged path is held by *another* agent's exclusive lock. This is
-the moment that matters: not the edit, the commit. `--no-verify` remains
-the user's escape hatch — bypass is unobservable to loto by definition
-(the hook didn't run), and that's fine. Trust model = trust the operator.
+**Pre-commit hook (deferred).** A pre-commit `loto check --staged` that
+refuses commits over another agent's held paths was prototyped in
+loto-ux3 and cut in the v2 entrypoint switch (commit 3d5f3de). The
+record-tier + chmod enforcement already catches most edits before they
+land; revisit if mistakes cluster at commit time.
 
 **`loto doctor`.** One command for diagnostics: dead-PID holders,
 orphaned `.lock` files, layout drift, soft-stale-but-still-held
@@ -171,9 +156,9 @@ absorb them.
 ```bash
 # next + loto, the unix way
 path=$(next claim --treatment=lint)
-loto lock "$path" --json && {
+loto lock "$path" -t "lint sweep" && {
   # ... do the lint work ...
-  loto unlock "$path"
+  loto unlock "$path" -t "lint done"
   next done --path "$path" --result "$(git rev-parse HEAD)"
 }
 ```
@@ -190,8 +175,8 @@ the same project. Each has a worktree under `~/Projects/foo-wt-<handle>/`.
 project-state ($XDG_STATE_HOME/loto/projects/foo/loto.db):
 
   locks (held):
-    internal/store/store.go    ← BlueOak     (held 4m, expires 6m, mode 0444)
-    cmd/foo/main.go            ← RedRiver    (held 30s, expires 9m30s, mode 0444)
+    internal/store/store.go    ← BlueOak     (held 4m, expires 26m, mode 0444)
+    cmd/foo/main.go            ← RedRiver    (held 30s, expires 29m30s, mode 0444)
 
   agents (active):
     BlueOak       last_seen: 12s ago    branch: store-refactor
@@ -204,7 +189,7 @@ project-state ($XDG_STATE_HOME/loto/projects/foo/loto.db):
 When AmberFox reads `internal/store/store.go`, no lock needed — the
 file is `0444`, still readable. loto coordinates writes only. When
 AmberFox tries to *edit* it: `loto lock internal/store/store.go` returns
-blocker JSON showing BlueOak holds it for ~6 more minutes with a clear
+a blocker row showing BlueOak holds it for ~26 more minutes with a clear
 intent. AmberFox's Claude sees that and picks different work.
 
 When dk's Claude session ends (or crashes), the SessionEnd hook runs
@@ -225,8 +210,9 @@ missed; `loto doctor --repair` mops up the rest.
    governs (future) foreground holds.
 2. **Single host.** Canonical paths on this machine. ✗ NFS, ✗ remote.
 3. **No daemon.** Every operation is a fresh process. State lives on disk.
-4. **JSON-first I/O.** Human formatting is opt-in. Exit codes are stable
-   (`0` success, `1` advisory conflict, `2` usage, `3` IO/system).
+4. **Claude-optimized KV output.** Deterministic order, fixed glyphs per
+   `.claude/rules/design.md`. Exit codes stable (`0` success, `1` advisory
+   conflict, `2` usage, `3` IO/system).
 5. **Identity is per-session, not per-process.** Many shells, one handle.
 6. **Reads are free.** loto coordinates writes. ✗ never gate reads.
    chmod enforcement strips write only — files remain readable at `0444`.
@@ -272,11 +258,10 @@ in the wrong layer.
 We reach the north star when a fresh Claude, dropped into any worktree
 of a project where 4 other Claudes are working, can:
 
-1. Run `loto status --json` and understand who's on what in <1s.
+1. Run `loto status` and understand who's on what in <1s.
 2. Acquire one or more file locks atomically, and edit safely.
 3. Receive a useful blocker report when something is held.
 4. Crash, restart, and resume without leaving stale state — including filesystem-mode state.
-5. Commit through a hook that catches the one mistake humans make.
 
 That's the bar. Everything in the backlog (loto-7wp.*) is a step toward
 it. Anything else is scope creep.
