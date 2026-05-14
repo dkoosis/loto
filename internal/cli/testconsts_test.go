@@ -9,6 +9,8 @@ const (
 	tcCmdStatus    = "status"
 	tcCmdCheck     = "check"
 	tcCmdDoctor    = "doctor"
+	tcTargetX      = "x.go"
+	tcFlagRepair   = "--repair"
 	tcFlagMine     = "--mine"
 	tcFlagIntent   = "--intent"
 	tcSlugDKLoto   = "dkoosis-loto"
