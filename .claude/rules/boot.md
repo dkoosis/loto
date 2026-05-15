@@ -1,11 +1,11 @@
 # Boot
 updated: 2026-05-14
 
-→ `bd ready` — qqh epic shipped, pick next.
+→ `bd ready` — design-judgment beads only (dtc, 3ge, 1w5, 2e1); ask dk before claiming.
 
 ✓ done
-- shipped epic loto-qqh (lockout primitive, gh#57): chmod strip-write enforcement, multi-target atomic AcquireLocks, op-flock serialization, doctor orphan-mode scan + --restore-orphan-mode, render package
-- closed gh#46 (folded into qqh — ReleaseLocks distinguishes no-lock vs not-owner)
+- merged PR #84 (qqh.6 + gemini exit-code fix)
+- closed stale loto-6um; filed loto-2e1 (bd↔loto bridge — design)
 
 ‡ traps
-- editing files in /Users/vcto/Projects/loto/ root fails inside a worktree session — Edit tool routes to worktree path; use `git worktree list` to confirm cwd.
+- `bd ready` has no peer-awareness; two sessions raced qqh.7 today → loto-2e1.
