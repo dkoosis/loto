@@ -58,8 +58,11 @@ check: vet lint arch test ## Full repo: vet + lint + arch + test + build
 	@go build -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/loto
 	@echo "=== check pass ==="
 
-audit: check race vuln dupl nilcheck ## Exhaustive: +race +vuln +dupl +nilcheck
+audit: check race vuln dupl nilcheck demo ## Exhaustive: +race +vuln +dupl +nilcheck +demo
 	@echo "=== audit pass ==="
+
+demo: ## Run CLI primitive demos with narrated -v transcript
+	@go test -v -run Demo -count=1 ./internal/cli
 
 deploy: install ## Build, install, and verify
 	@echo "=== deployed ($$(loto --version 2>/dev/null || echo unknown)) ==="
