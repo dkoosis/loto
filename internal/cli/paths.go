@@ -185,6 +185,42 @@ func resolveTargets(arg string) ([]domain.Target, error) {
 	return []domain.Target{t}, nil
 }
 
+// normalizeRepoPath translates an absolute path that lies inside repoTop to a
+// repo-relative POSIX path so domain.Canonicalize (which rejects absolute
+// paths) accepts it. Inputs that are already relative, lie outside repoTop, or
+// fail filepath ops are returned unchanged so the caller still sees the
+// original token in error output.
+//
+// Fix for loto-d3l: `loto check /abs/path` used to silently report "no
+// conflicts" for files locked under the equivalent relative form, because the
+// CLI swallowed the ErrRepoEscape from Canonicalize.
+func normalizeRepoPath(p, repoTop string) string {
+	if p == "" || repoTop == "" || !filepath.IsAbs(p) {
+		return p
+	}
+	absTop, err := filepath.Abs(repoTop)
+	if err != nil {
+		return p
+	}
+	// EvalSymlinks both sides so /var/... vs /private/var/... (macOS tmp) and
+	// other symlinked checkout roots resolve to the same prefix.
+	if r, err := filepath.EvalSymlinks(absTop); err == nil {
+		absTop = r
+	}
+	absP := filepath.Clean(p)
+	if r, err := filepath.EvalSymlinks(absP); err == nil {
+		absP = r
+	}
+	rel, err := filepath.Rel(absTop, absP)
+	if err != nil {
+		return p
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return p
+	}
+	return filepath.ToSlash(rel)
+}
+
 // relPath returns p relative to the current working directory when both lie
 // on the same volume and the result doesn't escape cwd with "../" prefixes
 // (which would be longer than the absolute path). Falls back to p on any

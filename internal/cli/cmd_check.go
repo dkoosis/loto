@@ -50,13 +50,31 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return 3
 	}
 
-	rows := computeCheckConflicts(paths, all, rt.Agent.UUID)
+	repoTop, _ := repoTopForCwd(ctx)
+	rows, invalid := computeCheckConflicts(paths, all, rt.Agent.UUID, repoTop)
+	if len(invalid) > 0 {
+		printCheckInvalid(stdout, invalid)
+		return 2
+	}
 	if len(rows) == 0 {
 		fmt.Fprintln(stdout, "✓ no conflicts")
 		return 0
 	}
 	printCheckConflicts(stdout, rows)
 	return 1
+}
+
+type checkInvalid struct {
+	Path   string
+	Reason string
+}
+
+func printCheckInvalid(stdout io.Writer, rows []checkInvalid) {
+	fmt.Fprintf(stdout, "✗ invalid count=%d\n", len(rows))
+	for i := range rows {
+		r := &rows[i]
+		fmt.Fprintf(stdout, "✗ path=%s reason=%s\n", r.Path, r.Reason)
+	}
 }
 
 func loadCheckTargets(ctx context.Context, staged bool, posArgs []string, stderr io.Writer) ([]string, int) {
@@ -79,11 +97,18 @@ func loadCheckTargets(ctx context.Context, staged bool, posArgs []string, stderr
 	return paths, 0
 }
 
-func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID string) []checkConflict {
+func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repoTop string) ([]checkConflict, []checkInvalid) {
 	var rows []checkConflict
+	var invalid []checkInvalid
 	seen := map[string]bool{}
-	for _, p := range paths {
-		rows = appendCheckConflicts(rows, seen, p, all, myUUID)
+	for _, raw := range paths {
+		p := normalizeRepoPath(raw, repoTop)
+		t, err := domain.Canonicalize(p)
+		if err != nil {
+			invalid = append(invalid, checkInvalid{Path: raw, Reason: classifyCanonicalizeErr(err)})
+			continue
+		}
+		rows = appendCheckConflictsForTarget(rows, seen, p, t, all, myUUID)
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Path != rows[j].Path {
@@ -91,14 +116,11 @@ func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID strin
 		}
 		return rows[i].Blocker.Target.Canonical < rows[j].Blocker.Target.Canonical
 	})
-	return rows
+	sort.Slice(invalid, func(i, j int) bool { return invalid[i].Path < invalid[j].Path })
+	return rows, invalid
 }
 
-func appendCheckConflicts(rows []checkConflict, seen map[string]bool, p string, all []domain.LockRecord, myUUID string) []checkConflict {
-	t, err := domain.Canonicalize(p)
-	if err != nil {
-		return rows
-	}
+func appendCheckConflictsForTarget(rows []checkConflict, seen map[string]bool, p string, t domain.Target, all []domain.LockRecord, myUUID string) []checkConflict {
 	for i := range all {
 		l := &all[i]
 		if l.OwnerUUID == myUUID || !domain.Overlap(l.Target, t) {
