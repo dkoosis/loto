@@ -89,6 +89,13 @@ func repoTopForCwd(ctx context.Context) (string, error) {
 
 func (r *runtime) Close() error { return r.Store.Close() }
 
+// Locks returns the lock-ops view of the underlying store.
+// Callers should prefer this over rt.Store when they only need lock ops.
+func (r *runtime) Locks() store.LockOps { return r.Store }
+
+// Health returns the audit/repair view of the underlying store.
+func (r *runtime) Health() store.Health { return r.Store }
+
 func stateDirForCwd(ctx context.Context) (string, error) {
 	top, err := gitRevParseToplevel(ctx)
 	if err != nil {

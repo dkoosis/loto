@@ -57,7 +57,7 @@ func unlockTargets(rt *runtime, args []string, stdout, stderr io.Writer) int {
 	if code != 0 {
 		return code
 	}
-	results, err := rt.Store.ReleaseLocks(rt.Ctx, targets, rt.Agent.UUID)
+	results, err := rt.Locks().ReleaseLocks(rt.Ctx, targets, rt.Agent.UUID)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
@@ -80,7 +80,7 @@ func breakTargets(rt *runtime, args []string, intent string, stdout, stderr io.W
 		}
 		return pidLive(pid)
 	}
-	results, err := rt.Store.BreakLocks(rt.Ctx, targets, rt.Agent.UUID, true, intent, live)
+	results, err := rt.Locks().BreakLocks(rt.Ctx, targets, rt.Agent.UUID, true, intent, live)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
@@ -117,7 +117,7 @@ func resolveUnlockArgs(args []string, stderr io.Writer) ([]domain.Target, int) {
 }
 
 func unlockAll(rt *runtime, intent string, stdout, stderr io.Writer) int {
-	all, err := rt.Store.ListLocks(rt.Ctx)
+	all, err := rt.Locks().ListLocks(rt.Ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
@@ -137,7 +137,7 @@ func unlockAll(rt *runtime, intent string, stdout, stderr io.Writer) int {
 		}
 		mine = append(mine, all[i].Target)
 	}
-	results, err := rt.Store.ReleaseLocks(rt.Ctx, mine, rt.Agent.UUID)
+	results, err := rt.Locks().ReleaseLocks(rt.Ctx, mine, rt.Agent.UUID)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

@@ -44,7 +44,7 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 	defer rt.Close()
 
-	all, err := rt.Store.ListLocks(rt.Ctx)
+	all, err := rt.Locks().ListLocks(rt.Ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
