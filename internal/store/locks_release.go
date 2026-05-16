@@ -25,11 +25,11 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, byAge
 	}
 	defer flock.release()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer cleanup()
 
 	owners, err := loadOwnersTx(ctx, tx, targets)
 	if err != nil {

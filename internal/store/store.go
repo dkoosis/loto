@@ -153,6 +153,63 @@ func isUserVersionMismatch(err error) bool { return errors.Is(err, errUserVersio
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// beginTx starts an immediate-mode tx on a dedicated pooled conn whose
+// busy_timeout PRAGMA is scaled to the caller's ctx deadline. Returned
+// cleanup MUST be deferred — it rolls back if Commit wasn't called and
+// always releases the conn back to the pool. Rollback after Commit is a
+// safe no-op (sql.ErrTxDone), so callers may unconditionally `defer cleanup()`.
+//
+// Rationale (gh#55): the DSN-level busy_timeout=5000 ignored caller ctx:
+// short deadlines couldn't pre-empt SQLite's internal poll loop, and
+// longer deadlines were silently truncated to 5s. Per-tx scaling restores
+// the contract that ctx is authoritative.
+func (s *Store) beginTx(ctx context.Context) (*sql.Tx, func(), error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	timeoutMs := txBusyTimeoutMs(ctx, time.Now())
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", timeoutMs)); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	cleanup := func() {
+		_ = tx.Rollback()
+		_ = conn.Close()
+	}
+	return tx, cleanup, nil
+}
+
+// txBusyTimeoutMs maps ctx.Deadline → SQLite busy_timeout in ms.
+// No deadline → fall back to DSN default (5000ms).
+// Deadline already past → 1ms (caller will see ctx.Err() at next step).
+// Otherwise → milliseconds remaining, clamped to [1, txBusyTimeoutCapMs].
+func txBusyTimeoutMs(ctx context.Context, now time.Time) int {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return txBusyTimeoutDefaultMs
+	}
+	rem := dl.Sub(now).Milliseconds()
+	switch {
+	case rem < 1:
+		return 1
+	case rem > txBusyTimeoutCapMs:
+		return txBusyTimeoutCapMs
+	default:
+		return int(rem)
+	}
+}
+
+const (
+	txBusyTimeoutDefaultMs = 5000
+	txBusyTimeoutCapMs     = 60000
+)
+
 // opFlockPath returns <db-dir>/lock-op.flock — the project-wide op-flock.
 func (s *Store) opFlockPath() string {
 	return filepath.Join(filepath.Dir(s.dbPath), "lock-op.flock")

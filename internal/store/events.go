@@ -21,11 +21,11 @@ const (
 
 // RotateEvents trims the events table per retention policy.
 func (s *Store) RotateEvents(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer cleanup()
 	if err := rotateEventsTx(ctx, tx, time.Now()); err != nil {
 		return err
 	}
@@ -61,11 +61,11 @@ func (s *Store) AppendEvents(ctx context.Context, evs []domain.Event) error {
 	if len(evs) == 0 {
 		return nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer cleanup()
 	if err := appendEventsTx(ctx, tx, evs); err != nil {
 		return err
 	}

@@ -38,11 +38,11 @@ func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, byAgent
 		return []BreakResult{}, nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer cleanup()
 
 	existing, err := loadLocksByTargetTx(ctx, tx, targets)
 	if err != nil {

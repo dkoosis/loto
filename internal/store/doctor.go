@@ -90,11 +90,11 @@ func checkSidecar(l domain.LockRecord, sc SidecarCheck) (SidecarFinding, bool) {
 }
 
 func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live domain.PidLiveProbe) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer cleanup()
 
 	all, err := loadLocksTx(ctx, tx)
 	if err != nil {

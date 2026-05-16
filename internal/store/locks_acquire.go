@@ -33,11 +33,11 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 		return nil, err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer cleanup()
 
 	all, err := loadLocksTx(ctx, tx)
 	if err != nil {
