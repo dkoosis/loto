@@ -68,9 +68,10 @@ func solo(t *testing.T) actor {
 	return actor{handle: a.Handle, agent: a}
 }
 
-// do runs a loto command as the given actor and renders it as a single
-// prompt line plus one collapsed result line. Returns exit + raw stdout.
-func (a actor) do(t *testing.T, args ...string) (int, string) {
+// tryDo runs a loto command as the given actor and renders it as a single
+// prompt line plus one collapsed result line. Returns exit + raw stdout
+// without asserting; use for demos that expect a non-zero exit.
+func (a actor) tryDo(t *testing.T, args ...string) (int, string) {
 	t.Helper()
 	t.Setenv("LOTO_AGENT_ID", a.agent.UUID)
 
@@ -81,13 +82,9 @@ func (a actor) do(t *testing.T, args ...string) (int, string) {
 		body = strings.TrimRight(errBuf.String(), "\n")
 	}
 
-	// Prompt line: aligned handle column, ❯ prompt, the command.
 	cmd := "loto " + strings.Join(args, " ")
 	t.Logf("    %-10s ❯ %s", a.handle, cmd)
 
-	// Result line(s): collapse to the first meaningful line; show more if
-	// the demo benefits. We render every non-empty line indented under the
-	// prompt so multi-line output (status tables) still reads cleanly.
 	for ln := range strings.SplitSeq(body, "\n") {
 		if strings.TrimSpace(ln) == "" {
 			continue
@@ -96,6 +93,17 @@ func (a actor) do(t *testing.T, args ...string) (int, string) {
 	}
 	t.Logf("    %-10s   (exit %d)", "", code)
 	return code, out.String()
+}
+
+// do is tryDo plus an assertion that the command exited zero. Surprise
+// non-zero exits fail the demo loudly instead of being swallowed.
+func (a actor) do(t *testing.T, args ...string) (int, string) {
+	t.Helper()
+	code, out := a.tryDo(t, args...)
+	if code != 0 {
+		t.Fatalf("loto %s: expected exit 0, got %d", strings.Join(args, " "), code)
+	}
+	return code, out
 }
 
 func mustContain(t *testing.T, got, want string) {
@@ -151,7 +159,7 @@ func TestDemo_03_CheckBeforeEdit(t *testing.T) {
 	beat(t)
 	say(t, bob.handle+" wanders in, doesn't know yet, and runs check first.")
 	beat(t)
-	code, out := bob.do(t, "check", "b.go")
+	code, out := bob.tryDo(t, "check", "b.go")
 	if code != 1 {
 		t.Fatalf("expected exit 1, got %d", code)
 	}
@@ -172,7 +180,7 @@ func TestDemo_04_TwoAgentsRacing(t *testing.T) {
 	beat(t)
 	say(t, bob.handle+" tries the same file moments later.")
 	beat(t)
-	code, out := bob.do(t, "lock", "internal/store/store.go", "--intent", "add test")
+	code, out := bob.tryDo(t, "lock", "internal/store/store.go", "--intent", "add test")
 	if code != 1 {
 		t.Fatalf("expected blocked, got exit %d", code)
 	}
