@@ -80,7 +80,7 @@ func breakTargets(rt *runtime, args []string, intent string, stdout, stderr io.W
 		}
 		return pidLive(pid)
 	}
-	results, err := rt.Locks().BreakLocks(rt.Ctx, targets, rt.Agent.UUID, true, intent, live)
+	results, err := rt.Locks().BreakLocks(rt.Ctx, targets, rt.Agent.UUID, store.BreakForce, intent, live)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

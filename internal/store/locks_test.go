@@ -50,10 +50,10 @@ func TestBreakLockStaleOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.BreakLock(ctx, l.Target, tcBob, false, tcTest, live); err == nil {
+	if err := s.BreakLock(ctx, l.Target, tcBob, BreakStale, tcTest, live); err == nil {
 		t.Fatal("live break without force must fail")
 	}
-	if err := s.BreakLock(ctx, l.Target, tcBob, true, "deadline", live); err != nil {
+	if err := s.BreakLock(ctx, l.Target, tcBob, BreakForce, "deadline", live); err != nil {
 		t.Fatalf("force break: %v", err)
 	}
 	got, _ := s.LockAt(ctx, l.Target)
@@ -120,7 +120,7 @@ func TestBreakLocks_RestoreErrSurfaced(t *testing.T) {
 		return orig(path, mode)
 	}
 
-	results, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, true, "restore-fail", live)
+	results, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "restore-fail", live)
 	if err != nil {
 		t.Fatalf("BreakLocks: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestBreakLocks_BatchedMultiTarget(t *testing.T) {
 	}
 
 	targets := []domain.Target{la.Target, lb.Target, lc.Target}
-	results, err := s.BreakLocks(ctx, targets, tcBob, true, "batch break", live)
+	results, err := s.BreakLocks(ctx, targets, tcBob, BreakForce, "batch break", live)
 	if err != nil {
 		t.Fatalf("BreakLocks: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestBreakLocks_MixedNoLockAndOwned(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.BreakLocks(ctx, []domain.Target{la.Target, missing}, tcBob, true, "mixed", live)
+	results, err := s.BreakLocks(ctx, []domain.Target{la.Target, missing}, tcBob, BreakForce, "mixed", live)
 	if err != nil {
 		t.Fatalf("BreakLocks: %v", err)
 	}
@@ -563,7 +563,7 @@ func TestBreakLock_RestoresWriteMode(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.BreakLock(ctx, l.Target, tcBob, false, "stale", live); err != nil {
+	if err := s.BreakLock(ctx, l.Target, tcBob, BreakStale, "stale", live); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := os.Stat(l.Target.Canonical)
