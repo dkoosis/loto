@@ -60,18 +60,23 @@ else's `loto lock`. Filter before claiming.
 ### Recipe
 
 ```bash
-bd ready --json | jq -r '.[] | "\(.id)\t\(.metadata.blast_paths // "")"' |
-while IFS=$'\t' read -r id paths; do
-  if [ -z "$paths" ]; then
-    echo "⚠ unverified $id (no blast_paths metadata)"
-    continue
-  fi
-  if loto check $(echo "$paths" | tr , ' ') >/dev/null 2>&1; then
-    echo "✓ claimable $id"
-  else
-    echo "✗ blocked $id"
-  fi
-done
+bd ready --json | jq -r '.[] | "\(.id)\t\(.metadata.blast_paths // "")"' | {
+  count=0
+  while IFS=$'\t' read -r id paths; do
+    count=$((count + 1))
+    if [ -z "$paths" ]; then
+      echo "⚠ unverified $id (no blast_paths metadata)"
+      continue
+    fi
+    IFS=',' read -ra path_array <<< "$paths"
+    if loto check "${path_array[@]}" >/dev/null 2>&1; then
+      echo "✓ claimable $id"
+    else
+      echo "✗ blocked $id"
+    fi
+  done
+  [ "$count" -eq 0 ] && echo "∅ bd ready empty — no candidates to triage"
+}
 ```
 
 - `loto check` exit 0 → no peer holds any of the paths → safe to claim.
