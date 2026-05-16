@@ -122,7 +122,7 @@ func classifyCanonicalizeErr(err error) string {
 func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.Duration, live domain.PidLiveProbe, stdout, stderr io.Writer) int {
 	now := time.Now()
 	recs := buildLockRecords(targets, rt, intent, now, ttl)
-	acquired, err := rt.Store.AcquireLocks(rt.Ctx, recs, live)
+	acquired, err := rt.Locks().AcquireLocks(rt.Ctx, recs, live)
 	if err != nil {
 		var mce *store.MultiConflictError
 		if errors.As(err, &mce) {
