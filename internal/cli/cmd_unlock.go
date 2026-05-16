@@ -41,7 +41,7 @@ func cmdUnlock(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	defer rt.Close()
 
 	if *all {
-		return unlockAll(rt, *intent, stdout, stderr)
+		return unlockAll(rt, stdout, stderr)
 	}
 	if *force {
 		return breakTargets(rt, fs.Args(), *intent, stdout, stderr)
@@ -116,7 +116,7 @@ func resolveUnlockArgs(args []string, stderr io.Writer) ([]domain.Target, int) {
 	return out, 0
 }
 
-func unlockAll(rt *runtime, intent string, stdout, stderr io.Writer) int {
+func unlockAll(rt *runtime, stdout, stderr io.Writer) int {
 	all, err := rt.Locks().ListLocks(rt.Ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
@@ -142,12 +142,5 @@ func unlockAll(rt *runtime, intent string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	n := 0
-	for _, r := range results {
-		if r.State == store.StateUnlocked {
-			n++
-		}
-	}
-	fmt.Fprintf(stdout, "✓ released count=%d intent=%q\n", n, intent)
-	return 0
+	return render.EmitReleaseResults(stdout, results)
 }
