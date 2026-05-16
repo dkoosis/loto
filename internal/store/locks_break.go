@@ -8,9 +8,22 @@ import (
 	"loto/internal/domain"
 )
 
+// BreakMode selects between operator-initiated break and stale-only reclaim.
+// Replaces the prior `force bool` parameter (domain-vocab bool-trap finding,
+// review run a608d43c6832 theme 3): call sites used to read
+// `BreakLocks(..., true /*force*/, ...)` with comment-as-documentation.
+type BreakMode int
+
+const (
+	// BreakForce: operator-initiated. Authorizes live locks; emits lock_broken.
+	BreakForce BreakMode = iota
+	// BreakStale: stale-only reclaim. Refuses live locks; emits lock_reclaimed_stale.
+	BreakStale
+)
+
 // BreakLock is a thin wrapper around BreakLocks for single-target callers.
-func (s *Store) BreakLock(ctx context.Context, t domain.Target, byAgent string, force bool, reason string, live domain.PidLiveProbe) error {
-	res, err := s.BreakLocks(ctx, []domain.Target{t}, byAgent, force, reason, live)
+func (s *Store) BreakLock(ctx context.Context, t domain.Target, byAgent string, mode BreakMode, reason string, live domain.PidLiveProbe) error {
+	res, err := s.BreakLocks(ctx, []domain.Target{t}, byAgent, mode, reason, live)
 	if err != nil {
 		return err
 	}
@@ -20,7 +33,7 @@ func (s *Store) BreakLock(ctx context.Context, t domain.Target, byAgent string, 
 // BreakLocks force/stale-reclaims a batch of locks in one transaction. Per-target
 // errors do not abort the batch — see BreakResult.Err. Returned error is non-nil
 // only on internal/SQL failures. Results are returned in input order.
-func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, byAgent string, force bool, reason string, live domain.PidLiveProbe) ([]BreakResult, error) {
+func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, byAgent string, mode BreakMode, reason string, live domain.PidLiveProbe) ([]BreakResult, error) {
 	if len(targets) == 0 {
 		return []BreakResult{}, nil
 	}
@@ -37,6 +50,7 @@ func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, byAgent
 	}
 
 	now := time.Now()
+	force := mode == BreakForce
 	kind := EventLockBroken
 	if !force {
 		kind = EventLockReclaimedStale

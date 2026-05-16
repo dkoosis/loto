@@ -18,8 +18,8 @@ import (
 type LockOps interface {
 	AcquireLocks(ctx context.Context, recs []domain.LockRecord, live domain.PidLiveProbe) ([]domain.LockRecord, error)
 	ReleaseLocks(ctx context.Context, targets []domain.Target, byAgent string) ([]ReleaseResult, error)
-	BreakLock(ctx context.Context, t domain.Target, byAgent string, force bool, reason string, live domain.PidLiveProbe) error
-	BreakLocks(ctx context.Context, targets []domain.Target, byAgent string, force bool, reason string, live domain.PidLiveProbe) ([]BreakResult, error)
+	BreakLock(ctx context.Context, t domain.Target, byAgent string, mode BreakMode, reason string, live domain.PidLiveProbe) error
+	BreakLocks(ctx context.Context, targets []domain.Target, byAgent string, mode BreakMode, reason string, live domain.PidLiveProbe) ([]BreakResult, error)
 	ListLocks(ctx context.Context) ([]domain.LockRecord, error)
 	LockAt(ctx context.Context, t domain.Target) (*domain.LockRecord, error)
 }
