@@ -69,8 +69,12 @@ func solo(t *testing.T) actor {
 }
 
 // tryDo runs a loto command as the given actor and renders it as a single
-// prompt line plus one collapsed result line. Returns exit + raw stdout
-// without asserting; use for demos that expect a non-zero exit.
+// prompt line plus one collapsed result line. Returns exit + the captured
+// body (stdout, or stderr when stdout is empty — matches what the demo log
+// renders) without asserting; use for demos that expect a non-zero exit.
+// Returning the same body the logger shows means error-path demos can assert
+// on messages the user sees, which often land on stderr (e.g. blocker= rows
+// from `loto check` exit-1).
 func (a actor) tryDo(t *testing.T, args ...string) (int, string) {
 	t.Helper()
 	t.Setenv("LOTO_AGENT_ID", a.agent.UUID)
@@ -92,7 +96,7 @@ func (a actor) tryDo(t *testing.T, args ...string) (int, string) {
 		t.Logf("    %-10s   %s", "", ln)
 	}
 	t.Logf("    %-10s   (exit %d)", "", code)
-	return code, out.String()
+	return code, body
 }
 
 // do is tryDo plus an assertion that the command exited zero. Surprise
