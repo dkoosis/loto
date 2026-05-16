@@ -124,7 +124,7 @@ func ensureForSession(sid string) (*Agent, error) {
 	// sees the winner's published mapping. If the winner crashed mid-write,
 	// the retries fail fast (~100ms total) and the caller surfaces the error.
 	var lastErr error
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		a, lerr := loadSessionAgent(sid)
 		if lerr == nil {
 			return a, nil
