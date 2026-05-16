@@ -1,14 +1,11 @@
 # Boot
 updated: 2026-05-16
 
-→ enter worktree `loto-gp3/`, execute plan task 1.
-
-1. `cd /Users/vcto/projects/loto/loto-gp3 && cat docs/superpowers/plans/2026-05-15-loto-gp3-store-isp-split.md | head -40`
-2. `loto lock` the task-1 files before editing.
+→ `bd ready` — only `loto-kez` open (P2 skill-refresh, retired subcommand cleanup).
 
 ✓ done
-- rejected loto-81o 3-pkg split; filed loto-gp3 (ISP + locks.go split), plan committed + branch pushed
-- closed 81o wontfix-as-specified
+- shipped loto-hz9 (#99 squash-merged) — skill teaches bd-ready triage via `loto check`
+- pruned 4 merged stale remote branches; main clean
 
 ‡ traps
-- new files can't be `loto lock`'d (lstat fails); stub then lock — see plan task 7.
+- `gh pr merge --delete-branch` skips the remote delete if local delete fails (worktree blocks it) — verify with `git ls-remote --heads origin`.
