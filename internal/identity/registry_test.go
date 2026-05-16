@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -253,5 +255,62 @@ func TestEnsureSessionCachePersists(t *testing.T) {
 	}
 	if a.UUID != b.UUID {
 		t.Fatalf("session cache not honored: %s != %s", a.UUID, b.UUID)
+	}
+}
+
+// TestEnsureForSessionFirstUseRace asserts that N concurrent Ensure() calls
+// for the same CLAUDE_CODE_SESSION_ID converge on one uuid — without this
+// guarantee, two processes both miss the cache, both mint, both write, and
+// one becomes a brief orphan (gh#28).
+func TestEnsureForSessionFirstUseRace(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "race-sid")
+
+	const N = 20
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		uuids = make(map[string]int, N)
+		errs  []error
+		start = make(chan struct{})
+	)
+	for range N {
+		wg.Go(func() {
+			<-start
+			a, err := Ensure()
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, err)
+				return
+			}
+			uuids[a.UUID]++
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	if len(errs) > 0 {
+		t.Fatalf("errors: %v", errs)
+	}
+	if len(uuids) != 1 {
+		t.Fatalf("concurrent ensureForSession produced %d distinct uuids; want 1: %v", len(uuids), uuids)
+	}
+
+	agentsDir := filepath.Join(dir, ".loto", "agents")
+	entries, err := os.ReadDir(agentsDir)
+	if err != nil {
+		t.Fatalf("agents dir: %v", err)
+	}
+	jsonCount := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".json") {
+			jsonCount++
+		}
+	}
+	if jsonCount != 1 {
+		t.Fatalf("orphan agent files: got %d, want 1", jsonCount)
 	}
 }

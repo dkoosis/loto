@@ -88,7 +88,7 @@ func (a actor) do(t *testing.T, args ...string) (int, string) {
 	// Result line(s): collapse to the first meaningful line; show more if
 	// the demo benefits. We render every non-empty line indented under the
 	// prompt so multi-line output (status tables) still reads cleanly.
-	for _, ln := range strings.Split(body, "\n") {
+	for ln := range strings.SplitSeq(body, "\n") {
 		if strings.TrimSpace(ln) == "" {
 			continue
 		}

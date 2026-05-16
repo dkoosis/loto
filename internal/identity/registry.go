@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -97,17 +98,41 @@ func Ensure() (*Agent, error) {
 }
 
 // ensureForSession resolves a stable identity for one Claude Code session
-// via ~/.loto/session/<sid>.json. Mints + caches on first call.
+// via ~/.loto/session/<sid>.json. Mints + caches on first call. The cache
+// file is created with O_CREATE|O_EXCL so concurrent first-use callers
+// (e.g. SessionStart hook + an immediate `loto inbox`) converge on one
+// identity; the loser drops its candidate agent file and adopts the
+// winner's record (gh#28).
 func ensureForSession(sid string) (*Agent, error) {
 	if a, err := loadSessionAgent(sid); err == nil {
 		return a, nil
 	}
-	a, err := newAgent()
+	candidate, err := newAgent()
 	if err != nil {
 		return nil, err
 	}
-	_ = saveSessionAgent(sid, a)
-	return a, nil
+	err = claimSessionCache(sid, candidate)
+	if err == nil {
+		return candidate, nil
+	}
+	if !errors.Is(err, fs.ErrExist) {
+		return nil, err
+	}
+	_ = os.Remove(filepath.Join(registryDir(), candidate.UUID+".json"))
+	// Loser raced the winner between O_EXCL create and Write+Close. ReadFile
+	// can observe a 0-byte file in that window; retry briefly so the loser
+	// sees the winner's published mapping. If the winner crashed mid-write,
+	// the retries fail fast (~100ms total) and the caller surfaces the error.
+	var lastErr error
+	for i := 0; i < 20; i++ {
+		a, lerr := loadSessionAgent(sid)
+		if lerr == nil {
+			return a, nil
+		}
+		lastErr = lerr
+		time.Sleep(5 * time.Millisecond)
+	}
+	return nil, lastErr
 }
 
 // loadSessionAgent reads ~/.loto/session/<sid>.json and resolves the cached
@@ -140,16 +165,15 @@ func loadSessionAgent(sid string) (*Agent, error) {
 	return a, nil
 }
 
-// saveSessionAgent caches the agent UUID for a Claude Code session via the
-// same temp+rename pattern as writeAgent — concurrent readers see either
-// the previous mapping or the new one, never partial JSON.
-func saveSessionAgent(sid string, a *Agent) error {
+// claimSessionCache attempts to create ~/.loto/session/<sid>.json with
+// O_CREATE|O_EXCL — first writer wins the sid mapping; the loser receives
+// fs.ErrExist and re-reads via loadSessionAgent (gh#28).
+func claimSessionCache(sid string, a *Agent) error {
 	final, err := sessionCachePath(sid)
 	if err != nil {
 		return err
 	}
-	dir := sessionDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(sessionDir(), 0o700); err != nil {
 		return err
 	}
 	body, err := json.Marshal(struct {
@@ -160,24 +184,21 @@ func saveSessionAgent(sid string, a *Agent) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, sid+".*.tmp")
+	f, err := os.OpenFile(final, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(body); err != nil {
-		tmp.Close()
-		return err
+	if _, werr := f.Write(body); werr != nil {
+		f.Close()
+		_ = os.Remove(final)
+		return werr
 	}
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
+	if serr := f.Sync(); serr != nil {
+		f.Close()
+		_ = os.Remove(final)
+		return serr
 	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, final) //nolint:gosec // final is validated by sessionCachePath
+	return f.Close()
 }
 
 func mostRecentAgent() (*Agent, error) {
