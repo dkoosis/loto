@@ -99,6 +99,50 @@ func mkFileLock(t *testing.T, name, agent string, expIn time.Duration) domain.Lo
 	}
 }
 
+func TestBreakLocks_RestoreErrSurfaced(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	live := func(string, int) bool { return true }
+	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject chmod failure for the restore phase only (post-strip). The strip
+	// during AcquireLocks already ran via the real chmodFn; flip it now so the
+	// post-commit restoreWrite returns EPERM.
+	orig := chmodFn
+	defer func() { chmodFn = orig }()
+	chmodFn = func(path string, mode os.FileMode) error {
+		if path == l.Target.Canonical {
+			return &os.PathError{Op: tcChmod, Path: path, Err: syscall.EPERM}
+		}
+		return orig(path, mode)
+	}
+
+	results, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, true, "restore-fail", live)
+	if err != nil {
+		t.Fatalf("BreakLocks: %v", err)
+	}
+	if results[0].Err != nil {
+		t.Fatalf("break itself should succeed, got Err=%v", results[0].Err)
+	}
+	if results[0].RestoreErr == nil {
+		t.Fatal("expected RestoreErr to surface chmod-restore failure")
+	}
+	// Audit event also emitted.
+	evs, _ := s.EventsForTarget(ctx, l.Target)
+	gotRestoreFailed := false
+	for _, e := range evs {
+		if e.Kind == EventModeRestoreFailed {
+			gotRestoreFailed = true
+		}
+	}
+	if !gotRestoreFailed {
+		t.Errorf("expected mode_restore_failed event, got %+v", evs)
+	}
+}
+
 func TestBreakLocks_BatchedMultiTarget(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()

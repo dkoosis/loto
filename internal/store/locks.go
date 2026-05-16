@@ -477,10 +477,15 @@ func (s *Store) restoreAndAudit(ctx context.Context, path, byAgent string) {
 }
 
 // BreakResult is the per-target outcome from BreakLocks. Err is nil on success;
-// ErrNoLockAtTarget or an AuthorizeBreak error otherwise.
+// ErrNoLockAtTarget or an AuthorizeBreak error otherwise. RestoreErr is set
+// independently when the lock row was deleted but post-commit chmod-restore
+// failed — the break itself succeeded but the file is left read-only, mirroring
+// ReleaseResult.StateRestoreFailed semantics. Restore failures are also audited
+// via mode_restore_failed events.
 type BreakResult struct {
-	Target domain.Target
-	Err    error
+	Target     domain.Target
+	Err        error
+	RestoreErr error
 }
 
 // BreakLock is a thin wrapper around BreakLocks for single-target callers.
@@ -584,6 +589,7 @@ func (s *Store) restoreAndAuditBreaks(ctx context.Context, results []BreakResult
 			continue
 		}
 		if rerr := restoreWrite(results[i].Target.Canonical); rerr != nil {
+			results[i].RestoreErr = rerr
 			failEvents = append(failEvents, modeRestoreFailedEvent(results[i].Target.Canonical, byAgent, now, rerr))
 		}
 	}
