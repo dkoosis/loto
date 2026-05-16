@@ -1,11 +1,14 @@
 # Boot
-updated: 2026-05-15
+updated: 2026-05-16
 
-→ `bd ready` — design-judgment beads (dtc, 3ge, 1w5, 2e1); ask dk before claiming.
+→ enter worktree `loto-gp3/`, execute plan task 1.
+
+1. `cd /Users/vcto/projects/loto/loto-gp3 && cat docs/superpowers/plans/2026-05-15-loto-gp3-store-isp-split.md | head -40`
+2. `loto lock` the task-1 files before editing.
 
 ✓ done
-- swept PRs/branches/stashes — clean, in sync with origin/main
-- committed boot.md refresh (38dfd2f)
+- rejected loto-81o 3-pkg split; filed loto-gp3 (ISP + locks.go split), plan committed + branch pushed
+- closed 81o wontfix-as-specified
 
 ‡ traps
-- `bd ready` has no peer-awareness; two sessions raced qqh.7 → loto-2e1.
+- new files can't be `loto lock`'d (lstat fails); stub then lock — see plan task 7.
