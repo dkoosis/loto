@@ -48,12 +48,12 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	defer rt.Close()
 
-	live := func(host string, pid int) bool {
+	live := domain.PidLiveProbe(func(host string, pid int) bool {
 		if host != rt.Host {
 			return true
 		}
 		return pidLive(pid)
-	}
+	})
 	return acquireBatch(rt, targets, *intent, *ttl, live, stdout, stderr)
 }
 
@@ -119,7 +119,7 @@ func classifyCanonicalizeErr(err error) string {
 	}
 }
 
-func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.Duration, live func(string, int) bool, stdout, stderr io.Writer) int {
+func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.Duration, live domain.PidLiveProbe, stdout, stderr io.Writer) int {
 	now := time.Now()
 	recs := buildLockRecords(targets, rt, intent, now, ttl)
 	acquired, err := rt.Store.AcquireLocks(rt.Ctx, recs, live)
