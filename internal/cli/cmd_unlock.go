@@ -65,9 +65,10 @@ func unlockTargets(rt *runtime, args []string, stdout, stderr io.Writer) int {
 	return render.EmitReleaseResults(stdout, results)
 }
 
-// breakTargets handles --force: per-target BreakLock loop, since BreakLock has
-// distinct semantics (tagging, mode restore via dead-owner path) that don't fit
-// the ReleaseLocks batch shape.
+// breakTargets handles --force: single batched BreakLocks call. Per-target
+// outcomes (success / no-lock / authorize-fail) come back in input order via
+// BreakResult.Err so the render walks one slice instead of looping a single-
+// target API.
 func breakTargets(rt *runtime, args []string, intent string, stdout, stderr io.Writer) int {
 	targets, code := resolveUnlockArgs(args, stderr)
 	if code != 0 {
@@ -79,19 +80,23 @@ func breakTargets(rt *runtime, args []string, intent string, stdout, stderr io.W
 		}
 		return pidLive(pid)
 	}
+	results, err := rt.Store.BreakLocks(rt.Ctx, targets, rt.Agent.UUID, true, intent, live)
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return 3
+	}
 	exit := 0
-	for _, t := range targets {
-		err := rt.Store.BreakLock(rt.Ctx, t, rt.Agent.UUID, true, intent, live)
+	for _, r := range results {
 		switch {
-		case err == nil:
-			fmt.Fprintf(stdout, "✓ broken target=%s\n", relPath(t.Canonical))
-		case errors.Is(err, store.ErrNoLockAtTarget):
-			fmt.Fprintf(stderr, "✗ no lock at target=%s\n", relPath(t.Canonical))
+		case r.Err == nil:
+			fmt.Fprintf(stdout, "✓ broken target=%s\n", relPath(r.Target.Canonical))
+		case errors.Is(r.Err, store.ErrNoLockAtTarget):
+			fmt.Fprintf(stderr, "✗ no lock at target=%s\n", relPath(r.Target.Canonical))
 			if exit < 1 {
 				exit = 1
 			}
 		default:
-			fmt.Fprintf(stderr, "✗ target=%s err=%v\n", relPath(t.Canonical), err)
+			fmt.Fprintf(stderr, "✗ target=%s err=%v\n", relPath(r.Target.Canonical), r.Err)
 			exit = 3
 		}
 	}

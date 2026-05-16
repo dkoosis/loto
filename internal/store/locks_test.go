@@ -99,6 +99,149 @@ func mkFileLock(t *testing.T, name, agent string, expIn time.Duration) domain.Lo
 	}
 }
 
+func TestBreakLocks_RestoreErrSurfaced(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	live := func(string, int) bool { return true }
+	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject chmod failure for the restore phase only (post-strip). The strip
+	// during AcquireLocks already ran via the real chmodFn; flip it now so the
+	// post-commit restoreWrite returns EPERM.
+	orig := chmodFn
+	defer func() { chmodFn = orig }()
+	chmodFn = func(path string, mode os.FileMode) error {
+		if path == l.Target.Canonical {
+			return &os.PathError{Op: tcChmod, Path: path, Err: syscall.EPERM}
+		}
+		return orig(path, mode)
+	}
+
+	results, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, true, "restore-fail", live)
+	if err != nil {
+		t.Fatalf("BreakLocks: %v", err)
+	}
+	if results[0].Err != nil {
+		t.Fatalf("break itself should succeed, got Err=%v", results[0].Err)
+	}
+	if results[0].RestoreErr == nil {
+		t.Fatal("expected RestoreErr to surface chmod-restore failure")
+	}
+	// Audit event also emitted.
+	evs, _ := s.EventsForTarget(ctx, l.Target)
+	gotRestoreFailed := false
+	for _, e := range evs {
+		if e.Kind == EventModeRestoreFailed {
+			gotRestoreFailed = true
+		}
+	}
+	if !gotRestoreFailed {
+		t.Errorf("expected mode_restore_failed event, got %+v", evs)
+	}
+}
+
+func TestBreakLocks_BatchedMultiTarget(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	live := func(string, int) bool { return true }
+
+	la := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	lb := mkFileLock(t, "b.go", tcAlice, time.Hour)
+	lc := mkFileLock(t, "c.go", tcAlice, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{la, lb, lc}, live); err != nil {
+		t.Fatal(err)
+	}
+
+	targets := []domain.Target{la.Target, lb.Target, lc.Target}
+	results, err := s.BreakLocks(ctx, targets, tcBob, true, "batch break", live)
+	if err != nil {
+		t.Fatalf("BreakLocks: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("got %d results, want 3", len(results))
+	}
+	for i, r := range results {
+		if r.Err != nil {
+			t.Errorf("results[%d] err=%v", i, r.Err)
+		}
+		if r.Target != targets[i] {
+			t.Errorf("results[%d] target=%v want %v (input order required)", i, r.Target, targets[i])
+		}
+		if got, _ := s.LockAt(ctx, targets[i]); got != nil {
+			t.Errorf("targets[%d] should be gone, got %+v", i, got)
+		}
+		evs, _ := s.EventsForTarget(ctx, targets[i])
+		if len(evs) != 1 || evs[0].Kind != EventLockBroken {
+			t.Errorf("targets[%d] expected one lock_broken event, got %+v", i, evs)
+		}
+	}
+}
+
+func TestBreakLocks_MixedNoLockAndOwned(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	live := func(string, int) bool { return true }
+
+	la := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{la}, live); err != nil {
+		t.Fatal(err)
+	}
+	missing := domain.Target{Canonical: filepath.Join(t.TempDir(), "missing.go")}
+	if err := os.WriteFile(missing.Canonical, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := s.BreakLocks(ctx, []domain.Target{la.Target, missing}, tcBob, true, "mixed", live)
+	if err != nil {
+		t.Fatalf("BreakLocks: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("want 2 results, got %d", len(results))
+	}
+	if results[0].Err != nil {
+		t.Errorf("owned target: %v", results[0].Err)
+	}
+	if !errors.Is(results[1].Err, ErrNoLockAtTarget) {
+		t.Errorf("missing target: want ErrNoLockAtTarget, got %v", results[1].Err)
+	}
+}
+
+func TestReleaseLocks_BatchedMixedStates(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	live := func(string, int) bool { return true }
+
+	la := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	lb := mkFileLock(t, "b.go", tcBob, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{la, lb}, live); err != nil {
+		t.Fatal(err)
+	}
+	never := domain.Target{Canonical: filepath.Join(t.TempDir(), "never.go")}
+	if err := os.WriteFile(never.Canonical, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.ReleaseLocks(ctx, []domain.Target{la.Target, lb.Target, never}, tcAlice)
+	if err != nil {
+		t.Fatalf("ReleaseLocks: %v", err)
+	}
+	if len(res) != 3 {
+		t.Fatalf("want 3 results, got %d", len(res))
+	}
+	if res[0].State != StateUnlocked {
+		t.Errorf("res[0]: want StateUnlocked, got %v", res[0].State)
+	}
+	if res[1].State != StateNotOwner || res[1].Holder != tcBob {
+		t.Errorf("res[1]: want StateNotOwner holder=bob, got state=%v holder=%v", res[1].State, res[1].Holder)
+	}
+	if res[2].State != StateNoLock {
+		t.Errorf("res[2]: want StateNoLock, got %v", res[2].State)
+	}
+}
+
 func TestAcquireOverlapBlocks(t *testing.T) {
 	dir := t.TempDir()
 	a := filepath.Join(dir, "a.go")
