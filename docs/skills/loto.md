@@ -6,7 +6,9 @@ description: >
   large refactor that touches many files. Coordinates file/global locks to
   prevent silent clobbers. Triggers: "edit X", "refactor Y", "modify Z" in
   shared repos; "I'm starting a sweep across …"; conflict-shaped errors
-  after an edit; "who has X locked?"; "what am I called in this project?".
+  after an edit; "who has X locked?"; "what am I called in this project?";
+  "triage backlog", "pick a bead", "bd ready", "claim a bead", "drain the
+  queue" in a multi-agent repo.
 ---
 
 # loto — multi-agent file coordination
@@ -48,6 +50,54 @@ Use `loto try file` as a **probe**: exit 0 means no one currently holds it; you 
 ### Pattern C — genuine hold across a long edit
 
 Run `loto try file <path> --hold` via `run_in_background`; it stays foreground until SIGTERM. Send the signal when done. Rare; only when Pattern A or B isn't enough.
+
+## Triaging `bd ready` in a multi-agent session
+
+`bd ready` lists beads without consulting peer locks. In a shared repo, the
+queue can look workable when every candidate is actually claimed by someone
+else's `loto lock`. Filter before claiming.
+
+### Recipe
+
+```bash
+bd ready --json | jq -r '.[] | "\(.id)\t\(.metadata.blast_paths // "")"' |
+while IFS=$'\t' read -r id paths; do
+  if [ -z "$paths" ]; then
+    echo "⚠ unverified $id (no blast_paths metadata)"
+    continue
+  fi
+  if loto check $(echo "$paths" | tr , ' ') >/dev/null 2>&1; then
+    echo "✓ claimable $id"
+  else
+    echo "✗ blocked $id"
+  fi
+done
+```
+
+- `loto check` exit 0 → no peer holds any of the paths → safe to claim.
+- exit 1 → at least one path is held; skip and revisit after the holder
+  releases.
+- Beads missing `blast_paths` metadata fall through as `⚠ unverified` —
+  surface to the human rather than guessing.
+
+### Claiming after triage
+
+Once a bead is `✓ claimable`:
+
+```
+1. loto lock <paths…> -t "<bead-id>"     # acquire before editing
+2. ... do the work, ship the PR ...
+3. bd close <bead-id> --reason "shipped #<PR>"
+4. loto unlock <paths…> -t "<bead-id> done"
+```
+
+Re-run the triage recipe between beads. State changes while you work.
+
+### Empty-status rule
+
+If every `bd ready` candidate triages as `✗ blocked` or `⚠ unverified`,
+say so explicitly to the human — silence reads as a crash (project
+design.md rule).
 
 ## Reading LLM output
 
