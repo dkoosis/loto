@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -44,6 +45,22 @@ func TestStatusSingleTargetFree(t *testing.T) {
 	code := Run([]string{tcCmdStatus, tcTargetA}, &out, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(out.String(), "✓ free") {
+		t.Errorf("expected ✓ free: %q", out.String())
+	}
+}
+
+// loto-dvx: parity with check (loto-d3l). `loto status /abs/path` for a file
+// inside the repo must work instead of failing canonicalization.
+func TestStatus_AcceptsAbsolutePathInsideRepo(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	abs := filepath.Join(repo, tcTargetA)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdStatus, abs}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, out=%q err=%q", code, out.String(), errBuf.String())
 	}
 	if !strings.Contains(out.String(), "✓ free") {
 		t.Errorf("expected ✓ free: %q", out.String())

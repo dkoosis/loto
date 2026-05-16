@@ -36,7 +36,8 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: loto lock <target> [<target>...] -t \"why\"")
 		return 2
 	}
-	targets, invalid := validateLockTargets(fs.Args())
+	repoTop, _ := repoTopForCwd(ctx)
+	targets, invalid := validateLockTargets(fs.Args(), repoTop)
 	if len(invalid) > 0 {
 		render.EmitInvalid(stderr, invalid)
 		return 2
@@ -60,12 +61,12 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // validateLockTargets canonicalizes and Lstat-validates each path before any
 // store work, so rejection produces a single render.EmitInvalid block and
 // leaves zero side effects on disk or DB.
-func validateLockTargets(args []string) ([]domain.Target, []render.InvalidTarget) {
+func validateLockTargets(args []string, repoTop string) ([]domain.Target, []render.InvalidTarget) {
 	targets := make([]domain.Target, 0, len(args))
 	seen := make(map[string]bool, len(args))
 	var invalid []render.InvalidTarget
 	for _, raw := range args {
-		t, err := domain.Canonicalize(raw)
+		t, err := domain.Canonicalize(normalizeRepoPath(raw, repoTop))
 		if err != nil {
 			invalid = append(invalid, render.InvalidTarget{Path: raw, Reason: classifyCanonicalizeErr(err)})
 			continue

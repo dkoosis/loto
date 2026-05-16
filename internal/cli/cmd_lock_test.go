@@ -212,6 +212,22 @@ func TestLock_RejectsSymlinks(t *testing.T) {
 	}
 }
 
+// loto-dvx: parity with check (loto-d3l). `loto lock /abs/path` for a file
+// inside the repo must succeed instead of being rejected as repo-escape.
+func TestLock_AcceptsAbsolutePathInsideRepo(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	abs := filepath.Join(repo, tcTargetA)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, abs, "-t", tcIntentTest}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✓ locked") {
+		t.Errorf("expected ✓ locked: %q", out.String())
+	}
+}
+
 func TestUnlockOwner(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
