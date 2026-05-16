@@ -132,6 +132,9 @@ func ensureForSession(sid string) (*Agent, error) {
 		lastErr = lerr
 		time.Sleep(5 * time.Millisecond)
 	}
+	if lastErr == nil {
+		lastErr = errNoSessionCache
+	}
 	return nil, lastErr
 }
 
