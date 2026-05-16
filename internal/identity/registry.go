@@ -119,7 +119,20 @@ func ensureForSession(sid string) (*Agent, error) {
 		return nil, err
 	}
 	_ = os.Remove(filepath.Join(registryDir(), candidate.UUID+".json"))
-	return loadSessionAgent(sid)
+	// Loser raced the winner between O_EXCL create and Write+Close. ReadFile
+	// can observe a 0-byte file in that window; retry briefly so the loser
+	// sees the winner's published mapping. If the winner crashed mid-write,
+	// the retries fail fast (~100ms total) and the caller surfaces the error.
+	var lastErr error
+	for i := 0; i < 20; i++ {
+		a, lerr := loadSessionAgent(sid)
+		if lerr == nil {
+			return a, nil
+		}
+		lastErr = lerr
+		time.Sleep(5 * time.Millisecond)
+	}
+	return nil, lastErr
 }
 
 // loadSessionAgent reads ~/.loto/session/<sid>.json and resolves the cached
@@ -179,6 +192,11 @@ func claimSessionCache(sid string, a *Agent) error {
 		f.Close()
 		_ = os.Remove(final)
 		return werr
+	}
+	if serr := f.Sync(); serr != nil {
+		f.Close()
+		_ = os.Remove(final)
+		return serr
 	}
 	return f.Close()
 }
