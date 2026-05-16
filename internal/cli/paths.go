@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"loto/internal/domain"
 )
@@ -158,15 +157,15 @@ func slugFromDir(repoTop string) string {
 	return unnamedSlug
 }
 
-// gitCmd runs git under a 10s timeout on top of the caller-supplied ctx so
-// SIGINT propagates into the git subprocess (audit loto-p7j) and a hung repo
-// (stale NFS, fsmonitor wedge) still completes. Boot-path callers can pass
+// gitCmd runs git under gitTimeout on top of the caller-supplied ctx so SIGINT
+// propagates into the git subprocess (audit loto-p7j) and a hung repo (stale
+// NFS, fsmonitor wedge) still completes. Boot-path callers can pass
 // context.Background() — the timeout alone is sufficient there.
 func gitCmd(ctx context.Context, repoTop string, args ...string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if repoTop != "" {
