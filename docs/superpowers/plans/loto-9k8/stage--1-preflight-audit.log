@@ -1,0 +1,23 @@
+go vet ./...
+golangci-lint run ./...
+level=warning msg="[runner] Can't process results by generated_file_filter processor: can't filter issue &result.Issue{FromLinter:\"errcheck\", Text:\"Error return value of `s.Close` is not checked\", Severity:\"\", SourceLines:[]string(nil), Pkg:(*packages.Package)(0x14aea7561040), Pos:token.Position{Filename:\"/Users/vcto/Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/concurrent_test.go\", Offset:568, Line:26, Column:15}, LineRange:(*result.Range)(nil), HunkPos:0, SuggestedFixes:[]analysis.SuggestedFix(nil), ExpectNoLint:false, ExpectedNoLintLinter:\"\", WorkingDirectoryRelativePath:\"../../Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/concurrent_test.go\", RelativePath:\"../../Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/concurrent_test.go\"}: failed to get doc (lax) of file /Users/vcto/Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/concurrent_test.go: failed to parse file: open /Users/vcto/Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/concurrent_test.go: no such file or directory"
+level=warning msg="[runner/source_code] Failed to get line 103 for file /Users/vcto/Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/flock.go: failed to get file /Users/vcto/Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/flock.go lines cache: can't get file /Users/vcto/Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/flock.go bytes from cache: can't read file /Users/vcto/Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/flock.go: open /Users/vcto/Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/flock.go: no such file or directory"
+level=warning msg="[runner/source_code] Failed to get line 466 for file /Users/vcto/Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/locks.go: failed to get file /Users/vcto/Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/locks.go lines cache: can't get file /Users/vcto/Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/locks.go bytes from cache: can't read file /Users/vcto/Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/locks.go: open /Users/vcto/Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/locks.go: no such file or directory"
+../../Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/flock.go:103:59: G404: Use of weak random number generator (math/rand or math/rand/v2 instead of crypto/rand) (gosec)
+internal/identity/registry.go:127:2: for loop can be changed to use an integer range (Go 1.22+) (intrange)
+	for i := 0; i < 20; i++ {
+	^
+../../Projects/loto/.claude/worktrees/loto-gh28-firstuse-race/internal/store/locks.go:466:3: return both a `nil` error and an invalid value: use a sentinel error instead (nilnil)
+3 issues:
+* gosec: 1
+* intrange: 1
+* nilnil: 1
+make: *** [lint] Error 1
+go vet ./...
+golangci-lint run ./...
+internal/identity/registry.go:127:2: for loop can be changed to use an integer range (Go 1.22+) (intrange)
+	for i := 0; i < 20; i++ {
+	^
+1 issues:
+* intrange: 1
+make: *** [lint] Error 1

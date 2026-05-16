@@ -131,8 +131,12 @@ func (s *Store) stripAndHandleFailure(ctx context.Context, tx *sql.Tx, sorted []
 	}
 	failures, restoreErrs := rollbackStripped(chmodErr.Target, chmodErr.Err, stripped)
 	_ = tx.Rollback()
-	for _, re := range restoreErrs {
-		_ = s.appendModeRestoreFailedEvent(ctx, re.path, sorted[0].OwnerUUID, now, re.err)
+	if len(restoreErrs) > 0 {
+		evs := make([]domain.Event, 0, len(restoreErrs))
+		for _, re := range restoreErrs {
+			evs = append(evs, modeRestoreFailedEvent(re.path, sorted[0].OwnerUUID, now, re.err))
+		}
+		_ = s.AppendEvents(ctx, evs)
 	}
 	return nil, &ChmodFailureError{Failures: failures}
 }
@@ -307,11 +311,12 @@ type ReleaseResult struct {
 	RestoreErr error  // populated when State == StateRestoreFailed
 }
 
-// ReleaseLocks releases each target best-effort under the project op-flock.
-// Returns one ReleaseResult per input target in input order — render owns the
-// canonical sort for stable output. The returned error is non-nil only on
-// internal/SQL failures; per-target outcomes (no-lock, not-owner,
-// restore-failed) are reported via ReleaseResult.State.
+// ReleaseLocks releases each target best-effort under the project op-flock in
+// a single transaction (SELECT … WHERE IN, batched DELETE). Returns one
+// ReleaseResult per input target in input order — render owns the canonical
+// sort for stable output. The returned error is non-nil only on internal/SQL
+// failures; per-target outcomes (no-lock, not-owner, restore-failed) are
+// reported via ReleaseResult.State.
 func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, byAgent string) ([]ReleaseResult, error) {
 	if len(targets) == 0 {
 		return []ReleaseResult{}, nil
@@ -323,51 +328,141 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, byAge
 	}
 	defer flock.release()
 
-	results := make([]ReleaseResult, 0, len(targets))
-	for _, t := range targets {
-		r, err := s.releaseOne(ctx, t, byAgent)
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, r)
-	}
-	return results, nil
-}
-
-func (s *Store) releaseOne(ctx context.Context, t domain.Target, byAgent string) (ReleaseResult, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return ReleaseResult{}, err
+		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var owner string
-	err = tx.QueryRowContext(ctx, `SELECT owner_uuid FROM locks WHERE target_canonical = ?`, t.Canonical).Scan(&owner)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ReleaseResult{Target: t, State: StateNoLock}, nil
-	}
+	owners, err := loadOwnersTx(ctx, tx, targets)
 	if err != nil {
-		return ReleaseResult{}, err
-	}
-	if owner != byAgent {
-		return ReleaseResult{Target: t, State: StateNotOwner, Holder: owner}, nil
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ?`, t.Canonical, byAgent); err != nil {
-		return ReleaseResult{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return ReleaseResult{}, err
+		return nil, err
 	}
 
-	// Chmod restore is outside the tx — lock IS released. Surface the failure
-	// via ReleaseResult AND emit a mode_restore_failed audit event (mirrors the
-	// prior single-target ReleaseLock contract: NORTH_STAR.md — every path that
-	// removes a `locks` row also tries restore + audits failure).
-	if rerr := restoreWrite(t.Canonical); rerr != nil {
-		_ = s.appendModeRestoreFailedEvent(ctx, t.Canonical, byAgent, time.Now(), rerr)
-		return ReleaseResult{Target: t, State: StateRestoreFailed, RestoreErr: rerr}, nil
+	results, owned := classifyReleases(targets, owners, byAgent)
+
+	if len(owned) > 0 {
+		if err := deleteOwnedTx(ctx, tx, owned, byAgent); err != nil {
+			return nil, err
+		}
 	}
-	return ReleaseResult{Target: t, State: StateUnlocked}, nil
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	// Chmod restore is outside the tx — locks ARE released. Failures surface
+	// per-target AND batch into one audit event call (NORTH_STAR.md: every path
+	// that removes a `locks` row also tries restore + audits failure).
+	s.restoreAndAuditReleases(ctx, results, byAgent)
+	return results, nil
+}
+
+// classifyReleases walks input targets in order, classifying each against the
+// owners map and collecting the canonical paths to delete in one statement.
+func classifyReleases(targets []domain.Target, owners map[string]string, byAgent string) ([]ReleaseResult, []string) {
+	results := make([]ReleaseResult, len(targets))
+	owned := make([]string, 0, len(targets))
+	for i, t := range targets {
+		results[i].Target = t
+		o, ok := owners[t.Canonical]
+		switch {
+		case !ok:
+			results[i].State = StateNoLock
+		case o != byAgent:
+			results[i].State = StateNotOwner
+			results[i].Holder = o
+		default:
+			results[i].State = StateUnlocked
+			owned = append(owned, t.Canonical)
+		}
+	}
+	return results, owned
+}
+
+func (s *Store) restoreAndAuditReleases(ctx context.Context, results []ReleaseResult, byAgent string) {
+	now := time.Now()
+	var failEvents []domain.Event
+	for i := range results {
+		if results[i].State != StateUnlocked {
+			continue
+		}
+		if rerr := restoreWrite(results[i].Target.Canonical); rerr != nil {
+			results[i].State = StateRestoreFailed
+			results[i].RestoreErr = rerr
+			failEvents = append(failEvents, modeRestoreFailedEvent(results[i].Target.Canonical, byAgent, now, rerr))
+		}
+	}
+	if len(failEvents) > 0 {
+		_ = s.AppendEvents(ctx, failEvents)
+	}
+}
+
+// loadOwnersTx reads owner_uuid for the given targets via a single SELECT.
+// Returned map is keyed by target_canonical; missing keys = no row.
+func loadOwnersTx(ctx context.Context, tx *sql.Tx, targets []domain.Target) (map[string]string, error) {
+	placeholders, args := inClause(targets)
+	// placeholders is built from '?' chars only; user data flows via args.
+	rows, err := tx.QueryContext(ctx, `SELECT target_canonical, owner_uuid FROM locks WHERE target_canonical IN (`+placeholders+`)`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]string, len(targets))
+	for rows.Next() {
+		var canonical, owner string
+		if err := rows.Scan(&canonical, &owner); err != nil {
+			return nil, err
+		}
+		out[canonical] = owner
+	}
+	return out, rows.Err()
+}
+
+// deleteOwnedTx removes `locks` rows for the given canonical paths owned by
+// byAgent in one statement.
+func deleteOwnedTx(ctx context.Context, tx *sql.Tx, canonicals []string, byAgent string) error {
+	placeholders, args := inClauseStrings(canonicals)
+	args = append(args, byAgent)
+	_, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical IN (`+placeholders+`) AND owner_uuid = ?`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+
+	return err
+}
+
+func inClause(targets []domain.Target) (string, []any) {
+	ph := make([]byte, 0, len(targets)*2)
+	args := make([]any, 0, len(targets))
+	for i, t := range targets {
+		if i > 0 {
+			ph = append(ph, ',')
+		}
+		ph = append(ph, '?')
+		args = append(args, t.Canonical)
+	}
+	return string(ph), args
+}
+
+func inClauseStrings(ss []string) (string, []any) {
+	ph := make([]byte, 0, len(ss)*2)
+	args := make([]any, 0, len(ss))
+	for i, s := range ss {
+		if i > 0 {
+			ph = append(ph, ',')
+		}
+		ph = append(ph, '?')
+		args = append(args, s)
+	}
+	return string(ph), args
+}
+
+func modeRestoreFailedEvent(path, byAgent string, now time.Time, cause error) domain.Event {
+	return domain.Event{
+		Target:    domain.Target{Canonical: path},
+		Kind:      EventModeRestoreFailed,
+		ActorUUID: byAgent,
+		Reason:    fmt.Sprintf("mode_restore_failed: %v on %s", cause, path),
+		CreatedAt: now,
+	}
 }
 
 // restoreAndAudit re-adds owner-write to a released target and emits a
@@ -381,59 +476,139 @@ func (s *Store) restoreAndAudit(ctx context.Context, path, byAgent string) {
 	}
 }
 
+// BreakResult is the per-target outcome from BreakLocks. Err is nil on success;
+// ErrNoLockAtTarget or an AuthorizeBreak error otherwise.
+type BreakResult struct {
+	Target domain.Target
+	Err    error
+}
+
+// BreakLock is a thin wrapper around BreakLocks for single-target callers.
 func (s *Store) BreakLock(ctx context.Context, t domain.Target, byAgent string, force bool, reason string, live domain.PidLiveProbe) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	res, err := s.BreakLocks(ctx, []domain.Target{t}, byAgent, force, reason, live)
 	if err != nil {
 		return err
+	}
+	return res[0].Err
+}
+
+// BreakLocks force/stale-reclaims a batch of locks in one transaction. Per-target
+// errors do not abort the batch — see BreakResult.Err. Returned error is non-nil
+// only on internal/SQL failures. Results are returned in input order.
+func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, byAgent string, force bool, reason string, live domain.PidLiveProbe) ([]BreakResult, error) {
+	if len(targets) == 0 {
+		return []BreakResult{}, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	rows, err := tx.QueryContext(ctx, `SELECT `+lockCols+` FROM locks WHERE target_canonical = ?`, t.Canonical)
+	existing, err := loadLocksByTargetTx(ctx, tx, targets)
 	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	if !rows.Next() {
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		return ErrNoLockAtTarget
-	}
-	l, err := scanLock(rows)
-	if err != nil {
-		return err
-	}
-	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
 	now := time.Now()
-	if err := domain.AuthorizeBreak(l, force, now, l.Host, live); err != nil {
-		return err
-	}
-
 	kind := EventLockBroken
 	if !force {
 		kind = EventLockReclaimedStale
 	}
-	if err := appendEventTx(ctx, tx, domain.Event{
-		Target:      t,
-		Kind:        kind,
-		ActorUUID:   byAgent,
-		SubjectUUID: l.OwnerUUID,
-		Reason:      reason,
-		CreatedAt:   now,
-	}); err != nil {
-		return err
+
+	results, events, deleteByOwner := classifyBreaks(targets, existing, byAgent, force, kind, reason, now, live)
+
+	if len(events) > 0 {
+		if err := appendEventsTx(ctx, tx, events); err != nil {
+			return nil, err
+		}
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ?`, t.Canonical, l.OwnerUUID); err != nil {
-		return err
+	for owner, canonicals := range deleteByOwner {
+		if err := deleteOwnedTx(ctx, tx, canonicals, owner); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return err
+		return nil, err
 	}
-	s.restoreAndAudit(ctx, t.Canonical, byAgent)
-	return nil
+
+	s.restoreAndAuditBreaks(ctx, results, byAgent, now)
+	return results, nil
+}
+
+// classifyBreaks walks input targets in order, building per-target results, the
+// batched event slice, and a per-owner canonical-path grouping for DELETE.
+// Returning all three lets the caller emit one events insert and one DELETE per
+// owner inside the same tx.
+func classifyBreaks(
+	targets []domain.Target,
+	existing map[string]domain.LockRecord,
+	byAgent string,
+	force bool,
+	kind string,
+	reason string,
+	now time.Time,
+	live domain.PidLiveProbe,
+) (results []BreakResult, events []domain.Event, deleteByOwner map[string][]string) {
+	results = make([]BreakResult, len(targets))
+	deleteByOwner = map[string][]string{}
+	for i, t := range targets {
+		results[i].Target = t
+		l, ok := existing[t.Canonical]
+		if !ok {
+			results[i].Err = ErrNoLockAtTarget
+			continue
+		}
+		if err := domain.AuthorizeBreak(l, force, now, l.Host, live); err != nil {
+			results[i].Err = err
+			continue
+		}
+		events = append(events, domain.Event{
+			Target:      t,
+			Kind:        kind,
+			ActorUUID:   byAgent,
+			SubjectUUID: l.OwnerUUID,
+			Reason:      reason,
+			CreatedAt:   now,
+		})
+		deleteByOwner[l.OwnerUUID] = append(deleteByOwner[l.OwnerUUID], t.Canonical)
+	}
+	return results, events, deleteByOwner
+}
+
+func (s *Store) restoreAndAuditBreaks(ctx context.Context, results []BreakResult, byAgent string, now time.Time) {
+	var failEvents []domain.Event
+	for i := range results {
+		if results[i].Err != nil {
+			continue
+		}
+		if rerr := restoreWrite(results[i].Target.Canonical); rerr != nil {
+			failEvents = append(failEvents, modeRestoreFailedEvent(results[i].Target.Canonical, byAgent, now, rerr))
+		}
+	}
+	if len(failEvents) > 0 {
+		_ = s.AppendEvents(ctx, failEvents)
+	}
+}
+
+func loadLocksByTargetTx(ctx context.Context, tx *sql.Tx, targets []domain.Target) (map[string]domain.LockRecord, error) {
+	placeholders, args := inClause(targets)
+	rows, err := tx.QueryContext(ctx, `SELECT `+lockCols+` FROM locks WHERE target_canonical IN (`+placeholders+`)`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]domain.LockRecord, len(targets))
+	for rows.Next() {
+		l, err := scanLock(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[l.Target.Canonical] = l
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ListLocks(ctx context.Context) ([]domain.LockRecord, error) {

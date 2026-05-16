@@ -1,0 +1,8 @@
+go vet ./...
+golangci-lint run ./...
+internal/identity/registry.go:127:2: for loop can be changed to use an integer range (Go 1.22+) (intrange)
+	for i := 0; i < 20; i++ {
+	^
+1 issues:
+* intrange: 1
+make: *** [lint] Error 1

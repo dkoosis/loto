@@ -44,33 +44,54 @@ DELETE FROM events WHERE id IN (
 	return err
 }
 
+// AppendEvent inserts a single event. Thin wrapper around AppendEvents to keep
+// the 1-arg caller surface; new code should prefer AppendEvents.
 func (s *Store) AppendEvent(ctx context.Context, e domain.Event) (string, error) {
-	if e.ID == "" {
-		e.ID = newEventID()
-	}
-	var subject sql.NullString
-	if e.SubjectUUID != "" {
-		subject = sql.NullString{Valid: true, String: e.SubjectUUID}
-	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO events(`+eventCols+`) VALUES (?,?,?,?,?,?,?)`,
-		e.ID, e.Target.Canonical, e.Kind, e.ActorUUID, subject, e.Reason, e.CreatedAt.UnixNano())
-	if err != nil {
+	evs := []domain.Event{e}
+	if err := s.AppendEvents(ctx, evs); err != nil {
 		return "", err
 	}
-	return e.ID, nil
+	return evs[0].ID, nil
+}
+
+// AppendEvents inserts a batch of events in a single transaction. Empty input
+// is a no-op. Event.ID is assigned in-place when empty so callers can read it
+// back after the call.
+func (s *Store) AppendEvents(ctx context.Context, evs []domain.Event) error {
+	if len(evs) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := appendEventsTx(ctx, tx, evs); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func appendEventTx(ctx context.Context, tx *sql.Tx, e domain.Event) error {
-	if e.ID == "" {
-		e.ID = newEventID()
+	evs := []domain.Event{e}
+	return appendEventsTx(ctx, tx, evs)
+}
+
+func appendEventsTx(ctx context.Context, tx *sql.Tx, evs []domain.Event) error {
+	for i := range evs {
+		if evs[i].ID == "" {
+			evs[i].ID = newEventID()
+		}
+		var subject sql.NullString
+		if evs[i].SubjectUUID != "" {
+			subject = sql.NullString{Valid: true, String: evs[i].SubjectUUID}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO events(`+eventCols+`) VALUES (?,?,?,?,?,?,?)`,
+			evs[i].ID, evs[i].Target.Canonical, evs[i].Kind, evs[i].ActorUUID, subject, evs[i].Reason, evs[i].CreatedAt.UnixNano()); err != nil {
+			return err
+		}
 	}
-	var subject sql.NullString
-	if e.SubjectUUID != "" {
-		subject = sql.NullString{Valid: true, String: e.SubjectUUID}
-	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO events(`+eventCols+`) VALUES (?,?,?,?,?,?,?)`,
-		e.ID, e.Target.Canonical, e.Kind, e.ActorUUID, subject, e.Reason, e.CreatedAt.UnixNano())
-	return err
+	return nil
 }
 
 func (s *Store) EventsForTarget(ctx context.Context, t domain.Target) ([]domain.Event, error) {

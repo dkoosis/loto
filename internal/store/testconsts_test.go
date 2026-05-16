@@ -6,4 +6,5 @@ const (
 	tcTest  = "test"
 	tcChmod = "chmod"
 	tcXGo   = "x.go"
+	tcAGo   = "a.go"
 )
