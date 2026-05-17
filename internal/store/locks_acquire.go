@@ -45,12 +45,6 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 	}
 	now := time.Now()
 
-	// collectAllBlockers also performs lazy GC of stale rows. Reclaimed paths
-	// are not chmod-restored here: collectBlockers only deletes rows that
-	// overlap the requested locks, and overlapping new locks immediately
-	// re-strip the same paths. Orphan-mode (stale row reclaimed with no new
-	// overlap) cannot occur via this code path; doctor's stale-scan handles
-	// non-overlapping orphans.
 	blockers, err := collectAllBlockers(ctx, tx, all, sorted, now, live)
 	if err != nil {
 		return nil, err
@@ -141,7 +135,7 @@ func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord
 	seen := map[string]bool{}
 	var blockers []domain.LockRecord
 	for i := range sorted {
-		bs, err := collectBlockers(ctx, tx, all, sorted[i], now, live)
+		bs, err := reclaimStaleAndCollectBlockers(ctx, tx, all, sorted[i], now, live)
 		if err != nil {
 			return nil, err
 		}
@@ -206,7 +200,7 @@ func (s *Store) appendModeRestoreFailedEvent(ctx context.Context, path, byAgent 
 	return err
 }
 
-func collectBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, l domain.LockRecord, now time.Time, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
+func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, l domain.LockRecord, now time.Time, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
 	var blockers []domain.LockRecord
 	for i := range all {
 		ex := &all[i]
