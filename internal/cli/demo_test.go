@@ -345,7 +345,9 @@ func TestDemo_08_Version(t *testing.T) {
 	say(t, "loto rev= pins the binary commit. when peers disagree about a lock,")
 	say(t, "first thing to compare: are we even on the same loto?")
 	beat(t)
-	a.do(t, "version")
+	_, out := a.do(t, "version")
+	mustContain(t, out, "loto rev=")
+	mustContain(t, out, "built=")
 }
 
 // ─── 09-16 · coordination patterns ───────────────────────────────────────────
