@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS events (
   reason           TEXT NOT NULL DEFAULT '',
   created_at       INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_events_target ON events(target_canonical, created_at);
-CREATE INDEX IF NOT EXISTS idx_events_kind   ON events(event_kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_target     ON events(target_canonical, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_kind       ON events(event_kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_created_id ON events(created_at, id);
 
-PRAGMA user_version = 5;
+PRAGMA user_version = 6;

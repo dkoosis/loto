@@ -14,7 +14,7 @@ import (
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
-const schemaUserVersion = 5
+const schemaUserVersion = 6
 
 var errUserVersionMismatch = errors.New("loto: schema user_version mismatch")
 
