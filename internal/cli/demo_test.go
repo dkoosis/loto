@@ -311,7 +311,11 @@ func TestDemo_06_GlobalStatus(t *testing.T) {
 	say(t, "a third session walks in and wants the lay of the land.")
 	beat(t)
 	c := solo(t)
-	c.do(t, "status")
+	_, out := c.do(t, "status")
+	mustContain(t, out, "a.go")
+	mustContain(t, out, "internal/store/store.go")
+	mustContain(t, out, "doc pass")
+	mustContain(t, out, "extract helper")
 	beat(t)
 	say(t, "no --mine = every active lock in the repo, with owner UUIDs + intent.")
 }
