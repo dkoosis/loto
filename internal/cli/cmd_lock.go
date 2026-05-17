@@ -66,7 +66,7 @@ func validateLockTargets(args []string, repoTop string) ([]domain.Target, []rend
 	seen := make(map[string]bool, len(args))
 	var invalid []render.InvalidTarget
 	for _, raw := range args {
-		t, err := domain.Canonicalize(normalizeRepoPath(raw, repoTop))
+		t, err := resolveCLITarget(repoTop, raw)
 		if err != nil {
 			invalid = append(invalid, render.InvalidTarget{Path: raw, Reason: classifyCanonicalizeErr(err)})
 			continue

@@ -185,6 +185,13 @@ func resolveTargets(arg string) ([]domain.Target, error) {
 	return []domain.Target{t}, nil
 }
 
+// resolveCLITarget normalizes a user-supplied path (absolute, relative, or
+// inside repoTop) into a canonical domain.Target. Centralizes the
+// normalizeRepoPath + Canonicalize policy so future fixes land in one place.
+func resolveCLITarget(repoTop, raw string) (domain.Target, error) {
+	return domain.Canonicalize(normalizeRepoPath(raw, repoTop))
+}
+
 // normalizeRepoPath translates an absolute path that lies inside repoTop to a
 // repo-relative POSIX path so domain.Canonicalize (which rejects absolute
 // paths) accepts it. Inputs that are already relative, lie outside repoTop, or

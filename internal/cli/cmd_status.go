@@ -33,7 +33,7 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fmt.Fprintf(stdout, "state:   %s\n", rt.StateDir)
 
 	if fs.NArg() == 1 {
-		t, err := domain.Canonicalize(normalizeRepoPath(fs.Arg(0), repoTop))
+		t, err := resolveCLITarget(repoTop, fs.Arg(0))
 		if err != nil {
 			fmt.Fprintf(stderr, "✗ %v\n", err)
 			return 2

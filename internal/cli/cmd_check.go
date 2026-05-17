@@ -102,13 +102,12 @@ func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repo
 	var invalid []checkInvalid
 	seen := map[string]bool{}
 	for _, raw := range paths {
-		p := normalizeRepoPath(raw, repoTop)
-		t, err := domain.Canonicalize(p)
+		t, err := resolveCLITarget(repoTop, raw)
 		if err != nil {
 			invalid = append(invalid, checkInvalid{Path: raw, Reason: classifyCanonicalizeErr(err)})
 			continue
 		}
-		rows = appendCheckConflictsForTarget(rows, seen, p, t, all, myUUID)
+		rows = appendCheckConflictsForTarget(rows, seen, t.Canonical, t, all, myUUID)
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Path != rows[j].Path {
