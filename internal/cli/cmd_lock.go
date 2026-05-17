@@ -157,7 +157,7 @@ func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now t
 			CreatedAt:   now,
 			ExpiresAt:   now.Add(ttl),
 			Host:        rt.Host,
-			PID:         selfPID(),
+			PID:         stampPID(),
 		})
 	}
 	return recs

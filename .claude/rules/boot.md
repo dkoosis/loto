@@ -1,9 +1,10 @@
-## Boot
-updated: 2026-05-16
+# Boot
+updated: 2026-05-17
 
-→ `bd ready` empty. New work → brainstorm shape first; else loose thread.
-
-state: `make demo` output is ugly; awaiting fo-fl0 (fo:scene format) in `../fo`.
+→ extend testscript coverage — doctor stale-break, hook entrypoints, error paths. `go test ./cmd/loto/ -run TestScripts`
 
 ✓ done
-- filed fo-fl0 — fo:scene input format request, full grammar + example in bead body
+- testscript wired (4 scripts pass) + LOTO_PID hook for subprocess-stamped locks
+
+‡ traps
+- per-script setup mints agents directly to disk (✗ os.Setenv races); see mintAgentFile
