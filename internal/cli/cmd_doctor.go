@@ -17,28 +17,30 @@ import (
 func init() { register("doctor", cmdDoctor) } //nolint:gochecknoinits // command registry pattern
 
 func renderDoctorReport(stdout io.Writer, report *store.DoctorReport) {
-	sort.Slice(report.StaleLocks, func(i, j int) bool {
-		return report.StaleLocks[i].Target.Canonical < report.StaleLocks[j].Target.Canonical
+	staleLocks := append([]domain.LockRecord(nil), report.StaleLocks...)
+	sort.Slice(staleLocks, func(i, j int) bool {
+		return staleLocks[i].Target.Canonical < staleLocks[j].Target.Canonical
 	})
-	sort.Slice(report.SidecarFindings, func(i, j int) bool {
-		if report.SidecarFindings[i].Target != report.SidecarFindings[j].Target {
-			return report.SidecarFindings[i].Target < report.SidecarFindings[j].Target
+	sidecarFindings := append([]store.SidecarFinding(nil), report.SidecarFindings...)
+	sort.Slice(sidecarFindings, func(i, j int) bool {
+		if sidecarFindings[i].Target != sidecarFindings[j].Target {
+			return sidecarFindings[i].Target < sidecarFindings[j].Target
 		}
-		return report.SidecarFindings[i].Reason < report.SidecarFindings[j].Reason
+		return sidecarFindings[i].Reason < sidecarFindings[j].Reason
 	})
-	if len(report.StaleLocks) == 0 && len(report.SidecarFindings) == 0 && report.IntegrityOK {
+	if len(staleLocks) == 0 && len(sidecarFindings) == 0 && report.IntegrityOK {
 		fmt.Fprintln(stdout, "✓ healthy")
 		return
 	}
 	fmt.Fprintf(stdout, "✗ stale_locks=%d sidecar_findings=%d integrity=%s\n",
-		len(report.StaleLocks), len(report.SidecarFindings), report.IntegrityDetail)
-	for i := range report.StaleLocks {
-		l := &report.StaleLocks[i]
+		len(staleLocks), len(sidecarFindings), report.IntegrityDetail)
+	for i := range staleLocks {
+		l := &staleLocks[i]
 		fmt.Fprintf(stdout, "✗ stale target=%s owner=%s expires_at=%s host=%s pid=%d\n",
 			relPath(l.Target.Canonical), l.OwnerUUID, l.ExpiresAt.UTC().Format(time.RFC3339), l.Host, l.PID)
 	}
-	for i := range report.SidecarFindings {
-		f := &report.SidecarFindings[i]
+	for i := range sidecarFindings {
+		f := &sidecarFindings[i]
 		if f.Detail != "" {
 			fmt.Fprintf(stdout, "✗ zombie_held target=%s pid=%d reason=%s cwd=%s\n",
 				relPath(f.Target), f.PID, f.Reason, f.Detail)
