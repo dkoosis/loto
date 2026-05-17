@@ -22,13 +22,13 @@ import (
 // in-process. Without this, `loto` calls inside a script would shell out to
 // whatever's on PATH.
 func TestMain(m *testing.M) {
-	os.Exit(testscript.RunMain(m, map[string]func() int{
-		"loto": func() int {
+	testscript.Main(m, map[string]func(){
+		"loto": func() {
 			ctx, stop := context.WithCancel(context.Background())
 			defer stop()
-			return cli.RunContext(ctx, os.Args[1:], os.Stdout, os.Stderr)
+			os.Exit(cli.RunContext(ctx, os.Args[1:], os.Stdout, os.Stderr))
 		},
-	}))
+	})
 }
 
 // TestScripts runs every *.txtar under testdata/script.
@@ -111,7 +111,7 @@ func mintAgentFile(home, handle string) (string, error) {
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", err
 	}
-	uuid := fmt.Sprintf("00000000-0000-4000-8000-%s", hex.EncodeToString(buf[:]))
+	uuid := "00000000-0000-4000-8000-" + hex.EncodeToString(buf[:])
 	a := agent{UUID: uuid, Handle: handle, CreatedAt: time.Now().UTC(), Host: "testscript"}
 	dir := filepath.Join(home, ".loto", "agents")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
