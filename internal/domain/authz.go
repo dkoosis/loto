@@ -5,10 +5,7 @@ import (
 	"time"
 )
 
-var (
-	ErrNotOwner        = errors.New("not the lock owner")
-	ErrLiveLockNoForce = errors.New("lock is live; --force required")
-)
+var ErrLiveLockNoForce = errors.New("lock is live; --force required")
 
 func AuthorizeBreak(l LockRecord, force bool, now time.Time, thisHost string, live PidLiveProbe) error {
 	if force {
