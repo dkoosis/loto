@@ -1,0 +1,10 @@
+# Identity round-trip: pinned LOTO_AGENT_ID surfaces the right handle.
+
+env LOTO_AGENT_ID=$ALICE
+loto whoami
+stdout 'AliceTester'
+
+env LOTO_AGENT_ID=$BOB
+loto whoami
+stdout 'BobTester'
+! stdout 'AliceTester'

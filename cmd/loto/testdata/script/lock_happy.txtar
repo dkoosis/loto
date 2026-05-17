@@ -1,0 +1,18 @@
+# Acquire a lock, see it in status, release it.
+
+env LOTO_AGENT_ID=$ALICE
+
+touch internal/store/store.go
+
+loto lock internal/store/store.go -t 'refactor query path'
+stdout '✓ locked count=1'
+
+loto status
+stdout 'owner='$ALICE
+stdout 'refactor query path'
+
+loto unlock internal/store/store.go -t 'done'
+stdout '✓ unlocked'
+
+loto status --mine
+! stdout 'owner='$ALICE

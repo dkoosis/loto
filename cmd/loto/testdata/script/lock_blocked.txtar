@@ -1,0 +1,18 @@
+# Alice locks a file; Bob tries to lock the same file and is blocked.
+
+touch internal/store/store.go
+
+env LOTO_AGENT_ID=$ALICE
+loto lock internal/store/store.go -t 'first edit'
+stdout '✓ locked count=1'
+
+env LOTO_AGENT_ID=$BOB
+! loto lock internal/store/store.go -t 'second edit'
+stdout '✗ blocked'
+stdout 'AliceTester'
+stdout 'first edit'
+
+# Bob can still lock something unrelated.
+touch other.go
+loto lock other.go -t 'unrelated'
+stdout '✓ locked count=1'

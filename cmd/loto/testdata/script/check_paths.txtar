@@ -1,0 +1,13 @@
+# `loto check` reports conflicts on held paths.
+
+touch a.go b.go
+
+env LOTO_AGENT_ID=$ALICE
+loto lock a.go -t 'alice on a'
+
+env LOTO_AGENT_ID=$BOB
+! loto check a.go b.go
+stdout '✗ conflicts count=1'
+stdout 'path=a.go'
+stdout $ALICE
+! stdout 'path=b.go'
