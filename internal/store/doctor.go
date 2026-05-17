@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"loto/internal/domain"
@@ -50,12 +51,28 @@ func (s *Store) DoctorAuditWith(ctx context.Context, thisHost string, live domai
 			}
 		}
 	}
-	var detail string
-	if err := s.db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&detail); err != nil {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA integrity_check`)
+	if err != nil {
 		return nil, err
 	}
-	r.IntegrityDetail = detail
-	r.IntegrityOK = detail == "ok"
+	defer rows.Close()
+	var lines []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			return nil, err
+		}
+		lines = append(lines, line)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	r.IntegrityOK = len(lines) == 1 && lines[0] == "ok"
+	if r.IntegrityOK {
+		r.IntegrityDetail = "ok"
+	} else {
+		r.IntegrityDetail = strings.Join(lines, "; ")
+	}
 	return r, nil
 }
 
