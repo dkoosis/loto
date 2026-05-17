@@ -121,13 +121,8 @@ func TestGCStaleAgents(t *testing.T) {
 
 // TestEnsureDistinctClaudeSessions asserts that two Claude Code sessions on
 // the same host resolve to distinct identities. Each Claude session exports a
-// unique CLAUDE_CODE_SESSION_ID; Ensure() must consume that signal so that
-// concurrent sessions do not collapse onto a shared owner_uuid via the
-// mostRecentAgent fallback.
-//
-// Currently fails — see gh#45 (P0 identity collision). Skip-marker is the
-// fix-tracking signal: once Ensure() honors CLAUDE_CODE_SESSION_ID, drop the
-// t.Skip call.
+// unique CLAUDE_CODE_SESSION_ID; Ensure() consumes that signal so concurrent
+// sessions do not collapse onto a shared owner_uuid via mostRecentAgent.
 func TestEnsureDistinctClaudeSessions(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
