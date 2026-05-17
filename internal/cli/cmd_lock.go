@@ -49,13 +49,7 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	defer rt.Close()
 
-	live := domain.PidLiveProbe(func(host string, pid int) bool {
-		if host != rt.Host {
-			return true
-		}
-		return pidLive(pid)
-	})
-	return acquireBatch(rt, targets, *intent, *ttl, live, stdout, stderr)
+	return acquireBatch(rt, targets, *intent, *ttl, rt.liveProbe(), stdout, stderr)
 }
 
 // validateLockTargets canonicalizes and Lstat-validates each path before any

@@ -68,12 +68,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 	defer rt.Close()
 
-	live := func(host string, pid int) bool {
-		if host != rt.Host {
-			return true
-		}
-		return pidLive(pid)
-	}
+	live := rt.liveProbe()
 
 	repoTop, _ := repoTopForCwd(ctx)
 	report, err := rt.Health().DoctorAuditWith(rt.Ctx, rt.Host, live, store.SidecarCheck{

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"loto/internal/domain"
 	"loto/internal/identity"
 	"loto/internal/store"
 )
@@ -95,6 +96,18 @@ func (r *runtime) Locks() store.LockOps { return r.Store }
 
 // Health returns the audit/repair view of the underlying store.
 func (r *runtime) Health() store.Health { return r.Store }
+
+// liveProbe returns a PidLiveProbe that treats remote-host PIDs as live and
+// probes local PIDs via pidLive. Centralizes the live-probe closure that
+// otherwise gets re-built at every lock/unlock/doctor call site.
+func (r *runtime) liveProbe() domain.PidLiveProbe {
+	return func(host string, pid int) bool {
+		if host != r.Host {
+			return true
+		}
+		return pidLive(pid)
+	}
+}
 
 func stateDirForCwd(ctx context.Context) (string, error) {
 	top, err := gitRevParseToplevel(ctx)
