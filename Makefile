@@ -65,7 +65,7 @@ demo: ## Run CLI primitive demos with narrated -v transcript
 	@go test -v -run Demo -count=1 ./internal/cli
 
 deploy: install ## Build, install, and verify
-	@echo "=== deployed ($$(loto --version 2>/dev/null || echo unknown)) ==="
+	@echo "=== deployed ($$(loto version 2>/dev/null || echo unknown)) ==="
 
 report: ## Structured QA output for agents/tools (always exits 0)
 	@( $(REPORT_CMD) ) | fo --format llm || true
