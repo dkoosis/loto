@@ -28,7 +28,7 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	defer rt.Close()
 
 	repoTop, _ := repoTopForCwd(ctx)
-	fmt.Fprintf(stdout, "project: %s\n", ProjectSlug(repoTop))
+	fmt.Fprintf(stdout, "project: %s\n", ResolveAndPinProjectSlug(repoTop))
 	fmt.Fprintf(stdout, "repo:    %s\n", repoTop)
 	fmt.Fprintf(stdout, "state:   %s\n", rt.StateDir)
 

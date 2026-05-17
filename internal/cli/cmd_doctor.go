@@ -85,7 +85,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 3
 	}
 
-	fmt.Fprintf(stdout, "project: %s\n", ProjectSlug(repoTop))
+	fmt.Fprintf(stdout, "project: %s\n", ResolveAndPinProjectSlug(repoTop))
 	fmt.Fprintf(stdout, "repo:    %s\n", repoTop)
 	fmt.Fprintf(stdout, "state:   %s\n", rt.StateDir)
 

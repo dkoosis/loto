@@ -19,7 +19,7 @@ func StateDir(repoTop string) string {
 	if v := os.Getenv("LOTO_BASE"); v != "" {
 		return v
 	}
-	return filepath.Join(xdgStateHome(), "loto", "projects", ProjectSlug(repoTop))
+	return filepath.Join(xdgStateHome(), "loto", "projects", ResolveAndPinProjectSlug(repoTop))
 }
 
 func xdgStateHome() string {
@@ -33,9 +33,9 @@ func xdgStateHome() string {
 	return filepath.Join(home, ".local", "state")
 }
 
-// ProjectSlug returns a stable slug for the repo at repoTop. Uses pinned slug
+// ResolveAndPinProjectSlug returns a stable slug for the repo at repoTop. Uses pinned slug
 // in $GIT_COMMON_DIR/.loto-slug if present; else origin remote; else dir name.
-func ProjectSlug(repoTop string) string {
+func ResolveAndPinProjectSlug(repoTop string) string {
 	if slug := pinnedSlug(repoTop); slug != "" {
 		return slug
 	}

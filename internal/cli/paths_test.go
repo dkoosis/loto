@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestProjectSlugFromOriginRemote(t *testing.T) {
+func TestResolveAndPinProjectSlugFromOriginRemote(t *testing.T) {
 	dir := t.TempDir()
 	run := func(args ...string) {
 		t.Helper()
@@ -20,13 +20,13 @@ func TestProjectSlugFromOriginRemote(t *testing.T) {
 	run("init", "-q")
 	run("remote", "add", "origin", "git@github.com:dkoosis/loto.git")
 
-	got := ProjectSlug(dir)
+	got := ResolveAndPinProjectSlug(dir)
 	if got != tcSlugDKLoto {
-		t.Errorf("ProjectSlug = %q; want dkoosis-loto", got)
+		t.Errorf("ResolveAndPinProjectSlug = %q; want dkoosis-loto", got)
 	}
 }
 
-func TestProjectSlugFallsBackToDirName(t *testing.T) {
+func TestResolveAndPinProjectSlugFallsBackToDirName(t *testing.T) {
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "myproject")
 	if err := exec.Command("mkdir", dir).Run(); err != nil {
@@ -37,9 +37,9 @@ func TestProjectSlugFallsBackToDirName(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	got := ProjectSlug(dir)
+	got := ResolveAndPinProjectSlug(dir)
 	if got != "myproject" {
-		t.Errorf("ProjectSlug = %q; want myproject", got)
+		t.Errorf("ResolveAndPinProjectSlug = %q; want myproject", got)
 	}
 }
 
