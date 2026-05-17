@@ -62,3 +62,18 @@ func TestCheckAcceptsAbsolutePathInsideRepo(t *testing.T) {
 		t.Errorf("expected conflict report for abs path: %q", out.String())
 	}
 }
+
+// Negative case for normalizeRepoPath: an absolute path that does not lie
+// inside the repo must still be rejected as repo-escape (no silent acceptance).
+func TestCheckRejectsAbsolutePathOutsideRepo(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, "/etc/hosts"}, &out, &bytes.Buffer{})
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d: %q", code, out.String())
+	}
+	if !strings.Contains(out.String(), "✗ invalid") || !strings.Contains(out.String(), "/etc/hosts") {
+		t.Errorf("expected invalid report citing /etc/hosts: %q", out.String())
+	}
+}

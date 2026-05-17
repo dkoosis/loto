@@ -202,14 +202,21 @@ func normalizeRepoPath(p, repoTop string) string {
 	if err != nil {
 		return p
 	}
-	// EvalSymlinks both sides so /var/... vs /private/var/... (macOS tmp) and
-	// other symlinked checkout roots resolve to the same prefix.
+	// EvalSymlinks the top so /var/... vs /private/var/... (macOS tmp) and
+	// other symlinked checkout roots resolve. We deliberately don't resolve p:
+	// symlink-as-lock-target is rejected upstream (Lstat), and skipping
+	// EvalSymlinks(p) avoids a failure mode when p doesn't exist on disk yet
+	// (e.g., loto check on a newly added file).
 	if r, err := filepath.EvalSymlinks(absTop); err == nil {
 		absTop = r
 	}
 	absP := filepath.Clean(p)
 	if r, err := filepath.EvalSymlinks(absP); err == nil {
 		absP = r
+	} else if r, err := filepath.EvalSymlinks(filepath.Dir(absP)); err == nil {
+		// p doesn't exist yet (e.g., loto check on a newly added file under
+		// `git diff --cached`). Resolve symlinks on the longest existing prefix.
+		absP = filepath.Join(r, filepath.Base(absP))
 	}
 	rel, err := filepath.Rel(absTop, absP)
 	if err != nil {
