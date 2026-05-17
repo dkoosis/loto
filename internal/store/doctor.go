@@ -51,21 +51,28 @@ func (s *Store) DoctorAuditWith(ctx context.Context, thisHost string, live domai
 			}
 		}
 	}
+	if err := s.runIntegrityCheck(ctx, r); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+func (s *Store) runIntegrityCheck(ctx context.Context, r *DoctorReport) error {
 	rows, err := s.db.QueryContext(ctx, `PRAGMA integrity_check`)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
 	var lines []string
 	for rows.Next() {
 		var line string
 		if err := rows.Scan(&line); err != nil {
-			return nil, err
+			return err
 		}
 		lines = append(lines, line)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return err
 	}
 	r.IntegrityOK = len(lines) == 1 && lines[0] == "ok"
 	if r.IntegrityOK {
@@ -73,7 +80,7 @@ func (s *Store) DoctorAuditWith(ctx context.Context, thisHost string, live domai
 	} else {
 		r.IntegrityDetail = strings.Join(lines, "; ")
 	}
-	return r, nil
+	return nil
 }
 
 // checkSidecar inspects ~/.claude/sessions/<pid>.json for a held lock and
