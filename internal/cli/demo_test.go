@@ -339,6 +339,8 @@ func TestDemo_07_DoctorStaleLock(t *testing.T) {
 	beat(t)
 	a.do(t, "doctor", "--repair")
 	beat(t)
+	_, out := a.do(t, "status")
+	mustContain(t, out, "✓ no locks")
 	say(t, "doctor keeps the lock table honest. run it when the repo feels sticky.")
 }
 
