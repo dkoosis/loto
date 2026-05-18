@@ -12,10 +12,6 @@ var registry = map[string]cmd{} //nolint:gochecknoglobals // command registry pa
 
 func register(name string, c cmd) { registry[name] = c }
 
-func Run(argv []string, stdout, stderr io.Writer) int {
-	return RunContext(context.Background(), argv, stdout, stderr)
-}
-
 func RunContext(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
 	if ctx == nil {
 		ctx = context.Background()
