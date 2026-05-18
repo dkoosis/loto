@@ -21,15 +21,6 @@ const (
 	BreakStale
 )
 
-// BreakLock is a thin wrapper around BreakLocks for single-target callers.
-func (s *Store) BreakLock(ctx context.Context, t domain.Target, byAgent string, mode BreakMode, reason string, live domain.PidLiveProbe) error {
-	res, err := s.BreakLocks(ctx, []domain.Target{t}, byAgent, mode, reason, live)
-	if err != nil {
-		return err
-	}
-	return res[0].Err
-}
-
 // BreakLocks force/stale-reclaims a batch of locks in one transaction. Per-target
 // errors do not abort the batch — see BreakResult.Err. Returned error is non-nil
 // only on internal/SQL failures. Results are returned in input order.

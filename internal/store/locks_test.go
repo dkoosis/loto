@@ -50,11 +50,13 @@ func TestBreakLockStaleOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.BreakLock(ctx, l.Target, tcBob, BreakStale, tcTest, live); err == nil {
+	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, tcTest, live)
+	if err != nil || res[0].Err == nil {
 		t.Fatal("live break without force must fail")
 	}
-	if err := s.BreakLock(ctx, l.Target, tcBob, BreakForce, "deadline", live); err != nil {
-		t.Fatalf("force break: %v", err)
+	res, err = s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "deadline", live)
+	if err != nil || res[0].Err != nil {
+		t.Fatalf("force break: %v / %v", err, res[0].Err)
 	}
 	got, _ := s.LockAt(ctx, l.Target)
 	if got != nil {
@@ -563,8 +565,9 @@ func TestBreakLock_RestoresWriteMode(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.BreakLock(ctx, l.Target, tcBob, BreakStale, "stale", live); err != nil {
-		t.Fatal(err)
+	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "stale", live)
+	if err != nil || res[0].Err != nil {
+		t.Fatalf("break: %v / %v", err, res[0].Err)
 	}
 	st, _ := os.Stat(l.Target.Canonical)
 	if st.Mode().Perm()&0o200 == 0 {
