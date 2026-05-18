@@ -90,13 +90,6 @@ func repoTopForCwd(ctx context.Context) (string, error) {
 
 func (r *runtime) Close() error { return r.Store.Close() }
 
-// Locks returns the lock-ops view of the underlying store.
-// Callers should prefer this over rt.Store when they only need lock ops.
-func (r *runtime) Locks() store.LockOps { return r.Store }
-
-// Health returns the audit/repair view of the underlying store.
-func (r *runtime) Health() store.Health { return r.Store }
-
 // liveProbe returns a PidLiveProbe that treats remote-host PIDs as live and
 // probes local PIDs via pidLive. Centralizes the live-probe closure that
 // otherwise gets re-built at every lock/unlock/doctor call site.

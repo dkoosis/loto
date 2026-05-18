@@ -71,7 +71,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	live := rt.liveProbe()
 
 	repoTop, _ := repoTopForCwd(ctx)
-	report, err := rt.Health().DoctorAuditWith(rt.Ctx, rt.Host, live, store.SidecarCheck{
+	report, err := rt.Store.DoctorAuditWith(rt.Ctx, rt.Host, live, store.SidecarCheck{
 		SidecarDir: store.DefaultSidecarDir(),
 		RepoTop:    repoTop,
 	})
@@ -104,13 +104,13 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 }
 
 func doRepair(rt *runtime, live domain.PidLiveProbe, restoreOrphan bool, orphans []string, stdout, stderr io.Writer) int {
-	if err := rt.Health().DoctorRepair(rt.Ctx, rt.Host, rt.Agent.UUID, live); err != nil {
+	if err := rt.Store.DoctorRepair(rt.Ctx, rt.Host, rt.Agent.UUID, live); err != nil {
 		fmt.Fprintf(stderr, "✗ repair: %v\n", err)
 		return 3
 	}
 	fmt.Fprintln(stdout, "✓ repaired")
 	if restoreOrphan && len(orphans) > 0 {
-		restored, failures := rt.Health().RestoreOrphanMode(orphans)
+		restored, failures := rt.Store.RestoreOrphanMode(orphans)
 		fmt.Fprintf(stdout, "✓ restored-orphan-mode count=%d failed=%d\n", len(restored), len(failures))
 		for _, f := range failures {
 			fmt.Fprintf(stdout, "✗ restore-orphan-mode target=%s err=%v\n", f.Path, f.Err)
@@ -121,7 +121,7 @@ func doRepair(rt *runtime, live domain.PidLiveProbe, restoreOrphan bool, orphans
 
 func scanAndReportOrphans(rt *runtime, repoTop string, stdout io.Writer) []string {
 	candidates := walkRepoCandidates(repoTop)
-	orphans, err := rt.Health().ScanOrphanModes(rt.Ctx, candidates)
+	orphans, err := rt.Store.ScanOrphanModes(rt.Ctx, candidates)
 	if err != nil {
 		fmt.Fprintf(stdout, "✗ scan-orphans: %v\n", err)
 		return nil

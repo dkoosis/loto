@@ -41,7 +41,7 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return statusSingleTarget(stdout, rt, t)
 	}
 
-	all, err := rt.Locks().ListLocks(rt.Ctx)
+	all, err := rt.Store.ListLocks(rt.Ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
@@ -85,7 +85,7 @@ func printStatusLocks(stdout io.Writer, all []domain.LockRecord) {
 }
 
 func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
-	all, err := rt.Locks().ListLocks(rt.Ctx)
+	all, err := rt.Store.ListLocks(rt.Ctx)
 	if err != nil {
 		fmt.Fprintf(w, "✗ %v\n", err)
 		return 3
