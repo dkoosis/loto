@@ -180,6 +180,10 @@ func (s *Store) beginTx(ctx context.Context) (*sql.Tx, func(), error) {
 	}
 	cleanup := func() {
 		_ = tx.Rollback()
+		// Reset busy_timeout to the DSN default before the conn returns to
+		// the pool — otherwise the next caller inherits this caller's
+		// ctx-scaled value (gh#55 follow-up).
+		_, _ = conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout=%d", txBusyTimeoutDefaultMs))
 		_ = conn.Close()
 	}
 	return tx, cleanup, nil

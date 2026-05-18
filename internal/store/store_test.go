@@ -96,6 +96,46 @@ func TestTxBusyTimeoutMs(t *testing.T) {
 	}
 }
 
+// TestBeginTxResetsBusyTimeoutOnRelease verifies that beginTx's cleanup
+// restores PRAGMA busy_timeout to the DSN default before returning the
+// conn to the pool. Without the reset, a short-deadline caller poisons
+// the next non-beginTx user (e.g. doctor's PRAGMA integrity_check) with
+// a stale, possibly sub-ms busy_timeout.
+func TestBeginTxResetsBusyTimeoutOnRelease(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "loto.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// Pin the pool to a single conn so we observe the same conn back.
+	s.db.SetMaxOpenConns(1)
+
+	// Run a tx with a near-zero deadline → busy_timeout scales to 1ms.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(500*time.Microsecond))
+	defer cancel()
+	_, cleanup, err := s.beginTx(ctx)
+	if err != nil {
+		t.Fatalf("beginTx: %v", err)
+	}
+	cleanup()
+
+	// Pull the same conn back via the pool and check PRAGMA.
+	conn, err := s.db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	defer conn.Close()
+	var got int
+	if err := conn.QueryRowContext(context.Background(), `PRAGMA busy_timeout`).Scan(&got); err != nil {
+		t.Fatalf("PRAGMA: %v", err)
+	}
+	if got != txBusyTimeoutDefaultMs {
+		t.Fatalf("busy_timeout = %d, want %d (reset on release)", got, txBusyTimeoutDefaultMs)
+	}
+}
+
 func TestStore_OpFlockPathDerivedFromDBPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "loto.db")
