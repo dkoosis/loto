@@ -79,7 +79,7 @@ func mustOpen(t *testing.T) *Store {
 	return s
 }
 
-// mkFileLock creates a real file under t.TempDir() and returns a LockRecord
+// mkFileLock creates a realPath file under t.TempDir() and returns a LockRecord
 // pointing to its absolute path with Kind=KindFile. Use when AcquireLocks
 // validation requires the target to actually exist on disk.
 func mkFileLock(t *testing.T, name, agent string, expIn time.Duration) domain.LockRecord {
@@ -111,7 +111,7 @@ func TestBreakLocks_RestoreErrSurfaced(t *testing.T) {
 	}
 
 	// Inject chmod failure for the restore phase only (post-strip). The strip
-	// during AcquireLocks already ran via the real chmodFn; flip it now so the
+	// during AcquireLocks already ran via the realPath chmodFn; flip it now so the
 	// post-commit restoreWrite returns EPERM.
 	orig := chmodFn
 	defer func() { chmodFn = orig }()
@@ -722,5 +722,45 @@ func TestReleaseLocks_RestoreFailureIsReported(t *testing.T) {
 	}
 	if results[0].RestoreErr == nil {
 		t.Error("RestoreErr nil")
+	}
+}
+
+// TestValidateFileTarget_TypedErrors verifies validateFileTarget returns
+// *TargetValidationError with reason + Nlink preserved (replaces the prior
+// bare ErrTarget* sentinels that lost state across the wrap).
+func TestValidateFileTarget_TypedErrors(t *testing.T) {
+	dir := t.TempDir()
+
+	// symlink → ReasonSymlink
+	realPath := filepath.Join(dir, "realPath.go")
+	if err := os.WriteFile(realPath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sym := filepath.Join(dir, "sym.go")
+	if err := os.Symlink(realPath, sym); err != nil {
+		t.Fatal(err)
+	}
+	var tve *TargetValidationError
+	if err := validateFileTarget(sym); !errors.As(err, &tve) || tve.Reason != ReasonSymlink {
+		t.Fatalf("symlink: got %v, want ReasonSymlink", err)
+	}
+
+	// directory → ReasonNotRegular
+	tve = nil
+	if err := validateFileTarget(dir); !errors.As(err, &tve) || tve.Reason != ReasonNotRegular {
+		t.Fatalf("dir: got %v, want ReasonNotRegular", err)
+	}
+
+	// hard link → ReasonMultiLinked + Nlink populated
+	hard := filepath.Join(dir, "hard.go")
+	if err := os.Link(realPath, hard); err != nil {
+		t.Fatal(err)
+	}
+	tve = nil
+	if err := validateFileTarget(realPath); !errors.As(err, &tve) || tve.Reason != ReasonMultiLinked {
+		t.Fatalf("multi-link: got %v, want ReasonMultiLinked", err)
+	}
+	if tve.Nlink < 2 {
+		t.Fatalf("Nlink not preserved: got %d, want >= 2", tve.Nlink)
 	}
 }

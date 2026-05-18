@@ -120,13 +120,13 @@ func validateFileTarget(p string) error {
 		return fmt.Errorf("validate %s: %w", p, err)
 	}
 	if lst.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("validate %s: %w", p, ErrTargetSymlink)
+		return &TargetValidationError{Path: p, Reason: ReasonSymlink}
 	}
 	if !lst.Mode().IsRegular() {
-		return fmt.Errorf("validate %s: %w", p, ErrTargetNotRegular)
+		return &TargetValidationError{Path: p, Reason: ReasonNotRegular}
 	}
 	if sys, ok := lst.Sys().(*syscall.Stat_t); ok && sys.Nlink > 1 {
-		return fmt.Errorf("validate %s (Nlink=%d): %w", p, sys.Nlink, ErrTargetMultiLinked)
+		return &TargetValidationError{Path: p, Reason: ReasonMultiLinked, Nlink: uint64(sys.Nlink)}
 	}
 	return nil
 }

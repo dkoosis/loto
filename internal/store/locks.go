@@ -18,12 +18,40 @@ const (
 	EventModeRestoreFailed  = "mode_restore_failed"
 )
 
-var (
-	ErrNoLockAtTarget    = errors.New("no lock at target")
-	ErrTargetSymlink     = errors.New("symlink not supported")
-	ErrTargetNotRegular  = errors.New("not a regular file")
-	ErrTargetMultiLinked = errors.New("multi-linked file not supported")
+var ErrNoLockAtTarget = errors.New("no lock at target")
+
+// TargetValidationError reports why a target path can't be locked. Replaces
+// the prior bare-sentinel design: ErrTargetMultiLinked used to smuggle Nlink
+// through a %d in fmt.Errorf's wrap message — the sentinel could be matched
+// via errors.Is but Nlink couldn't be recovered. Holding Path + Nlink on the
+// struct preserves state across the error boundary.
+type TargetValidationError struct {
+	Path   string
+	Reason TargetValidationReason
+	Nlink  uint64 // populated for ReasonMultiLinked, zero otherwise
+}
+
+// TargetValidationReason discriminates the failure modes.
+type TargetValidationReason int
+
+const (
+	ReasonSymlink TargetValidationReason = iota
+	ReasonNotRegular
+	ReasonMultiLinked
 )
+
+func (e *TargetValidationError) Error() string {
+	switch e.Reason {
+	case ReasonSymlink:
+		return fmt.Sprintf("validate %s: symlink not supported", e.Path)
+	case ReasonNotRegular:
+		return fmt.Sprintf("validate %s: not a regular file", e.Path)
+	case ReasonMultiLinked:
+		return fmt.Sprintf("validate %s (Nlink=%d): multi-linked file not supported", e.Path, e.Nlink)
+	default:
+		return fmt.Sprintf("validate %s: unknown validation failure", e.Path)
+	}
+}
 
 // MultiConflictError aggregates blockers across multiple targets.
 type MultiConflictError struct {
