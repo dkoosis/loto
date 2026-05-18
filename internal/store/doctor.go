@@ -114,6 +114,15 @@ func checkSidecar(l domain.LockRecord, sc SidecarCheck) (SidecarFinding, bool) {
 }
 
 func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live domain.PidLiveProbe) error {
+	// Hold the op-flock across the tx AND the post-commit chmod restores
+	// so concurrent AcquireLocks can't race the filesystem half of the
+	// reclaim (loto-4qt).
+	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
+	if err != nil {
+		return err
+	}
+	defer flock.release()
+
 	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
 		return err

@@ -29,6 +29,15 @@ func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, byAgent
 		return []BreakResult{}, nil
 	}
 
+	// Hold the op-flock across the tx AND the post-commit restoreWrite so
+	// concurrent AcquireLocks can't observe a row+file pair where one side
+	// of the chmod has lagged (gh#... loto-4qt).
+	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
+	if err != nil {
+		return nil, err
+	}
+	defer flock.release()
+
 	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
