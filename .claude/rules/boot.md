@@ -1,11 +1,11 @@
 # Boot
 updated: 2026-05-17
 
-→ pick from `bd ready` — all 5 are P2 bugs already surfaced w/ `human` label from prior audit. dk decides which to take next.
+→ pick from `bd ready` — if empty, ask dk for direction.
 
 ✓ done
-- /clean: gocognit fix on DoctorAuditWith (commit 73b7879)
-- drain: queue confirmed = 5 surfaced beads, GH issues 0
+- pushed 6 commits to origin/main (loto-d17, loto-4qt, loto-att)
+- deferred loto-44q (PID-reuse fix needs dk design call on schema bump)
 
 ‡ traps
-- ready queue is all `human`-labeled — don't auto-execute, surface first
+- `bd ready` empty is the normal state post-drain, not a bug
