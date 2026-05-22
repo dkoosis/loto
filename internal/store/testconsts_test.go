@@ -7,4 +7,5 @@ const (
 	tcChmod = "chmod"
 	tcXGo   = "x.go"
 	tcAGo   = "a.go"
+	tcPing  = "ping"
 )

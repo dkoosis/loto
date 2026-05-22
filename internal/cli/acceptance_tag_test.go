@@ -38,7 +38,7 @@ func TestE2E_TagLifecycle(t *testing.T) {
 	}
 
 	// 3. bob tags a.go.
-	bobTagOut, _, code := run("tag", tcTargetA, "ETA?")
+	bobTagOut, _, code := run(tcCmdTag, tcTargetA, "ETA?")
 	if code != 0 {
 		t.Fatalf("bob tag: code=%d out=%q", code, bobTagOut)
 	}
@@ -55,12 +55,12 @@ func TestE2E_TagLifecycle(t *testing.T) {
 	}
 
 	// 5. alice self-tags (edge #2).
-	if _, _, code := run("tag", tcTargetA, "self note"); code != 0 {
+	if _, _, code := run(tcCmdTag, tcTargetA, "self note"); code != 0 {
 		t.Fatalf("alice self-tag: code=%d", code)
 	}
 
 	// 6. alice acks bob's tag.
-	if _, _, code := run("ack", bobTagID); code != 0 {
+	if _, _, code := run(tcCmdAck, bobTagID); code != 0 {
 		t.Fatalf("alice ack: code=%d", code)
 	}
 
@@ -102,15 +102,5 @@ func TestE2E_TagLifecycle(t *testing.T) {
 
 func parseTagIDFromOutput(t *testing.T, s string) string {
 	t.Helper()
-	const marker = "id="
-	i := strings.Index(s, marker)
-	if i < 0 {
-		t.Fatalf("no id= in %q", s)
-	}
-	rest := s[i+len(marker):]
-	j := strings.Index(rest, " ")
-	if j < 0 {
-		t.Fatalf("malformed: %q", s)
-	}
-	return rest[:j]
+	return extractTagID(t, s)
 }

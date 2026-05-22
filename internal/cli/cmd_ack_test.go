@@ -11,22 +11,24 @@ import (
 func runTagGetID(t *testing.T, target string) string {
 	t.Helper()
 	var out, errBuf bytes.Buffer
-	if code := Run([]string{"tag", target, "ping"}, &out, &errBuf); code != 0 {
+	if code := Run([]string{tcCmdTag, target, "ping"}, &out, &errBuf); code != 0 {
 		t.Fatalf("tag exit=%d err=%q", code, errBuf.String())
 	}
-	// "✓ tag id=t-deadbeef target=…"
-	s := out.String()
-	const marker = "id="
-	i := strings.Index(s, marker)
-	if i < 0 {
+	return extractTagID(t, out.String())
+}
+
+// extractTagID parses "✓ tag id=t-deadbeef target=…" and returns "t-deadbeef".
+func extractTagID(t *testing.T, s string) string {
+	t.Helper()
+	_, after, ok := strings.Cut(s, "id=")
+	if !ok {
 		t.Fatalf("no id= in tag output: %q", s)
 	}
-	rest := s[i+len(marker):]
-	j := strings.Index(rest, " ")
-	if j < 0 {
+	id, _, ok := strings.Cut(after, " ")
+	if !ok {
 		t.Fatalf("malformed tag output: %q", s)
 	}
-	return rest[:j]
+	return id
 }
 
 func TestCmdAck_Dismisses(t *testing.T) {
@@ -41,7 +43,7 @@ func TestCmdAck_Dismisses(t *testing.T) {
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
 	var out, errBuf bytes.Buffer
-	if code := Run([]string{"ack", id}, &out, &errBuf); code != 0 {
+	if code := Run([]string{tcCmdAck, id}, &out, &errBuf); code != 0 {
 		t.Fatalf("ack exit=%d err=%q", code, errBuf.String())
 	}
 	if !strings.Contains(out.String(), "✓ ack id="+id) {
@@ -57,14 +59,14 @@ func TestCmdAck_Idempotent(t *testing.T) {
 	t.Setenv("LOTO_AGENT_ID", bob.UUID)
 	id := runTagGetID(t, tcTargetA)
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
-	must0(t, []string{"ack", id})
-	must0(t, []string{"ack", id}) // second ack → no-op exit 0
+	must0(t, []string{tcCmdAck, id})
+	must0(t, []string{tcCmdAck, id}) // second ack → no-op exit 0
 }
 
 func TestCmdAck_UnknownID_NoOp(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
-	must0(t, []string{"ack", "t-deadbeef"})
+	must0(t, []string{tcCmdAck, "t-deadbeef"})
 }
 
 func TestCmdAck_NotMine_Rejects(t *testing.T) {
@@ -76,7 +78,7 @@ func TestCmdAck_NotMine_Rejects(t *testing.T) {
 	id := runTagGetID(t, tcTargetA)
 	// Bob (the tagger) tries to ack — addressed to alice (the lock holder).
 	var out, errBuf bytes.Buffer
-	code := Run([]string{"ack", id}, &out, &errBuf)
+	code := Run([]string{tcCmdAck, id}, &out, &errBuf)
 	if code != 3 {
 		t.Fatalf("expected exit 3 for wrong recipient; got %d out=%q err=%q", code, out.String(), errBuf.String())
 	}

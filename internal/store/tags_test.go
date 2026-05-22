@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -146,7 +147,7 @@ func TestAck_Idempotent(t *testing.T) {
 	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
 	id, err := s.InsertTag(ctx, NewTag{
 		TargetCanonical: lock.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
-		TaggerUUID: tcBob, Text: "ping",
+		TaggerUUID: tcBob, Text: tcPing,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -173,7 +174,7 @@ func TestAck_NotMine_Rejects(t *testing.T) {
 	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
 	id, err := s.InsertTag(ctx, NewTag{
 		TargetCanonical: lock.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
-		TaggerUUID: tcBob, Text: "ping",
+		TaggerUUID: tcBob, Text: tcPing,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +220,7 @@ func TestReleaseLocks_AcksTagsOnReleasedLock(t *testing.T) {
 	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
 	id, err := s.InsertTag(ctx, NewTag{
 		TargetCanonical: lock.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
-		TaggerUUID: tcBob, Text: "ping",
+		TaggerUUID: tcBob, Text: tcPing,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -249,7 +250,7 @@ func TestBreakLocks_DoesNotAckTags(t *testing.T) {
 	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
 	id, err := s.InsertTag(ctx, NewTag{
 		TargetCanonical: lock.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
-		TaggerUUID: tcBob, Text: "ping",
+		TaggerUUID: tcBob, Text: tcPing,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -327,8 +328,5 @@ func rawTagRowCount(t *testing.T, s *Store) int {
 }
 
 func errEqualsTo(got, want error) bool {
-	if got == nil || want == nil {
-		return got == want
-	}
-	return got == want || got.Error() == want.Error()
+	return errors.Is(got, want)
 }

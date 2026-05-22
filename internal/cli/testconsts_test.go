@@ -17,4 +17,6 @@ const (
 	tcStoreStoreGo = "internal/store/store.go"
 	tcIntentTest   = "test"
 	tcIntentDone   = "done"
+	tcCmdTag       = "tag"
+	tcCmdAck       = "ack"
 )

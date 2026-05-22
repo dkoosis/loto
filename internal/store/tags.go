@@ -195,4 +195,3 @@ func (s *Store) Ack(ctx context.Context, tagID, byUUID string) error {
 	}
 	return nil // already acked (edge #10)
 }
-

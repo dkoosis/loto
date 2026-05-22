@@ -132,13 +132,12 @@ func ackTagsForReleaseTx(ctx context.Context, tx *sql.Tx, canonicals []string, b
 	placeholders, args := inClauseStrings(canonicals)
 	args = append([]any{time.Now().UnixNano()}, args...)
 	args = append(args, byAgent)
-	q := `UPDATE tags SET acked_at = ?
-	      WHERE acked_at IS NULL
-	        AND (target_canonical, lock_owner_uuid, lock_created_at) IN (
-	          SELECT target_canonical, owner_uuid, created_at FROM locks
-	          WHERE target_canonical IN (` + placeholders + `) AND owner_uuid = ?
-	        )`
-	_, err := tx.ExecContext(ctx, q, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+	_, err := tx.ExecContext(ctx, `UPDATE tags SET acked_at = ?`+ //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+		` WHERE acked_at IS NULL`+
+		` AND (target_canonical, lock_owner_uuid, lock_created_at) IN (`+
+		`   SELECT target_canonical, owner_uuid, created_at FROM locks`+
+		`   WHERE target_canonical IN (`+placeholders+`) AND owner_uuid = ?`+
+		` )`, args...)
 	return err
 }
 
