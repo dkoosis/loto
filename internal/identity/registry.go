@@ -15,12 +15,28 @@ import (
 	"time"
 )
 
-// handleShape constrains LOTO_HANDLE input to the PascalCase adjective+noun
-// form randomHandle emits. The hyphen in the second group accommodates noun
-// list entries like "aye-aye" and "musk-ox".
+// handleShape constrains LOTO_HANDLE to the same general PascalCase display
+// shape as generated handles. It does not require membership in the built-in
+// adjective/animal lists. The hyphen in the second group accommodates entries
+// like "aye-aye" and "musk-ox".
 var handleShape = regexp.MustCompile(`^[A-Z][a-z]+(?:[A-Z][a-z-]+)+$`)
 
-var errInvalidHandle = errors.New("invalid LOTO_HANDLE")
+// agentIDShape matches RFC 4122 v4 UUIDs as emitted by newUUID. Validating
+// LOTO_AGENT_ID against this before any filepath.Join is what prevents
+// `LOTO_AGENT_ID=../../etc/passwd` from escaping the registry directory.
+var agentIDShape = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+var (
+	errInvalidHandle  = errors.New("invalid LOTO_HANDLE")
+	errInvalidAgentID = errors.New("invalid LOTO_AGENT_ID")
+	errStaleAgentID   = errors.New("stale LOTO_AGENT_ID")
+)
+
+// fallbackFreshness bounds how recently mostRecentAgent's pick must have
+// been created to be usable as an interactive fallback. Older records are
+// almost certainly from a long-finished session; reusing them would silently
+// re-attribute new locks to a dead identity.
+const fallbackFreshness = 24 * time.Hour
 
 // agentsGCMaxAge bounds how long an unused agent record may linger in
 // ~/.loto/agents/ before Ensure prunes it. Anything older than this is
@@ -46,7 +62,6 @@ func sessionDir() string {
 
 var (
 	fallbackWarnOnce    sync.Once
-	staleWarnOnce       sync.Once
 	errNoSessionCache   = errors.New("no session cache")
 	errInvalidSessionID = errors.New("invalid session id")
 )
@@ -61,37 +76,40 @@ func sessionCachePath(sid string) (string, error) {
 	return filepath.Join(sessionDir(), sid+".json"), nil
 }
 
-// Ensure returns the current session's agent. If LOTO_AGENT_ID is set and
-// resolves, returns it. Empty-but-set LOTO_AGENT_ID requests an ephemeral
-// in-memory identity — fleet dispatchers export this to keep the registry
-// from accumulating one orphan .json per subagent. Unset falls back through
-// session cache then mostRecentAgent for interactive shells.
+// Ensure resolves the current agent identity by the contract documented in
+// the package doc. The governing principle: identity ambiguity is allowed
+// for display, never for authority — an explicit but unresolvable
+// LOTO_AGENT_ID is a hard error, and the heuristic mostRecentAgent fallback
+// is only consulted when fresh.
 func Ensure() (*Agent, error) {
 	agentsGCOnce.Do(func() { _ = gcStaleAgents(time.Now()) })
 
 	u, set := os.LookupEnv("LOTO_AGENT_ID")
 	if set {
-		if u != "" {
-			if a, err := loadByUUID(u); err == nil {
-				return a, nil
-			}
-			// Stale LOTO_AGENT_ID — set but not resolvable. Falling through to
-			// ephemeral mints a fresh in-memory uuid on every call, so any
-			// locks acquired in this session can't be released (the second
-			// invocation sees a different uuid). Warn loudly (audit loto-16t).
-			staleWarnOnce.Do(func() {
-				fmt.Fprintf(os.Stderr, "✗ loto: LOTO_AGENT_ID=%s is set but no agent record exists; using ephemeral identity (locks acquired here cannot be released by other invocations)\n", u)
-			})
+		if u == "" {
+			return mintAgent()
 		}
-		return mintAgent()
+		if !agentIDShape.MatchString(u) {
+			return nil, fmt.Errorf("%w: %q (want RFC 4122 v4 uuid)", errInvalidAgentID, u)
+		}
+		a, err := loadByUUID(u)
+		if err == nil {
+			return a, nil
+		}
+		// An explicit uuid that doesn't resolve is the caller asserting an
+		// identity that does not exist. Silently substituting an ephemeral
+		// identity (the pre-loto-16t behavior) orphans every lock acquired
+		// in the session, since the next invocation sees a different uuid.
+		// Fail loud instead.
+		return nil, fmt.Errorf("%w: %q (no agent record at %s)", errStaleAgentID, u, filepath.Join(registryDir(), u+".json"))
 	}
 	if sid := os.Getenv("CLAUDE_CODE_SESSION_ID"); sid != "" {
 		return ensureForSession(sid)
 	}
-	fallbackWarnOnce.Do(func() {
-		fmt.Fprintln(os.Stderr, "✗ loto: CLAUDE_CODE_SESSION_ID unset — using mostRecentAgent fallback; identity may not be stable across concurrent sessions")
-	})
-	if a, err := mostRecentAgent(); err == nil && a != nil {
+	if a, err := mostRecentAgent(time.Now()); err == nil && a != nil {
+		fallbackWarnOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "✗ loto: CLAUDE_CODE_SESSION_ID unset — reusing recent agent %s (%s); set CLAUDE_CODE_SESSION_ID or LOTO_AGENT_ID for stable identity\n", a.Handle, a.UUID)
+		})
 		return a, nil
 	}
 	return newAgent()
@@ -204,12 +222,18 @@ func claimSessionCache(sid string, a *Agent) error {
 	return f.Close()
 }
 
-func mostRecentAgent() (*Agent, error) {
+// mostRecentAgent returns the newest local agent created within
+// fallbackFreshness of now, or nil if no such record exists. Stale entries
+// are deliberately excluded — a 30-day-old record represents a long-finished
+// session, and reusing it would silently re-attribute new locks to a dead
+// identity.
+func mostRecentAgent(now time.Time) (*Agent, error) {
 	entries, err := os.ReadDir(registryDir())
 	if err != nil {
 		return nil, err
 	}
 	host, _ := os.Hostname()
+	cutoff := now.Add(-fallbackFreshness)
 	var best *Agent
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".json") {
@@ -224,6 +248,9 @@ func mostRecentAgent() (*Agent, error) {
 			continue
 		}
 		if a.Host != host {
+			continue
+		}
+		if a.CreatedAt.Before(cutoff) {
 			continue
 		}
 		if best == nil || a.CreatedAt.After(best.CreatedAt) {
@@ -268,17 +295,24 @@ func chooseHandle() (string, error) {
 }
 
 // gcStaleAgents removes ~/.loto/agents/*.json whose mtime is older than
-// agentsGCMaxAge. Best-effort: errors are swallowed (a missing dir, a denied
-// unlink, a racing writer) — staleness is a hygiene concern, not a hard
-// invariant. Stops scanning the moment ReadDir fails.
+// agentsGCMaxAge, except any uuid still referenced by a session cache file
+// in ~/.loto/session/. Preserving referenced uuids keeps the binding
+// invariant: as long as a session cache exists, the agent it points to
+// resolves. Best-effort otherwise: errors are swallowed (missing dir,
+// denied unlink, racing writer) — staleness is hygiene, not invariant.
 func gcStaleAgents(now time.Time) error {
 	entries, err := os.ReadDir(registryDir())
 	if err != nil {
 		return err
 	}
+	pinned := sessionReferencedUUIDs()
 	cutoff := now.Add(-agentsGCMaxAge)
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		uuid := strings.TrimSuffix(e.Name(), ".json")
+		if _, keep := pinned[uuid]; keep {
 			continue
 		}
 		info, err := e.Info()
@@ -292,6 +326,36 @@ func gcStaleAgents(now time.Time) error {
 	return nil
 }
 
+// sessionReferencedUUIDs returns the set of agent uuids that any session
+// cache currently points at. Used by gcStaleAgents to avoid breaking a
+// session→agent binding from underneath a live session.
+func sessionReferencedUUIDs() map[string]struct{} {
+	out := map[string]struct{}{}
+	entries, err := os.ReadDir(sessionDir())
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(sessionDir(), e.Name()))
+		if err != nil {
+			continue
+		}
+		var ref struct {
+			UUID string `json:"uuid"`
+		}
+		if err := json.Unmarshal(body, &ref); err != nil {
+			continue
+		}
+		if ref.UUID != "" {
+			out[ref.UUID] = struct{}{}
+		}
+	}
+	return out
+}
+
 // LookupByUUID returns the agent record for uuid, or an error if no record
 // exists on disk. Used by render to print holder Handle alongside UUID in
 // conflict reports (loto-b3o).
@@ -300,6 +364,9 @@ func LookupByUUID(uuid string) (*Agent, error) {
 }
 
 func loadByUUID(uuid string) (*Agent, error) {
+	if !agentIDShape.MatchString(uuid) {
+		return nil, fmt.Errorf("%w: %q", errInvalidAgentID, uuid)
+	}
 	path := filepath.Join(registryDir(), uuid+".json")
 	body, err := os.ReadFile(path)
 	if err != nil {
@@ -356,7 +423,13 @@ func NewUUID() string { return newUUID() }
 
 func newUUID() string {
 	var b [16]byte
-	_, _ = rand.Read(b[:])
+	// crypto/rand.Read on Linux/macOS is backed by getrandom(2) / arc4random;
+	// a failure here means the kernel CSPRNG is unavailable, which is a
+	// program-environment failure, not a user error. Panic rather than
+	// emit a zeroed (and thus colliding) "uuid".
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(fmt.Errorf("identity: crypto/rand unavailable: %w", err))
+	}
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%s-%s-%s-%s-%s",

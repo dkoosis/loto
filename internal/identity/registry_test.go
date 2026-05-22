@@ -2,6 +2,7 @@ package identity
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,96 @@ func TestEnsurePersistsWhenAgentIDUnset(t *testing.T) {
 	path := filepath.Join(dir, ".loto", "agents", a.UUID+".json")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("identity file missing: %v", err)
+	}
+}
+
+// TestEnsureStaleAgentIDIsHardError asserts that an explicit LOTO_AGENT_ID
+// pointing at a uuid with no registry record fails loudly rather than
+// silently substituting an ephemeral identity. Silent substitution orphans
+// every lock acquired in the session because the next invocation sees a
+// different uuid (audit loto-16t / governing principle: ambiguity never
+// authority).
+func TestEnsureStaleAgentIDIsHardError(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+	t.Setenv("LOTO_AGENT_ID", "11111111-2222-4333-8444-555555555555")
+
+	_, err := Ensure()
+	if !errors.Is(err, errStaleAgentID) {
+		t.Fatalf("want errStaleAgentID, got %v", err)
+	}
+}
+
+// TestEnsureRejectsMalformedAgentID asserts that a syntactically invalid
+// LOTO_AGENT_ID is rejected before any filesystem interaction. Without
+// this, `LOTO_AGENT_ID=../../etc/passwd` would escape registryDir() via
+// filepath.Join in loadByUUID.
+func TestEnsureRejectsMalformedAgentID(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+
+	for _, bad := range []string{"not-a-uuid", "../../escape", "agent-123", "11111111"} {
+		t.Setenv("LOTO_AGENT_ID", bad)
+		_, err := Ensure()
+		if !errors.Is(err, errInvalidAgentID) {
+			t.Errorf("LOTO_AGENT_ID=%q: want errInvalidAgentID, got %v", bad, err)
+		}
+	}
+}
+
+// TestMostRecentAgentSkipsStale asserts the freshness gate: an agent record
+// older than fallbackFreshness is not reused as the unset+unset fallback.
+// Without this gate, a CLI invocation a week after the last session would
+// silently re-attribute new locks to a long-dead identity.
+func TestMostRecentAgentSkipsStale(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("LOTO_AGENT_ID", "")
+
+	host, _ := os.Hostname()
+	old := &Agent{UUID: newUUID(), Handle: "OldOwl", Host: host, CreatedAt: time.Now().Add(-72 * time.Hour).UTC()}
+	if err := writeAgent(old); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := mostRecentAgent(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Fatalf("stale record returned as fallback: %+v", got)
+	}
+}
+
+// TestGCPreservesSessionReferencedAgents asserts the binding invariant:
+// even if an agent file's mtime predates the GC cutoff, if a session cache
+// still references it, GC must not delete it. Breaking this binding would
+// leave a live session pointing at a missing uuid → next Ensure() in that
+// session would error out of nowhere.
+func TestGCPreservesSessionReferencedAgents(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "preserve-me")
+
+	a, err := Ensure()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Backdate the agent file past the GC cutoff.
+	agentPath := filepath.Join(dir, ".loto", "agents", a.UUID+".json")
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	if err := os.Chtimes(agentPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := gcStaleAgents(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(agentPath); err != nil {
+		t.Fatalf("session-referenced agent was deleted: %v", err)
 	}
 }
 

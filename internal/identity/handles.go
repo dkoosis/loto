@@ -3,12 +3,15 @@ package identity
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"strings"
 )
 
 func randomHandle() string {
 	var b [8]byte
-	_, _ = rand.Read(b[:])
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(fmt.Errorf("identity: crypto/rand unavailable: %w", err))
+	}
 	adj := adjectives[binary.BigEndian.Uint32(b[0:4])%uint32(len(adjectives))] //nolint:gosec // G115: word list bounded <1k entries
 	animal := animals[binary.BigEndian.Uint32(b[4:8])%uint32(len(animals))]    //nolint:gosec // G115: word list bounded <1k entries
 	return toTitle(adj) + toTitle(animal)

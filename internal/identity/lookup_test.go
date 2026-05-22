@@ -10,21 +10,27 @@ import (
 	"time"
 )
 
+// validUUID is a known-shape uuid used by lookup tests that need a
+// path-safe identifier without committing real entropy to the test source.
+const validUUID = "11111111-2222-4333-8444-555555555555"
+
 func TestLookupByUUIDMissing(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 
-	if _, err := LookupByUUID("does-not-exist"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := LookupByUUID(validUUID); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("want ErrNotExist, got %v", err)
 	}
 }
 
-func TestLookupByUUIDEmpty(t *testing.T) {
+func TestLookupByUUIDRejectsMalformed(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 
-	if _, err := LookupByUUID(""); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("empty uuid must miss, got %v", err)
+	for _, bad := range []string{"", "does-not-exist", "../escape", "agent-123"} {
+		if _, err := LookupByUUID(bad); !errors.Is(err, errInvalidAgentID) {
+			t.Errorf("LookupByUUID(%q): want errInvalidAgentID, got %v", bad, err)
+		}
 	}
 }
 
@@ -32,7 +38,7 @@ func TestLookupByUUIDMalformedJSON(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 
-	path := filepath.Join(dir, ".loto", "agents", "bad.json")
+	path := filepath.Join(dir, ".loto", "agents", validUUID+".json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +46,7 @@ func TestLookupByUUIDMalformedJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := LookupByUUID("bad")
+	_, err := LookupByUUID(validUUID)
 	if err == nil {
 		t.Fatal("want decode error, got nil")
 	}
@@ -55,7 +61,7 @@ func TestLookupByUUIDRoundTrip(t *testing.T) {
 	t.Setenv("HOME", dir)
 
 	want := Agent{
-		UUID:      "agent-123",
+		UUID:      validUUID,
 		Handle:    "SwiftFalcon",
 		Host:      "devbox",
 		CreatedAt: time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC),
