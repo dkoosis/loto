@@ -151,6 +151,59 @@ func TestLockConflict_SurfacesTags(t *testing.T) {
 	}
 }
 
+func TestDoctor_HolderSeesTrailingFooter(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	must0(t, []string{tcCmdLock, tcTargetA, "-t", tcIntentTest})
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	must0(t, []string{"tag", tcTargetA, "doctor-visible"})
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	var out, errBuf bytes.Buffer
+	if code := Run([]string{tcCmdDoctor}, &out, &errBuf); code != 0 {
+		t.Fatalf("doctor exit=%d err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "doctor-visible") {
+		t.Fatalf("expected tag in doctor output (trailing footer): %q", out.String())
+	}
+}
+
+// TestCheck_ExcludedFromTagSurfacing pins `loto check` output as a machine
+// surface (trixi's PreToolUse hook parses it). Adding tags must not change
+// byte-equality with the no-tag baseline.
+func TestCheck_ExcludedFromTagSurfacing(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	must0(t, []string{tcCmdLock, tcTargetA, "-t", tcIntentTest})
+
+	// Capture baseline `check` output before any tag exists.
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var baseOut, baseErr bytes.Buffer
+	baseCode := Run([]string{tcCmdCheck, tcTargetA}, &baseOut, &baseErr)
+
+	// Now create a tag and re-run check; output must be byte-identical.
+	must0(t, []string{"tag", tcTargetA, "should-not-appear"})
+	var taggedOut, taggedErr bytes.Buffer
+	taggedCode := Run([]string{tcCmdCheck, tcTargetA}, &taggedOut, &taggedErr)
+
+	if baseCode != taggedCode {
+		t.Fatalf("exit code differs: baseline=%d tagged=%d", baseCode, taggedCode)
+	}
+	if baseOut.String() != taggedOut.String() {
+		t.Fatalf("stdout differs after tagging:\n--- baseline ---\n%s\n--- tagged ---\n%s",
+			baseOut.String(), taggedOut.String())
+	}
+	if baseErr.String() != taggedErr.String() {
+		t.Fatalf("stderr differs after tagging:\n--- baseline ---\n%s\n--- tagged ---\n%s",
+			baseErr.String(), taggedErr.String())
+	}
+	if strings.Contains(taggedOut.String()+taggedErr.String(), "should-not-appear") {
+		t.Fatalf("tag text leaked into check output")
+	}
+}
+
 func TestCmdTag_UsagePrintsOnShortArgs(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
