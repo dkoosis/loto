@@ -40,21 +40,26 @@ func connDSN(path string) string {
 // existence check and clobber each other's writes. Subsequent Opens on
 // an initialized DB take the fast path (no flock).
 func Open(p string) (*Store, error) {
+	return OpenContext(context.Background(), p)
+}
+
+// OpenContext is Open with a caller-supplied context. Cancellation aborts
+// flock polling (op-flock + recovery-lock) instead of waiting out
+// LOTO_FLOCK_TIMEOUT.
+func OpenContext(ctx context.Context, p string) (*Store, error) {
 	if st, err := os.Stat(p); err == nil && st.Size() > 0 {
-		return openWithRecovery(p)
+		return openWithRecovery(ctx, p)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir state dir: %w", err)
 	}
-	// Open is the boot path and lacks a caller ctx — relies on the flock's
-	// own LOTO_FLOCK_TIMEOUT (default 30s) as the upper bound.
-	flock, err := acquireOpFlock(context.Background(), opFlockPathFor(p), os.Stderr)
+	flock, err := acquireOpFlock(ctx, opFlockPathFor(p), os.Stderr)
 	if err != nil {
 		return nil, err
 	}
 	defer flock.release()
-	return openWithRecovery(p)
+	return openWithRecovery(ctx, p)
 }
 
 // opFlockPathFor returns the op-flock path for a DB at p — used during
@@ -63,7 +68,7 @@ func opFlockPathFor(p string) string {
 	return filepath.Join(filepath.Dir(p), "lock-op.flock")
 }
 
-func openWithRecovery(p string) (*Store, error) {
+func openWithRecovery(ctx context.Context, p string) (*Store, error) {
 	s, err := openOnce(p)
 	if err == nil {
 		return s, nil
@@ -72,7 +77,7 @@ func openWithRecovery(p string) (*Store, error) {
 		return nil, err
 	}
 
-	release, lockErr := acquireRecoveryLock(p)
+	release, lockErr := acquireRecoveryLock(ctx, p)
 	if lockErr != nil {
 		return nil, fmt.Errorf("acquire recovery lock: %w (orig: %w)", lockErr, err)
 	}

@@ -67,7 +67,7 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	s, err := store.Open(filepath.Join(dir, "loto.db"))
+	s, err := store.OpenContext(ctx, filepath.Join(dir, "loto.db"))
 	if err != nil {
 		return nil, fmt.Errorf("store.Open: %w", err)
 	}

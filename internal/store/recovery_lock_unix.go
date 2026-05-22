@@ -3,6 +3,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -18,7 +19,7 @@ import (
 // Polls with LOCK_NB instead of blocking — a wedged holder (sigstopped,
 // debugger-attached) used to hang the recovery path indefinitely (audit
 // loto-4yt). Honors LOTO_FLOCK_TIMEOUT like acquireOpFlock.
-func acquireRecoveryLock(dbPath string) (func(), error) {
+func acquireRecoveryLock(ctx context.Context, dbPath string) (func(), error) {
 	lockPath := dbPath + ".recover.lock"
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -47,6 +48,11 @@ func acquireRecoveryLock(dbPath string) (func(), error) {
 			f.Close()
 			return nil, ErrFlockTimeout
 		}
-		time.Sleep(jitter(flockPollInitial))
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return nil, ctx.Err()
+		case <-time.After(jitter(flockPollInitial)):
+		}
 	}
 }

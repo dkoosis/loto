@@ -58,18 +58,34 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 		return nil, chmodFailErr
 	}
 
-	if err := insertAllLocks(ctx, tx, sorted, stripped); err != nil {
+	if err := s.insertAllLocks(ctx, tx, sorted, stripped, now); err != nil {
 		return nil, err
 	}
 	if err := rotateEventsTx(ctx, tx, now); err != nil {
-		restoreAll(stripped)
+		s.restoreAllAndAudit(ctx, stripped, sorted[0].OwnerUUID, now)
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		restoreAll(stripped)
+		s.restoreAllAndAudit(ctx, stripped, sorted[0].OwnerUUID, now)
 		return nil, err
 	}
 	return sorted, nil
+}
+
+// restoreAllAndAudit restores write bits on every stripped path. Any
+// restore that fails is recorded as a mode_restore_failed event so the
+// orphan-mode state on disk has an audit trail. Mirrors the strip-time
+// asymmetry that stripAndHandleFailure handles for the rollback path.
+func (s *Store) restoreAllAndAudit(ctx context.Context, stripped []string, byAgent string, now time.Time) {
+	var evs []domain.Event
+	for _, p := range stripped {
+		if err := restoreWrite(p); err != nil {
+			evs = append(evs, modeRestoreFailedEvent(p, byAgent, now, err))
+		}
+	}
+	if len(evs) > 0 {
+		_ = s.AppendEvents(ctx, evs)
+	}
 }
 
 func (s *Store) stripAndHandleFailure(ctx context.Context, tx *sql.Tx, sorted []domain.LockRecord, now time.Time) ([]string, error) {
@@ -89,20 +105,14 @@ func (s *Store) stripAndHandleFailure(ctx context.Context, tx *sql.Tx, sorted []
 	return nil, &ChmodFailureError{Failures: failures}
 }
 
-func insertAllLocks(ctx context.Context, tx *sql.Tx, sorted []domain.LockRecord, stripped []string) error {
+func (s *Store) insertAllLocks(ctx context.Context, tx *sql.Tx, sorted []domain.LockRecord, stripped []string, now time.Time) error {
 	for i := range sorted {
 		if err := insertOrRefreshLock(ctx, tx, sorted[i]); err != nil {
-			restoreAll(stripped)
+			s.restoreAllAndAudit(ctx, stripped, sorted[0].OwnerUUID, now)
 			return err
 		}
 	}
 	return nil
-}
-
-func restoreAll(stripped []string) {
-	for _, p := range stripped {
-		_ = restoreWrite(p)
-	}
 }
 
 func validateAllFileTargets(sorted []domain.LockRecord) error {
