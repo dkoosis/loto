@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -146,6 +147,9 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 	if err := rotateEventsTx(ctx, tx, now); err != nil {
 		return err
 	}
+	if err := gcTagsTx(ctx, tx, now); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -153,6 +157,31 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 		s.restoreAndAudit(ctx, p, byAgent)
 	}
 	_, err = s.db.ExecContext(ctx, `VACUUM`)
+	return err
+}
+
+// tagsRetentionAge: acked tags older than this are hard-deleted by doctor
+// --repair. Matches events retention (7d) so the audit window is uniform.
+const tagsRetentionAge = 7 * 24 * time.Hour
+
+// gcTagsTx hard-deletes orphan tags (host lock gone) and old-acked tags.
+// Runs inside DoctorRepair's tx alongside rotateEventsTx so the GC is atomic
+// with the surrounding cleanup. Read-time filters already hide orphans, so
+// this is purely a disk-reclamation pass — losing rows here is harmless.
+func gcTagsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM tags
+		WHERE NOT EXISTS (
+		  SELECT 1 FROM locks l
+		  WHERE l.target_canonical = tags.target_canonical
+		    AND l.owner_uuid       = tags.lock_owner_uuid
+		    AND l.created_at       = tags.lock_created_at
+		)`); err != nil {
+		return err
+	}
+	cutoff := now.Add(-tagsRetentionAge).UnixNano()
+	_, err := tx.ExecContext(ctx, `
+		DELETE FROM tags WHERE acked_at IS NOT NULL AND acked_at < ?`, cutoff)
 	return err
 }
 

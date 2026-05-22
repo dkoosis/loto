@@ -291,6 +291,41 @@ func TestReleaseLocks_MultiTarget_AcksEachLocksTags(t *testing.T) {
 	}
 }
 
+func TestDoctorRepair_GCsOrphanedTags(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
+	if _, err := s.InsertTag(ctx, NewTag{
+		TargetCanonical: lock.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
+		TaggerUUID: tcBob, Text: "doomed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate break-by-third-party: delete the host lock row directly.
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ?`, lock.Target.Canonical); err != nil {
+		t.Fatal(err)
+	}
+	if n := rawTagRowCount(t, s); n != 1 {
+		t.Fatalf("precondition: 1 orphan tag row, got %d", n)
+	}
+	live := func(string, int) bool { return true }
+	if err := s.DoctorRepair(ctx, "h", tcAlice, live); err != nil {
+		t.Fatalf("DoctorRepair: %v", err)
+	}
+	if n := rawTagRowCount(t, s); n != 0 {
+		t.Fatalf("orphan tag should be GC'd, got %d rows", n)
+	}
+}
+
+func rawTagRowCount(t *testing.T, s *Store) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM tags`).Scan(&n); err != nil {
+		t.Fatalf("count tags: %v", err)
+	}
+	return n
+}
+
 func errEqualsTo(got, want error) bool {
 	if got == nil || want == nil {
 		return got == want
