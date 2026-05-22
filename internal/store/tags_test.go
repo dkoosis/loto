@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"strings"
@@ -209,6 +210,84 @@ func TestOrphanFilter_OnLockDeletion(t *testing.T) {
 	}
 	if len(gotTarget) != 0 {
 		t.Fatalf("orphan must be filtered from target list, got %+v", gotTarget)
+	}
+}
+
+func TestReleaseLocks_AcksTagsOnReleasedLock(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
+	id, err := s.InsertTag(ctx, NewTag{
+		TargetCanonical: lock.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
+		TaggerUUID: tcBob, Text: "ping",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReleaseLocks(ctx, []domain.Target{lock.Target}, tcAlice); err != nil {
+		t.Fatalf("ReleaseLocks: %v", err)
+	}
+	// Tag row should still exist with acked_at set (audit), not orphaned.
+	var acked *int64
+	var ackedNull sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT acked_at FROM tags WHERE id = ?`, id).Scan(&ackedNull); err != nil {
+		t.Fatalf("tag row missing after release: %v", err)
+	}
+	if !ackedNull.Valid {
+		t.Fatalf("release should ack tag, acked_at still NULL")
+	}
+	v := ackedNull.Int64
+	acked = &v
+	if *acked == 0 {
+		t.Fatalf("acked_at = 0, want a real timestamp")
+	}
+}
+
+func TestBreakLocks_DoesNotAckTags(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
+	id, err := s.InsertTag(ctx, NewTag{
+		TargetCanonical: lock.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
+		TaggerUUID: tcBob, Text: "ping",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Force-break by a 3rd party (bob).
+	live := func(string, int) bool { return true }
+	res, err := s.BreakLocks(ctx, []domain.Target{lock.Target}, tcBob, BreakForce, "break", live)
+	if err != nil || res[0].Err != nil {
+		t.Fatalf("break: %v / %v", err, res[0].Err)
+	}
+	// Tag should be orphaned: row exists, acked_at NULL (no implicit ack).
+	var acked sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT acked_at FROM tags WHERE id = ?`, id).Scan(&acked); err != nil {
+		t.Fatalf("tag row missing: %v", err)
+	}
+	if acked.Valid {
+		t.Fatalf("force-break should NOT ack tags (orphan semantics, edge #6), got acked_at=%d", acked.Int64)
+	}
+}
+
+func TestReleaseLocks_MultiTarget_AcksEachLocksTags(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	la, lockANs := acquireForTest(t, s, tcAGo, tcAlice)
+	lb, lockBNs := acquireForTest(t, s, "b.go", tcAlice)
+	idA, _ := s.InsertTag(ctx, NewTag{TargetCanonical: la.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockANs, TaggerUUID: tcBob, Text: "a"})
+	idB, _ := s.InsertTag(ctx, NewTag{TargetCanonical: lb.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockBNs, TaggerUUID: tcBob, Text: "b"})
+	if _, err := s.ReleaseLocks(ctx, []domain.Target{la.Target, lb.Target}, tcAlice); err != nil {
+		t.Fatalf("multi release: %v", err)
+	}
+	for _, id := range []string{idA, idB} {
+		var acked sql.NullInt64
+		if err := s.db.QueryRowContext(ctx, `SELECT acked_at FROM tags WHERE id = ?`, id).Scan(&acked); err != nil {
+			t.Fatalf("tag %s missing: %v", id, err)
+		}
+		if !acked.Valid {
+			t.Fatalf("tag %s should be acked", id)
+		}
 	}
 }
 

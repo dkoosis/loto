@@ -196,15 +196,3 @@ func (s *Store) Ack(ctx context.Context, tagID, byUUID string) error {
 	return nil // already acked (edge #10)
 }
 
-// AckAllForLock marks every pending tag on the identified host lock as acked.
-// Called inside ReleaseLocks' transaction so release+ack are atomic.
-// `tx` is the surrounding transaction; pass nil to run standalone.
-func (s *Store) ackAllForLockTx(ctx context.Context, tx *sql.Tx, targetCanonical, ownerUUID string, lockCreatedAt int64) error {
-	now := time.Now().UnixNano()
-	_, err := tx.ExecContext(ctx, `
-		UPDATE tags SET acked_at = ?
-		WHERE target_canonical = ? AND lock_owner_uuid = ? AND lock_created_at = ?
-		  AND acked_at IS NULL`,
-		now, targetCanonical, ownerUUID, lockCreatedAt)
-	return err
-}
