@@ -124,6 +124,33 @@ func TestStatus_HolderSeesTrailingFooter(t *testing.T) {
 	}
 }
 
+func TestLockConflict_SurfacesTags(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	must0(t, []string{tcCmdLock, tcTargetA, "-t", tcIntentTest})
+
+	// Carol (using bob's session for simplicity — second agent in the project)
+	// leaves a tag on alice's locked file.
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	must0(t, []string{"tag", tcTargetA, "blocking?"})
+
+	// Bob now tries to lock a.go — conflict, and the tag should appear.
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &out, &errBuf)
+	if code != 1 {
+		t.Fatalf("expected conflict exit 1, got %d; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	combined := out.String() + errBuf.String()
+	if !strings.Contains(combined, "✗ blocked") {
+		t.Fatalf("expected blocker report: %q", combined)
+	}
+	if !strings.Contains(combined, "blocking?") {
+		t.Fatalf("expected tag text in conflict output: %q", combined)
+	}
+}
+
 func TestCmdTag_UsagePrintsOnShortArgs(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
