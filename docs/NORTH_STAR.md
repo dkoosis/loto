@@ -237,6 +237,51 @@ missed; `loto doctor --repair` mops up the rest.
   to land or not-land together, not race per-file. No multi-target
   *unlock* atomicity (release is best-effort per target).
 
+## tags (annotations bound to locks)
+
+`loto tag <file> <text>` leaves a note on a target that's locked by another
+agent. Tags are parasitic on the host lock identified by
+(target_canonical, owner_uuid, lock_created_at): when that triple disappears
+the tag is orphaned (read-time filter, GC'd by `doctor --repair`).
+
+Invariants:
+
+- **I1** external tag (`tagger ≠ lock_owner`) → counted for cap, in holder echo.
+- **I2** self-tag (`tagger = lock_owner`) → counted for cap, **not** in holder echo.
+- **I3** `Alive(t) ⟹ Host(t) ∃` — parasitic; no orphan can be alive.
+- **I4** `acked_at` monotonic (set once, never unset).
+- **I5** text is append-only — no UPDATE path.
+- **I6** cap of 5 alive tags per (file, lock-instance), enforced inside the same tx as the INSERT (no TOCTOU).
+
+Surfaces (the holder is forced to see):
+
+| caller \ tag                | external | self-tag |
+|-----------------------------|----------|----------|
+| holder runs runtime cmd     | ✓ trailing footer | ✗ |
+| holder runs `ack`           | ✓ (acks it)       | n/a |
+| holder runs `unlock`        | ✓ implicit ack    | ✓ implicit ack |
+| non-holder `status f`       | ✓ inline          | ✓ inline |
+| non-holder `lock f` (fail)  | ✓ via EmitConflict| ✓ via EmitConflict |
+
+`loto check` is excluded — its output is a pinned machine surface that
+trixi's PreToolUse hook parses on every `.go` save. Holders pick up tags
+via the next `lock` / `unlock` / `status` / `doctor` instead.
+
+Lifecycle (matches `locks_release.go::ackTagsForReleaseTx` + `doctor.go::gcTagsTx`):
+
+| event                      | effect on the host lock's tags        |
+|----------------------------|---------------------------------------|
+| `loto unlock` by holder    | UPDATE acked_at inside the release tx |
+| `loto unlock --force` break| tags orphaned, no implicit ack        |
+| lock expiry                | tags orphaned                         |
+| holder re-acquires         | new `lock_created_at` → previous tags stay dead |
+| `loto ack <id>` by holder  | one tag acked                         |
+| `loto doctor --repair`     | hard-deletes orphans + acked > 7d     |
+
+‡ Schema v6 → v7 means a one-time `MoveCorruptAside` on first open after
+this change: the audit `events` log lives in the same DB and is lost too.
+Acceptable trade — locks are ephemeral and events retention is already 7d.
+
 ## smell tests
 
 If you find yourself writing one of these, stop and reconsider:
