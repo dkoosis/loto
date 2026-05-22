@@ -119,6 +119,38 @@ func (s *Store) ListAliveForHolder(ctx context.Context, ownerUUID string) ([]Tag
 	return scanTags(rows)
 }
 
+// ListAliveByTargets is the batched form of ListAliveForTarget: one query for
+// many canonical paths, grouped into a map. Callers that surface tags across a
+// list of files (status, lock conflict) should prefer this — it folds an N+1
+// loop into a single round-trip. Empty input returns an empty map.
+func (s *Store) ListAliveByTargets(ctx context.Context, canonicals []string) (map[string][]Tag, error) {
+	if len(canonicals) == 0 {
+		return map[string][]Tag{}, nil
+	}
+	placeholders, args := inClauseStrings(canonicals)
+	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.target_canonical, t.lock_owner_uuid, t.lock_created_at,`+ //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+		` t.tagger_uuid, t.text, t.created_at, t.acked_at`+
+		` FROM tags t JOIN locks l`+
+		`   ON l.target_canonical = t.target_canonical`+
+		`  AND l.owner_uuid       = t.lock_owner_uuid`+
+		`  AND l.created_at       = t.lock_created_at`+
+		` WHERE t.target_canonical IN (`+placeholders+`) AND t.acked_at IS NULL`+
+		` ORDER BY t.created_at ASC, t.id ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	all, err := scanTags(rows)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]Tag, len(canonicals))
+	for _, t := range all {
+		out[t.TargetCanonical] = append(out[t.TargetCanonical], t)
+	}
+	return out, nil
+}
+
 // ListAliveForTarget returns pending tags bound to the live lock on
 // targetCanonical (if any). No self-tag filter — non-holder surfaces (status,
 // lock conflict) show everyone's tags. Empty result when no live lock.

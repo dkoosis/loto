@@ -142,20 +142,23 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 }
 
 // fetchTagsForBlockers returns a map keyed by target_canonical of pending tags
-// on each blocker. Read errors are swallowed silently — surfacing tags is
-// best-effort and must not mask the underlying conflict report.
+// on each blocker. One batched query (not per-target N+1). Read errors are
+// swallowed silently — surfacing tags is best-effort and must not mask the
+// underlying conflict report.
 func fetchTagsForBlockers(rt *runtime, blockers []domain.LockRecord) map[string][]store.Tag {
-	out := make(map[string][]store.Tag, len(blockers))
+	canonicals := make([]string, 0, len(blockers))
+	seen := make(map[string]bool, len(blockers))
 	for i := range blockers {
-		canonical := blockers[i].Target.Canonical
-		if _, seen := out[canonical]; seen {
+		c := blockers[i].Target.Canonical
+		if seen[c] {
 			continue
 		}
-		tags, err := rt.Store.ListAliveForTarget(rt.Ctx, canonical)
-		if err != nil || len(tags) == 0 {
-			continue
-		}
-		out[canonical] = tags
+		seen[c] = true
+		canonicals = append(canonicals, c)
+	}
+	out, err := rt.Store.ListAliveByTargets(rt.Ctx, canonicals)
+	if err != nil {
+		return map[string][]store.Tag{}
 	}
 	return out
 }

@@ -77,15 +77,18 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord) {
 		return
 	}
 	fmt.Fprintf(stdout, "✓ locks count=%d\n", len(all))
+	canonicals := make([]string, len(all))
+	for i := range all {
+		canonicals[i] = all[i].Target.Canonical
+	}
+	tagsByTarget, _ := rt.Store.ListAliveByTargets(rt.Ctx, canonicals)
 	for i := range all {
 		l := &all[i]
 		fmt.Fprintf(stdout, "✓ target=%s owner=%s intent=%q held_since=%s expires_at=%s host=%s pid=%d\n",
 			relPath(l.Target.Canonical), l.OwnerUUID, l.Intent,
 			l.CreatedAt.UTC().Format(time.RFC3339), l.ExpiresAt.UTC().Format(time.RFC3339),
 			l.Host, l.PID)
-		if tags, err := rt.Store.ListAliveForTarget(rt.Ctx, l.Target.Canonical); err == nil {
-			render.EmitTagRows(stdout, tags)
-		}
+		render.EmitTagRows(stdout, tagsByTarget[l.Target.Canonical])
 	}
 }
 
