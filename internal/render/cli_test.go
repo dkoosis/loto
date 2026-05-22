@@ -120,6 +120,64 @@ func TestEmitInvalid_DoesNotMutateInput(t *testing.T) {
 	}
 }
 
+func TestEmitTagFooter_Empty_NoOutput(t *testing.T) {
+	var buf bytes.Buffer
+	EmitTagFooter(&buf, nil, "alice")
+	if buf.Len() != 0 {
+		t.Fatalf("empty input must emit nothing, got %q", buf.String())
+	}
+}
+
+func TestEmitTagFooter_KeyValueAndCount(t *testing.T) {
+	tags := []store.Tag{
+		{ID: "t-aaa", TargetCanonical: aGo, TaggerUUID: "bob", Text: "ETA?", CreatedAt: 100},
+		{ID: "t-bbb", TargetCanonical: aGo, TaggerUUID: "carol", Text: "why?", CreatedAt: 200},
+	}
+	var buf bytes.Buffer
+	EmitTagFooter(&buf, tags, "alice")
+	got := buf.String()
+	if !strings.HasPrefix(got, "ℹ tags count=2 ") {
+		t.Errorf("triage first: %s", got)
+	}
+	if strings.Index(got, "ETA?") > strings.Index(got, "why?") {
+		t.Errorf("caller-provided order must be preserved (caller sorts), got:\n%s", got)
+	}
+	if strings.Contains(got, "\x1b[") {
+		t.Errorf("no ANSI allowed: %q", got)
+	}
+	// RFC3339 UTC stamp
+	if !strings.Contains(got, "at=1970-01-01T00:00:00Z") {
+		t.Errorf("RFC3339 UTC stamp missing: %s", got)
+	}
+}
+
+func TestEmitConflictWithTags_AppendsTagRows(t *testing.T) {
+	now := time.Date(2026, 5, 10, 18, 0, 0, 0, time.UTC)
+	tags := map[string][]store.Tag{
+		aGo: {{ID: "t-x", TargetCanonical: aGo, TaggerUUID: "bob", Text: "ping", CreatedAt: 0}},
+	}
+	var buf bytes.Buffer
+	EmitConflictWithTags(&buf, &store.MultiConflictError{
+		Blockers: []domain.LockRecord{
+			{Target: domain.Target{Canonical: aGo}, OwnerUUID: "alice", Intent: "x", ExpiresAt: now},
+		},
+	}, tags)
+	got := buf.String()
+	if !strings.HasPrefix(got, "✗ blocked count=1\n") {
+		t.Errorf("triage first: %s", got)
+	}
+	if !strings.Contains(got, "ℹ   tag id=t-x") {
+		t.Errorf("indented tag row missing: %s", got)
+	}
+	if !strings.Contains(got, `text="ping"`) {
+		t.Errorf("text missing: %s", got)
+	}
+	// Tag row appears AFTER its blocker line.
+	if strings.Index(got, "ℹ   tag id=t-x") < strings.Index(got, "⚠ target=") {
+		t.Errorf("tag row should follow its blocker line: %s", got)
+	}
+}
+
 func TestEmitChmodFailure_FailedQuotedAndCountsErrOnly(t *testing.T) {
 	var buf bytes.Buffer
 	EmitChmodFailure(&buf, &store.ChmodFailureError{
