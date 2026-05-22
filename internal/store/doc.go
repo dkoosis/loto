@@ -19,6 +19,15 @@
 // you are in the wrong layer — the row describes the claim, the kernel
 // (or file mode) prevents the write.
 //
+// # Tags table (annotations, not locks)
+//
+// The `tags` table (see tags.go) is a separate primitive — short text
+// annotations a non-holder leaves for a lock holder. Each row is parasitic
+// on a host lock identified by (target, owner, created_at); when the host
+// disappears the tag is orphaned and filtered at read time, GC'd by doctor
+// --repair. Disambiguate: package doc above uses "tag" in the LOTO sense
+// (the locks row); `tags.go` uses "tag" in the annotation sense.
+//
 // # Why SQLite
 //
 // Atomic multi-row updates (lock + system tag + cursor in one BEGIN

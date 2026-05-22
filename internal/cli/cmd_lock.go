@@ -48,6 +48,7 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 3
 	}
 	defer rt.Close()
+	defer rt.DeferredTagFooter(stdout)
 
 	return acquireBatch(rt, targets, *intent, *ttl, rt.liveProbe(), stdout, stderr)
 }
@@ -121,7 +122,7 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 	if err != nil {
 		var mce *store.MultiConflictError
 		if errors.As(err, &mce) {
-			render.EmitConflict(stdout, mce)
+			render.EmitConflictWithTags(stdout, mce, fetchTagsForBlockers(rt, mce.Blockers))
 			return 1
 		}
 		var cfe *store.ChmodFailureError
@@ -138,6 +139,28 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 	}
 	render.EmitLockSuccess(stdout, emitted)
 	return 0
+}
+
+// fetchTagsForBlockers returns a map keyed by target_canonical of pending tags
+// on each blocker. One batched query (not per-target N+1). Read errors are
+// swallowed silently — surfacing tags is best-effort and must not mask the
+// underlying conflict report.
+func fetchTagsForBlockers(rt *runtime, blockers []domain.LockRecord) map[string][]store.Tag {
+	canonicals := make([]string, 0, len(blockers))
+	seen := make(map[string]bool, len(blockers))
+	for i := range blockers {
+		c := blockers[i].Target.Canonical
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		canonicals = append(canonicals, c)
+	}
+	out, err := rt.Store.ListAliveByTargets(rt.Ctx, canonicals)
+	if err != nil {
+		return map[string][]store.Tag{}
+	}
+	return out
 }
 
 func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now time.Time, ttl time.Duration) []domain.LockRecord {

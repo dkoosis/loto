@@ -72,6 +72,13 @@ func EmitLockSuccess(w io.Writer, targets []domain.Target) {
 }
 
 func EmitConflict(w io.Writer, ce *store.MultiConflictError) {
+	EmitConflictWithTags(w, ce, nil)
+}
+
+// EmitConflictWithTags renders the same conflict block as EmitConflict and, for
+// each blocker, appends pending tags from tagsByTarget[canonical] as `ℹ tag …`
+// rows beneath the `⚠ target=…` line. Pass nil to suppress tag surfacing.
+func EmitConflictWithTags(w io.Writer, ce *store.MultiConflictError, tagsByTarget map[string][]store.Tag) {
 	cwd := getCwd()
 	blockers := append([]domain.LockRecord(nil), ce.Blockers...)
 	sort.Slice(blockers, func(i, j int) bool {
@@ -83,7 +90,40 @@ func EmitConflict(w io.Writer, ce *store.MultiConflictError) {
 		fmt.Fprintf(w, "⚠ target=%s blocker=%s intent=%q expires_at=%s\n",
 			relToCwd(b.Target.Canonical, cwd), holderTag(b.OwnerUUID), b.Intent,
 			b.ExpiresAt.UTC().Format(time.RFC3339))
+		for _, t := range tagsByTarget[b.Target.Canonical] {
+			emitTagRow(w, t, "  ")
+		}
 	}
+}
+
+// EmitTagFooter renders the holder-facing trailing block of pending external
+// tags. Empty input emits nothing — the caller's primary output must stand
+// alone when there's no message to surface. Sort order is the caller's
+// responsibility (store ListAlive* already orders by created_at ASC, id ASC).
+func EmitTagFooter(w io.Writer, tags []store.Tag, holderUUID string) {
+	if len(tags) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "ℹ tags count=%d holder=%s\n", len(tags), holderTag(holderUUID))
+	for _, t := range tags {
+		emitTagRow(w, t, "")
+	}
+}
+
+// EmitTagRows renders just the per-tag lines (no count header). Use for inline
+// blocks beneath a per-file status line where the surrounding context already
+// names the target. Empty input emits nothing.
+func EmitTagRows(w io.Writer, tags []store.Tag) {
+	for _, t := range tags {
+		emitTagRow(w, t, "  ")
+	}
+}
+
+func emitTagRow(w io.Writer, t store.Tag, indent string) {
+	cwd := getCwd()
+	at := time.Unix(0, t.CreatedAt).UTC().Format(time.RFC3339)
+	fmt.Fprintf(w, "ℹ %stag id=%s at=%s from=%s target=%s text=%q\n",
+		indent, t.ID, at, holderTag(t.TaggerUUID), relToCwd(t.TargetCanonical, cwd), t.Text)
 }
 
 func EmitChmodFailure(w io.Writer, cfe *store.ChmodFailureError) {

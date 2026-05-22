@@ -37,6 +37,8 @@ commands:
   check    Check targets for lock conflicts; --staged reads git staged paths
   status   Show lock state; --mine to filter to yours
   doctor   Detect and optionally repair stale locks
+  tag      Leave a note on a target locked by another agent
+  ack      Dismiss a tag by ID
   whoami   Print agent identity
   version  Print loto version`)
 }

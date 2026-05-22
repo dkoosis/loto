@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/render"
 )
 
 func init() { register("status", cmdStatus) } //nolint:gochecknoinits // command registry pattern
@@ -26,6 +27,7 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 3
 	}
 	defer rt.Close()
+	defer rt.DeferredTagFooter(stdout)
 
 	repoTop, _ := repoTopForCwd(ctx)
 	fmt.Fprintf(stdout, "project: %s\n", ResolveAndPinProjectSlug(repoTop))
@@ -55,7 +57,7 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		return all[i].CreatedAt.Before(all[j].CreatedAt)
 	})
-	printStatusLocks(stdout, all)
+	printStatusLocks(stdout, rt, all)
 	return 0
 }
 
@@ -69,18 +71,24 @@ func filterLocksByOwner(all []domain.LockRecord, ownerUUID string) []domain.Lock
 	return filtered
 }
 
-func printStatusLocks(stdout io.Writer, all []domain.LockRecord) {
+func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord) {
 	if len(all) == 0 {
 		fmt.Fprintln(stdout, "✓ no locks")
 		return
 	}
 	fmt.Fprintf(stdout, "✓ locks count=%d\n", len(all))
+	canonicals := make([]string, len(all))
+	for i := range all {
+		canonicals[i] = all[i].Target.Canonical
+	}
+	tagsByTarget, _ := rt.Store.ListAliveByTargets(rt.Ctx, canonicals)
 	for i := range all {
 		l := &all[i]
 		fmt.Fprintf(stdout, "✓ target=%s owner=%s intent=%q held_since=%s expires_at=%s host=%s pid=%d\n",
 			relPath(l.Target.Canonical), l.OwnerUUID, l.Intent,
 			l.CreatedAt.UTC().Format(time.RFC3339), l.ExpiresAt.UTC().Format(time.RFC3339),
 			l.Host, l.PID)
+		render.EmitTagRows(stdout, tagsByTarget[l.Target.Canonical])
 	}
 }
 
@@ -108,6 +116,9 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 		l := &overlapping[i]
 		fmt.Fprintf(w, "✗ holder target=%s owner=%s intent=%q expires_at=%s\n",
 			relPath(l.Target.Canonical), l.OwnerUUID, l.Intent, l.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	if tags, err := rt.Store.ListAliveForTarget(rt.Ctx, t.Canonical); err == nil {
+		render.EmitTagRows(w, tags)
 	}
 	return 0
 }

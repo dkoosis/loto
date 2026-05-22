@@ -29,4 +29,19 @@ CREATE INDEX IF NOT EXISTS idx_events_target     ON events(target_canonical, cre
 CREATE INDEX IF NOT EXISTS idx_events_kind       ON events(event_kind, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_created_id ON events(created_at, id);
 
-PRAGMA user_version = 6;
+CREATE TABLE IF NOT EXISTS tags (
+  id                TEXT PRIMARY KEY,
+  target_canonical  TEXT NOT NULL,
+  lock_owner_uuid   TEXT NOT NULL,
+  lock_created_at   INTEGER NOT NULL,
+  tagger_uuid       TEXT NOT NULL,
+  text              TEXT NOT NULL,
+  created_at        INTEGER NOT NULL,
+  acked_at          INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_tags_host
+  ON tags(target_canonical, lock_owner_uuid, lock_created_at);
+CREATE INDEX IF NOT EXISTS idx_tags_holder_pending
+  ON tags(lock_owner_uuid, acked_at);
+
+PRAGMA user_version = 7;

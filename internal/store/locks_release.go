@@ -39,6 +39,13 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, byAge
 	results, owned := classifyReleases(targets, owners, byAgent)
 
 	if len(owned) > 0 {
+		// Ack tags BEFORE deleting the host locks: the host-lock match must
+		// still resolve to set acked_at; if we DELETE first the tags would
+		// orphan instead, losing the audit ack (edge #6 distinguishes
+		// release-ack from break-orphan).
+		if err := ackTagsForReleaseTx(ctx, tx, owned, byAgent); err != nil {
+			return nil, err
+		}
 		if err := deleteOwnedTx(ctx, tx, owned, byAgent); err != nil {
 			return nil, err
 		}
@@ -114,6 +121,24 @@ func loadOwnersTx(ctx context.Context, tx *sql.Tx, targets []domain.Target) (map
 		out[canonical] = owner
 	}
 	return out, rows.Err()
+}
+
+// ackTagsForReleaseTx marks every pending tag whose host lock is in the
+// release set as acked. Run inside the release tx BEFORE deleteOwnedTx so the
+// host-lock subquery still matches; running it after would silently orphan
+// tags instead of acking them (would still get GC'd by doctor, but the audit
+// would lose the explicit ack timestamp).
+func ackTagsForReleaseTx(ctx context.Context, tx *sql.Tx, canonicals []string, byAgent string) error {
+	placeholders, args := inClauseStrings(canonicals)
+	args = append([]any{time.Now().UnixNano()}, args...)
+	args = append(args, byAgent)
+	_, err := tx.ExecContext(ctx, `UPDATE tags SET acked_at = ?`+ //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+		` WHERE acked_at IS NULL`+
+		` AND (target_canonical, lock_owner_uuid, lock_created_at) IN (`+
+		`   SELECT target_canonical, owner_uuid, created_at FROM locks`+
+		`   WHERE target_canonical IN (`+placeholders+`) AND owner_uuid = ?`+
+		` )`, args...)
+	return err
 }
 
 // deleteOwnedTx removes `locks` rows for the given canonical paths owned by

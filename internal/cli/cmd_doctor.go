@@ -67,6 +67,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 3
 	}
 	defer rt.Close()
+	defer rt.DeferredTagFooter(stdout)
 
 	live := rt.liveProbe()
 
