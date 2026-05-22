@@ -84,6 +84,46 @@ func TestCmdTag_CapAt5(t *testing.T) {
 	}
 }
 
+func TestStatus_SingleTarget_SurfacesTags(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	must0(t, []string{tcCmdLock, tcTargetA, "-t", tcIntentTest})
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	must0(t, []string{"tag", tcTargetA, "ETA?"})
+
+	// Non-holder bob runs status — sees the tag inline.
+	var out, errBuf bytes.Buffer
+	if code := Run([]string{tcCmdStatus, tcTargetA}, &out, &errBuf); code != 0 {
+		t.Fatalf("status exit=%d err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "ETA?") {
+		t.Fatalf("expected tag text in status output: %q", out.String())
+	}
+}
+
+func TestStatus_HolderSeesTrailingFooter(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	must0(t, []string{tcCmdLock, tcTargetA, "-t", tcIntentTest})
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	must0(t, []string{"tag", tcTargetA, "external note"})
+
+	// Alice (holder) runs `status` with no args — trailing footer should fire.
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	var out, errBuf bytes.Buffer
+	if code := Run([]string{tcCmdStatus}, &out, &errBuf); code != 0 {
+		t.Fatalf("status exit=%d err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "external note") {
+		t.Fatalf("expected trailing tag footer for holder: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "ℹ tags count=") {
+		t.Fatalf("expected footer count header: %q", out.String())
+	}
+}
+
 func TestCmdTag_UsagePrintsOnShortArgs(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)

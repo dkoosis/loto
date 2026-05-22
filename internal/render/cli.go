@@ -110,6 +110,15 @@ func EmitTagFooter(w io.Writer, tags []store.Tag, holderUUID string) {
 	}
 }
 
+// EmitTagRows renders just the per-tag lines (no count header). Use for inline
+// blocks beneath a per-file status line where the surrounding context already
+// names the target. Empty input emits nothing.
+func EmitTagRows(w io.Writer, tags []store.Tag) {
+	for _, t := range tags {
+		emitTagRow(w, t, "  ")
+	}
+}
+
 func emitTagRow(w io.Writer, t store.Tag, indent string) {
 	cwd := getCwd()
 	at := time.Unix(0, t.CreatedAt).UTC().Format(time.RFC3339)

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"loto/internal/domain"
 	"loto/internal/identity"
+	"loto/internal/render"
 	"loto/internal/store"
 )
 
@@ -89,6 +91,21 @@ func repoTopForCwd(ctx context.Context) (string, error) {
 }
 
 func (r *runtime) Close() error { return r.Store.Close() }
+
+// DeferredTagFooter prints the caller-as-holder's pending external tags after
+// the primary command output. Opted-in commands (lock, unlock, status, doctor)
+// register this via `defer`; check is excluded deliberately — its output is a
+// pinned machine surface for trixi's PreToolUse hook.
+//
+// Tags whose host lock disappeared mid-command (release, break) are filtered by
+// the JOIN inside ListAliveForHolder.
+func (r *runtime) DeferredTagFooter(w io.Writer) {
+	tags, err := r.Store.ListAliveForHolder(r.Ctx, r.Agent.UUID)
+	if err != nil || len(tags) == 0 {
+		return
+	}
+	render.EmitTagFooter(w, tags, r.Agent.UUID)
+}
 
 // liveProbe returns a PidLiveProbe that treats remote-host PIDs as live and
 // probes local PIDs via pidLive. Centralizes the live-probe closure that
