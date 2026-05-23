@@ -533,6 +533,49 @@ func TestAcquireLocks_RollbackRestoreFailureLeavesBreadcrumb(t *testing.T) {
 	}
 }
 
+// Regression for gh#122: post-commit restore-failure audit must land even
+// when the caller's ctx is already cancelled. Pre-fix, AppendEvents
+// opened a fresh tx under the cancelled ctx → busy_timeout scaled to ~1ms
+// → audit silently dropped, leaving orphan-mode files with zero trail.
+func TestAcquireLocks_AuditSurvivesCancelledCtx(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "x.go")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := mustOpen(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	live := func(string, int) bool { return true }
+	rec := domain.LockRecord{
+		Target:      domain.Target{Canonical: p},
+		OwnerUUID:   tcAlice,
+		SessionUUID: "s1",
+		CreatedAt:   time.Now(),
+		ExpiresAt:   time.Now().Add(time.Hour),
+		Host:        "h",
+		PID:         1,
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, live); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	// Drive the rollback path: rotateEventsTx etc. are committed, but a
+	// future Commit-failure path mirrors restoreAllAndAudit directly.
+	s.restoreAllAndAudit(ctx, []string{p}, tcAlice, time.Now())
+
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM events WHERE target_canonical=? AND event_kind=?`,
+		p, EventAcquireRollbackStart,
+	).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatalf("acquire_rollback_started audit dropped under cancelled ctx (gh#122)")
+	}
+}
+
 func TestReleaseLock_RestoresWriteMode(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()

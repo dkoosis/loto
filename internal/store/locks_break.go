@@ -72,7 +72,7 @@ func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, byAgent
 		return nil, err
 	}
 
-	s.restoreAndAuditBreaks(ctx, results, byAgent, now)
+	s.restoreAndAuditBreaks(results, byAgent, now)
 	return results, nil
 }
 
@@ -116,7 +116,7 @@ func classifyBreaks(
 	return results, events, deleteByOwner
 }
 
-func (s *Store) restoreAndAuditBreaks(ctx context.Context, results []BreakResult, byAgent string, now time.Time) {
+func (s *Store) restoreAndAuditBreaks(results []BreakResult, byAgent string, now time.Time) {
 	var failEvents []domain.Event
 	for i := range results {
 		if results[i].Err != nil {
@@ -128,7 +128,7 @@ func (s *Store) restoreAndAuditBreaks(ctx context.Context, results []BreakResult
 		}
 	}
 	if len(failEvents) > 0 {
-		_ = s.AppendEvents(ctx, failEvents)
+		_ = s.appendAuditDetached(failEvents)
 	}
 }
 

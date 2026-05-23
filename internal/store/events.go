@@ -44,6 +44,26 @@ DELETE FROM events WHERE id IN (
 	return err
 }
 
+// auditDetachedTimeout bounds best-effort audit writes that must survive
+// parent-ctx cancellation. The post-commit restore loop and the
+// post-rollback failure-audit must persist their breadcrumbs even when
+// the caller has gone away — otherwise a cancelled lock attempt that
+// leaves files in orphan-mode produces zero audit (gh#122).
+const auditDetachedTimeout = 2 * time.Second
+
+// appendAuditDetached appends evs on a fresh background context bounded
+// by auditDetachedTimeout so audit writes survive parent-ctx cancellation.
+// Best-effort: errors are returned but most callers ignore them — the audit
+// trail is hygiene, not invariant.
+func (s *Store) appendAuditDetached(evs []domain.Event) error {
+	if len(evs) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), auditDetachedTimeout)
+	defer cancel()
+	return s.AppendEvents(ctx, evs)
+}
+
 // AppendEvent inserts a single event. Thin wrapper around AppendEvents to keep
 // the 1-arg caller surface; new code should prefer AppendEvents.
 func (s *Store) AppendEvent(ctx context.Context, e domain.Event) (string, error) {

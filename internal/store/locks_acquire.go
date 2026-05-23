@@ -53,7 +53,7 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 		return nil, &MultiConflictError{Blockers: blockers}
 	}
 
-	stripped, chmodFailErr := s.stripAndHandleFailure(ctx, tx, sorted, now)
+	stripped, chmodFailErr := s.stripAndHandleFailure(tx, sorted, now)
 	if chmodFailErr != nil {
 		return nil, chmodFailErr
 	}
@@ -72,11 +72,29 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 	return sorted, nil
 }
 
-// restoreAllAndAudit restores write bits on every stripped path. Any
-// restore that fails is recorded as a mode_restore_failed event so the
-// orphan-mode state on disk has an audit trail. Mirrors the strip-time
-// asymmetry that stripAndHandleFailure handles for the rollback path.
-func (s *Store) restoreAllAndAudit(ctx context.Context, stripped []string, byAgent string, now time.Time) {
+// restoreAllAndAudit restores write bits on every stripped path. Emits
+// an acquire_rollback_started breadcrumb BEFORE the chmod loop so a
+// mid-loop crash leaves a durable trail pointing at the orphan-mode
+// files; per-path mode_restore_failed events follow for any restore
+// that fails (gh#122).
+//
+// Audit writes use a detached bounded ctx so an already-cancelled
+// caller ctx doesn't scale busy_timeout to ~1ms and silently drop the
+// trail — the post-commit/post-rollback restore is the one moment we
+// most need the audit to land.
+func (s *Store) restoreAllAndAudit(_ context.Context, stripped []string, byAgent string, now time.Time) {
+	if len(stripped) == 0 {
+		return
+	}
+	start := []domain.Event{{
+		Target:    domain.Target{Canonical: stripped[0]},
+		Kind:      EventAcquireRollbackStart,
+		ActorUUID: byAgent,
+		Reason:    fmt.Sprintf("acquire_rollback_started: restoring %d path(s); first=%s", len(stripped), stripped[0]),
+		CreatedAt: now,
+	}}
+	_ = s.appendAuditDetached(start)
+
 	var evs []domain.Event
 	for _, p := range stripped {
 		if err := restoreWrite(p); err != nil {
@@ -84,11 +102,11 @@ func (s *Store) restoreAllAndAudit(ctx context.Context, stripped []string, byAge
 		}
 	}
 	if len(evs) > 0 {
-		_ = s.AppendEvents(ctx, evs)
+		_ = s.appendAuditDetached(evs)
 	}
 }
 
-func (s *Store) stripAndHandleFailure(ctx context.Context, tx *sql.Tx, sorted []domain.LockRecord, now time.Time) ([]string, error) {
+func (s *Store) stripAndHandleFailure(tx *sql.Tx, sorted []domain.LockRecord, now time.Time) ([]string, error) {
 	stripped, chmodErr := stripAll(sorted)
 	if chmodErr == nil {
 		return stripped, nil
@@ -100,7 +118,7 @@ func (s *Store) stripAndHandleFailure(ctx context.Context, tx *sql.Tx, sorted []
 		for _, re := range restoreErrs {
 			evs = append(evs, modeRestoreFailedEvent(re.path, sorted[0].OwnerUUID, now, re.err))
 		}
-		_ = s.AppendEvents(ctx, evs)
+		_ = s.appendAuditDetached(evs)
 	}
 	return nil, &ChmodFailureError{Failures: failures}
 }

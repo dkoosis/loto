@@ -57,7 +57,7 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, byAge
 	// Chmod restore is outside the tx — locks ARE released. Failures surface
 	// per-target AND batch into one audit event call (NORTH_STAR.md: every path
 	// that removes a `locks` row also tries restore + audits failure).
-	s.restoreAndAuditReleases(ctx, results, byAgent)
+	s.restoreAndAuditReleases(results, byAgent)
 	return results, nil
 }
 
@@ -83,7 +83,7 @@ func classifyReleases(targets []domain.Target, owners map[string]string, byAgent
 	return results, owned
 }
 
-func (s *Store) restoreAndAuditReleases(ctx context.Context, results []ReleaseResult, byAgent string) {
+func (s *Store) restoreAndAuditReleases(results []ReleaseResult, byAgent string) {
 	now := time.Now()
 	var failEvents []domain.Event
 	for i := range results {
@@ -97,7 +97,7 @@ func (s *Store) restoreAndAuditReleases(ctx context.Context, results []ReleaseRe
 		}
 	}
 	if len(failEvents) > 0 {
-		_ = s.AppendEvents(ctx, failEvents)
+		_ = s.appendAuditDetached(failEvents)
 	}
 }
 
