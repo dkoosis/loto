@@ -157,11 +157,48 @@ func TestGCPreservesSessionReferencedAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := gcStaleAgents(time.Now()); err != nil {
+	if err := gcStaleAgents(time.Now(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(agentPath); err != nil {
 		t.Fatalf("session-referenced agent was deleted: %v", err)
+	}
+}
+
+// TestGCPreservesLockReferencedAgents asserts that even when an agent file's
+// mtime predates the GC cutoff, if any live lock row still references its
+// uuid as owner_uuid, GC must not delete it. Pruning a lock-pinned agent
+// strands the lock with an unresolvable owner: LookupByUUID(holder) returns
+// ENOENT for the live holder, breaking render of conflict reports and any
+// holder-scoped operation. Regression for gh#125 (loto-ffg).
+func TestGCPreservesLockReferencedAgents(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+
+	// A stale-by-time agent file that is nonetheless pinned by a live lock.
+	stale := &Agent{
+		UUID:      newUUID(),
+		Handle:    "PinnedPanda",
+		CreatedAt: time.Now().Add(-90 * 24 * time.Hour).UTC(),
+		Host:      "old",
+	}
+	if err := writeAgent(stale); err != nil {
+		t.Fatal(err)
+	}
+	stalePath := filepath.Join(dir, ".loto", "agents", stale.UUID+".json")
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	if err := os.Chtimes(stalePath, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	pinned := map[string]struct{}{stale.UUID: {}}
+	if err := gcStaleAgents(time.Now(), pinned); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stalePath); err != nil {
+		t.Fatalf("lock-pinned agent was deleted: %v", err)
 	}
 }
 
@@ -229,7 +266,7 @@ func TestGCStaleAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := gcStaleAgents(time.Now()); err != nil {
+	if err := gcStaleAgents(time.Now(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {

@@ -83,7 +83,14 @@ func sessionCachePath(sid string) (string, error) {
 // LOTO_AGENT_ID is a hard error, and the heuristic mostRecentAgent fallback
 // is only consulted when fresh.
 func Ensure() (*Agent, error) {
-	agentsGCOnce.Do(func() { _ = gcStaleAgents(time.Now()) })
+	// GC runs out of band via GCAgents (driven by the CLI runtime after the
+	// store is open, so it can pass the set of lock-owner UUIDs to pin).
+	// Firing it here unconditionally with a nil pin set would race the
+	// runtime's pin-aware call: agentsGCOnce only fires once, so whichever
+	// path runs first defines the GC behavior, and Ensure() runs first.
+	// That ordering was the root cause of gh#125 (loto-ffg) — stale-by-time
+	// agents pinned by live locks were reaped before the runtime could
+	// register them as pinned. Leave GC scheduling to GCAgents.
 
 	u, set := os.LookupEnv("LOTO_AGENT_ID")
 	if set {
@@ -300,16 +307,25 @@ func chooseHandle() (string, error) {
 
 // gcStaleAgents removes ~/.loto/agents/*.json whose mtime is older than
 // agentsGCMaxAge, except any uuid still referenced by a session cache file
-// in ~/.loto/session/. Preserving referenced uuids keeps the binding
-// invariant: as long as a session cache exists, the agent it points to
-// resolves. Best-effort otherwise: errors are swallowed (missing dir,
-// denied unlink, racing writer) — staleness is hygiene, not invariant.
-func gcStaleAgents(now time.Time) error {
+// in ~/.loto/session/ OR present in extraPinned. extraPinned carries
+// owner_uuids drawn from live lock rows (see GCAgents): pruning an agent
+// pinned by a live lock would strand the lock with an unresolvable owner,
+// so LookupByUUID(holder) returns ENOENT for an active holder. Identity
+// package cannot import store directly without a dependency cycle, so the
+// caller passes the pin set in. Preserving referenced uuids keeps the
+// binding invariant: as long as a session cache or live lock points at
+// an agent, it resolves. Best-effort otherwise: errors are swallowed
+// (missing dir, denied unlink, racing writer) — staleness is hygiene,
+// not invariant. Regression for gh#125 (loto-ffg).
+func gcStaleAgents(now time.Time, extraPinned map[string]struct{}) error {
 	entries, err := os.ReadDir(registryDir())
 	if err != nil {
 		return err
 	}
 	pinned := sessionReferencedUUIDs()
+	for u := range extraPinned {
+		pinned[u] = struct{}{}
+	}
 	cutoff := now.Add(-agentsGCMaxAge)
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".json") {
@@ -328,6 +344,19 @@ func gcStaleAgents(now time.Time) error {
 		}
 	}
 	return nil
+}
+
+// GCAgents is the public entry point for the agent-registry GC pass. The
+// CLI runtime calls it after opening the store, passing the set of
+// owner_uuids drawn from live lock rows. This is the path that closes the
+// gh#125 race where the once-per-process GC in Ensure() runs before the
+// store is open and so reaps agents still pinned by active locks. Wraps
+// gcStaleAgents; runs at most once per process via agentsGCOnce so
+// Ensure()'s best-effort call and this call don't double up.
+func GCAgents(now time.Time, lockOwnerUUIDs map[string]struct{}) error {
+	var err error
+	agentsGCOnce.Do(func() { err = gcStaleAgents(now, lockOwnerUUIDs) })
+	return err
 }
 
 // sessionReferencedUUIDs returns the set of agent uuids that any session
