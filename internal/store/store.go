@@ -47,10 +47,36 @@ func Open(p string) (*Store, error) {
 // flock polling (op-flock + recovery-lock) instead of waiting out
 // LOTO_FLOCK_TIMEOUT.
 func OpenContext(ctx context.Context, p string) (*Store, error) {
+	return acquireOpenLocks(ctx, p)
+}
+
+// acquireOpenLocks is the single canonical entry point for the Open-path
+// lock dance. It enforces the gh#109 invariant:
+//
+//	op-flock is NEVER held across acquireRecoveryLock.
+//
+// Op-flock protects only the create-race window on fresh DBs (two
+// concurrent first-Opens picking the same path). Recovery-lock serializes
+// corrupt-DB recovery and is taken alone. Holding both at once would
+// (a) be one missing rename away from an AB/BA deadlock with any future
+// caller that takes them in the opposite order, and (b) stall every
+// unrelated `loto` invocation for the full recovery poll window, since
+// acquire/release/break/doctor all need op-flock.
+//
+// Canonical order, when both are needed by a single caller: op-flock
+// first, then release before recovery-lock. The fresh-DB path here
+// follows that rule by releasing op-flock immediately after the initial
+// openOnce attempt — before any recovery-lock acquire — even when the
+// initial attempt fails with corruption/version mismatch.
+func acquireOpenLocks(ctx context.Context, p string) (*Store, error) {
 	if st, err := os.Stat(p); err == nil && st.Size() > 0 {
+		// Existing-DB path: no create race possible, so op-flock isn't
+		// needed. openWithRecovery may take recovery-lock alone.
 		return openWithRecovery(ctx, p)
 	}
 
+	// Fresh-DB path: op-flock guards the create-race window, but is
+	// released before any recovery-lock acquire (gh#109).
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir state dir: %w", err)
 	}
@@ -58,7 +84,18 @@ func OpenContext(ctx context.Context, p string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer flock.release()
+	s, openErr := openOnce(p)
+	// Release op-flock BEFORE any recovery-lock acquire. If openOnce
+	// succeeded the create race is resolved; if it failed with corruption
+	// or version mismatch, openWithRecovery will retake recovery-lock
+	// alone — never with op-flock held.
+	flock.release()
+	if openErr == nil {
+		return s, nil
+	}
+	if !isCorruptDB(openErr) && !isUserVersionMismatch(openErr) {
+		return nil, openErr
+	}
 	return openWithRecovery(ctx, p)
 }
 
