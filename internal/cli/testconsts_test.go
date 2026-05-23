@@ -11,6 +11,7 @@ const (
 	tcCmdDoctor    = "doctor"
 	tcTargetX      = "x.go"
 	tcFlagRepair   = "--repair"
+	tcFlagOrphan   = "--orphan-mode"
 	tcFlagMine     = "--mine"
 	tcFlagIntent   = "--intent"
 	tcSlugDKLoto   = "dkoosis-loto"
