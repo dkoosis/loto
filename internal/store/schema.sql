@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS tags (
   lock_owner_uuid   TEXT NOT NULL,
   lock_created_at   INTEGER NOT NULL,
   tagger_uuid       TEXT NOT NULL,
-  text              TEXT NOT NULL,
+  text              TEXT NOT NULL CHECK (length(text) <= 4096),
   created_at        INTEGER NOT NULL,
   acked_at          INTEGER
 );
@@ -44,4 +44,4 @@ CREATE INDEX IF NOT EXISTS idx_tags_host
 CREATE INDEX IF NOT EXISTS idx_tags_holder_pending
   ON tags(lock_owner_uuid, acked_at);
 
-PRAGMA user_version = 8;
+PRAGMA user_version = 9;

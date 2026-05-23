@@ -93,6 +93,46 @@ func TestInsertTag_CapEnforcedTransactionally(t *testing.T) {
 	}
 }
 
+func TestInsertTag_TextTooLong_Rejects(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
+
+	oversized := strings.Repeat("x", tagTextMaxBytes+1)
+	_, err := s.InsertTag(ctx, NewTag{
+		TargetCanonical: lock.Target.Canonical,
+		LockOwnerUUID:   tcAlice,
+		LockCreatedAt:   lockNs,
+		TaggerUUID:      tcBob,
+		Text:            oversized,
+	})
+	if !errEqualsTo(err, ErrTagTextTooLong) {
+		t.Fatalf("want ErrTagTextTooLong, got %v", err)
+	}
+	if n := rawTagRowCount(t, s); n != 0 {
+		t.Fatalf("oversized tag must not be inserted, got %d rows", n)
+	}
+}
+
+// TestInsertTag_TextAtCap_Accepted pins the boundary: exactly tagTextMaxBytes
+// bytes is the largest legal text.
+func TestInsertTag_TextAtCap_Accepted(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
+
+	atCap := strings.Repeat("x", tagTextMaxBytes)
+	if _, err := s.InsertTag(ctx, NewTag{
+		TargetCanonical: lock.Target.Canonical,
+		LockOwnerUUID:   tcAlice,
+		LockCreatedAt:   lockNs,
+		TaggerUUID:      tcBob,
+		Text:            atCap,
+	}); err != nil {
+		t.Fatalf("at-cap text must be accepted, got %v", err)
+	}
+}
+
 func TestInsertTag_NoHostLock_Rejects(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
