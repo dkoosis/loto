@@ -111,15 +111,15 @@ func TestBreakLocks_RestoreErrSurfaced(t *testing.T) {
 	}
 
 	// Inject chmod failure for the restore phase only (post-strip). The strip
-	// during AcquireLocks already ran via the realPath chmodFn; flip it now so the
+	// during AcquireLocks already ran via the realPath fchmodFn; flip it now so the
 	// post-commit restoreWrite returns EPERM.
-	orig := chmodFn
-	defer func() { chmodFn = orig }()
-	chmodFn = func(path string, mode os.FileMode) error {
-		if path == l.Target.Canonical {
-			return &os.PathError{Op: tcChmod, Path: path, Err: syscall.EPERM}
+	orig := fchmodFn
+	defer func() { fchmodFn = orig }()
+	fchmodFn = func(f *os.File, mode os.FileMode) error {
+		if f.Name() == l.Target.Canonical {
+			return &os.PathError{Op: tcChmod, Path: f.Name(), Err: syscall.EPERM}
 		}
-		return orig(path, mode)
+		return orig(f, mode)
 	}
 
 	results, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "restore-fail", live)
@@ -431,13 +431,13 @@ func TestAcquireLocks_ChmodFailureRollsBack(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 
-	orig := chmodFn
-	defer func() { chmodFn = orig }()
-	chmodFn = func(path string, mode os.FileMode) error {
-		if path == b {
-			return &os.PathError{Op: tcChmod, Path: path, Err: syscall.EPERM}
+	orig := fchmodFn
+	defer func() { fchmodFn = orig }()
+	fchmodFn = func(f *os.File, mode os.FileMode) error {
+		if f.Name() == b {
+			return &os.PathError{Op: tcChmod, Path: f.Name(), Err: syscall.EPERM}
 		}
-		return orig(path, mode)
+		return orig(f, mode)
 	}
 
 	live := func(string, int) bool { return true }
@@ -481,16 +481,16 @@ func TestAcquireLocks_RollbackRestoreFailureLeavesBreadcrumb(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 
-	orig := chmodFn
-	defer func() { chmodFn = orig }()
-	chmodFn = func(path string, mode os.FileMode) error {
+	orig := fchmodFn
+	defer func() { fchmodFn = orig }()
+	fchmodFn = func(f *os.File, mode os.FileMode) error {
 		switch {
-		case path == b:
-			return &os.PathError{Op: tcChmod, Path: path, Err: syscall.EPERM}
-		case path == a && mode.Perm()&0o200 != 0:
-			return &os.PathError{Op: tcChmod, Path: path, Err: syscall.EPERM}
+		case f.Name() == b:
+			return &os.PathError{Op: tcChmod, Path: f.Name(), Err: syscall.EPERM}
+		case f.Name() == a && mode.Perm()&0o200 != 0:
+			return &os.PathError{Op: tcChmod, Path: f.Name(), Err: syscall.EPERM}
 		}
-		return orig(path, mode)
+		return orig(f, mode)
 	}
 
 	live := func(string, int) bool { return true }
@@ -704,13 +704,13 @@ func TestReleaseLocks_RestoreFailureIsReported(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orig := chmodFn
-	defer func() { chmodFn = orig }()
-	chmodFn = func(path string, mode os.FileMode) error {
-		if path == rec.Target.Canonical && mode.Perm()&0o200 != 0 {
-			return &os.PathError{Op: "chmod", Path: path, Err: syscall.EPERM}
+	orig := fchmodFn
+	defer func() { fchmodFn = orig }()
+	fchmodFn = func(f *os.File, mode os.FileMode) error {
+		if f.Name() == rec.Target.Canonical && mode.Perm()&0o200 != 0 {
+			return &os.PathError{Op: "chmod", Path: f.Name(), Err: syscall.EPERM}
 		}
-		return orig(path, mode)
+		return orig(f, mode)
 	}
 
 	results, err := s.ReleaseLocks(ctx, []domain.Target{rec.Target}, tcAlice)

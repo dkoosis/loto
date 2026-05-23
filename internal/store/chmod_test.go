@@ -41,3 +41,51 @@ func TestRestoreWrite_MissingFileIsNoop(t *testing.T) {
 		t.Errorf("missing file should be noop, got %v", err)
 	}
 }
+
+// Regression for gh#123: symlink swap must not allow chmod to follow
+// the symlink and modify an attacker-chosen target. stripWrite and
+// restoreWrite must refuse symlinks.
+func TestStripWrite_RefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := stripWrite(link); err == nil {
+		t.Fatal("stripWrite must refuse symlink, got nil error")
+	}
+	st, _ := os.Stat(target)
+	if st.Mode().Perm()&0o200 == 0 {
+		t.Errorf("target was modified via symlink, mode=%o", st.Mode().Perm())
+	}
+}
+
+func TestRestoreWrite_RefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreWrite(link); err == nil {
+		t.Fatal("restoreWrite must refuse symlink, got nil error")
+	}
+	st, _ := os.Stat(target)
+	if st.Mode().Perm()&0o200 != 0 {
+		t.Errorf("target was modified via symlink, mode=%o", st.Mode().Perm())
+	}
+}
+
+func TestStripWrite_RefusesDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := stripWrite(dir); err == nil {
+		t.Fatal("stripWrite must refuse directory")
+	}
+}

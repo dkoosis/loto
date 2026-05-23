@@ -2,36 +2,80 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
+	"syscall"
 )
 
-// chmodFn is a package-private indirection so tests can inject EPERM
-// without an OS-specific fixture.
-var chmodFn = os.Chmod
+// fchmodFn is a package-private indirection so tests can inject EPERM
+// without an OS-specific fixture. Tests filter by f.Name() when needed.
+var fchmodFn = func(f *os.File, mode os.FileMode) error {
+	return f.Chmod(mode)
+}
+
+// safeOpenRegular opens path with O_NOFOLLOW and verifies the result is a
+// regular file. This binds subsequent fchmod calls to the inode that was
+// validated, closing the TOCTOU window where a symlink swap between Stat
+// and Chmod could redirect chmod onto an attacker-chosen file.
+//
+// Returns the os.OpenFile error untouched so callers can distinguish
+// ENOENT (treat as no-op for restore) from ELOOP (symlink — refuse).
+func safeOpenRegular(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, &fs.PathError{
+			Op:   "open",
+			Path: path,
+			Err:  fmt.Errorf("not a regular file: mode %s", st.Mode()),
+		}
+	}
+	return f, nil
+}
 
 // stripWrite removes all write bits (owner/group/other) from path.
+// Refuses symlinks and non-regular files to prevent TOCTOU swap.
 func stripWrite(path string) error {
-	st, err := os.Stat(path)
+	f, err := safeOpenRegular(path)
 	if err != nil {
 		return err
 	}
-	return chmodFn(path, st.Mode().Perm()&^0o222)
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	return fchmodFn(f, st.Mode().Perm()&^0o222)
 }
 
 // restoreWrite adds owner-write to path. Missing-file is a no-op
-// (the file may have been deleted while held).
+// (the file may have been deleted while held). Refuses symlinks and
+// non-regular files.
 //
 // restoreWrite intentionally restores ONLY owner-write (mode | 0o200).
 // loto does not preserve exact pre-lock modes; a file at 0o400 round-trips
 // to 0o600. Documented trade per spec §"chmod policy (no stored mode)".
 func restoreWrite(path string) error {
-	st, err := os.Stat(path)
+	f, err := safeOpenRegular(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return err
 	}
-	return chmodFn(path, st.Mode().Perm()|0o200)
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	return fchmodFn(f, st.Mode().Perm()|0o200)
 }
