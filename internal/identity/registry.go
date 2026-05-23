@@ -21,9 +21,11 @@ import (
 // like "aye-aye" and "musk-ox".
 var handleShape = regexp.MustCompile(`^[A-Z][a-z]+(?:[A-Z][a-z-]+)+$`)
 
-// agentIDShape matches RFC 4122 v4 UUIDs as emitted by newUUID. Validating
-// LOTO_AGENT_ID against this before any filepath.Join is what prevents
-// `LOTO_AGENT_ID=../../etc/passwd` from escaping the registry directory.
+// agentIDShape matches the canonical UUID hex layout. It is not a strict
+// RFC 4122 v4 check — version/variant bits aren't enforced — because its
+// job is to block path traversal before filepath.Join, not to police
+// UUID provenance. newUUID always emits v4, so values produced by this
+// tool satisfy both shapes regardless.
 var agentIDShape = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 var (
@@ -90,7 +92,7 @@ func Ensure() (*Agent, error) {
 			return mintAgent()
 		}
 		if !agentIDShape.MatchString(u) {
-			return nil, fmt.Errorf("%w: %q (want RFC 4122 v4 uuid)", errInvalidAgentID, u)
+			return nil, fmt.Errorf("%w: %q (want canonical uuid hex form)", errInvalidAgentID, u)
 		}
 		a, err := loadByUUID(u)
 		if err == nil {
@@ -121,6 +123,17 @@ func Ensure() (*Agent, error) {
 // (e.g. SessionStart hook + an immediate `loto inbox`) converge on one
 // identity; the loser drops its candidate agent file and adopts the
 // winner's record (gh#28).
+//
+// Ordering is load-bearing: newAgent writes the candidate's agent file
+// before claimSessionCache publishes the session→uuid mapping — referent
+// before reference. A loser that reads the winner's cache is therefore
+// guaranteed to find the winner's agent file already on disk; flipping
+// to a mint→claim→write-on-win ordering would widen the retry loop
+// below (currently scoped to the 0-byte cache window) to also absorb
+// agent-write latency. The os.Remove cleanup runs only on the ErrExist
+// branch; a non-ErrExist claim failure orphans the candidate agent
+// file, but gcStaleAgents reaps it at 30 days, which is the right
+// amount of cleanup at this scale.
 func ensureForSession(sid string) (*Agent, error) {
 	if a, err := loadSessionAgent(sid); err == nil {
 		return a, nil
@@ -176,14 +189,7 @@ func loadSessionAgent(sid string) (*Agent, error) {
 	if ref.UUID == "" {
 		return nil, errNoSessionCache
 	}
-	a, err := loadByUUID(ref.UUID)
-	if err != nil {
-		return nil, err
-	}
-	if a == nil {
-		return nil, errNoSessionCache
-	}
-	return a, nil
+	return loadByUUID(ref.UUID)
 }
 
 // claimSessionCache attempts to create ~/.loto/session/<sid>.json with
