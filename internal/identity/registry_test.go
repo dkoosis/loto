@@ -45,6 +45,36 @@ func TestEnsurePersistsWhenAgentIDUnset(t *testing.T) {
 	}
 }
 
+// Regression for gh#121: with both LOTO_AGENT_ID and CLAUDE_CODE_SESSION_ID
+// unset, Ensure must mint a fresh agent even if a recent (fresh) record
+// exists on disk. The prior heuristic adopted within-24h records, which
+// could resurrect a dead session's UUID and re-attribute new locks to it.
+func TestEnsureNoFallbackToRecentAgent(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+
+	host, _ := os.Hostname()
+	prior := &Agent{
+		UUID:      newUUID(),
+		Handle:    "PriorPanda",
+		Host:      host,
+		CreatedAt: time.Now().Add(-time.Hour).UTC(), // fresh, within old 24h window
+	}
+	if err := writeAgent(prior); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Ensure()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UUID == prior.UUID {
+		t.Fatalf("Ensure adopted recent on-disk agent %s — heuristic fallback must be gone (gh#121)", prior.UUID)
+	}
+}
+
 // TestEnsureStaleAgentIDIsHardError asserts that an explicit LOTO_AGENT_ID
 // pointing at a uuid with no registry record fails loudly rather than
 // silently substituting an ephemeral identity. Silent substitution orphans

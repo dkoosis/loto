@@ -63,7 +63,6 @@ func sessionDir() string {
 }
 
 var (
-	fallbackWarnOnce    sync.Once
 	errNoSessionCache   = errors.New("no session cache")
 	errInvalidSessionID = errors.New("invalid session id")
 )
@@ -108,12 +107,11 @@ func Ensure() (*Agent, error) {
 	if sid := os.Getenv("CLAUDE_CODE_SESSION_ID"); sid != "" {
 		return ensureForSession(sid)
 	}
-	if a, err := mostRecentAgent(time.Now()); err == nil && a != nil {
-		fallbackWarnOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "✗ loto: CLAUDE_CODE_SESSION_ID unset — reusing recent agent %s (%s); set CLAUDE_CODE_SESSION_ID or LOTO_AGENT_ID for stable identity\n", a.Handle, a.UUID)
-		})
-		return a, nil
-	}
+	// No explicit env binding. Per identity v4 invariant ("ambiguity allowed
+	// for display, never for authority"), do not adopt any pre-existing local
+	// agent — the heuristic 24h fallback could resurrect a dead session's
+	// UUID and silently re-attribute new locks to it. Mint a fresh identity
+	// instead; the caller can pin it by exporting LOTO_AGENT_ID.
 	return newAgent()
 }
 

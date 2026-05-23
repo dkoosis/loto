@@ -21,11 +21,13 @@
 //     to one agent via ~/.loto/session/<sid>.json. Concurrent first-use
 //     callers race an O_EXCL claim; losers drop their candidate record and
 //     adopt the winner's mapping (gh#28).
-//  4. LOTO_AGENT_ID and CLAUDE_CODE_SESSION_ID both unset: warn on stderr,
-//     reuse the most recent local agent if it was created within
-//     fallbackFreshness (24h); otherwise mint a fresh persistent agent. The
-//     freshness gate exists because reusing a week-old record would silently
-//     re-attribute new locks to a long-dead identity.
+//  4. LOTO_AGENT_ID and CLAUDE_CODE_SESSION_ID both unset: mint a fresh
+//     persistent agent. The prior heuristic that reused the most-recent
+//     local agent within a 24h window was removed (gh#121): a dead session's
+//     UUID could be adopted by a new process and silently re-attribute new
+//     locks to it, violating the v4 "ambiguity allowed for display, never
+//     for authority" invariant. Pin identity across processes by exporting
+//     CLAUDE_CODE_SESSION_ID or LOTO_AGENT_ID.
 //
 // LOTO_HANDLE preassigns the agent handle; its shape is validated in
 // handles.go but membership in the built-in word lists is not required.
