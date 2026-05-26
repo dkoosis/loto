@@ -280,6 +280,7 @@ func TestIsCorruptDB_RealNotADatabase(t *testing.T) {
 var (
 	errSpoofMalformed = errors.New("transient network read: database disk image is malformed (cached)")
 	errSpoofNotADB    = errors.New("file is not a database (from middleware)")
+	errVACUUMStub     = errors.New("disk I/O error during VACUUM")
 )
 
 func TestIsCorruptDB_NotFooledBySubstring(t *testing.T) {
@@ -426,5 +427,43 @@ func TestMoveCorruptAside_PreservesBytesOnCommitFailure(t *testing.T) {
 			names = append(names, e.Name())
 		}
 		t.Fatalf("corrupt DB bytes lost after commit-rename failure; dir contents: %v", names)
+	}
+}
+
+// TestDoctorRepair_VACUUMFailureDoesNotMaskSuccess verifies that a VACUUM
+// error after a successful repair transaction does not propagate as the
+// DoctorRepair return value. The operator must not see "repair failed" when
+// the actual repair (reclaim + chmod) succeeded. gh#127.
+func TestDoctorRepair_VACUUMFailureDoesNotMaskSuccess(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	dead := func(string, int) bool { return false }
+	l := mkFileLock(t, "v.go", "alice", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject a VACUUM that always fails.
+	var stderr bytes.Buffer
+	s.stderr = &stderr
+	origVacuum := vacuumFn
+	vacuumFn = func(_ context.Context, _ *sql.DB) error {
+		return errVACUUMStub
+	}
+	t.Cleanup(func() { vacuumFn = origVacuum })
+
+	if err := s.DoctorRepair(ctx, l.Host, "doctor", dead); err != nil {
+		t.Fatalf("VACUUM failure must not surface as DoctorRepair error: %v", err)
+	}
+
+	// Lock must still be reclaimed despite VACUUM failure.
+	got, _ := s.LockAt(ctx, l.Target)
+	if got != nil {
+		t.Fatal("stale lock should be reclaimed even when VACUUM fails")
+	}
+
+	// VACUUM error must be logged to stderr.
+	if !bytes.Contains(stderr.Bytes(), []byte("VACUUM after repair")) {
+		t.Fatalf("expected VACUUM warning on stderr, got %q", stderr.String())
 	}
 }

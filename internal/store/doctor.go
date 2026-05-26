@@ -18,6 +18,13 @@ const (
 	sqliteSHMSuffix = "-shm"
 )
 
+// vacuumFn is the VACUUM implementation called by DoctorRepair after a
+// successful repair transaction. Tests can replace it to inject failures.
+var vacuumFn = func(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `VACUUM`)
+	return err
+}
+
 type DoctorReport struct {
 	StaleLocks      []domain.LockRecord
 	SidecarFindings []SidecarFinding
@@ -156,8 +163,10 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 	for _, p := range reclaimed {
 		s.restoreAndAudit(ctx, p, byAgent)
 	}
-	_, err = s.db.ExecContext(ctx, `VACUUM`)
-	return err
+	if err := vacuumFn(ctx, s.db); err != nil {
+		fmt.Fprintf(s.stderr, "loto: VACUUM after repair: %v (best-effort, repair succeeded)\n", err)
+	}
+	return nil
 }
 
 // tagsRetentionAge: acked tags older than this are hard-deleted by doctor
