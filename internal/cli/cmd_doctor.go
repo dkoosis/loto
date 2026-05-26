@@ -118,7 +118,11 @@ func doRepair(rt *runtime, live domain.PidLiveProbe, restoreOrphan bool, orphans
 	}
 	fmt.Fprintln(stdout, "✓ repaired")
 	if restoreOrphan && len(orphans) > 0 {
-		restored, failures := rt.Store.RestoreOrphanMode(orphans)
+		restored, failures, err := rt.Store.RestoreOrphanMode(rt.Ctx, orphans)
+		if err != nil {
+			fmt.Fprintf(stderr, "✗ restore-orphan-mode: %v\n", err)
+			return 3
+		}
 		fmt.Fprintf(stdout, "✓ restored-orphan-mode count=%d failed=%d\n", len(restored), len(failures))
 		for _, f := range failures {
 			fmt.Fprintf(stdout, "✗ restore-orphan-mode target=%s err=%v\n", f.Path, f.Err)

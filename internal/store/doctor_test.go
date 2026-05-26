@@ -111,7 +111,10 @@ func TestRestoreOrphanMode_ChmodsToWritable(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := mustOpen(t)
-	restored, failures := s.RestoreOrphanMode([]string{p})
+	restored, failures, err := s.RestoreOrphanMode(context.Background(), []string{p})
+	if err != nil {
+		t.Fatalf("RestoreOrphanMode: %v", err)
+	}
 	if len(restored) != 1 || restored[0] != p {
 		t.Fatalf("restored = %v", restored)
 	}
@@ -121,6 +124,49 @@ func TestRestoreOrphanMode_ChmodsToWritable(t *testing.T) {
 	st, _ := os.Stat(p)
 	if st.Mode().Perm()&0o200 == 0 {
 		t.Errorf("not writable: %o", st.Mode().Perm())
+	}
+}
+
+// TestRestoreOrphanMode_HoldsOpFlock asserts RestoreOrphanMode serializes
+// against the project op-flock so a concurrent Acquire can't mutate the
+// lock/orphan set mid-restore (loto-98v, gh#124). If an external holder owns
+// op-flock, RestoreOrphanMode must wait — verified by a short flock timeout
+// causing ErrFlockTimeout rather than a torn restore.
+func TestRestoreOrphanMode_HoldsOpFlock(t *testing.T) {
+	t.Setenv("LOTO_FLOCK_TIMEOUT", "100ms")
+	dir := t.TempDir()
+	p := filepath.Join(dir, "x.go")
+	if err := os.WriteFile(p, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	s := mustOpen(t)
+
+	// External holder of op-flock — simulates a concurrent AcquireLocks
+	// (or any other op-flock-taking path) in flight.
+	h, err := acquireOpFlock(context.Background(), s.opFlockPath(), nil)
+	if err != nil {
+		t.Fatalf("acquireOpFlock: %v", err)
+	}
+
+	_, _, err = s.RestoreOrphanMode(context.Background(), []string{p})
+	if !errors.Is(err, ErrFlockTimeout) {
+		t.Fatalf("expected ErrFlockTimeout, got %v", err)
+	}
+	// File must still be read-only — restore didn't proceed.
+	st, _ := os.Stat(p)
+	if st.Mode().Perm()&0o200 != 0 {
+		t.Errorf("restore happened despite flock contention: %o", st.Mode().Perm())
+	}
+
+	h.release()
+
+	// After release, restore succeeds.
+	restored, failures, err := s.RestoreOrphanMode(context.Background(), []string{p})
+	if err != nil {
+		t.Fatalf("post-release RestoreOrphanMode: %v", err)
+	}
+	if len(restored) != 1 || len(failures) != 0 {
+		t.Fatalf("post-release restored=%v failures=%v", restored, failures)
 	}
 }
 

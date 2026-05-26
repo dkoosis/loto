@@ -243,7 +243,18 @@ func (s *Store) ScanOrphanModes(ctx context.Context, paths []string) ([]string, 
 // gates this behind explicit user intent (--restore-orphan-mode). Returns
 // the paths it successfully chmod'd and a parallel slice of per-path failures
 // so callers can surface why a file was skipped.
-func (s *Store) RestoreOrphanMode(paths []string) (restored []string, failures []OrphanRestoreFailure) {
+//
+// Holds the project op-flock across the full restore so a concurrent
+// AcquireLocks/Release/Break can't mutate the lock set mid-restore and
+// leave the filesystem and DB views torn (loto-98v, gh#124). Same posture
+// as DoctorRepair, which already serializes its DB+chmod work under op-flock.
+func (s *Store) RestoreOrphanMode(ctx context.Context, paths []string) (restored []string, failures []OrphanRestoreFailure, err error) {
+	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer flock.release()
+
 	for _, p := range paths {
 		if err := restoreWrite(p); err != nil {
 			failures = append(failures, OrphanRestoreFailure{Path: p, Err: err})
@@ -251,7 +262,7 @@ func (s *Store) RestoreOrphanMode(paths []string) (restored []string, failures [
 		}
 		restored = append(restored, p)
 	}
-	return restored, failures
+	return restored, failures, nil
 }
 
 // OrphanRestoreFailure pairs an orphan-mode path with the error encountered
