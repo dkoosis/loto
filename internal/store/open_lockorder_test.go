@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -96,22 +97,10 @@ func TestOpen_AllPathsUseAcquireOpenLocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	srcStr := string(src)
-	if !lockOrderTestContains(srcStr, "acquireOpenLocks") {
+	if !strings.Contains(srcStr, "acquireOpenLocks") {
 		t.Fatal("acquireOpenLocks helper missing from store.go (gh#109)")
 	}
-	if !lockOrderTestContains(srcStr, "gh#109") {
+	if !strings.Contains(srcStr, "gh#109") {
 		t.Fatal("acquireOpenLocks must reference gh#109 invariant in its doc comment")
 	}
-}
-
-func lockOrderTestContains(haystack, needle string) bool {
-	if len(needle) == 0 {
-		return true
-	}
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return true
-		}
-	}
-	return false
 }
