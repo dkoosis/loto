@@ -112,27 +112,18 @@ func resolveUnlockArgs(args []string, stderr io.Writer) ([]domain.Target, int) {
 }
 
 func unlockAll(rt *runtime, stdout, stderr io.Writer) int {
-	all, err := rt.Store.ListLocks(rt.Ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return 3
+	// Scope: session-pinned → release only this session's locks (NORTH_STAR
+	// invariant 5). Unpinned → agent-scoped fallback (empty sessionUUID
+	// tells ReleaseBySession to match all sessions for this agent).
+	//
+	// ReleaseBySession is atomic: one SQL query finds+deletes matching rows
+	// in a single tx, closing the TOCTOU gap where the old list+filter+release
+	// dance could miss locks created between ListLocks and ReleaseLocks.
+	sessionFilter := ""
+	if rt.SessionPinned {
+		sessionFilter = rt.SessionUUID
 	}
-	// Scope: agent always, session iff LOTO_SESSION_ID is pinned. Pinning is
-	// the SessionStart hook signaling "I am one Claude session of many" — in
-	// that case --all must not release sibling sessions' holdings (NORTH_STAR
-	// invariant 5). Without pinning (interactive single-shot use), fall back
-	// to agent-scoped — otherwise --all matches nothing and silently fails.
-	mine := make([]domain.Target, 0, len(all))
-	for i := range all {
-		if all[i].OwnerUUID != rt.Agent.UUID {
-			continue
-		}
-		if rt.SessionPinned && all[i].SessionUUID != rt.SessionUUID {
-			continue
-		}
-		mine = append(mine, all[i].Target)
-	}
-	results, err := rt.Store.ReleaseLocks(rt.Ctx, mine, rt.Agent.UUID)
+	results, err := rt.Store.ReleaseBySession(rt.Ctx, rt.Agent.UUID, sessionFilter)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
