@@ -49,6 +49,20 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, byAge
 		if err := deleteOwnedTx(ctx, tx, owned, byAgent); err != nil {
 			return nil, err
 		}
+		// Emit lock_released events in the same tx (atomic with the row deletes).
+		now := time.Now()
+		evs := make([]domain.Event, len(owned))
+		for i, canonical := range owned {
+			evs[i] = domain.Event{
+				Target:    domain.Target{Canonical: canonical},
+				Kind:      EventLockReleased,
+				ActorUUID: byAgent,
+				CreatedAt: now,
+			}
+		}
+		if err := appendEventsTx(ctx, tx, evs); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -193,6 +207,20 @@ func (s *Store) ReleaseBySession(ctx context.Context, byAgent, sessionUUID strin
 		return nil, err
 	}
 	if err := deleteOwnedTx(ctx, tx, canonicals, byAgent); err != nil {
+		return nil, err
+	}
+	// Emit lock_released events in the same tx (atomic with the row deletes).
+	now := time.Now()
+	evs := make([]domain.Event, len(canonicals))
+	for i, c := range canonicals {
+		evs[i] = domain.Event{
+			Target:    domain.Target{Canonical: c},
+			Kind:      EventLockReleased,
+			ActorUUID: byAgent,
+			CreatedAt: now,
+		}
+	}
+	if err := appendEventsTx(ctx, tx, evs); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

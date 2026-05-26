@@ -142,6 +142,21 @@ func (s *Store) insertAllLocks(ctx context.Context, tx *sql.Tx, sorted []domain.
 			return err
 		}
 	}
+	// Emit lock_acquired events in the same tx (atomic with the row inserts).
+	evs := make([]domain.Event, len(sorted))
+	for i := range sorted {
+		evs[i] = domain.Event{
+			Target:    sorted[i].Target,
+			Kind:      EventLockAcquired,
+			ActorUUID: sorted[i].OwnerUUID,
+			Reason:    sorted[i].Intent,
+			CreatedAt: now,
+		}
+	}
+	if err := appendEventsTx(ctx, tx, evs); err != nil {
+		s.restoreAllAndAudit(ctx, stripped, sorted[0].OwnerUUID, now)
+		return err
+	}
 	return nil
 }
 

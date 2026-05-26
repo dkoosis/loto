@@ -66,7 +66,10 @@ func TestCrash_BreakLockAtomic(t *testing.T) {
 		t.Fatalf("lock should still belong to alice; got %+v", got)
 	}
 	events, _ := s.EventsForTarget(ctx, l.Target)
-	if len(events) != 0 {
-		t.Errorf("no event should have been written; got %+v", events)
+	for _, e := range events {
+		if e.Kind == EventLockBroken || e.Kind == EventLockReclaimedStale {
+			t.Errorf("no break/reclaim event should have been written; got %+v", events)
+			break
+		}
 	}
 }
