@@ -86,6 +86,7 @@ func classifyReleases(targets []domain.Target, owners map[string]string, byAgent
 func (s *Store) restoreAndAuditReleases(results []ReleaseResult, byAgent string) {
 	now := time.Now()
 	var failEvents []domain.Event
+	var failIdx []int
 	for i := range results {
 		if results[i].State != StateUnlocked {
 			continue
@@ -94,10 +95,17 @@ func (s *Store) restoreAndAuditReleases(results []ReleaseResult, byAgent string)
 			results[i].State = StateRestoreFailed
 			results[i].RestoreErr = rerr
 			failEvents = append(failEvents, modeRestoreFailedEvent(results[i].Target.Canonical, byAgent, now, rerr))
+			failIdx = append(failIdx, i)
 		}
 	}
 	if len(failEvents) > 0 {
-		_ = s.appendAuditDetached(failEvents)
+		if auditErr := s.appendAuditDetached(failEvents); auditErr != nil {
+			// Fan audit-write failure out to each affected result so callers
+			// see the audit hole — silent loss was gh#107.
+			for _, i := range failIdx {
+				results[i].AuditErr = auditErr
+			}
+		}
 	}
 }
 

@@ -112,12 +112,24 @@ func (s *Store) stripAndHandleFailure(tx *sql.Tx, sorted []domain.LockRecord, no
 		return stripped, nil
 	}
 	failures, restoreErrs := rollbackStripped(chmodErr.Target, chmodErr.Err, stripped)
-	_ = tx.Rollback()
-	if len(restoreErrs) > 0 {
-		evs := make([]domain.Event, 0, len(restoreErrs))
-		for _, re := range restoreErrs {
-			evs = append(evs, modeRestoreFailedEvent(re.path, sorted[0].OwnerUUID, now, re.err))
-		}
+	if len(restoreErrs) == 0 {
+		_ = tx.Rollback()
+		return nil, &ChmodFailureError{Failures: failures}
+	}
+	// Persist restore-failure audits IN-TX before committing — the parent tx
+	// has only run SELECTs so a write+commit makes the audit atomic with the
+	// failed acquire (gh#107). On any in-tx error, fall back to the detached
+	// path which logs to s.stderr so the loss is observable.
+	evs := make([]domain.Event, 0, len(restoreErrs))
+	for _, re := range restoreErrs {
+		evs = append(evs, modeRestoreFailedEvent(re.path, sorted[0].OwnerUUID, now, re.err))
+	}
+	auditCtx, cancel := context.WithTimeout(context.Background(), auditDetachedTimeout)
+	defer cancel()
+	if err := appendEventsTx(auditCtx, tx, evs); err != nil {
+		_ = tx.Rollback()
+		_ = s.appendAuditDetached(evs)
+	} else if err := tx.Commit(); err != nil {
 		_ = s.appendAuditDetached(evs)
 	}
 	return nil, &ChmodFailureError{Failures: failures}
