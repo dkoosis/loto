@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -55,12 +56,27 @@ type Agent struct {
 	Host      string    `json:"host"`
 }
 
+// homeDir returns the user's home directory, preferring os.UserHomeDir ($HOME)
+// but falling back to os/user.Current().HomeDir (getpwuid_r) when $HOME is
+// unset. Without this fallback, an empty $HOME yields relative ".loto/agents"
+// paths whose meaning changes with cwd — fragmenting identity across
+// directories (gh#112 / loto-3axo).
+func homeDir() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return home
+	}
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		return u.HomeDir
+	}
+	return "/tmp" // both lookups failed; /tmp keeps paths absolute
+}
+
 func registryDir() string {
-	return filepath.Join(os.Getenv("HOME"), ".loto", "agents")
+	return filepath.Join(homeDir(), ".loto", "agents")
 }
 
 func sessionDir() string {
-	return filepath.Join(os.Getenv("HOME"), ".loto", "session")
+	return filepath.Join(homeDir(), ".loto", "session")
 }
 
 var (
