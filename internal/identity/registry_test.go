@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -16,7 +17,7 @@ func TestEnsureBlankAgentIDIsEphemeral(t *testing.T) {
 	t.Setenv("HOME", dir)
 	t.Setenv("LOTO_AGENT_ID", "")
 
-	a, err := Ensure()
+	a, err := Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +36,7 @@ func TestEnsurePersistsWhenAgentIDUnset(t *testing.T) {
 	os.Unsetenv("LOTO_AGENT_ID")
 	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
 
-	a, err := Ensure()
+	a, err := Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,7 @@ func TestEnsureNoFallbackToRecentAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := Ensure()
+	got, err := Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +88,7 @@ func TestEnsureStaleAgentIDIsHardError(t *testing.T) {
 	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
 	t.Setenv("LOTO_AGENT_ID", "11111111-2222-4333-8444-555555555555")
 
-	_, err := Ensure()
+	_, err := Ensure(context.Background())
 	if !errors.Is(err, errStaleAgentID) {
 		t.Fatalf("want errStaleAgentID, got %v", err)
 	}
@@ -104,7 +105,7 @@ func TestEnsureRejectsMalformedAgentID(t *testing.T) {
 
 	for _, bad := range []string{"not-a-uuid", "../../escape", "agent-123", "11111111"} {
 		t.Setenv("LOTO_AGENT_ID", bad)
-		_, err := Ensure()
+		_, err := Ensure(context.Background())
 		if !errors.Is(err, errInvalidAgentID) {
 			t.Errorf("LOTO_AGENT_ID=%q: want errInvalidAgentID, got %v", bad, err)
 		}
@@ -138,7 +139,7 @@ func TestMostRecentAgentSkipsStale(t *testing.T) {
 // TestGCPreservesSessionReferencedAgents asserts the binding invariant:
 // even if an agent file's mtime predates the GC cutoff, if a session cache
 // still references it, GC must not delete it. Breaking this binding would
-// leave a live session pointing at a missing uuid → next Ensure() in that
+// leave a live session pointing at a missing uuid → next Ensure(context.Background()) in that
 // session would error out of nowhere.
 func TestGCPreservesSessionReferencedAgents(t *testing.T) {
 	dir := t.TempDir()
@@ -146,7 +147,7 @@ func TestGCPreservesSessionReferencedAgents(t *testing.T) {
 	os.Unsetenv("LOTO_AGENT_ID")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "preserve-me")
 
-	a, err := Ensure()
+	a, err := Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,11 +209,11 @@ func TestEnsureRespectsExistingEnv(t *testing.T) {
 	os.Unsetenv("LOTO_AGENT_ID")
 	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
 
-	first, _ := Ensure()
+	first, _ := Ensure(context.Background())
 	t.Setenv("LOTO_AGENT_ID", first.UUID)
-	second, _ := Ensure()
+	second, _ := Ensure(context.Background())
 	if second.UUID != first.UUID {
-		t.Fatalf("Ensure() must return same uuid when LOTO_AGENT_ID is set; %s != %s", second.UUID, first.UUID)
+		t.Fatalf("Ensure(context.Background()) must return same uuid when LOTO_AGENT_ID is set; %s != %s", second.UUID, first.UUID)
 	}
 }
 
@@ -222,7 +223,7 @@ func TestEnsureHonorsLOTOHandle(t *testing.T) {
 	t.Setenv("LOTO_AGENT_ID", "")
 	t.Setenv("LOTO_HANDLE", "TeamTrixiAbc")
 
-	a, err := Ensure()
+	a, err := Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +238,7 @@ func TestEnsureRejectsInvalidLOTOHandle(t *testing.T) {
 	t.Setenv("LOTO_AGENT_ID", "")
 	for _, bad := range []string{"lowercase", "no spaces here", "Bad_Underscore", "Single"} {
 		t.Setenv("LOTO_HANDLE", bad)
-		if _, err := Ensure(); err == nil {
+		if _, err := Ensure(context.Background()); err == nil {
 			t.Errorf("Ensure must reject LOTO_HANDLE=%q", bad)
 		}
 	}
@@ -249,7 +250,7 @@ func TestGCStaleAgents(t *testing.T) {
 	os.Unsetenv("LOTO_AGENT_ID")
 	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
 
-	fresh, err := Ensure()
+	fresh, err := Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +280,7 @@ func TestGCStaleAgents(t *testing.T) {
 
 // TestEnsureDistinctClaudeSessions asserts that two Claude Code sessions on
 // the same host resolve to distinct identities. Each Claude session exports a
-// unique CLAUDE_CODE_SESSION_ID; Ensure() consumes that signal so concurrent
+// unique CLAUDE_CODE_SESSION_ID; Ensure(context.Background()) consumes that signal so concurrent
 // sessions do not collapse onto a shared owner_uuid via mostRecentAgent.
 func TestEnsureDistinctClaudeSessions(t *testing.T) {
 	dir := t.TempDir()
@@ -293,13 +294,13 @@ func TestEnsureDistinctClaudeSessions(t *testing.T) {
 	}
 
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "session-aaaa-1111")
-	a, err := Ensure()
+	a, err := Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "session-bbbb-2222")
-	b, err := Ensure()
+	b, err := Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +311,7 @@ func TestEnsureDistinctClaudeSessions(t *testing.T) {
 
 	// Same session id repeated → same uuid (stable per session).
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "session-aaaa-1111")
-	a2, err := Ensure()
+	a2, err := Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +330,7 @@ func TestWriteAgentAtomic(t *testing.T) {
 	t.Setenv("HOME", dir)
 	t.Setenv("LOTO_AGENT_ID", "")
 
-	a, err := Ensure()
+	a, err := Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +395,7 @@ func TestEnsureSessionCachePersists(t *testing.T) {
 	os.Unsetenv("LOTO_AGENT_ID")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "session-cache-test")
 
-	a, err := Ensure()
+	a, err := Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +403,7 @@ func TestEnsureSessionCachePersists(t *testing.T) {
 	if _, err := os.Stat(cachePath); err != nil {
 		t.Fatalf("session cache not written: %v", err)
 	}
-	b, err := Ensure()
+	b, err := Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +412,7 @@ func TestEnsureSessionCachePersists(t *testing.T) {
 	}
 }
 
-// TestEnsureForSessionFirstUseRace asserts that N concurrent Ensure() calls
+// TestEnsureForSessionFirstUseRace asserts that N concurrent Ensure(context.Background()) calls
 // for the same CLAUDE_CODE_SESSION_ID converge on one uuid — without this
 // guarantee, two processes both miss the cache, both mint, both write, and
 // one becomes a brief orphan (gh#28).
@@ -432,7 +433,7 @@ func TestEnsureForSessionFirstUseRace(t *testing.T) {
 	for range N {
 		wg.Go(func() {
 			<-start
-			a, err := Ensure()
+			a, err := Ensure(context.Background())
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -465,5 +466,48 @@ func TestEnsureForSessionFirstUseRace(t *testing.T) {
 	}
 	if jsonCount != 1 {
 		t.Fatalf("orphan agent files: got %d, want 1", jsonCount)
+	}
+}
+
+// TestEnsureForSessionRespectsCtxCancel asserts that a cancelled context
+// aborts the ensureForSession retry loop within one poll interval (~5ms)
+// rather than spinning through all 20 retries (~100ms). Without this fix,
+// Ctrl-C / parent deadline cannot abort the retry (gh#114).
+func TestEnsureForSessionRespectsCtxCancel(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "ctx-cancel-test")
+
+	// Pre-create session dir and claim the sid with O_EXCL so ensureForSession
+	// enters the retry branch. Leave the file empty (0 bytes) so loadSessionAgent
+	// always fails — simulates a winner that crashed mid-write.
+	if err := os.MkdirAll(filepath.Join(dir, ".loto", "session"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(dir, ".loto", "session", "ctx-cancel-test.json")
+	f, err := os.OpenFile(cachePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close() // 0-byte file — loadSessionAgent will fail every retry
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled
+
+	start := time.Now()
+	_, err = Ensure(ctx)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Ensure with cancelled ctx must return error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+	// With 20 retries × 5ms sleep, the old code takes ~100ms. A ctx-aware
+	// loop should bail in <10ms.
+	if elapsed > 50*time.Millisecond {
+		t.Fatalf("retry loop took %v — ctx.Done() not checked in retry", elapsed)
 	}
 }

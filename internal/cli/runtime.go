@@ -58,7 +58,7 @@ func sessionUUID() (id string, pinned bool) {
 }
 
 func openRuntime(ctx context.Context) (*runtime, error) {
-	a, err := identity.Ensure()
+	a, err := identity.Ensure(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("identity: %w", err)
 	}

@@ -10,8 +10,8 @@ import (
 
 func init() { register("whoami", cmdWhoami) } //nolint:gochecknoinits // command registry pattern
 
-func cmdWhoami(_ context.Context, _ []string, stdout, stderr io.Writer) int {
-	a, err := identity.Ensure()
+func cmdWhoami(ctx context.Context, _ []string, stdout, stderr io.Writer) int {
+	a, err := identity.Ensure(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ identity: %v\n", err)
 		return 3
