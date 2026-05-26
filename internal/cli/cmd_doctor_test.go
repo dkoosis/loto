@@ -53,7 +53,7 @@ func TestDoctor_OrphanModeFlaggedNotRepaired(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	code := Run([]string{tcCmdDoctor, tcFlagRepair, "--orphan-mode"}, &out, io.Discard)
+	code := Run([]string{tcCmdDoctor, tcFlagRepair, tcFlagOrphan}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, out.String())
 	}
@@ -82,6 +82,45 @@ func TestDoctor_DefaultDoesNotWalkTree(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "orphan-mode") {
 		t.Errorf("default doctor should not walk: %s", out.String())
+	}
+}
+
+// TestDoctor_OrphanModeWalkErrorIsSurfaced verifies that filepath.WalkDir errors
+// (e.g. permission-denied subtrees) are surfaced rather than silently swallowed.
+// Without the fix, the doctor reports a clean scan even when files were inaccessible.
+func TestDoctor_OrphanModeWalkErrorIsSurfaced(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not gate root")
+	}
+	repo := withTempProject(t)
+	pinAgent(t)
+
+	// Create an unreadable subdir: WalkDir will invoke the fn with a non-nil err
+	// when attempting to read its children.
+	denied := filepath.Join(repo, "denied")
+	if err := os.Mkdir(denied, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(denied, "inside.go"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(denied, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(denied, 0o755) })
+
+	var out bytes.Buffer
+	code := Run([]string{tcCmdDoctor, tcFlagOrphan}, &out, io.Discard)
+	got := out.String()
+
+	if code == 0 {
+		t.Errorf("expected non-zero exit on incomplete scan, got 0: %s", got)
+	}
+	if !strings.Contains(got, "scan-skipped") {
+		t.Errorf("expected ✗ scan-skipped line in output: %s", got)
+	}
+	if !strings.Contains(got, "✗") {
+		t.Errorf("expected ✗ glyph: %s", got)
 	}
 }
 

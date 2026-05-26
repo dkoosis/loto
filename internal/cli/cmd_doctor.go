@@ -88,18 +88,25 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	renderDoctorReport(stdout, report)
 
 	var orphans []string
+	scanIncomplete := false
 	if *orphanMode || *restoreOrphan {
-		orphans = scanAndReportOrphans(rt, repoTop, stdout)
+		orphans, scanIncomplete = runOrphanScan(rt, repoTop, stdout)
 	}
 
 	if *dryRun {
 		fmt.Fprintf(stdout, "✓ dry-run would_reclaim=%d\n", len(report.StaleLocks))
+		if scanIncomplete {
+			return 3
+		}
 		return 0
 	}
 	if *repair {
 		if code := doRepair(rt, live, *restoreOrphan, orphans, stdout, stderr); code != 0 {
 			return code
 		}
+	}
+	if scanIncomplete {
+		return 3
 	}
 	return 0
 }
@@ -120,12 +127,30 @@ func doRepair(rt *runtime, live domain.PidLiveProbe, restoreOrphan bool, orphans
 	return 0
 }
 
-func scanAndReportOrphans(rt *runtime, repoTop string, stdout io.Writer) []string {
-	candidates := walkRepoCandidates(repoTop)
+// runOrphanScan performs the orphan-mode scan and reports any incomplete-scan
+// signal (gh#130). Returns the orphan list and a flag set when the underlying
+// walk skipped entries (e.g. permission-denied subtrees) so the caller can
+// surface a non-zero exit instead of a false-clean report.
+func runOrphanScan(rt *runtime, repoTop string, stdout io.Writer) ([]string, bool) {
+	orphans, skipped, firstErr := scanAndReportOrphans(rt, repoTop, stdout)
+	if skipped > 0 {
+		fmt.Fprintf(stdout, "✗ scan-skipped count=%d first=%v\n", skipped, firstErr)
+		return orphans, true
+	}
+	return orphans, false
+}
+
+// scanAndReportOrphans walks the repo for orphan-mode candidates. It returns
+// the orphan list, a count of walk entries skipped due to errors (e.g.
+// permission-denied subtrees), and the first walk error encountered. Callers
+// must surface a non-zero skipped count as an incomplete-scan signal; silently
+// dropping these would produce a false-clean report (gh#130).
+func scanAndReportOrphans(rt *runtime, repoTop string, stdout io.Writer) ([]string, int, error) {
+	candidates, skipped, firstWalkErr := walkRepoCandidates(repoTop)
 	orphans, err := rt.Store.ScanOrphanModes(rt.Ctx, candidates)
 	if err != nil {
 		fmt.Fprintf(stdout, "✗ scan-orphans: %v\n", err)
-		return nil
+		return nil, skipped, firstWalkErr
 	}
 	for _, p := range orphans {
 		rel, err := filepath.Rel(repoTop, p)
@@ -134,7 +159,7 @@ func scanAndReportOrphans(rt *runtime, repoTop string, stdout io.Writer) []strin
 		}
 		fmt.Fprintf(stdout, "✗ orphan-mode target=%s\n", rel)
 	}
-	return orphans
+	return orphans, skipped, firstWalkErr
 }
 
 var walkSkipDirs = map[string]bool{
@@ -142,14 +167,24 @@ var walkSkipDirs = map[string]bool{
 	"dist": true, "build": true, "target": true, ".cache": true,
 }
 
-func walkRepoCandidates(root string) []string {
+// walkRepoCandidates enumerates regular files under root, skipping known
+// vendored/build dirs. Walk errors (typically permission-denied subtrees) are
+// counted via skipped and the first such error is returned via firstErr — the
+// caller is responsible for surfacing an incomplete-scan signal so a partial
+// walk does not masquerade as a clean result (gh#130).
+func walkRepoCandidates(root string) (out []string, skipped int, firstErr error) {
 	if root == "" {
-		return nil
+		return nil, 0, nil
 	}
-	var out []string
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil //nolint:nilerr // skip unreadable entries, continue walk
+			skipped++
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", p, err)
+			}
+			// Continue the walk so a single unreadable subtree does not abort
+			// the scan; the caller reports the partial result via skipped/firstErr.
+			return nil
 		}
 		if d.IsDir() {
 			if walkSkipDirs[d.Name()] {
@@ -163,5 +198,5 @@ func walkRepoCandidates(root string) []string {
 		out = append(out, p)
 		return nil
 	})
-	return out
+	return out, skipped, firstErr
 }

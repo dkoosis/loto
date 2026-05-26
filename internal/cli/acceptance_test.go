@@ -206,7 +206,7 @@ func TestDoctor_CrashRecoveryRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if code := Run([]string{tcCmdDoctor, "--orphan-mode"}, &out, io.Discard); code != 0 {
+	if code := Run([]string{tcCmdDoctor, tcFlagOrphan}, &out, io.Discard); code != 0 {
 		t.Fatalf("doctor scan: %s", out.String())
 	}
 	if !strings.Contains(out.String(), "orphan-mode") {
