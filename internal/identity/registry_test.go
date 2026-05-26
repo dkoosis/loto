@@ -511,3 +511,81 @@ func TestEnsureForSessionRespectsCtxCancel(t *testing.T) {
 		t.Fatalf("retry loop took %v — ctx.Done() not checked in retry", elapsed)
 	}
 }
+
+// TestEnsureForSessionRecoverZeroByteCacheOnWinnerCrash asserts that when
+// the winner crashes between O_EXCL create and Write (leaving a 0-byte
+// session cache), the loser recovers by unlinking the corrupt cache and
+// re-claiming the session — rather than surfacing errNoSessionCache forever
+// (gh#115 / loto-yeni).
+func TestEnsureForSessionRecoverZeroByteCacheOnWinnerCrash(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+
+	sid := "winner-crashed"
+
+	sessDir := filepath.Join(dir, ".loto", "session")
+	if err := os.MkdirAll(sessDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(sessDir, sid+".json")
+	f, err := os.Create(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	t.Setenv("CLAUDE_CODE_SESSION_ID", sid)
+	a, err := Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure must recover from 0-byte cache, got: %v", err)
+	}
+	if a.UUID == "" {
+		t.Fatal("recovered agent has empty UUID")
+	}
+
+	b, err := Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("second Ensure after recovery failed: %v", err)
+	}
+	if b.UUID != a.UUID {
+		t.Fatalf("identity unstable after recovery: %s != %s", b.UUID, a.UUID)
+	}
+}
+
+// TestEnsureForSessionRecoverUnparseableCacheOnWinnerCrash covers the
+// partial-write variant: winner wrote some bytes but crashed before
+// completing valid JSON.
+func TestEnsureForSessionRecoverUnparseableCacheOnWinnerCrash(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+
+	sid := "winner-partial-write"
+
+	sessDir := filepath.Join(dir, ".loto", "session")
+	if err := os.MkdirAll(sessDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(sessDir, sid+".json")
+	if err := os.WriteFile(cachePath, []byte(`{"uuid":"trunc`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CLAUDE_CODE_SESSION_ID", sid)
+	a, err := Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure must recover from unparseable cache, got: %v", err)
+	}
+	if a.UUID == "" {
+		t.Fatal("recovered agent has empty UUID")
+	}
+
+	b, err := Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("second Ensure after recovery failed: %v", err)
+	}
+	if b.UUID != a.UUID {
+		t.Fatalf("identity unstable after recovery: %s != %s", b.UUID, a.UUID)
+	}
+}
