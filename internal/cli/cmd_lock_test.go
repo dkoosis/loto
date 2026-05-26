@@ -14,6 +14,24 @@ import (
 	"loto/internal/identity"
 )
 
+// initBareGitRepo runs `git init` and the minimal user.email/user.name config
+// in `dir`. Shared by withTempProject and any test that builds an auxiliary
+// repo (e.g., TestLoadCheckTargets_UsesRepoTopForGitDiff).
+func initBareGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "t@example.com"},
+		{"config", "user.name", "T"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
 // withTempProject sets up a fresh git repo, a shared LOTO_BASE state dir, and a
 // fresh HOME. Returns repoTop. Caller can use newAgent() to get a new identity.
 func withTempProject(t *testing.T) string {
@@ -27,17 +45,11 @@ func withTempProject(t *testing.T) string {
 	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
 
 	repo := t.TempDir()
-	for _, args := range [][]string{
-		{"init", "-q"},
-		{"config", "user.email", "t@example.com"},
-		{"config", "user.name", "T"},
-		{"remote", "add", "origin", "git@github.com:test/proj.git"},
-	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
+	initBareGitRepo(t, repo)
+	cmd := exec.Command("git", "remote", "add", "origin", "git@github.com:test/proj.git")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
 	}
 	t.Chdir(repo)
 	// Standard target files used across CLI tests. AcquireLocks Lstat-validates

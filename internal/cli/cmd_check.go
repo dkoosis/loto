@@ -28,7 +28,13 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return 2
 	}
 
-	paths, code := loadCheckTargets(ctx, *staged, fs.Args(), stderr)
+	// Resolve repoTop before shelling out to git so `git diff --cached` runs
+	// with cmd.Dir = repoTop (loto-jff, gh#128). Without that pin, the staged
+	// diff inherits process cwd and reads the wrong repo's index in worktree /
+	// nested-launch / scripted-invocation scenarios.
+	repoTop, _ := repoTopForCwd(ctx)
+
+	paths, code := loadCheckTargets(ctx, repoTop, *staged, fs.Args(), stderr)
 	if code != 0 {
 		return code
 	}
@@ -50,7 +56,6 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return 3
 	}
 
-	repoTop, _ := repoTopForCwd(ctx)
 	rows, invalid := computeCheckConflicts(paths, all, rt.Agent.UUID, repoTop)
 	if len(invalid) > 0 {
 		printCheckInvalid(stdout, invalid)
@@ -77,13 +82,19 @@ func printCheckInvalid(stdout io.Writer, rows []checkInvalid) {
 	}
 }
 
-func loadCheckTargets(ctx context.Context, staged bool, posArgs []string, stderr io.Writer) ([]string, int) {
+func loadCheckTargets(ctx context.Context, repoTop string, staged bool, posArgs []string, stderr io.Writer) ([]string, int) {
 	if !staged {
 		return posArgs, 0
 	}
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "-z").Output()
+	// Pin cmd.Dir = repoTop so the staged diff comes from the loto-resolved
+	// repo, not from process cwd (loto-jff, gh#128).
+	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "-z")
+	if repoTop != "" {
+		cmd.Dir = repoTop
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ git diff: %v\n", err)
 		return nil, 3
