@@ -39,7 +39,7 @@ func rotateEventsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	}
 	_, err := tx.ExecContext(ctx, `
 DELETE FROM events WHERE id IN (
-  SELECT id FROM events ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?
+  SELECT id FROM events ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
 )`, eventsRetentionMax)
 	return err
 }
