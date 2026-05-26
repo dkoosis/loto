@@ -73,6 +73,14 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store.Open: %w", err)
 	}
+	// Drive identity GC now that the store is open. Collect the owner_uuid
+	// of every live lock so gcStaleAgents pins them; otherwise a long-lived
+	// lock whose owner agent file has aged past agentsGCMaxAge would have
+	// its owner reaped, stranding the lock with an unresolvable holder
+	// (gh#125 / loto-ffg). Best-effort: GC errors and ListLocks errors are
+	// non-fatal — identity GC is hygiene, not invariant.
+	pinnedAgents := lockOwnerUUIDs(ctx, s)
+	_ = identity.GCAgents(time.Now(), pinnedAgents)
 	host, _ := os.Hostname()
 	sid, pinned := sessionUUID()
 	return &runtime{
@@ -125,4 +133,24 @@ func stateDirForCwd(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("not in a git repo: %w", err)
 	}
 	return StateDir(top), nil
+}
+
+// lockOwnerUUIDs collects the set of owner_uuid values referenced by live
+// lock rows in s. Fed to identity.GCAgents so the agent-registry GC pass
+// pins agents that any live lock still depends on, closing gh#125
+// (loto-ffg). A ListLocks failure is non-fatal: a nil set means GC runs
+// with only its built-in session-cache pin set — the worst case is the
+// same as the pre-fix behavior, not a regression.
+func lockOwnerUUIDs(ctx context.Context, s *store.Store) map[string]struct{} {
+	locks, err := s.ListLocks(ctx)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]struct{}, len(locks))
+	for _, l := range locks {
+		if l.OwnerUUID != "" {
+			out[l.OwnerUUID] = struct{}{}
+		}
+	}
+	return out
 }
