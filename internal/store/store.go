@@ -87,7 +87,7 @@ func acquireOpenLocks(ctx context.Context, p string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s, openErr := openOnce(p)
+	s, openErr := openOnce(ctx, p)
 	// Release op-flock BEFORE any recovery-lock acquire. If openOnce
 	// succeeded the create race is resolved; if it failed with corruption
 	// or version mismatch, openWithRecovery will retake recovery-lock
@@ -109,7 +109,7 @@ func opFlockPathFor(p string) string {
 }
 
 func openWithRecovery(ctx context.Context, p string) (*Store, error) {
-	s, err := openOnce(p)
+	s, err := openOnce(ctx, p)
 	if err == nil {
 		return s, nil
 	}
@@ -124,7 +124,7 @@ func openWithRecovery(ctx context.Context, p string) (*Store, error) {
 	defer release()
 
 	// Re-probe under the lock — another process may have already recovered.
-	if s2, err2 := openOnce(p); err2 == nil {
+	if s2, err2 := openOnce(ctx, p); err2 == nil {
 		return s2, nil
 	} else if !isCorruptDB(err2) && !isUserVersionMismatch(err2) {
 		return nil, err2
@@ -139,10 +139,10 @@ func openWithRecovery(ctx context.Context, p string) (*Store, error) {
 	} else {
 		fmt.Fprintf(os.Stderr, "loto: corrupt DB moved aside to %s; creating fresh DB\n", moved)
 	}
-	return openOnce(p)
+	return openOnce(ctx, p)
 }
 
-func openOnce(p string) (*Store, error) {
+func openOnce(ctx context.Context, p string) (*Store, error) {
 	preExisted := false
 	if st, err := os.Stat(p); err == nil && st.Size() > 0 {
 		preExisted = true
@@ -152,14 +152,14 @@ func openOnce(p string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sql.Open: %w", err)
 	}
-	if err := db.PingContext(context.Background()); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
 
 	if preExisted {
 		var v int
-		if err := db.QueryRowContext(context.Background(), `PRAGMA user_version`).Scan(&v); err != nil {
+		if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&v); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("read user_version: %w", err)
 		}
@@ -170,7 +170,7 @@ func openOnce(p string) (*Store, error) {
 	}
 
 	s := &Store{db: db, dbPath: p, stderr: os.Stderr}
-	if err := s.migrate(); err != nil {
+	if err := s.migrate(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
@@ -270,9 +270,21 @@ func (s *Store) opFlockPath() string {
 	return filepath.Join(filepath.Dir(s.dbPath), "lock-op.flock")
 }
 
-func (s *Store) migrate() error {
-	if _, err := s.db.ExecContext(context.Background(), schemaSQL); err != nil {
+// migrate applies schema DDL inside a single transaction so user_version is
+// set atomically with table creation. Before gh#118 this ran bare ExecContext
+// with context.Background() — a mid-DDL crash could leave tables without
+// user_version (triggering moveCorruptAside on next Open) or vice-versa.
+func (s *Store) migrate(ctx context.Context) error {
+	tx, cleanup, err := s.beginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin migrate tx: %w", err)
+	}
+	defer cleanup()
+	if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit schema: %w", err)
 	}
 	return nil
 }
