@@ -75,7 +75,7 @@ func breakTargets(rt *runtime, args []string, intent string, stdout, stderr io.W
 	if code != 0 {
 		return code
 	}
-	results, err := rt.Store.BreakLocks(rt.Ctx, targets, rt.Agent.UUID, store.BreakForce, intent, rt.liveProbe())
+	results, err := rt.Store.BreakLocks(rt.Ctx, targets, rt.Agent.UUID, store.BreakForce, intent, rt.Host, rt.liveProbe())
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

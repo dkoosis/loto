@@ -24,7 +24,7 @@ const (
 // BreakLocks force/stale-reclaims a batch of locks in one transaction. Per-target
 // errors do not abort the batch — see BreakResult.Err. Returned error is non-nil
 // only on internal/SQL failures. Results are returned in input order.
-func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, byAgent string, mode BreakMode, reason string, live domain.PidLiveProbe) ([]BreakResult, error) {
+func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, byAgent string, mode BreakMode, reason string, thisHost string, live domain.PidLiveProbe) ([]BreakResult, error) {
 	if len(targets) == 0 {
 		return []BreakResult{}, nil
 	}
@@ -56,7 +56,7 @@ func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, byAgent
 		kind = EventLockReclaimedStale
 	}
 
-	results, events, deleteByOwner := classifyBreaks(targets, existing, byAgent, force, kind, reason, now, live)
+	results, events, deleteByOwner := classifyBreaks(targets, existing, byAgent, force, kind, reason, now, thisHost, live)
 
 	if len(events) > 0 {
 		if err := appendEventsTx(ctx, tx, events); err != nil {
@@ -88,6 +88,7 @@ func classifyBreaks(
 	kind string,
 	reason string,
 	now time.Time,
+	thisHost string,
 	live domain.PidLiveProbe,
 ) (results []BreakResult, events []domain.Event, deleteByOwner map[string][]string) {
 	results = make([]BreakResult, len(targets))
@@ -99,7 +100,7 @@ func classifyBreaks(
 			results[i].Err = ErrNoLockAtTarget
 			continue
 		}
-		if err := domain.AuthorizeBreak(l, force, now, l.Host, live); err != nil {
+		if err := domain.AuthorizeBreak(l, force, now, thisHost, live); err != nil {
 			results[i].Err = err
 			continue
 		}

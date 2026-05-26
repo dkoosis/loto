@@ -297,7 +297,7 @@ func TestBreakLocks_DoesNotAckTags(t *testing.T) {
 	}
 	// Force-break by a 3rd party (bob).
 	live := func(string, int) bool { return true }
-	res, err := s.BreakLocks(ctx, []domain.Target{lock.Target}, tcBob, BreakForce, "break", live)
+	res, err := s.BreakLocks(ctx, []domain.Target{lock.Target}, tcBob, BreakForce, "break", "h", live)
 	if err != nil || res[0].Err != nil {
 		t.Fatalf("break: %v / %v", err, res[0].Err)
 	}
