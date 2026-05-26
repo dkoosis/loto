@@ -20,6 +20,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -81,7 +82,7 @@ func triCast(t *testing.T) (alice, bob, carol actor) {
 	a, b := cast(t)
 	os.Unsetenv("LOTO_AGENT_ID")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", fmt.Sprintf("carol-%d", time.Now().UnixNano()))
-	c, err := identity.Ensure()
+	c, err := identity.Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

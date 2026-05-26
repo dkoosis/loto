@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -82,7 +83,7 @@ func sessionCachePath(sid string) (string, error) {
 // for display, never for authority — an explicit but unresolvable
 // LOTO_AGENT_ID is a hard error, and the heuristic mostRecentAgent fallback
 // is only consulted when fresh.
-func Ensure() (*Agent, error) {
+func Ensure(ctx context.Context) (*Agent, error) {
 	// GC runs out of band via GCAgents (driven by the CLI runtime after the
 	// store is open, so it can pass the set of lock-owner UUIDs to pin).
 	// Firing it here unconditionally with a nil pin set would race the
@@ -112,7 +113,7 @@ func Ensure() (*Agent, error) {
 		return nil, fmt.Errorf("%w: %q (no agent record at %s)", errStaleAgentID, u, filepath.Join(registryDir(), u+".json"))
 	}
 	if sid := os.Getenv("CLAUDE_CODE_SESSION_ID"); sid != "" {
-		return ensureForSession(sid)
+		return ensureForSession(ctx, sid)
 	}
 	// No explicit env binding. Per identity v4 invariant ("ambiguity allowed
 	// for display, never for authority"), do not adopt any pre-existing local
@@ -139,7 +140,7 @@ func Ensure() (*Agent, error) {
 // branch; a non-ErrExist claim failure orphans the candidate agent
 // file, but gcStaleAgents reaps it at 30 days, which is the right
 // amount of cleanup at this scale.
-func ensureForSession(sid string) (*Agent, error) {
+func ensureForSession(ctx context.Context, sid string) (*Agent, error) {
 	if a, err := loadSessionAgent(sid); err == nil {
 		return a, nil
 	}
@@ -166,7 +167,11 @@ func ensureForSession(sid string) (*Agent, error) {
 			return a, nil
 		}
 		lastErr = lerr
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 	if lastErr == nil {
 		lastErr = errNoSessionCache

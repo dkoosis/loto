@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -76,7 +77,7 @@ func pinAgent(t *testing.T) *identity.Agent {
 	t.Helper()
 	os.Unsetenv("LOTO_AGENT_ID")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", fmt.Sprintf("pin-%d-%d", time.Now().UnixNano(), pinCounter.Add(1)))
-	a, err := identity.Ensure()
+	a, err := identity.Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,12 +106,12 @@ func twoAgents(t *testing.T) (alice, bob *identity.Agent) {
 	t.Helper()
 	os.Unsetenv("LOTO_AGENT_ID")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", fmt.Sprintf("alice-%d-%d", time.Now().UnixNano(), pinCounter.Add(1)))
-	a, err := identity.Ensure()
+	a, err := identity.Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("CLAUDE_CODE_SESSION_ID", fmt.Sprintf("bob-%d-%d", time.Now().UnixNano(), pinCounter.Add(1)))
-	b, err := identity.Ensure()
+	b, err := identity.Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
