@@ -3,7 +3,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -133,6 +138,49 @@ func TestBeginTxResetsBusyTimeoutOnRelease(t *testing.T) {
 	}
 	if got != txBusyTimeoutDefaultMs {
 		t.Fatalf("busy_timeout = %d, want %d (reset on release)", got, txBusyTimeoutDefaultMs)
+	}
+}
+
+// TestOpenContext_NonENOENTStatError verifies that a non-ENOENT stat error
+// (e.g. permission denied) is surfaced directly instead of being masked
+// by a downstream MkdirAll error.
+func TestOpenContext_NonENOENTStatError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 000 ineffective on Windows")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("test ineffective as root")
+	}
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "subdir", "loto.db")
+
+	// Create the parent so it exists, then remove all perms.
+	parent := filepath.Join(dir, "subdir")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+	if err := os.Chmod(parent, 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := OpenContext(context.Background(), dbPath)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	// The error must surface the stat failure directly, not mask it
+	// behind a downstream mkdir or flock error.
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("expected fs.ErrPermission in chain, got: %v", err)
+	}
+	errStr := err.Error()
+	if strings.Contains(errStr, "mkdir") || strings.Contains(errStr, "flock") || strings.Contains(errStr, "op-flock") {
+		t.Errorf("stat error masked by downstream fallthrough: %v", err)
+	}
+	if !strings.Contains(errStr, "stat") {
+		t.Errorf("expected stat-originated error, got: %v", err)
 	}
 }
 
