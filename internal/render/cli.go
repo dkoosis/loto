@@ -170,6 +170,10 @@ func EmitInvalid(w io.Writer, items []InvalidTarget) {
 // Renders canonical-sorted regardless of input order (caller passes input order;
 // render owns deterministic output).
 func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
+	if len(results) == 0 {
+		fmt.Fprintf(w, "ℹ no locks owned\n")
+		return 0
+	}
 	cwd := getCwd()
 	sorted := append([]store.ReleaseResult(nil), results...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })

@@ -197,3 +197,36 @@ func TestEmitChmodFailure_FailedQuotedAndCountsErrOnly(t *testing.T) {
 		t.Errorf("missing restored row: %s", got)
 	}
 }
+
+func TestEmitReleaseResults_EmptyInput_EmitsInfoGlyph(t *testing.T) {
+	var buf bytes.Buffer
+	exit := EmitReleaseResults(&buf, nil)
+	if exit != 0 {
+		t.Errorf("empty results should exit 0, got %d", exit)
+	}
+	got := buf.String()
+	if strings.HasPrefix(got, "✓") {
+		t.Errorf("empty results must NOT use success glyph ✓, got: %s", got)
+	}
+	if !strings.HasPrefix(got, "ℹ") {
+		t.Errorf("empty results should use info glyph ℹ, got: %s", got)
+	}
+	if !strings.Contains(got, "no locks owned") {
+		t.Errorf("empty results should say 'no locks owned', got: %s", got)
+	}
+}
+
+func TestEmitReleaseResults_EmptySlice_EmitsInfoGlyph(t *testing.T) {
+	var buf bytes.Buffer
+	exit := EmitReleaseResults(&buf, []store.ReleaseResult{})
+	if exit != 0 {
+		t.Errorf("empty results should exit 0, got %d", exit)
+	}
+	got := buf.String()
+	if strings.HasPrefix(got, "✓") {
+		t.Errorf("empty slice must NOT use success glyph ✓, got: %s", got)
+	}
+	if !strings.Contains(got, "no locks owned") {
+		t.Errorf("empty slice should say 'no locks owned', got: %s", got)
+	}
+}
