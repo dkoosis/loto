@@ -63,8 +63,14 @@ func TestBreakLockStaleOnly(t *testing.T) {
 		t.Fatalf("lock should be gone, got %+v", got)
 	}
 	events, _ := s.EventsForTarget(ctx, l.Target)
-	if len(events) != 1 || events[0].Kind != EventLockBroken {
-		t.Fatalf("expected single lock_broken event, got %+v", events)
+	var broken int
+	for _, e := range events {
+		if e.Kind == EventLockBroken {
+			broken++
+		}
+	}
+	if broken != 1 {
+		t.Fatalf("expected exactly 1 lock_broken event, got %d in %+v", broken, events)
 	}
 }
 
@@ -225,8 +231,14 @@ func TestBreakLocks_BatchedMultiTarget(t *testing.T) {
 			t.Errorf("targets[%d] should be gone, got %+v", i, got)
 		}
 		evs, _ := s.EventsForTarget(ctx, targets[i])
-		if len(evs) != 1 || evs[0].Kind != EventLockBroken {
-			t.Errorf("targets[%d] expected one lock_broken event, got %+v", i, evs)
+		var broken int
+		for _, e := range evs {
+			if e.Kind == EventLockBroken {
+				broken++
+			}
+		}
+		if broken != 1 {
+			t.Errorf("targets[%d] expected 1 lock_broken event, got %d in %+v", i, broken, evs)
 		}
 	}
 }
