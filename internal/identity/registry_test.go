@@ -589,3 +589,39 @@ func TestEnsureForSessionRecoverUnparseableCacheOnWinnerCrash(t *testing.T) {
 		t.Fatalf("identity unstable after recovery: %s != %s", b.UUID, a.UUID)
 	}
 }
+
+// TestEnsureHomeUnsetYieldsAbsolutePath asserts that when HOME is unset,
+// registryDir/sessionDir still return absolute paths rooted in
+// os.UserHomeDir() — not relative ".loto/agents" fragments that change
+// meaning with cwd (gh#112 / loto-3axo).
+func TestEnsureHomeUnsetYieldsAbsolutePath(t *testing.T) {
+	t.Setenv("HOME", "")
+	os.Unsetenv("HOME")
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+
+	rdir := registryDir()
+	if !filepath.IsAbs(rdir) {
+		t.Fatalf("registryDir() returned relative path %q when HOME unset", rdir)
+	}
+	sdir := sessionDir()
+	if !filepath.IsAbs(sdir) {
+		t.Fatalf("sessionDir() returned relative path %q when HOME unset", sdir)
+	}
+}
+
+// TestRegistryDirIsAlwaysAbsolute asserts the guard: even if os.UserHomeDir()
+// somehow returned "", registryDir must not silently yield a relative path.
+func TestRegistryDirIsAlwaysAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	rdir := registryDir()
+	if !filepath.IsAbs(rdir) {
+		t.Fatalf("registryDir() not absolute: %q", rdir)
+	}
+	sdir := sessionDir()
+	if !filepath.IsAbs(sdir) {
+		t.Fatalf("sessionDir() not absolute: %q", sdir)
+	}
+}
