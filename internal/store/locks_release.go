@@ -151,6 +151,87 @@ func deleteOwnedTx(ctx context.Context, tx *sql.Tx, canonicals []string, byAgent
 	return err
 }
 
+// ReleaseBySession atomically releases all locks owned by byAgent in the given
+// session. If sessionUUID is empty, it releases all locks owned by byAgent
+// regardless of session — the agent-scoped fallback for direct CLI use where
+// no LOTO_SESSION_ID is pinned. This is the atomic replacement for the
+// list+filter+release dance in unlockAll: a single SQL query finds matching
+// rows and deletes them in one transaction, closing the TOCTOU gap where the
+// old path could miss locks created between ListLocks and ReleaseLocks.
+func (s *Store) ReleaseBySession(ctx context.Context, byAgent, sessionUUID string) ([]ReleaseResult, error) {
+	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
+	if err != nil {
+		return nil, err
+	}
+	defer flock.release()
+
+	tx, cleanup, err := s.beginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	// Find all targets matching agent (+session if pinned).
+	canonicals, err := loadSessionTargetsTx(ctx, tx, byAgent, sessionUUID)
+	if err != nil {
+		return nil, err
+	}
+	if len(canonicals) == 0 {
+		return []ReleaseResult{}, nil
+	}
+
+	// Ack tags before deleting host locks (same ordering as ReleaseLocks).
+	if err := ackTagsForReleaseTx(ctx, tx, canonicals, byAgent); err != nil {
+		return nil, err
+	}
+	if err := deleteOwnedTx(ctx, tx, canonicals, byAgent); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	// Build results and do chmod restore outside the tx.
+	results := make([]ReleaseResult, len(canonicals))
+	for i, c := range canonicals {
+		results[i] = ReleaseResult{
+			Target: domain.Target{Canonical: c},
+			State:  StateUnlocked,
+		}
+	}
+	s.restoreAndAuditReleases(results, byAgent)
+	return results, nil
+}
+
+// loadSessionTargetsTx returns canonical paths for all locks owned by agent
+// (and optionally scoped to session). Returns them in deterministic order.
+func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID string) ([]string, error) {
+	var rows *sql.Rows
+	var err error
+	if sessionUUID != "" {
+		rows, err = tx.QueryContext(ctx,
+			`SELECT target_canonical FROM locks WHERE owner_uuid = ? AND session_uuid = ? ORDER BY target_canonical`,
+			byAgent, sessionUUID)
+	} else {
+		rows, err = tx.QueryContext(ctx,
+			`SELECT target_canonical FROM locks WHERE owner_uuid = ? ORDER BY target_canonical`,
+			byAgent)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // restoreAndAudit re-adds owner-write to a released target and emits a
 // mode_restore_failed event on failure. Spec contract (NORTH_STAR.md): strip
 // on acquire, restore on release. Callers: BreakLock, reclaimStaleTx,

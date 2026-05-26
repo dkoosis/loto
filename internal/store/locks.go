@@ -11,12 +11,12 @@ import (
 )
 
 const (
-	EventLockAcquired          = "lock_acquired"
-	EventLockReleased          = "lock_released"
-	EventLockBroken            = "lock_broken"
-	EventLockReclaimedStale    = "lock_reclaimed_stale"
-	EventModeRestoreFailed     = "mode_restore_failed"
-	EventAcquireRollbackStart  = "acquire_rollback_started"
+	EventLockAcquired         = "lock_acquired"
+	EventLockReleased         = "lock_released"
+	EventLockBroken           = "lock_broken"
+	EventLockReclaimedStale   = "lock_reclaimed_stale"
+	EventModeRestoreFailed    = "mode_restore_failed"
+	EventAcquireRollbackStart = "acquire_rollback_started"
 )
 
 var ErrNoLockAtTarget = errors.New("no lock at target")
