@@ -270,10 +270,11 @@ func (s *Store) opFlockPath() string {
 	return filepath.Join(filepath.Dir(s.dbPath), "lock-op.flock")
 }
 
-// migrate applies schema DDL inside a single transaction so user_version is
-// set atomically with table creation. Before gh#118 this ran bare ExecContext
-// with context.Background() — a mid-DDL crash could leave tables without
-// user_version (triggering moveCorruptAside on next Open) or vice-versa.
+// migrate applies schema DDL inside a transaction, then sets user_version
+// in a separate statement. PRAGMA user_version is not transactional in
+// SQLite (it takes effect immediately regardless of tx state), so it runs
+// after the DDL tx commits. If a crash occurs between commit and PRAGMA,
+// the next Open re-runs migrate (all DDL is IF NOT EXISTS) and retries.
 func (s *Store) migrate(ctx context.Context) error {
 	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
@@ -285,6 +286,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit schema: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaUserVersion)); err != nil {
+		return fmt.Errorf("set user_version: %w", err)
 	}
 	return nil
 }
