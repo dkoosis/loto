@@ -2,11 +2,12 @@ package store
 
 import (
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"syscall"
 )
+
+var errNotRegular = errors.New("not a regular file")
 
 // fchmodFn is a package-private indirection so tests can inject EPERM
 // without an OS-specific fixture. Tests filter by f.Name() when needed.
@@ -36,7 +37,7 @@ func safeOpenRegular(path string) (*os.File, error) {
 		return nil, &fs.PathError{
 			Op:   "open",
 			Path: path,
-			Err:  fmt.Errorf("not a regular file: mode %s", st.Mode()),
+			Err:  errNotRegular,
 		}
 	}
 	return f, nil

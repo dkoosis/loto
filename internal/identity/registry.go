@@ -156,10 +156,12 @@ func ensureForSession(ctx context.Context, sid string) (*Agent, error) {
 		return nil, err
 	}
 	_ = os.Remove(filepath.Join(registryDir(), candidate.UUID+".json"))
-	// Loser raced the winner between O_EXCL create and Write+Close. ReadFile
-	// can observe a 0-byte file in that window; retry briefly so the loser
-	// sees the winner's published mapping. If the winner crashed mid-write,
-	// the retries fail fast (~100ms total) and we fall through to recovery.
+	return awaitOrRecoverSession(ctx, sid)
+}
+
+// awaitOrRecoverSession retries loading the session agent (the winner may
+// still be writing), then attempts crash recovery if the cache is corrupt.
+func awaitOrRecoverSession(ctx context.Context, sid string) (*Agent, error) {
 	for range 20 {
 		a, lerr := loadSessionAgent(sid)
 		if lerr == nil {
@@ -172,11 +174,6 @@ func ensureForSession(ctx context.Context, sid string) (*Agent, error) {
 		}
 	}
 
-	// If we get here, the winner likely crashed between O_EXCL create and
-	// Write/Sync, leaving a 0-byte or unparseable session cache file. Every
-	// future caller would hit errNoSessionCache forever (gh#115). Recover by
-	// checking the cache file: if it exists but is 0-byte or unparseable,
-	// unlink it and re-claim once with a fresh candidate.
 	if recoverCorruptSessionCache(sid) {
 		recovery, rerr := newAgent()
 		if rerr != nil {
@@ -185,7 +182,6 @@ func ensureForSession(ctx context.Context, sid string) (*Agent, error) {
 		if cerr := claimSessionCache(sid, recovery); cerr == nil {
 			return recovery, nil
 		}
-		// Another racer beat us to the re-claim — adopt their identity.
 		_ = os.Remove(filepath.Join(registryDir(), recovery.UUID+".json"))
 		if a, lerr := loadSessionAgent(sid); lerr == nil {
 			return a, nil

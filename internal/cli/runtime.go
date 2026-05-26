@@ -147,9 +147,9 @@ func lockOwnerUUIDs(ctx context.Context, s *store.Store) map[string]struct{} {
 		return nil
 	}
 	out := make(map[string]struct{}, len(locks))
-	for _, l := range locks {
-		if l.OwnerUUID != "" {
-			out[l.OwnerUUID] = struct{}{}
+	for i := range locks {
+		if locks[i].OwnerUUID != "" {
+			out[locks[i].OwnerUUID] = struct{}{}
 		}
 	}
 	return out
