@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -13,16 +12,17 @@ import (
 	"loto/internal/domain"
 )
 
-// TestSchemaVersionPaired pins the const/PRAGMA pair so a future bump of one
-// without the other fails fast instead of move-aside'ing every DB on open.
+// TestSchemaVersionPaired verifies that migrate() sets user_version to the
+// expected constant. PRAGMA user_version is set in Go code (not schema.sql)
+// because it is not transactional in SQLite.
 func TestSchemaVersionPaired(t *testing.T) {
-	raw, err := os.ReadFile("schema.sql")
-	if err != nil {
+	s := mustOpen(t)
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	want := fmt.Sprintf("PRAGMA user_version = %d;", schemaUserVersion)
-	if !strings.Contains(string(raw), want) {
-		t.Fatalf("schema.sql missing %q; schema.sql and store.go schemaUserVersion drifted", want)
+	if v != schemaUserVersion {
+		t.Fatalf("user_version = %d, want %d", v, schemaUserVersion)
 	}
 }
 

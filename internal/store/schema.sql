@@ -44,4 +44,3 @@ CREATE INDEX IF NOT EXISTS idx_tags_host
 CREATE INDEX IF NOT EXISTS idx_tags_holder_pending
   ON tags(lock_owner_uuid, acked_at);
 
-PRAGMA user_version = 9;

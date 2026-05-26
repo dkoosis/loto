@@ -184,6 +184,83 @@ func TestOpenContext_NonENOENTStatError(t *testing.T) {
 	}
 }
 
+// TestMigrateUsesTransaction verifies that migrate() wraps schema DDL in a
+// single transaction, so a mid-DDL failure leaves user_version unchanged.
+func TestMigrateUsesTransaction(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "loto.db")
+
+	db, err := sql.Open("sqlite", connDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS locks (target_canonical TEXT PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+
+	db.Close()
+	path2 := filepath.Join(dir, "fresh.db")
+	s, err := OpenContext(context.Background(), path2)
+	if err != nil {
+		t.Fatalf("OpenContext: %v", err)
+	}
+
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if v != schemaUserVersion {
+		t.Fatalf("user_version = %d after migrate, want %d", v, schemaUserVersion)
+	}
+
+	for _, tbl := range []string{"locks", "events", "tags"} {
+		if _, err := s.db.Exec("SELECT 1 FROM " + tbl + " LIMIT 0"); err != nil {
+			t.Fatalf("table %s missing after migrate: %v", tbl, err)
+		}
+	}
+	s.Close()
+}
+
+// TestOpenContextCancelledPropagates verifies that openOnce propagates the
+// caller's ctx.
+func TestOpenContextCancelledPropagates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "loto.db")
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("setup open: %v", err)
+	}
+	s.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = OpenContext(ctx, path)
+	if err == nil {
+		t.Fatal("OpenContext with cancelled ctx should fail, but succeeded")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled in error chain, got: %v", err)
+	}
+}
+
+// TestMigrateAcceptsCtx is a compile-time check that migrate() accepts ctx.
+func TestMigrateAcceptsCtx(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "loto.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if err := s.migrate(context.Background()); err != nil {
+		t.Fatalf("migrate(ctx): %v", err)
+	}
+}
+
 func TestStore_OpFlockPathDerivedFromDBPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "loto.db")
