@@ -28,10 +28,18 @@ type NewTag struct {
 
 const tagCap = 5
 
+// tagTextMaxBytes bounds tag.text at the write site so a misbehaving caller
+// can't balloon the DB with megabyte annotations (gh#129). 4 KiB is generous
+// for human-meaningful "why?" notes (a screenful of prose) while keeping the
+// per-row footprint bounded. Mirrored as a CHECK(length(text) <= 4096) in
+// schema.sql so direct SQL writes can't bypass the Go-side guard.
+const tagTextMaxBytes = 4096
+
 var (
-	ErrTagCapReached = errors.New("loto: tag cap reached")
-	ErrTagNotMine    = errors.New("loto: tag not addressed to caller")
-	ErrNoHostLock    = errors.New("loto: no host lock for tag")
+	ErrTagCapReached  = errors.New("loto: tag cap reached")
+	ErrTagNotMine     = errors.New("loto: tag not addressed to caller")
+	ErrNoHostLock     = errors.New("loto: no host lock for tag")
+	ErrTagTextTooLong = errors.New("loto: tag text exceeds 4096-byte cap")
 )
 
 func newTagID() string {
@@ -49,6 +57,12 @@ func newTagID() string {
 // check and the per-host alive-tag cap (5) are enforced inside the same
 // transaction as the INSERT so cap is TOCTOU-free.
 func (s *Store) InsertTag(ctx context.Context, t NewTag) (string, error) {
+	// Cheap language-level guard runs before opening a tx so oversized writes
+	// never reach SQLite. CHECK constraint in schema.sql is the belt; this is
+	// the suspenders that produces a typed error for callers.
+	if len(t.Text) > tagTextMaxBytes {
+		return "", ErrTagTextTooLong
+	}
 	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
 		return "", err
