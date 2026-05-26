@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -49,6 +50,8 @@ func Open(p string) (*Store, error) {
 func OpenContext(ctx context.Context, p string) (*Store, error) {
 	if st, err := os.Stat(p); err == nil && st.Size() > 0 {
 		return openWithRecovery(ctx, p)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("stat db path: %w", err)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
