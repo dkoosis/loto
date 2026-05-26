@@ -159,24 +159,39 @@ func ensureForSession(ctx context.Context, sid string) (*Agent, error) {
 	// Loser raced the winner between O_EXCL create and Write+Close. ReadFile
 	// can observe a 0-byte file in that window; retry briefly so the loser
 	// sees the winner's published mapping. If the winner crashed mid-write,
-	// the retries fail fast (~100ms total) and the caller surfaces the error.
-	var lastErr error
+	// the retries fail fast (~100ms total) and we fall through to recovery.
 	for range 20 {
 		a, lerr := loadSessionAgent(sid)
 		if lerr == nil {
 			return a, nil
 		}
-		lastErr = lerr
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
-	if lastErr == nil {
-		lastErr = errNoSessionCache
+
+	// If we get here, the winner likely crashed between O_EXCL create and
+	// Write/Sync, leaving a 0-byte or unparseable session cache file. Every
+	// future caller would hit errNoSessionCache forever (gh#115). Recover by
+	// checking the cache file: if it exists but is 0-byte or unparseable,
+	// unlink it and re-claim once with a fresh candidate.
+	if recoverCorruptSessionCache(sid) {
+		recovery, rerr := newAgent()
+		if rerr != nil {
+			return nil, rerr
+		}
+		if cerr := claimSessionCache(sid, recovery); cerr == nil {
+			return recovery, nil
+		}
+		// Another racer beat us to the re-claim — adopt their identity.
+		_ = os.Remove(filepath.Join(registryDir(), recovery.UUID+".json"))
+		if a, lerr := loadSessionAgent(sid); lerr == nil {
+			return a, nil
+		}
 	}
-	return nil, lastErr
+	return nil, errNoSessionCache
 }
 
 // loadSessionAgent reads ~/.loto/session/<sid>.json and resolves the cached
@@ -200,6 +215,35 @@ func loadSessionAgent(sid string) (*Agent, error) {
 		return nil, errNoSessionCache
 	}
 	return loadByUUID(ref.UUID)
+}
+
+// recoverCorruptSessionCache checks whether the session cache file for sid
+// is corrupt (0-byte or unparseable JSON) and, if so, unlinks it so the
+// caller can re-claim. Returns true if the file was removed (or already
+// absent), false if the file exists and is valid (another writer repaired
+// it concurrently). This is the recovery path for gh#115: a winner that
+// crashed between O_EXCL Create and Write/Sync leaves a permanently broken
+// cache file; without recovery every future caller returns errNoSessionCache.
+func recoverCorruptSessionCache(sid string) bool {
+	path, err := sessionCachePath(sid)
+	if err != nil {
+		return false
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		// File gone (another racer cleaned up) — caller can re-claim.
+		return !errors.Is(err, fs.ErrPermission)
+	}
+	// Non-empty, parseable, with a uuid → the file is valid; no recovery.
+	var ref struct {
+		UUID string `json:"uuid"`
+	}
+	if len(body) > 0 && json.Unmarshal(body, &ref) == nil && ref.UUID != "" {
+		return false
+	}
+	// Corrupt: 0-byte, bad JSON, or empty uuid. Unlink and let caller retry.
+	_ = os.Remove(path)
+	return true
 }
 
 // claimSessionCache attempts to create ~/.loto/session/<sid>.json with
