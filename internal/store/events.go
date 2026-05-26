@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"loto/internal/domain"
@@ -53,15 +54,22 @@ const auditDetachedTimeout = 2 * time.Second
 
 // appendAuditDetached appends evs on a fresh background context bounded
 // by auditDetachedTimeout so audit writes survive parent-ctx cancellation.
-// Best-effort: errors are returned but most callers ignore them — the audit
-// trail is hygiene, not invariant.
+// On failure (tx contention, SQLITE_BUSY, disk-full), the error is logged to
+// s.stderr so the loss is observable instead of silent — callers that need
+// per-target propagation should also surface the returned err via AuditErr
+// (gh#107). The audit trail is hygiene, not an invariant: failure here does
+// not undo the operation that's already on disk.
 func (s *Store) appendAuditDetached(evs []domain.Event) error {
 	if len(evs) == 0 {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), auditDetachedTimeout)
 	defer cancel()
-	return s.AppendEvents(ctx, evs)
+	err := s.AppendEvents(ctx, evs)
+	if err != nil && s.stderr != nil {
+		fmt.Fprintf(s.stderr, "loto: audit-write failed for %d event(s): %v\n", len(evs), err)
+	}
+	return err
 }
 
 // AppendEvent inserts a single event. Thin wrapper around AppendEvents to keep

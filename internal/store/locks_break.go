@@ -118,6 +118,7 @@ func classifyBreaks(
 
 func (s *Store) restoreAndAuditBreaks(results []BreakResult, byAgent string, now time.Time) {
 	var failEvents []domain.Event
+	var failIdx []int
 	for i := range results {
 		if results[i].Err != nil {
 			continue
@@ -125,10 +126,16 @@ func (s *Store) restoreAndAuditBreaks(results []BreakResult, byAgent string, now
 		if rerr := restoreWrite(results[i].Target.Canonical); rerr != nil {
 			results[i].RestoreErr = rerr
 			failEvents = append(failEvents, modeRestoreFailedEvent(results[i].Target.Canonical, byAgent, now, rerr))
+			failIdx = append(failIdx, i)
 		}
 	}
 	if len(failEvents) > 0 {
-		_ = s.appendAuditDetached(failEvents)
+		if auditErr := s.appendAuditDetached(failEvents); auditErr != nil {
+			// Fan audit-write failure out to each affected result (gh#107).
+			for _, i := range failIdx {
+				results[i].AuditErr = auditErr
+			}
+		}
 	}
 }
 

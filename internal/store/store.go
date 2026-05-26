@@ -161,6 +161,12 @@ func isUserVersionMismatch(err error) bool { return errors.Is(err, errUserVersio
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// SetStderr overrides the writer used for diagnostic messages (audit-write
+// failures, op-flock contention notices). Defaults to os.Stderr. Intended for
+// tests that need to observe these messages; production code should keep the
+// default.
+func (s *Store) SetStderr(w io.Writer) { s.stderr = w }
+
 // beginTx starts an immediate-mode tx on a dedicated pooled conn whose
 // busy_timeout PRAGMA is scaled to the caller's ctx deadline. Returned
 // cleanup MUST be deferred — it rolls back if Commit wasn't called and

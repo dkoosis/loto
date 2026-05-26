@@ -104,6 +104,11 @@ type ReleaseResult struct {
 	State      ReleaseOutcome
 	Holder     string // populated when State == StateNotOwner
 	RestoreErr error  // populated when State == StateRestoreFailed
+	// AuditErr is populated when the per-target mode_restore_failed audit
+	// event could not be persisted (tx contention, SQLITE_BUSY, ctx tail).
+	// The lock row is already gone; AuditErr signals the audit trail has a
+	// hole at this target so callers can re-emit or alert (gh#107).
+	AuditErr error
 }
 
 // BreakResult is the per-target outcome from BreakLocks. Err is nil on success;
@@ -116,6 +121,9 @@ type BreakResult struct {
 	Target     domain.Target
 	Err        error
 	RestoreErr error
+	// AuditErr is populated when the per-target mode_restore_failed audit
+	// event could not be persisted alongside RestoreErr. See ReleaseResult.AuditErr (gh#107).
+	AuditErr error
 }
 
 const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,branch`
