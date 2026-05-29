@@ -27,3 +27,6 @@ bin/
 docs/feedback/
 # local lintbrush quality ledger (sqlite + wal/shm)
 .quality/
+# jscpd fo-render temp dir
+.jscpd-tmp/
+report/
