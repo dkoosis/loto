@@ -2,7 +2,7 @@
 
 ‡ **stdout audience = Claude.** Every CLI surface except the dashboard (bead `loto-egg`) is consumed by Claude in agent loops. Follow Claude-Optimized Utility Output (nug `32f0ece29b72`) + claudish glyphs (`c75320ff5718`).
 
-- ✓ glyphs ✗ ⚠ ℹ ✔ over severity words
+- ✓ glyphs over severity words · ✗ ⚠ ℹ ✔
 - ✓ triage counts on the first body line
 - ✓ deterministic sort, same input → byte-identical output
 - ✓ `file:line:col` locations, prefer paths relative to cwd
