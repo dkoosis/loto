@@ -1,9 +1,8 @@
 # Boot
 updated: 2026-05-29
 
-→ `bd list --status=in_progress`. 2 beads, both genuinely unfixed (no branch, no commit on main):
-- `loto-129` (gh#126) — bug, not started
-- `loto-cq6` (gh#131) — bug, not started
+→ `bd list --status=in_progress`. 1 bead genuinely unfixed:
+- `loto-cq6` (gh#131) — atomic-rename publish doesn't fsync parent dir. See `paths.go:91` (`_ = os.Rename(tmpName, pinFile)`, no dir sync) + doctor.go rename sites. No branch, real work.
 
 ‡ state: branch backlog fully drained 2026-05-29
 - 0 ready, 0 open, 2 in_progress. No `fix/loto-*` branches remain; `origin/main` is the only branch.
