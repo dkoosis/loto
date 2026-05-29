@@ -1,8 +1,11 @@
 # Boot
-updated: 2026-05-29 #8
+updated: 2026-05-29 #9
 
-→ pick next work: `bd ready` (empty as of wrap) — no open PRs, no in_progress, backlog drained.
+→ pick next work: `bd ready` (empty as of update) — no open PRs, no in_progress, backlog drained.
 
 ✓ done
-- PR #151 (loto-4n65) merged w/ gemini fsync-order + TOCTOU fixes; CI green both runners.
-- `.quality/` gitignored.
+- PR #152 (loto-bbgm) merged — gate Make targets render through `fo`; `make audit` ~700→16 lines, gate integrity preserved (fo exits 1 on error/warn, 0 on note).
+- `make demo-v` is the opt-in narrated-transcript escape hatch.
+
+‡ traps
+- `docs/NORTH_STAR.md` churns from a KG reconcile daemon — auto-published, ✗ commit it.
