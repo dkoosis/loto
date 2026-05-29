@@ -34,29 +34,47 @@ operation that already succeeded: the bytes/rename are already durable, so a dir
 
 | File | Change |
 |------|--------|
-| `internal/identity/registry.go` | Add `mkdirAllSync(dir, perm)` helper; use it at the two `MkdirAll` sites. |
-| `internal/identity/registry_test.go` | `TestMkdirAllSync`: creates+syncs a missing dir, idempotent on an existing dir, surfaces error when parent unwritable. |
+| `internal/identity/registry.go` | Add `mkdirAllSync(dir)` helper (fixed 0o700; `perm` dropped per unparam); use it at the two `MkdirAll` sites and route `newAgent` through `writeAgent` (drop its redundant bare `MkdirAll`). |
+| `internal/identity/registry_test.go` | `TestMkdirAllSync`: creates+syncs a missing dir, multi-level create (fresh-home shape), idempotent on an existing dir, surfaces the "not a directory" error when the path is a file. |
 | `internal/store/doctor.go` | Add `syncDir` helper; sync `staging` after assembling moved files; sync parent `dir` after commit-rename and after failure-path requarantine. |
 | `internal/store/doctor_test.go` | `TestSyncDir` (helper contract) + assert `moveCorruptAside` still produces the quarantine dir (regression for the wired sites). |
 
 ### `mkdirAllSync` semantics
 ```go
-// mkdirAllSync is os.MkdirAll plus a parent-dir fsync when dir was newly
-// created, so the new directory entry survives power loss (loto-4n65, same
-// class as loto-cq6). A pre-existing directory is a no-op (no extra fsync).
-// Assumes a single missing level (loto's ~/.loto parent pre-exists); only the
-// immediate parent is flushed.
-func mkdirAllSync(dir string, perm os.FileMode) error {
+// mkdirAllSync is os.MkdirAll(dir, 0o700) plus an fsync of every newly-created
+// level's parent, so each new directory entry survives power loss (loto-4n65,
+// same class as loto-cq6). A pre-existing directory is a no-op. On a fresh home
+// MkdirAll creates more than one level (~/.loto then ~/.loto/agents); we walk
+// from dir up to the first existing ancestor and fsync each created level's
+// parent. 0o700 is fixed (perm param dropped — unparam: every caller passed it).
+func mkdirAllSync(dir string) error {
 	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
 		return nil
 	}
-	if err := os.MkdirAll(dir, perm); err != nil {
+	var created []string
+	for p := dir; ; {
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			break
+		}
+		created = append(created, p)
+		parent := filepath.Dir(p)
+		if parent == p {
+			break
+		}
+		p = parent
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return syncDir(filepath.Dir(dir))
+	for _, p := range created {
+		if err := syncDir(filepath.Dir(p)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 ```
-- Stat-shows-dir → skip (MkdirAll would be a no-op; parent unchanged).
+- Stat-shows-dir → skip (MkdirAll would be a no-op; parents unchanged).
 - Stat-shows-non-dir or Stat-errors → fall through to MkdirAll, which surfaces the real error
   (preserves original "not a directory" behavior — no error masking).
 
@@ -74,6 +92,11 @@ Durability across power-loss is not observable from userspace without fault inje
 sites still succeed end-to-end. No behavior change to existing happy/error paths.
 
 ## Out of scope
-- Multi-level MkdirAll durability (syncing every created ancestor) — loto only ever creates one
-  missing level; documented assumption.
 - Sharing `syncDir` via a helper package — blocked by the store→domain-only arch rule.
+
+## Addendum (pass-1 review F1)
+Original plan scoped out multi-level durability on the assumption loto creates only one missing
+level. False: on a fresh home `MkdirAll(~/.loto/agents)` creates two levels, and `newAgent` had a
+redundant bare `MkdirAll` that short-circuited the create-path fsync entirely. Fix: `mkdirAllSync`
+now fsyncs every created level's parent, and `newAgent` routes through `writeAgent`. See
+`pass-1-review.md`.

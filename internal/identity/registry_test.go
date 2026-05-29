@@ -362,6 +362,19 @@ func TestMkdirAllSync(t *testing.T) {
 		t.Fatalf("mkdirAllSync on existing dir: %v", err)
 	}
 
+	// Multi-level create (fresh-home shape: two missing levels at once). Both
+	// the intermediate and leaf dirs must exist afterward.
+	leaf := filepath.Join(base, "nested", "deep")
+	if err := mkdirAllSync(leaf); err != nil {
+		t.Fatalf("mkdirAllSync on missing multi-level dir: %v", err)
+	}
+	if fi, err := os.Stat(leaf); err != nil || !fi.IsDir() {
+		t.Fatalf("mkdirAllSync did not create leaf: stat=%v err=%v", fi, err)
+	}
+	if fi, err := os.Stat(filepath.Join(base, "nested")); err != nil || !fi.IsDir() {
+		t.Fatalf("mkdirAllSync did not create intermediate level: stat=%v err=%v", fi, err)
+	}
+
 	// Path exists as a file → MkdirAll's "not a directory" error must surface.
 	asFile := filepath.Join(base, "afile")
 	if err := os.WriteFile(asFile, []byte("x"), 0o600); err != nil {
