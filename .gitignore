@@ -25,3 +25,5 @@ bin/
 .claude/scheduled_tasks.lock
 # review-artifact dump dir
 docs/feedback/
+# local lintbrush quality ledger (sqlite + wal/shm)
+.quality/
