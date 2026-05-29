@@ -299,6 +299,21 @@ func TestMoveCorruptDB(t *testing.T) {
 	}
 }
 
+// TestSyncDir asserts the store-local parent-dir fsync helper succeeds on a
+// real directory and surfaces an error for a path that cannot be opened
+// (loto-4n65, same class as loto-cq6). Durability across power-loss is not
+// observable from userspace, so this covers only the open→sync→close contract;
+// regression coverage for the quarantine sites comes from TestMoveCorruptDB,
+// TestMoveCorruptAsideAtomic, and TestMoveCorruptAside_PreservesBytesOnCommitFailure.
+func TestSyncDir(t *testing.T) {
+	if err := syncDir(t.TempDir()); err != nil {
+		t.Fatalf("syncDir on real dir: %v", err)
+	}
+	if err := syncDir(filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
+		t.Fatal("syncDir on missing path: want error, got nil")
+	}
+}
+
 // isCorruptDB must trip on real sqlite NOTADB/CORRUPT errors only — not on
 // arbitrary wrapped errors that happen to contain the substring "malformed".
 // Regression: gh#48 — string-match isCorruptDB destroys DB on false positives.

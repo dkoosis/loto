@@ -266,7 +266,7 @@ func claimSessionCache(sid string, a *Agent) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(sessionDir(), 0o700); err != nil {
+	if err := mkdirAllSync(sessionDir()); err != nil {
 		return err
 	}
 	body, err := json.Marshal(struct {
@@ -489,7 +489,7 @@ func writeAgent(a *Agent) error {
 		return err
 	}
 	dir := registryDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := mkdirAllSync(dir); err != nil {
 		return err
 	}
 	final := filepath.Join(dir, a.UUID+".json")
@@ -541,6 +541,24 @@ func syncDir(dir string) error {
 		return err
 	}
 	return d.Close()
+}
+
+// mkdirAllSync is os.MkdirAll(dir, 0o700) plus a parent-dir fsync when dir was
+// newly created, so the new directory entry survives power loss (loto-4n65,
+// same durability class as loto-cq6). A pre-existing directory is a no-op — no
+// extra fsync. Only the immediate parent is flushed; loto's ~/.loto parent
+// already exists, so MkdirAll never creates more than one level here. A path
+// that exists as a non-directory falls through to MkdirAll, which surfaces the
+// real "not a directory" error rather than being masked. 0o700 is fixed: every
+// identity dir under ~/.loto is user-private.
+func mkdirAllSync(dir string) error {
+	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(dir))
 }
 
 // NewUUID returns a fresh RFC 4122 v4 UUID. Exported so non-identity callers

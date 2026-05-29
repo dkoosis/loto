@@ -340,6 +340,38 @@ func TestSyncDir(t *testing.T) {
 	}
 }
 
+// TestMkdirAllSync asserts the create-then-fsync-parent helper: it creates a
+// missing directory, is a no-op on a pre-existing one, and surfaces the real
+// error when the path exists as a non-directory (no error masking) — the
+// MkdirAll-site half of loto-4n65. Power-loss durability is not observable
+// from userspace (see TestSyncDir), so this covers only the control flow.
+func TestMkdirAllSync(t *testing.T) {
+	base := t.TempDir()
+
+	// Missing dir: created and usable.
+	fresh := filepath.Join(base, "fresh")
+	if err := mkdirAllSync(fresh); err != nil {
+		t.Fatalf("mkdirAllSync on missing dir: %v", err)
+	}
+	if fi, err := os.Stat(fresh); err != nil || !fi.IsDir() {
+		t.Fatalf("mkdirAllSync did not create dir: stat=%v err=%v", fi, err)
+	}
+
+	// Idempotent on an existing dir.
+	if err := mkdirAllSync(fresh); err != nil {
+		t.Fatalf("mkdirAllSync on existing dir: %v", err)
+	}
+
+	// Path exists as a file → MkdirAll's "not a directory" error must surface.
+	asFile := filepath.Join(base, "afile")
+	if err := os.WriteFile(asFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mkdirAllSync(asFile); err == nil {
+		t.Fatal("mkdirAllSync over a file: want error, got nil")
+	}
+}
+
 func TestWriteAgentAtomic(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)

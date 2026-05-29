@@ -310,27 +310,71 @@ func moveCorruptAside(dbPath string, when time.Time) (string, error) {
 			// "corrupt-staging-" so it's discoverable even unrenamed.
 			fmt.Fprintf(os.Stderr, "loto: corrupt DB bytes preserved at %s (rename to %s failed: %v)\n", staging, failed, err)
 		} else {
+			// Best-effort: flush the parent so the requarantine entry is durable.
+			// A defer can only log, never return — match the recovery-path tone.
+			_ = syncDir(dir)
 			fmt.Fprintf(os.Stderr, "loto: corrupt DB bytes preserved at %s after commit-rename failure\n", failed)
 		}
 	}()
 
-	if err := os.Rename(dbPath, filepath.Join(staging, base)); err != nil {
-		return "", fmt.Errorf("rename main: %w", err)
+	moved, err := fillCorruptStaging(dbPath, staging, base)
+	holdsCorruptBytes = moved
+	if err != nil {
+		return "", err
 	}
-	holdsCorruptBytes = true
+
+	if err := os.Rename(staging, finalDir); err != nil {
+		return "", fmt.Errorf("commit corrupt dir: %w", err)
+	}
+	// committed first: the deferred cleanup must not chase a staging path that
+	// no longer exists once the commit-rename has consumed it.
+	committed = true
+	// Flush the parent so the new <finalDir> entry survives power loss.
+	if err := syncDir(dir); err != nil {
+		return "", fmt.Errorf("sync corrupt dir parent: %w", err)
+	}
+	return finalDir, nil
+}
+
+// fillCorruptStaging moves the corrupt main DB and any existing -wal/-shm
+// siblings into staging, then fsyncs staging so the moved entries are durable
+// before it is published (loto-4n65). The bool return is true once the main DB
+// has been renamed in — from that point staging holds the only copy of the
+// user's bytes, so the caller must preserve it on any later failure (see the
+// moveCorruptAside defer). It stays true even when a sibling rename or the
+// staging fsync fails.
+func fillCorruptStaging(dbPath, staging, base string) (bool, error) {
+	if err := os.Rename(dbPath, filepath.Join(staging, base)); err != nil {
+		return false, fmt.Errorf("rename main: %w", err)
+	}
 	for _, sfx := range []string{sqliteWALSuffix, sqliteSHMSuffix} {
 		src := dbPath + sfx
 		if _, statErr := os.Stat(src); statErr != nil {
 			continue
 		}
 		if err := os.Rename(src, filepath.Join(staging, base+sfx)); err != nil {
-			return "", fmt.Errorf("rename %s: %w", sfx, err)
+			return true, fmt.Errorf("rename %s: %w", sfx, err)
 		}
 	}
-
-	if err := os.Rename(staging, finalDir); err != nil {
-		return "", fmt.Errorf("commit corrupt dir: %w", err)
+	if err := syncDir(staging); err != nil {
+		return true, fmt.Errorf("sync staging: %w", err)
 	}
-	committed = true
-	return finalDir, nil
+	return true, nil
+}
+
+// syncDir flushes a directory's metadata to stable storage so that a rename
+// performed inside it survives power loss. Call after the file/dir itself has
+// been fsync'd. (Duplicated from internal/identity & internal/cli rather than
+// shared via a helper package: store may depend only on internal/domain — see
+// .go-arch-lint.yml. The helper is small enough to fall under jscpd limits.)
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return err
+	}
+	return d.Close()
 }
