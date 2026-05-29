@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -575,7 +576,12 @@ func mkdirAllSync(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	for _, p := range created {
+	// Fsync top-down (shallowest parent first): a level's entry must be durable
+	// in its parent before that level's own contents are flushed, else a crash
+	// mid-walk can leave a directory whose contents are persisted but whose link
+	// from the parent is not — an orphaned inode. created is deepest-first, so
+	// walk it in reverse.
+	for _, p := range slices.Backward(created) {
 		if err := syncDir(filepath.Dir(p)); err != nil {
 			return err
 		}
