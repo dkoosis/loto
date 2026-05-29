@@ -1,12 +1,16 @@
 # Boot
-updated: 2026-05-29
+updated: 2026-05-29 PM
 
-→ `bd list --status=in_progress`. 1 bead genuinely unfixed:
-- `loto-cq6` (gh#131) — atomic-rename publish doesn't fsync parent dir. See `paths.go:91` (`_ = os.Rename(tmpName, pinFile)`, no dir sync) + doctor.go rename sites. No branch, real work.
+→ next: `loto-4n65` (P3, open) — parent-dir fsync gaps left out of loto-cq6's scope:
+- `MkdirAll`-created dirs not fsync'd into parent: `registry.go:269` (sessionDir), `:492` (registryDir).
+- `doctor.go` quarantine renames (308/317/326/331) — recovery path, same class.
+- pattern to reuse: the `syncDir` helper on `loto-cq6` branch / PR #149.
 
-‡ state: branch backlog fully drained 2026-05-29
-- 0 ready, 0 open, 2 in_progress. No `fix/loto-*` branches remain; `origin/main` is the only branch.
-- all prior audit fixes are squash-merged on main (PRs #133–#147). main history is clean.
+‡ state: 2026-05-29 PM
+- `loto-cq6` (gh#131) SHIPPED — PR #149 open (branch `loto-cq6`), bead closed. Awaiting merge.
+  - `syncDir` helper at writeAgent/claimSessionCache/pinSlug. Audit trail: `docs/superpowers/plans/loto-cq6/`.
+- 1 open bead (loto-4n65), 0 in_progress. Worktree `loto-cq6/` still present until PR merges.
+- all prior audit fixes squash-merged on main (PRs #133–#147). main history clean.
 
 ‡ trap learned (the mess that ate a session)
 - the bug-audit filed beads AND those fixes were separately squash-merged via PRs — leaving ~11 stale `fix/loto-*` branches that LOOKED unmerged (gh issues open, beads in_progress) but were already on main.
