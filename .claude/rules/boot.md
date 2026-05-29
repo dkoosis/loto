@@ -1,19 +1,12 @@
 # Boot
-updated: 2026-05-29 PM
+updated: 2026-05-29 #7
 
-→ next: `loto-4n65` (P3, open) — parent-dir fsync gaps left out of loto-cq6's scope:
-- `MkdirAll`-created dirs not fsync'd into parent: `registry.go:269` (sessionDir), `:492` (registryDir).
-- `doctor.go` quarantine renames (308/317/326/331) — recovery path, same class.
-- pattern to reuse: the `syncDir` helper on `loto-cq6` branch / PR #149.
+→ next: nothing claimed. `bd ready` = empty, no open PRs, no in_progress beads. Backlog drained.
+- `loto-4n65` SHIPPED + MERGED — PR #151 squash-merged to main (583a688). Worktree + local/remote branch deleted. gemini review (top-down fsync order via slices.Backward + dropped TOCTOU stat in fillCorruptStaging) addressed in 0c37337 before merge. `make audit` green both CI platforms.
+- `loto-cq6` (gh#131) merged via #149 earlier.
 
-‡ state: 2026-05-29 PM
-- `loto-cq6` (gh#131) SHIPPED — PR #149 open (branch `loto-cq6`), bead closed. Awaiting merge.
-  - `syncDir` helper at writeAgent/claimSessionCache/pinSlug. Audit trail: `docs/superpowers/plans/loto-cq6/`.
-- 1 open bead (loto-4n65), 0 in_progress. Worktree `loto-cq6/` still present until PR merges.
-- all prior audit fixes squash-merged on main (PRs #133–#147). main history clean.
+state: φ docs/superpowers/plans/loto-4n65/{plan.md,pass-1-review.md} (Pass C records the gemini fixes)
+- `.quality/ledger.db*` — local lintbrush ledger, untracked, not mine; left in place (NOT gitignored — don't commit it).
 
-‡ trap learned (the mess that ate a session)
-- the bug-audit filed beads AND those fixes were separately squash-merged via PRs — leaving ~11 stale `fix/loto-*` branches that LOOKED unmerged (gh issues open, beads in_progress) but were already on main.
-- before merging any branch: `git cherry main origin/fix/loto-X` — `-` = already applied, delete the branch; don't merge (a `--no-ff` merge of an already-merged branch pushes zero-content pollution).
-- gh-issue-open ≠ unfixed. bead-in_progress ≠ unfixed. Verify against main commits.
-- `stash@{0}` = old boot.md draft, ignorable.
+‡ CI runs on self-hosted runners (`trixi-loto` Linux, `mac-loto` macOS) — GH-hosted billing block bypassed.
+‡ trap: gh-issue-open ≠ unfixed, bead-in_progress ≠ unfixed. Before merging any branch: `git cherry main origin/<branch>` — `-` = already on main, delete don't merge.
