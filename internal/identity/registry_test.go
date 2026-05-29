@@ -325,6 +325,21 @@ func TestEnsureDistinctClaudeSessions(t *testing.T) {
 // truncate-then-write), readers racing the writer observe zero-byte reads
 // or short writes and fail Unmarshal → mostRecentAgent silently drops the
 // entry → identity flap (gh#50 / loto-200).
+// TestSyncDir asserts the parent-dir fsync helper succeeds on a real
+// directory and surfaces an error for a path that cannot be opened
+// (loto-cq6 / gh#131). Durability across power-loss is not observable from
+// userspace without fault injection, so this only covers the helper's own
+// open→sync→close contract; regression coverage for the publish sites comes
+// from TestWriteAgentAtomic and TestEnsureSessionCachePersists.
+func TestSyncDir(t *testing.T) {
+	if err := syncDir(t.TempDir()); err != nil {
+		t.Fatalf("syncDir on real dir: %v", err)
+	}
+	if err := syncDir(filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
+		t.Fatal("syncDir on missing path: want error, got nil")
+	}
+}
+
 func TestWriteAgentAtomic(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
