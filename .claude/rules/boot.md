@@ -1,15 +1,16 @@
 # Boot
 updated: 2026-05-29
 
-→ `bd ready` empty + `bd list --status=in_progress`. Real work is the in-flight branches, not the ready queue.
+→ `bd list --status=in_progress`. 2 beads, both genuinely unfixed (no branch, no commit on main):
+- `loto-129` (gh#126) — bug, not started
+- `loto-cq6` (gh#131) — bug, not started
 
-‡ state: bug-audit fixes mid-flight
-- 13 beads `in_progress`, 0 ready, 0 open — backlog is NOT drained
-- 11 `origin/fix/loto-*` branches pushed, **no PRs open** → work = verify→PR→merge
-- 2 beads have NO branch yet: `loto-129` (gh#126), `loto-cq6` (gh#131)
-- map: each `fix/loto-X` ↔ bead `loto-X` ↔ one open gh issue
+‡ state: branch backlog fully drained 2026-05-29
+- 0 ready, 0 open, 2 in_progress. No `fix/loto-*` branches remain; `origin/main` is the only branch.
+- all prior audit fixes are squash-merged on main (PRs #133–#147). main history is clean.
 
-‡ traps
-- before closing any bead: confirm fix is on `main` (`git log main | grep loto-X`). gh-issue-closed ≠ code-merged — they drifted hard, reconciled 2026-05-29.
-- `git push origin --delete` your fix branch after its PR merges — stale remotes pile up fast.
+‡ trap learned (the mess that ate a session)
+- the bug-audit filed beads AND those fixes were separately squash-merged via PRs — leaving ~11 stale `fix/loto-*` branches that LOOKED unmerged (gh issues open, beads in_progress) but were already on main.
+- before merging any branch: `git cherry main origin/fix/loto-X` — `-` = already applied, delete the branch; don't merge (a `--no-ff` merge of an already-merged branch pushes zero-content pollution).
+- gh-issue-open ≠ unfixed. bead-in_progress ≠ unfixed. Verify against main commits.
 - `stash@{0}` = old boot.md draft, ignorable.
