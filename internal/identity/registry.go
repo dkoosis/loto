@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -266,7 +267,7 @@ func claimSessionCache(sid string, a *Agent) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(sessionDir(), 0o700); err != nil {
+	if err := mkdirAllSync(sessionDir()); err != nil {
 		return err
 	}
 	body, err := json.Marshal(struct {
@@ -348,9 +349,9 @@ func newAgent() (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(registryDir(), 0o700); err != nil {
-		return nil, err
-	}
+	// writeAgent's mkdirAllSync creates registryDir() and routes the create
+	// through the parent-dir fsync; a bare MkdirAll here would short-circuit
+	// that fsync (the dir would already exist when mkdirAllSync runs).
 	if err := writeAgent(a); err != nil {
 		return nil, err
 	}
@@ -489,7 +490,7 @@ func writeAgent(a *Agent) error {
 		return err
 	}
 	dir := registryDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := mkdirAllSync(dir); err != nil {
 		return err
 	}
 	final := filepath.Join(dir, a.UUID+".json")
@@ -541,6 +542,51 @@ func syncDir(dir string) error {
 		return err
 	}
 	return d.Close()
+}
+
+// mkdirAllSync is os.MkdirAll(dir, 0o700) plus an fsync of every newly-created
+// level's parent, so each new directory entry survives power loss (loto-4n65,
+// same durability class as loto-cq6). A pre-existing directory is a no-op — no
+// extra fsync. On a fresh home MkdirAll creates more than one level (e.g.
+// ~/.loto then ~/.loto/agents); fsyncing only the immediate parent would leave
+// the higher entries unflushed, so we walk from dir up to the first existing
+// ancestor and fsync each created level's parent. A path that exists as a
+// non-directory falls through to MkdirAll, which surfaces the real "not a
+// directory" error rather than being masked. 0o700 is fixed: every identity
+// dir under ~/.loto is user-private.
+func mkdirAllSync(dir string) error {
+	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+		return nil
+	}
+	// Levels that don't yet exist, deepest first, up to the first existing
+	// ancestor (or the filesystem root). Each level's parent gets fsync'd
+	// after MkdirAll so the new directory entry is durable.
+	var created []string
+	for p := dir; ; {
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			break
+		}
+		created = append(created, p)
+		parent := filepath.Dir(p)
+		if parent == p { // filesystem root; no further ancestors
+			break
+		}
+		p = parent
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	// Fsync top-down (shallowest parent first): a level's entry must be durable
+	// in its parent before that level's own contents are flushed, else a crash
+	// mid-walk can leave a directory whose contents are persisted but whose link
+	// from the parent is not — an orphaned inode. created is deepest-first, so
+	// walk it in reverse.
+	for _, p := range slices.Backward(created) {
+		if err := syncDir(filepath.Dir(p)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // NewUUID returns a fresh RFC 4122 v4 UUID. Exported so non-identity callers

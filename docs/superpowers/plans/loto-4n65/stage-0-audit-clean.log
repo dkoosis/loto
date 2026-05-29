@@ -1,0 +1,652 @@
+go vet ./...
+golangci-lint run ./...
+0 issues.
+module: [32mloto[0m
+linters:
+[32m   On[0m[90m | [0mBase: component imports[90m # always on[0m
+[33m  Off[0m[90m | [0mAdvanced: vendor imports[90m # switch 'allow.depOnAnyVendor = false' (or delete) to on[0m
+[32m   On[0m[90m | [0mAdvanced: method calls and dependency injections[90m # switch 'allow.deepScan = true' (or delete) to on[0m
+
+[32mOK - No warnings found[0m
+go test -count=1 -cover ./...
+ok  	loto/cmd/loto	1.519s	coverage: 0.0% of statements
+ok  	loto/internal/cli	7.612s	coverage: 78.6% of statements
+ok  	loto/internal/domain	0.383s	coverage: 93.1% of statements
+ok  	loto/internal/identity	1.074s	coverage: 74.5% of statements
+ok  	loto/internal/render	0.793s	coverage: 87.9% of statements
+ok  	loto/internal/store	2.859s	coverage: 78.9% of statements
+=== check pass ===
+go test -race -timeout=5m -count=1 ./...
+ok  	loto/cmd/loto	6.955s
+ok  	loto/internal/cli	14.308s
+ok  	loto/internal/domain	1.597s
+ok  	loto/internal/identity	2.521s
+ok  	loto/internal/render	1.968s
+ok  	loto/internal/store	9.125s
+govulncheck ./...
+=== Symbol Results ===
+
+No vulnerabilities found.
+
+Your code is affected by 0 vulnerabilities.
+This scan also found 0 vulnerabilities in packages you import and 1
+vulnerability in modules you require, but your code doesn't appear to call these
+vulnerabilities.
+Use '-show verbose' for more details.
+jscpd .
+[90m┌──────────[39m[90m┬────────────────[39m[90m┬─────────────[39m[90m┬──────────────[39m[90m┬──────────────[39m[90m┬──────────────────[39m[90m┬───────────────────┐[39m
+[90m│[39m[31m Format   [39m[90m│[39m[31m Files analyzed [39m[90m│[39m[31m Total lines [39m[90m│[39m[31m Total tokens [39m[90m│[39m[31m Clones found [39m[90m│[39m[31m Duplicated lines [39m[90m│[39m[31m Duplicated tokens [39m[90m│[39m
+[90m├──────────[39m[90m┼────────────────[39m[90m┼─────────────[39m[90m┼──────────────[39m[90m┼──────────────[39m[90m┼──────────────────[39m[90m┼───────────────────┤[39m
+[90m│[39m go       [90m│[39m 40             [90m│[39m 5083        [90m│[39m 40402        [90m│[39m 0            [90m│[39m 0 (0%)           [90m│[39m 0 (0%)            [90m│[39m
+[90m├──────────[39m[90m┼────────────────[39m[90m┼─────────────[39m[90m┼──────────────[39m[90m┼──────────────[39m[90m┼──────────────────[39m[90m┼───────────────────┤[39m
+[90m│[39m yaml     [90m│[39m 3              [90m│[39m 282         [90m│[39m 1390         [90m│[39m 0            [90m│[39m 0 (0%)           [90m│[39m 0 (0%)            [90m│[39m
+[90m├──────────[39m[90m┼────────────────[39m[90m┼─────────────[39m[90m┼──────────────[39m[90m┼──────────────[39m[90m┼──────────────────[39m[90m┼───────────────────┤[39m
+[90m│[39m markdown [90m│[39m 1              [90m│[39m 136         [90m│[39m 1424         [90m│[39m 0            [90m│[39m 0 (0%)           [90m│[39m 0 (0%)            [90m│[39m
+[90m├──────────[39m[90m┼────────────────[39m[90m┼─────────────[39m[90m┼──────────────[39m[90m┼──────────────[39m[90m┼──────────────────[39m[90m┼───────────────────┤[39m
+[90m│[39m json     [90m│[39m 1              [90m│[39m 24          [90m│[39m 143          [90m│[39m 0            [90m│[39m 0 (0%)           [90m│[39m 0 (0%)            [90m│[39m
+[90m├──────────[39m[90m┼────────────────[39m[90m┼─────────────[39m[90m┼──────────────[39m[90m┼──────────────[39m[90m┼──────────────────[39m[90m┼───────────────────┤[39m
+[90m│[39m [1mTotal:[22m   [90m│[39m 45             [90m│[39m 5525        [90m│[39m 43359        [90m│[39m 0            [90m│[39m 0 (0%)           [90m│[39m 0 (0%)            [90m│[39m
+[90m└──────────[39m[90m┴────────────────[39m[90m┴─────────────[39m[90m┴──────────────[39m[90m┴──────────────[39m[90m┴──────────────────[39m[90m┴───────────────────┘[39m
+[90mFound 0 clones.[39m
+[3m[90mDetection time:[39m[23m: 260.22ms
+nilaway -include-pkgs=loto -test=false ./...
+=== RUN   TestDemo_00_Index
+    demo_test.go:203: 
+            ┌─ loto demo index ────────────────────────────────────────────┐
+            │  ── primitives ──                                        │
+            │  01  whoami           identity of the current session            │
+            │  02  lock + status    claim a file, inspect what you hold        │
+            │  03  check            pre-flight before editing                  │
+            │  04  contention       two agents racing for the same file        │
+            │  05  handoff          unlock so a peer can claim                 │
+            │  06  status (global)  every active lock, across agents           │
+            │  07  doctor           find and repair stale locks                │
+            │  08  version          meta                                       │
+            │  ── coordination patterns ──                             │
+            │  09  lane by anchors  parallel feature lanes without globs       │
+            │  10  hook gate        pre-write check loop, skip on conflict     │
+            │  11  drain loop       claim → edit → unlock, three files in a row│
+            │  12  migration TTL    long claim with intent that explains itself│
+            │  13  queue behind     poll check until peer releases             │
+            │  14  reviewer peek    status as in-flight signal, not as block   │
+            │  15  TDD ping-pong    red / green / refactor tags drive the handoff│
+            │  16  cross-repo note  lock domain is per-project — by design   │
+            │  ── safety invariants ──                                 │
+            │  17  multi-file atomic  lock a+b+c all-or-nothing; one blocker aborts the set│
+            │  18  reads are free     locked file is 0444 — peers can still read│
+            │  19  force-break        unlock --force takes over; no silent dispossession│
+            │  20  lazy GC            expired row reaped on next acquire, no doctor needed│
+            └───────────────────────────────────────────────────────────────────┘
+        
+--- PASS: TestDemo_00_Index (0.00s)
+=== RUN   TestDemo_01_WhoAmI
+    demo_test.go:209: 
+        ── demo 01 · whoami — every session has a handle ────────────────
+    demo_test.go:213:     a fresh session lands in the repo.
+    demo_test.go:214:     first question: what am I called here?
+    demo_test.go:215: 
+    demo_test.go:216:     BriefVulture ❯ loto whoami
+    demo_test.go:117:                  handle: BriefVulture
+    demo_test.go:117:                  uuid:   a6026ab4-1941-4f11-b47f-2da674191e53
+    demo_test.go:117:                  host:   Davids-MacBookPro
+    demo_test.go:216:                  (exit 0)
+    demo_test.go:218: 
+    demo_test.go:219:     that handle is what peers will see in conflict reports.
+--- PASS: TestDemo_01_WhoAmI (0.09s)
+=== RUN   TestDemo_02_LockAndStatus
+    demo_test.go:223: 
+        ── demo 02 · lock + status — claim, then inspect ────────────────
+    demo_test.go:227:     PlaidRabbit is about to refactor a.go. she locks it first.
+    demo_test.go:228: 
+    demo_test.go:229:     PlaidRabbit ❯ loto lock a.go --intent rename Type
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=a.go
+    demo_test.go:229:                  (exit 0)
+    demo_test.go:231: 
+    demo_test.go:232:     what does she hold right now?
+    demo_test.go:233: 
+    demo_test.go:234:     PlaidRabbit ❯ loto status --mine
+    demo_test.go:117:                  project: test-proj
+    demo_test.go:117:                  repo:    /private/tmp/claude-503/TestDemo_02_LockAndStatus4035179737/003
+    demo_test.go:117:                  state:   /tmp/claude-503/TestDemo_02_LockAndStatus4035179737/002/state
+    demo_test.go:117:                  ✓ locks count=1
+    demo_test.go:117:                  ✓ target=a.go owner=9f717a6b-310f-4208-81b9-677257e63eed intent="rename Type" held_since=2026-05-29T15:58:58Z expires_at=2026-05-29T16:28:58Z host=Davids-MacBookPro pid=61595
+    demo_test.go:234:                  (exit 0)
+--- PASS: TestDemo_02_LockAndStatus (0.10s)
+=== RUN   TestDemo_03_CheckBeforeEdit
+    demo_test.go:239: 
+        ── demo 03 · check — pre-flight before you touch a file ─────────
+    demo_test.go:244:     SteelAye-aye locks b.go for a fix.
+    demo_test.go:245: 
+    demo_test.go:246:     SteelAye-aye ❯ loto lock b.go --intent fix race
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=b.go
+    demo_test.go:246:                  (exit 0)
+    demo_test.go:247: 
+    demo_test.go:248:     BriefAdder wanders in, doesn't know yet, and runs check first.
+    demo_test.go:249: 
+    demo_test.go:250:     BriefAdder ❯ loto check b.go
+    demo_test.go:117:                  ✗ conflicts count=1
+    demo_test.go:117:                  ✗ path=b.go blocker=d6ab3b5f-6543-4a4f-9a12-47de1155fe1f holder_target=b.go intent="fix race" expires_at=2026-05-29T16:28:58Z
+    demo_test.go:117:                  ```bash
+    demo_test.go:117:                  loto unlock --force -t "unblock" b.go
+    demo_test.go:117:                  ```
+    demo_test.go:250:                  (exit 1)
+    demo_test.go:256: 
+    demo_test.go:257:     exit 1 + blocker= line says: do NOT edit.
+    demo_test.go:258:     the intent tells BriefAdder what the holder is doing — enough to route around.
+--- PASS: TestDemo_03_CheckBeforeEdit (0.10s)
+=== RUN   TestDemo_04_TwoAgentsRacing
+    demo_test.go:262: 
+        ── demo 04 · contention — two agents want the same file ─────────
+    demo_test.go:266:     LucidMagpie gets there first.
+    demo_test.go:267: 
+    demo_test.go:268:     LucidMagpie ❯ loto lock internal/store/store.go --intent split file
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=internal/store/store.go
+    demo_test.go:268:                  (exit 0)
+    demo_test.go:270: 
+    demo_test.go:271:     TonicOcelot tries the same file moments later.
+    demo_test.go:272: 
+    demo_test.go:273:     TonicOcelot ❯ loto lock internal/store/store.go --intent add test
+    demo_test.go:117:                  ✗ blocked count=1
+    demo_test.go:117:                  ⚠ target=internal/store/store.go blocker=LucidMagpie(92318719) intent="split file" expires_at=2026-05-29T16:28:58Z
+    demo_test.go:273:                  (exit 1)
+    demo_test.go:278: 
+    demo_test.go:279:     ✗ blocked — this is the whole point of loto. no silent clobbers.
+--- PASS: TestDemo_04_TwoAgentsRacing (0.10s)
+=== RUN   TestDemo_05_HandoffViaUnlock
+    demo_test.go:283: 
+        ── demo 05 · unlock — hand the territory back ───────────────────
+    demo_test.go:287:     GreenKestrel claims the file, does the work.
+    demo_test.go:288: 
+    demo_test.go:289:     GreenKestrel ❯ loto lock internal/store/store.go --intent split file
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=internal/store/store.go
+    demo_test.go:289:                  (exit 0)
+    demo_test.go:290: 
+    demo_test.go:291:     she's done. the tag explains WHY she's releasing — peers see it in history.
+    demo_test.go:292: 
+    demo_test.go:293:     GreenKestrel ❯ loto unlock internal/store/store.go -t ready-for-review
+    demo_test.go:117:                  ✓ unlocked count=1
+    demo_test.go:117:                  ✓ target=internal/store/store.go
+    demo_test.go:293:                  (exit 0)
+    demo_test.go:295: 
+    demo_test.go:296:     OliveMerlin can now claim what was blocked a moment ago.
+    demo_test.go:297: 
+    demo_test.go:298:     OliveMerlin ❯ loto lock internal/store/store.go --intent add test
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=internal/store/store.go
+    demo_test.go:298:                  (exit 0)
+--- PASS: TestDemo_05_HandoffViaUnlock (0.10s)
+=== RUN   TestDemo_06_GlobalStatus
+    demo_test.go:303: 
+        ── demo 06 · status — full picture across agents ────────────────
+    demo_test.go:307:     two agents working in parallel each claim a file.
+    demo_test.go:308: 
+    demo_test.go:309:     GrossHyena ❯ loto lock a.go --intent doc pass
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=a.go
+    demo_test.go:309:                  (exit 0)
+    demo_test.go:310:     SharpZorro ❯ loto lock internal/store/store.go --intent extract helper
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=internal/store/store.go
+    demo_test.go:310:                  (exit 0)
+    demo_test.go:311: 
+    demo_test.go:312:     a third session walks in and wants the lay of the land.
+    demo_test.go:313: 
+    demo_test.go:315:     SilverLoon ❯ loto status
+    demo_test.go:117:                  project: test-proj
+    demo_test.go:117:                  repo:    /private/tmp/claude-503/TestDemo_06_GlobalStatus3078743498/003
+    demo_test.go:117:                  state:   /tmp/claude-503/TestDemo_06_GlobalStatus3078743498/002/state
+    demo_test.go:117:                  ✓ locks count=2
+    demo_test.go:117:                  ✓ target=a.go owner=241a6efd-292e-4bf2-82c9-2925f3a8656b intent="doc pass" held_since=2026-05-29T15:58:58Z expires_at=2026-05-29T16:28:58Z host=Davids-MacBookPro pid=61595
+    demo_test.go:117:                  ✓ target=internal/store/store.go owner=c7d795e7-8246-4063-bbc1-e8be65ea87b3 intent="extract helper" held_since=2026-05-29T15:58:58Z expires_at=2026-05-29T16:28:58Z host=Davids-MacBookPro pid=61595
+    demo_test.go:315:                  (exit 0)
+    demo_test.go:320: 
+    demo_test.go:321:     no --mine = every active lock in the repo, with owner UUIDs + intent.
+--- PASS: TestDemo_06_GlobalStatus (0.16s)
+=== RUN   TestDemo_07_DoctorStaleLock
+    demo_test.go:325: 
+        ── demo 07 · doctor — find and repair stale locks ───────────────
+    demo_test.go:329:     a previous session locked the file with a short TTL and never came back.
+    demo_test.go:330:     TTL expired with no clean unlock — same shape as a crash.
+    demo_test.go:331: 
+    demo_test.go:332:     RawBuffalo ❯ loto lock a.go --ttl 1ms --intent interrupted
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=a.go
+    demo_test.go:332:                  (exit 0)
+    demo_test.go:334: 
+    demo_test.go:335:     dry-run first — see the plan before mutating state.
+    demo_test.go:336: 
+    demo_test.go:337:     RawBuffalo ❯ loto doctor --dry-run --repair
+    demo_test.go:117:                  project: test-proj
+    demo_test.go:117:                  repo:    /private/tmp/claude-503/TestDemo_07_DoctorStaleLock1392439978/003
+    demo_test.go:117:                  state:   /tmp/claude-503/TestDemo_07_DoctorStaleLock1392439978/002/state
+    demo_test.go:117:                  ✗ stale_locks=1 sidecar_findings=0 integrity=ok
+    demo_test.go:117:                  ✗ stale target=a.go owner=fe6f7087-b484-4b2d-bc04-25664b7e980c expires_at=2026-05-29T15:58:58Z host=Davids-MacBookPro pid=61595
+    demo_test.go:117:                  ✓ dry-run would_reclaim=1
+    demo_test.go:337:                  (exit 0)
+    demo_test.go:338: 
+    demo_test.go:339:     now for real.
+    demo_test.go:340: 
+    demo_test.go:341:     RawBuffalo ❯ loto doctor --repair
+    demo_test.go:117:                  project: test-proj
+    demo_test.go:117:                  repo:    /private/tmp/claude-503/TestDemo_07_DoctorStaleLock1392439978/003
+    demo_test.go:117:                  state:   /tmp/claude-503/TestDemo_07_DoctorStaleLock1392439978/002/state
+    demo_test.go:117:                  ✗ stale_locks=1 sidecar_findings=0 integrity=ok
+    demo_test.go:117:                  ✗ stale target=a.go owner=fe6f7087-b484-4b2d-bc04-25664b7e980c expires_at=2026-05-29T15:58:58Z host=Davids-MacBookPro pid=61595
+    demo_test.go:117:                  ✓ repaired
+    demo_test.go:341:                  (exit 0)
+    demo_test.go:342: 
+    demo_test.go:343:     RawBuffalo ❯ loto status
+    demo_test.go:117:                  project: test-proj
+    demo_test.go:117:                  repo:    /private/tmp/claude-503/TestDemo_07_DoctorStaleLock1392439978/003
+    demo_test.go:117:                  state:   /tmp/claude-503/TestDemo_07_DoctorStaleLock1392439978/002/state
+    demo_test.go:117:                  ✓ no locks
+    demo_test.go:343:                  (exit 0)
+    demo_test.go:345:     doctor keeps the lock table honest. run it when the repo feels sticky.
+--- PASS: TestDemo_07_DoctorStaleLock (0.19s)
+=== RUN   TestDemo_08_Version
+    demo_test.go:349: 
+        ── demo 08 · version — meta ─────────────────────────────────────
+    demo_test.go:352:     loto rev= pins the binary commit. when peers disagree about a lock,
+    demo_test.go:353:     first thing to compare: are we even on the same loto?
+    demo_test.go:354: 
+    demo_test.go:355:     StrictWarbler ❯ loto version
+    demo_test.go:117:                  loto rev=unknown built=unknown
+    demo_test.go:355:                  (exit 0)
+--- PASS: TestDemo_08_Version (0.05s)
+=== RUN   TestDemo_09_LaneByAnchors
+    demo_test.go:371: 
+        ── demo 09 · lane by anchors — own a subtree without globs ──────
+    demo_test.go:377:     three agents divide the repo into feature lanes.
+    demo_test.go:378:     loto doesn't lock subtrees, so each claims the anchor file with intent.
+    demo_test.go:379: 
+    demo_test.go:380:     GreatSkunk ❯ loto lock internal/store/store.go --intent lane: store/** refactor
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=internal/store/store.go
+    demo_test.go:380:                  (exit 0)
+    demo_test.go:381:     YoungCrane ❯ loto lock internal/auth/auth.go --intent lane: auth/** session work
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=internal/auth/auth.go
+    demo_test.go:381:                  (exit 0)
+    demo_test.go:382:     WisePanther ❯ loto lock internal/api/api.go --intent lane: api/** endpoint adds
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=internal/api/api.go
+    demo_test.go:382:                  (exit 0)
+    demo_test.go:383: 
+    demo_test.go:384:     a fourth session walks in and runs status. one glance = whole map.
+    demo_test.go:385: 
+    demo_test.go:387:     SubtlePipit ❯ loto status
+    demo_test.go:117:                  project: test-proj
+    demo_test.go:117:                  repo:    /private/tmp/claude-503/TestDemo_09_LaneByAnchors1028731929/003
+    demo_test.go:117:                  state:   /tmp/claude-503/TestDemo_09_LaneByAnchors1028731929/002/state
+    demo_test.go:117:                  ✓ locks count=3
+    demo_test.go:117:                  ✓ target=internal/api/api.go owner=975c9c36-4840-49ce-a696-26b8ec265a79 intent="lane: api/** endpoint adds" held_since=2026-05-29T15:58:59Z expires_at=2026-05-29T16:28:59Z host=Davids-MacBookPro pid=61595
+    demo_test.go:117:                  ✓ target=internal/auth/auth.go owner=c5c179ea-56ac-41eb-bd4e-80800e7d0e71 intent="lane: auth/** session work" held_since=2026-05-29T15:58:59Z expires_at=2026-05-29T16:28:59Z host=Davids-MacBookPro pid=61595
+    demo_test.go:117:                  ✓ target=internal/store/store.go owner=8445b0f8-c3cc-4c3d-b2f1-e9633780ea09 intent="lane: store/** refactor" held_since=2026-05-29T15:58:59Z expires_at=2026-05-29T16:28:59Z host=Davids-MacBookPro pid=61595
+    demo_test.go:387:                  (exit 0)
+    demo_test.go:389: 
+    demo_test.go:390:     the lane intents tell the newcomer where NOT to wander.
+    demo_test.go:391:     convention does the work that globs would in a heavier tool.
+--- PASS: TestDemo_09_LaneByAnchors (0.18s)
+=== RUN   TestDemo_10_HookGate
+    demo_test.go:400: 
+        ── demo 10 · hook gate — check before every write ───────────────
+    demo_test.go:406:     PrimeWarbler ❯ loto lock owned.go --intent iterating
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=owned.go
+    demo_test.go:406:                  (exit 0)
+    demo_test.go:407: 
+    demo_test.go:408:     SolarBat is about to edit two files. policy: check first, every time.
+    demo_test.go:409: 
+    demo_test.go:410:     → free.go: clear, proceed.
+    demo_test.go:411: 
+    demo_test.go:412:     SolarBat   ❯ loto check free.go
+    demo_test.go:117:                  ✓ no conflicts
+    demo_test.go:412:                  (exit 0)
+    demo_test.go:414: 
+    demo_test.go:415:     → owned.go: blocked. skip, log, move on.
+    demo_test.go:416: 
+    demo_test.go:417:     SolarBat   ❯ loto check owned.go
+    demo_test.go:117:                  ✗ conflicts count=1
+    demo_test.go:117:                  ✗ path=owned.go blocker=85425c44-ad3c-4af0-80c5-4f221ad21c00 holder_target=owned.go intent="iterating" expires_at=2026-05-29T16:28:59Z
+    demo_test.go:117:                  ```bash
+    demo_test.go:117:                  loto unlock --force -t "unblock" owned.go
+    demo_test.go:117:                  ```
+    demo_test.go:417:                  (exit 1)
+    demo_test.go:421: 
+    demo_test.go:422:     exit 0 = green light. exit 1 = peer holds it. wire `check` into
+    demo_test.go:423:     PreToolUse and the gate runs itself.
+--- PASS: TestDemo_10_HookGate (0.10s)
+=== RUN   TestDemo_11_DrainLoop
+    demo_test.go:431: 
+        ── demo 11 · drain loop — claim → edit → unlock, three in a row 
+    demo_test.go:439:     PaleLion pulls three small tasks off the backlog.
+    demo_test.go:440:     for each: claim → (edit) → unlock with a tag. no held state between items.
+    demo_test.go:441: 
+    demo_test.go:443:     PaleLion   ❯ loto lock f1.go --ttl 5m --intent drain: f1.go
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=f1.go
+    demo_test.go:443:                  (exit 0)
+    demo_test.go:444:     PaleLion   ❯ loto unlock f1.go -t done
+    demo_test.go:117:                  ✓ unlocked count=1
+    demo_test.go:117:                  ✓ target=f1.go
+    demo_test.go:444:                  (exit 0)
+    demo_test.go:443:     PaleLion   ❯ loto lock f2.go --ttl 5m --intent drain: f2.go
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=f2.go
+    demo_test.go:443:                  (exit 0)
+    demo_test.go:444:     PaleLion   ❯ loto unlock f2.go -t done
+    demo_test.go:117:                  ✓ unlocked count=1
+    demo_test.go:117:                  ✓ target=f2.go
+    demo_test.go:444:                  (exit 0)
+    demo_test.go:443:     PaleLion   ❯ loto lock f3.go --ttl 5m --intent drain: f3.go
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=f3.go
+    demo_test.go:443:                  (exit 0)
+    demo_test.go:444:     PaleLion   ❯ loto unlock f3.go -t done
+    demo_test.go:117:                  ✓ unlocked count=1
+    demo_test.go:117:                  ✓ target=f3.go
+    demo_test.go:444:                  (exit 0)
+    demo_test.go:446: 
+    demo_test.go:447:     short TTL says 'I'll be quick.' short intent says 'this is what.'
+    demo_test.go:448:     tagged unlocks leave breadcrumbs in the audit trail.
+    demo_test.go:449: 
+    demo_test.go:450:     PaleLion   ❯ loto status --mine
+    demo_test.go:117:                  project: test-proj
+    demo_test.go:117:                  repo:    /private/tmp/claude-503/TestDemo_11_DrainLoop520423930/003
+    demo_test.go:117:                  state:   /tmp/claude-503/TestDemo_11_DrainLoop520423930/002/state
+    demo_test.go:117:                  ✓ no locks
+    demo_test.go:450:                  (exit 0)
+--- PASS: TestDemo_11_DrainLoop (0.14s)
+=== RUN   TestDemo_12_MigrationTTL
+    demo_test.go:460: 
+        ── demo 12 · migration TTL — long claim that explains itself ────
+    demo_test.go:465:     DeepYellowthroat starts a repo-wide rename. she expects to be a while.
+    demo_test.go:466: 
+    demo_test.go:467:     DeepYellowthroat ❯ loto lock internal/store/store.go --ttl 4h --intent migration: rename Foo→Bar across internal/store/**
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=internal/store/store.go
+    demo_test.go:467:                  (exit 0)
+    demo_test.go:470: 
+    demo_test.go:471:     JadeHarrier needs to touch store.go for a bugfix. checks first.
+    demo_test.go:472: 
+    demo_test.go:473:     JadeHarrier ❯ loto check internal/store/store.go
+    demo_test.go:117:                  ✗ conflicts count=1
+    demo_test.go:117:                  ✗ path=internal/store/store.go blocker=61c18e98-aaac-430d-8148-3a21efa3cbc9 holder_target=internal/store/store.go intent="migration: rename Foo→Bar across internal/store/**" expires_at=2026-05-29T19:58:59Z
+    demo_test.go:117:                  ```bash
+    demo_test.go:117:                  loto unlock --force -t "unblock" internal/store/store.go
+    demo_test.go:117:                  ```
+    demo_test.go:473:                  (exit 1)
+    demo_test.go:478: 
+    demo_test.go:479:     the intent reads 'migration … hours.' JadeHarrier reroutes to api.go instead.
+    demo_test.go:480: 
+    demo_test.go:481:     JadeHarrier ❯ loto lock internal/api/api.go --intent bugfix: nil deref in handler
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=internal/api/api.go
+    demo_test.go:481:                  (exit 0)
+    demo_test.go:482: 
+    demo_test.go:483:     no human paged. no force-break. the intent string did the routing.
+--- PASS: TestDemo_12_MigrationTTL (0.11s)
+=== RUN   TestDemo_13_QueueBehind
+    demo_test.go:491: 
+        ── demo 13 · queue behind — poll check until peer releases ──────
+    demo_test.go:496:     DualPetrel ❯ loto lock hot.go --intent quick fix, ~1 min
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=hot.go
+    demo_test.go:496:                  (exit 0)
+    demo_test.go:497: 
+    demo_test.go:498:     SolarGalah must touch hot.go and is willing to wait. she polls.
+    demo_test.go:499: 
+    demo_test.go:500:     SolarGalah ❯ loto check hot.go
+    demo_test.go:117:                  ✗ conflicts count=1
+    demo_test.go:117:                  ✗ path=hot.go blocker=458e11f4-872d-4fa4-ab50-8c5715e6a4d0 holder_target=hot.go intent="quick fix, ~1 min" expires_at=2026-05-29T16:28:59Z
+    demo_test.go:117:                  ```bash
+    demo_test.go:117:                  loto unlock --force -t "unblock" hot.go
+    demo_test.go:117:                  ```
+    demo_test.go:500:                  (exit 1)
+    demo_test.go:504: 
+    demo_test.go:505:     still held. (in real life: sleep 5; check; repeat.)
+    demo_test.go:506:     DualPetrel finishes and unlocks.
+    demo_test.go:507: 
+    demo_test.go:508:     DualPetrel ❯ loto unlock hot.go -t done
+    demo_test.go:117:                  ✓ unlocked count=1
+    demo_test.go:117:                  ✓ target=hot.go
+    demo_test.go:508:                  (exit 0)
+    demo_test.go:509: 
+    demo_test.go:510:     next poll comes back clean. SolarGalah claims and proceeds.
+    demo_test.go:511: 
+    demo_test.go:512:     SolarGalah ❯ loto check hot.go
+    demo_test.go:117:                  ✓ no conflicts
+    demo_test.go:512:                  (exit 0)
+    demo_test.go:514:     SolarGalah ❯ loto lock hot.go --intent follow-up
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=hot.go
+    demo_test.go:514:                  (exit 0)
+    demo_test.go:515: 
+    demo_test.go:516:     tighter shell shape (atomic, no TOCTOU between check and lock):
+    demo_test.go:517:       while ! loto lock hot.go --intent "..."; do sleep 5; done
+    demo_test.go:518:     → no `loto wait` primitive needed — `lock` already returns ✗ blocked atomically.
+--- PASS: TestDemo_13_QueueBehind (0.12s)
+=== RUN   TestDemo_14_ReviewerPeek
+    demo_test.go:526: 
+        ── demo 14 · reviewer peek — status as in-flight signal ─────────
+    demo_test.go:531:     AvidWren is iterating on feature.go. lock makes it visible.
+    demo_test.go:532: 
+    demo_test.go:533:     AvidWren   ❯ loto lock feature.go --intent iterating on PR review fixes
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=feature.go
+    demo_test.go:533:                  (exit 0)
+    demo_test.go:534: 
+    demo_test.go:535:     BrightElk (reviewer) peeks at the file before writing comments.
+    demo_test.go:536: 
+    demo_test.go:537:     BrightElk  ❯ loto status feature.go
+    demo_test.go:117:                  project: test-proj
+    demo_test.go:117:                  repo:    /private/tmp/claude-503/TestDemo_14_ReviewerPeek2269891447/003
+    demo_test.go:117:                  state:   /tmp/claude-503/TestDemo_14_ReviewerPeek2269891447/002/state
+    demo_test.go:117:                  ✗ overlap count=1 target=feature.go
+    demo_test.go:117:                  ✗ holder target=feature.go owner=3718e9e8-1c31-49c9-873a-c0106e404034 intent="iterating on PR review fixes" expires_at=2026-05-29T16:28:59Z
+    demo_test.go:537:                  (exit 0)
+    demo_test.go:539: 
+    demo_test.go:540:     file is mid-edit. reviewer holds comments — they'd be stale in 60s.
+    demo_test.go:541:     AvidWren finishes and unlocks.
+    demo_test.go:542: 
+    demo_test.go:543:     AvidWren   ❯ loto unlock feature.go -t ready-for-review
+    demo_test.go:117:                  ✓ unlocked count=1
+    demo_test.go:117:                  ✓ target=feature.go
+    demo_test.go:543:                  (exit 0)
+    demo_test.go:544: 
+    demo_test.go:545:     BrightElk  ❯ loto status feature.go
+    demo_test.go:117:                  project: test-proj
+    demo_test.go:117:                  repo:    /private/tmp/claude-503/TestDemo_14_ReviewerPeek2269891447/003
+    demo_test.go:117:                  state:   /tmp/claude-503/TestDemo_14_ReviewerPeek2269891447/002/state
+    demo_test.go:117:                  ✓ free target=feature.go
+    demo_test.go:545:                  (exit 0)
+    demo_test.go:547: 
+    demo_test.go:548:     now safe to review. the unlock tag even says so.
+--- PASS: TestDemo_14_ReviewerPeek (0.14s)
+=== RUN   TestDemo_15_TDDPingPong
+    demo_test.go:555: 
+        ── demo 15 · TDD ping-pong — red / green / refactor ─────────────
+    demo_test.go:561:     CandidGrizzly writes a failing test. intent names the phase.
+    demo_test.go:562: 
+    demo_test.go:563:     CandidGrizzly ❯ loto lock calc_test.go --intent RED: failing test for Add
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=calc_test.go
+    demo_test.go:563:                  (exit 0)
+    demo_test.go:564:     CandidGrizzly ❯ loto unlock calc_test.go -t red
+    demo_test.go:117:                  ✓ unlocked count=1
+    demo_test.go:117:                  ✓ target=calc_test.go
+    demo_test.go:564:                  (exit 0)
+    demo_test.go:565: 
+    demo_test.go:566:     PlaidLoon sees -t red in history and picks up the impl side.
+    demo_test.go:567: 
+    demo_test.go:568:     PlaidLoon  ❯ loto lock calc.go --intent GREEN: make Add pass
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=calc.go
+    demo_test.go:568:                  (exit 0)
+    demo_test.go:569:     PlaidLoon  ❯ loto unlock calc.go -t green
+    demo_test.go:117:                  ✓ unlocked count=1
+    demo_test.go:117:                  ✓ target=calc.go
+    demo_test.go:569:                  (exit 0)
+    demo_test.go:570: 
+    demo_test.go:571:     tests pass. CandidGrizzly reclaims for refactor.
+    demo_test.go:572: 
+    demo_test.go:573:     CandidGrizzly ❯ loto lock calc.go --intent REFACTOR: extract helper
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=calc.go
+    demo_test.go:573:                  (exit 0)
+    demo_test.go:574:     CandidGrizzly ❯ loto unlock calc.go -t refactor
+    demo_test.go:117:                  ✓ unlocked count=1
+    demo_test.go:117:                  ✓ target=calc.go
+    demo_test.go:574:                  (exit 0)
+    demo_test.go:575: 
+    demo_test.go:576:     tags + intents make the TDD cycle legible without a human in the loop.
+--- PASS: TestDemo_15_TDDPingPong (0.13s)
+=== RUN   TestDemo_16_CrossRepoNote
+    demo_test.go:585: 
+        ── demo 16 · cross-repo — lock domain is per-project, by design ─
+    demo_test.go:589:     loto's lock DB lives at $XDG_STATE_HOME/loto/projects/<slug>/.
+    demo_test.go:590:     <slug> derives from git origin (or dir basename for un-remoted repos).
+    demo_test.go:591: 
+    demo_test.go:592:     SafeCheetah ❯ loto status
+    demo_test.go:117:                  project: test-proj
+    demo_test.go:117:                  repo:    /private/tmp/claude-503/TestDemo_16_CrossRepoNote2942401846/003
+    demo_test.go:117:                  state:   /tmp/claude-503/TestDemo_16_CrossRepoNote2942401846/002/state
+    demo_test.go:117:                  ✓ no locks
+    demo_test.go:592:                  (exit 0)
+    demo_test.go:593: 
+    demo_test.go:594:     worktrees of the SAME repo share a DB (via GIT_COMMON_DIR).
+    demo_test.go:595:     sibling checkouts of DIFFERENT repos do NOT share — separate slugs.
+    demo_test.go:596: 
+    demo_test.go:597:     cross-repo refactors? coordinate out-of-band (chat, shared bead, ticket).
+    demo_test.go:598:     this is a deliberate scope choice — a single global lock domain would
+    demo_test.go:599:     couple unrelated projects and turn doctor into a cross-repo concern.
+--- PASS: TestDemo_16_CrossRepoNote (0.10s)
+=== RUN   TestDemo_17_MultiFileAtomic
+    demo_test.go:613: 
+        ── demo 17 · multi-file atomic — one blocker aborts the whole set 
+    demo_test.go:620:     StarkDove claims three files in a single invocation.
+    demo_test.go:621: 
+    demo_test.go:622:     StarkDove  ❯ loto lock a.go b.go c.go --intent rename across set
+    demo_test.go:117:                  ✓ locked count=3
+    demo_test.go:117:                  ✓ target=a.go
+    demo_test.go:117:                  ✓ target=b.go
+    demo_test.go:117:                  ✓ target=c.go
+    demo_test.go:622:                  (exit 0)
+    demo_test.go:624: 
+    demo_test.go:625:     StarkDove releases the set so the next part of the demo is clean.
+    demo_test.go:626:     StarkDove  ❯ loto unlock a.go b.go c.go -t done
+    demo_test.go:117:                  ✓ unlocked count=3
+    demo_test.go:117:                  ✓ target=a.go
+    demo_test.go:117:                  ✓ target=b.go
+    demo_test.go:117:                  ✓ target=c.go
+    demo_test.go:626:                  (exit 0)
+    demo_test.go:627: 
+    demo_test.go:628:     now the harder case: FirmPika already holds b.go.
+    demo_test.go:629: 
+    demo_test.go:630:     FirmPika   ❯ loto lock b.go --intent tweak
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=b.go
+    demo_test.go:630:                  (exit 0)
+    demo_test.go:631: 
+    demo_test.go:632:     StarkDove tries the same three-file claim. b.go is blocked.
+    demo_test.go:633: 
+    demo_test.go:634:     StarkDove  ❯ loto lock a.go b.go c.go --intent rename across set
+    demo_test.go:117:                  ✗ blocked count=1
+    demo_test.go:117:                  ⚠ target=b.go blocker=FirmPika(8b6e0c1f) intent="tweak" expires_at=2026-05-29T16:29:00Z
+    demo_test.go:634:                  (exit 1)
+    demo_test.go:639: 
+    demo_test.go:640:     key invariant: a.go and c.go are NOT held by StarkDove either.
+    demo_test.go:641:     the whole batch aborted. no chmod side effects, no partial state.
+    demo_test.go:642: 
+    demo_test.go:643:     StarkDove  ❯ loto status --mine
+    demo_test.go:117:                  project: test-proj
+    demo_test.go:117:                  repo:    /private/tmp/claude-503/TestDemo_17_MultiFileAtomic113136463/003
+    demo_test.go:117:                  state:   /tmp/claude-503/TestDemo_17_MultiFileAtomic113136463/002/state
+    demo_test.go:117:                  ✓ no locks
+    demo_test.go:643:                  (exit 0)
+--- PASS: TestDemo_17_MultiFileAtomic (0.15s)
+=== RUN   TestDemo_18_ReadsAreFree
+    demo_test.go:652: 
+        ── demo 18 · reads are free — locked file stays readable at 0444 
+    demo_test.go:661:     SunnyApe locks shared.go.
+    demo_test.go:662: 
+    demo_test.go:663:     SunnyApe   ❯ loto lock shared.go --intent edit in progress
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=shared.go
+    demo_test.go:663:                  (exit 0)
+    demo_test.go:664: 
+    demo_test.go:671:     fs           mode: 0444 (owner-write stripped)
+    demo_test.go:675: 
+    demo_test.go:677:     SleekVole — without a lock — reads the file. should just work.
+    demo_test.go:678: 
+    demo_test.go:683:     SleekVole    read 10 bytes: "package x"
+    demo_test.go:684: 
+    demo_test.go:685:     now bob tries to WRITE without a lock. filesystem refuses (mode 0444).
+    demo_test.go:686: 
+    demo_test.go:690:     SleekVole    write blocked: open /tmp/claude-503/TestDemo_18_ReadsAreFree49267381/003/shared.go: permission denied
+    demo_test.go:692: 
+    demo_test.go:693:     loto coordinates writes only. reads stay free — review, grep, snipe, all safe.
+--- PASS: TestDemo_18_ReadsAreFree (0.07s)
+=== RUN   TestDemo_19_ForceBreak
+    demo_test.go:702: 
+        ── demo 19 · force-break — taking over with an audit trail ──────
+    demo_test.go:707:     LoneSwallow claims stuck.go and then disappears (AFK, crash, whatever).
+    demo_test.go:708: 
+    demo_test.go:709:     LoneSwallow ❯ loto lock stuck.go --intent long migration
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=stuck.go
+    demo_test.go:709:                  (exit 0)
+    demo_test.go:710: 
+    demo_test.go:711:     GoldBobcat needs the file. lock would be blocked. --force breaks it,
+    demo_test.go:712:     and the -t tag explains why — the audit trail is the whole point.
+    demo_test.go:713: 
+    demo_test.go:714:     GoldBobcat ❯ loto unlock stuck.go --force -t alice afk 30m, taking over for hotfix
+    demo_test.go:117:                  ✓ broken target=stuck.go
+    demo_test.go:714:                  (exit 0)
+    demo_test.go:715: 
+    demo_test.go:716:     filesystem mode restored — file is writable again.
+    demo_test.go:725:     fs           mode: 0644
+    demo_test.go:726: 
+    demo_test.go:727:     GoldBobcat can now claim. no silent dispossession — the break left a tag.
+    demo_test.go:728: 
+    demo_test.go:729:     GoldBobcat ❯ loto lock stuck.go --intent hotfix
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=stuck.go
+    demo_test.go:729:                  (exit 0)
+--- PASS: TestDemo_19_ForceBreak (0.09s)
+=== RUN   TestDemo_20_LazyGCOnAcquire
+    demo_test.go:739: 
+        ── demo 20 · lazy GC — next acquire cleans expired rows automatically 
+    demo_test.go:744:     QuietFinch locks with a 1ms TTL. think: short-claim that timed out.
+    demo_test.go:745: 
+    demo_test.go:746:     QuietFinch ❯ loto lock abandoned.go --ttl 1ms --intent quick touch
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=abandoned.go
+    demo_test.go:746:                  (exit 0)
+    demo_test.go:748: 
+    demo_test.go:749:     TTL has expired. no doctor run, no sweep, no daemon.
+    demo_test.go:750:     RosyWheatear just tries to lock — and lazy GC reaps alice's row first.
+    demo_test.go:751: 
+    demo_test.go:752:     RosyWheatear ❯ loto lock abandoned.go --intent follow-up
+    demo_test.go:117:                  ✓ locked count=1
+    demo_test.go:117:                  ✓ target=abandoned.go
+    demo_test.go:752:                  (exit 0)
+    demo_test.go:754: 
+    demo_test.go:755:     this is reclamation layer #1: every acquire pays a small GC tax
+    demo_test.go:756:     so the system stays honest without a background process.
+    demo_test.go:757: 
+    demo_test.go:758:     RosyWheatear ❯ loto status abandoned.go
+    demo_test.go:117:                  project: test-proj
+    demo_test.go:117:                  repo:    /private/tmp/claude-503/TestDemo_20_LazyGCOnAcquire731403342/003
+    demo_test.go:117:                  state:   /tmp/claude-503/TestDemo_20_LazyGCOnAcquire731403342/002/state
+    demo_test.go:117:                  ✗ overlap count=1 target=abandoned.go
+    demo_test.go:117:                  ✗ holder target=abandoned.go owner=d453295a-529f-467d-9600-2cf0d7804fd5 intent="follow-up" expires_at=2026-05-29T16:29:00Z
+    demo_test.go:758:                  (exit 0)
+--- PASS: TestDemo_20_LazyGCOnAcquire (0.19s)
+PASS
+ok  	loto/internal/cli	2.749s
+=== audit pass ===
