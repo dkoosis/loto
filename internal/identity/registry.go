@@ -291,7 +291,17 @@ func claimSessionCache(sid string, a *Agent) error {
 		_ = os.Remove(final)
 		return serr
 	}
-	return f.Close()
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(final)
+		return cerr
+	}
+	// Durably record the new directory entry (loto-cq6 / gh#131). Best-effort:
+	// the O_EXCL claim has already won and the file's bytes are fsync'd, so a
+	// dir-flush IO error must not retract a valid claim — the caller treats any
+	// non-ErrExist error as fatal (see ensureForSession). Next invocation
+	// re-reads the file that exists.
+	_ = syncDir(sessionDir())
+	return nil
 }
 
 // mostRecentAgent returns the newest local agent created within
@@ -507,7 +517,30 @@ func writeAgent(a *Agent) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, final)
+	if err := os.Rename(tmpName, final); err != nil {
+		return err
+	}
+	// An fsync'd file's directory entry is not itself durable until the
+	// containing dir is fsync'd — power loss between the rename and the dir
+	// metadata flush can lose the new name (loto-cq6 / gh#131).
+	return syncDir(dir)
+}
+
+// syncDir flushes a directory's metadata to stable storage so that a rename
+// or O_EXCL create performed inside it survives power loss. Call after the
+// file itself has been fsync'd. (Duplicated in internal/cli rather than shared
+// via a helper package: identity must import no internal package — see
+// .go-arch-lint.yml. The helper is small enough to fall under jscpd limits.)
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return err
+	}
+	return d.Close()
 }
 
 // NewUUID returns a fresh RFC 4122 v4 UUID. Exported so non-identity callers

@@ -85,10 +85,35 @@ func pinSlug(repoTop, slug string) {
 		tmp.Close()
 		return
 	}
+	// Sync the bytes before rename, then fsync the parent dir after — without
+	// both, the pin's directory entry can be lost on power loss (loto-cq6 /
+	// gh#131). Best-effort throughout: the caller uses the slug it computed
+	// regardless, so a flush failure must not abort.
+	_ = tmp.Sync()
 	if err := tmp.Close(); err != nil {
 		return
 	}
-	_ = os.Rename(tmpName, pinFile)
+	if err := os.Rename(tmpName, pinFile); err != nil {
+		return
+	}
+	_ = syncDir(dir)
+}
+
+// syncDir flushes a directory's metadata so a rename inside it survives power
+// loss. Call after the file's own bytes are fsync'd. (Duplicated from
+// internal/identity rather than shared: that package must import no internal
+// package — see .go-arch-lint.yml — and the helper is small enough to stay
+// under jscpd limits.)
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return err
+	}
+	return d.Close()
 }
 
 func gitCommonDirFile(repoTop, name string) string {
