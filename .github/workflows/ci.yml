@@ -7,12 +7,16 @@ on:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.runs-on }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - name: linux
+            runs-on: [self-hosted, Linux, loto]
+          - name: macos
+            runs-on: [self-hosted, macOS, loto]
 
     steps:
       - uses: actions/checkout@v4
