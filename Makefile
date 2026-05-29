@@ -19,7 +19,7 @@ include .sandbox/lib/Makefile.doctor.mk
 include .sandbox/lib/Makefile.cross.mk
 
 .PHONY: help scan check audit deploy report report-human \
-        vet lint test race vuln dupl nilcheck stress \
+        vet lint arch test race demo demo-v vuln dupl nilcheck stress \
         build install tidy clean
 
 BIN_DIR := bin
@@ -61,7 +61,10 @@ check: vet lint arch test ## Full repo: vet + lint + arch + test + build
 audit: check race vuln dupl nilcheck demo ## Exhaustive: +race +vuln +dupl +nilcheck +demo
 	@echo "=== audit pass ==="
 
-demo: ## Run CLI primitive demos with narrated -v transcript
+demo: ## Run CLI primitive demos (fo-rendered: triage line, not the full transcript)
+	@go test -json -run Demo -count=1 ./internal/cli | fo --format llm
+
+demo-v: ## Run CLI primitive demos with the full narrated -v transcript
 	@go test -v -run Demo -count=1 ./internal/cli
 
 deploy: install ## Build, install, and verify
@@ -80,52 +83,54 @@ report-human: ## Same as report, rendered for humans (always exits 0)
 ## Checks
 ## ---------------------------------------------------------------------
 
-vet: ## Run go vet
-	go vet $(PKG)
+vet: ## Run go vet (fo-rendered)
+	@go vet $(PKG) 2>&1 | fo wrap diag --tool vet --level error | fo --format llm
 
 arch: ## Enforce layering (.go-arch-lint.yml)
 	@if ! command -v go-arch-lint >/dev/null 2>&1; then \
 		echo "go-arch-lint not installed; 'go install github.com/fe3dback/go-arch-lint/v3@latest'"; \
 		exit 1; \
 	fi
-	@go-arch-lint check
+	@go-arch-lint check --json 2>/dev/null | fo wrap archlint | fo --format llm
 
 lint: ## Run golangci-lint (full)
 	@if ! command -v golangci-lint >/dev/null 2>&1; then \
 		echo "golangci-lint not installed; source .sandbox/activate.sh or 'go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest'"; \
 		exit 1; \
 	fi
-	golangci-lint run $(PKG)
+	@golangci-lint run --output.sarif.path=/dev/stdout $(PKG) 2>/dev/null | fo --format llm
 
-test: ## Run tests with coverage
-	go test -count=1 -cover $(PKG)
+test: ## Run tests with coverage (fo-rendered)
+	@go test -json -count=1 -cover $(PKG) | fo --format llm
 
-race: ## Run tests with race detector (slow)
-	go test -race -timeout=5m -count=1 $(PKG)
+race: ## Run tests with race detector (slow, fo-rendered)
+	@go test -race -json -timeout=5m -count=1 $(PKG) | fo --format llm
 
 stress: ## Concurrent-agent conformance gauntlet (build-tag stress)
 	go test -tags=stress -race -run TestStress -count=1 -timeout=2m ./...
 
-vuln: ## Scan for known vulnerabilities
+vuln: ## Scan for known vulnerabilities (fo-rendered)
 	@if ! command -v govulncheck >/dev/null 2>&1; then \
 		echo "govulncheck not installed (install: go install golang.org/x/vuln/cmd/govulncheck@latest)"; \
 		exit 1; \
 	fi
-	govulncheck ./...
+	@govulncheck -format sarif ./... 2>/dev/null | fo --format llm
 
-dupl: ## Detect duplicate code (jscpd; skips if not installed — dev-only)
+dupl: ## Detect duplicate code (jscpd; fo-rendered; skips if not installed — dev-only)
 	@if ! command -v jscpd >/dev/null 2>&1; then \
-		echo "dupl: jscpd not installed — skipping (install: npm i -g jscpd)"; \
+		echo "+ dupl: jscpd not installed — skipped (npm i -g jscpd)"; \
 		exit 0; \
 	fi
-	jscpd .
+	@rm -rf .jscpd-tmp
+	@jscpd . --silent --reporters json --output .jscpd-tmp >/dev/null 2>&1 || true
+	@cat .jscpd-tmp/jscpd-report.json | fo wrap jscpd | fo --format llm
 
-nilcheck: ## Run nilaway (skips if not installed — dev-only)
+nilcheck: ## Run nilaway (fo-rendered; skips if not installed — dev-only)
 	@if ! command -v nilaway >/dev/null 2>&1; then \
-		echo "nilcheck: nilaway not installed — skipping (install: go install go.uber.org/nilaway/cmd/nilaway@latest)"; \
+		echo "+ nilcheck: nilaway not installed — skipped (go install go.uber.org/nilaway/cmd/nilaway@latest)"; \
 		exit 0; \
 	fi
-	nilaway -include-pkgs=loto -test=false ./...
+	@nilaway -include-pkgs=loto -test=false ./... 2>&1 | fo wrap diag --tool nilaway --level error | fo --format llm
 
 ## ---------------------------------------------------------------------
 ## Build
