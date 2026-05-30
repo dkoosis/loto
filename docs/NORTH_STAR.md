@@ -1,6 +1,4 @@
-<!-- auto-published from KG (nug:0b105e61f67f) — do not edit -->
-<!-- Source: /Users/vcto/Projects/dk/Project/dk/loto/docs/loto north star.md -->
-<!-- Edits to this file are silently overwritten on next reconcile. Edit the source nug instead. -->
+<!-- auto-published from KG (nug:0b105e61f67f) — edit source nug, not this file -->
 
 # loto north star
 
