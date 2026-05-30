@@ -170,6 +170,76 @@ func TestRestoreOrphanMode_HoldsOpFlock(t *testing.T) {
 	}
 }
 
+// TestRestoreOrphanMode_SkipsRelockedPaths asserts that RestoreOrphanMode
+// re-validates ownership under op-flock and does NOT chmod a path that became
+// locked between scan and restore (loto-h85e TOCTOU). The genuine-orphan in the
+// same call must still be restored so we verify per-path behaviour.
+func TestRestoreOrphanMode_SkipsRelockedPaths(t *testing.T) {
+	dir := t.TempDir()
+	// genuineOrphan: read-only, no lock row — should be restored.
+	genuine := filepath.Join(dir, "genuine.go")
+	if err := os.WriteFile(genuine, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	// raced: read-only on disk, but a lock row is inserted before restore runs.
+	raced := filepath.Join(dir, "raced.go")
+	if err := os.WriteFile(raced, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	// Simulate the TOCTOU window: scan first (both appear as orphans at this
+	// point), then acquire a lock on raced before calling RestoreOrphanMode.
+	scanned := []string{genuine, raced}
+
+	now := time.Now()
+	racedLock := domain.LockRecord{
+		Target:      domain.Target{Canonical: raced},
+		OwnerUUID:   tcAlice,
+		SessionUUID: tcAlice,
+		Intent:      tcTest,
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(time.Hour),
+		Host:        "h",
+		PID:         1,
+	}
+	// AcquireLocks writes back the file to writable first, then strips write for
+	// KindFile — but for this test we only need the lock row in the DB. Reset
+	// the file back to read-only to replicate the real scenario.
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{racedLock}, func(string, int) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(raced, 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now call RestoreOrphanMode with the stale scan list.
+	restored, failures, err := s.RestoreOrphanMode(ctx, scanned)
+	if err != nil {
+		t.Fatalf("RestoreOrphanMode: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("unexpected failures: %v", failures)
+	}
+
+	// genuine must be restored.
+	if len(restored) != 1 || restored[0] != genuine {
+		t.Errorf("restored = %v, want [%s]", restored, genuine)
+	}
+	st, _ := os.Stat(genuine)
+	if st.Mode().Perm()&0o200 == 0 {
+		t.Errorf("genuine orphan not writable after restore: %o", st.Mode().Perm())
+	}
+
+	// raced must NOT be restored — write bit must stay stripped.
+	st2, _ := os.Stat(raced)
+	if st2.Mode().Perm()&0o200 != 0 {
+		t.Errorf("raced path was chmod-restored despite active lock: %o", st2.Mode().Perm())
+	}
+}
+
 func TestDoctorSidecarMissingDirIsNoOp(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
