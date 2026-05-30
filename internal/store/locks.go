@@ -126,7 +126,7 @@ type BreakResult struct {
 	AuditErr error
 }
 
-const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,branch`
+const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch`
 
 func inClause(targets []domain.Target) (string, []any) {
 	ph := make([]byte, 0, len(targets)*2)
@@ -185,12 +185,19 @@ func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	var l domain.LockRecord
 	var canonical string
 	var createdNs, expiresNs int64
-	if err := r.Scan(&canonical, &l.OwnerUUID, &l.SessionUUID, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &l.Branch); err != nil {
+	// proc_start is nullable: legacy rows (added via in-place ALTER) hold NULL.
+	// Map NULL → 0 (UNKNOWN) at the store boundary so domain logic never sees
+	// the SQL-null distinction.
+	var procStart sql.NullInt64
+	if err := r.Scan(&canonical, &l.OwnerUUID, &l.SessionUUID, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch); err != nil {
 		return l, err
 	}
 	l.Target = domain.Target{Canonical: canonical}
 	l.CreatedAt = time.Unix(0, createdNs).UTC()
 	l.ExpiresAt = time.Unix(0, expiresNs).UTC()
+	if procStart.Valid {
+		l.ProcStart = procStart.Int64
+	}
 	return l, nil
 }
 

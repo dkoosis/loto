@@ -164,6 +164,11 @@ func fetchTagsForBlockers(rt *runtime, blockers []domain.LockRecord) map[string]
 }
 
 func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now time.Time, ttl time.Duration) []domain.LockRecord {
+	pid := stampPID()
+	// Read the stamped pid's start-time on the local host now, at acquire, so a
+	// later liveness probe can detect PID reuse (loto-kwlp). ok==false leaves
+	// ProcStart 0 (UNKNOWN) → liveness degrades to pid-alive-only.
+	procStartVal, _ := procStart(pid)
 	recs := make([]domain.LockRecord, 0, len(targets))
 	for _, t := range targets {
 		recs = append(recs, domain.LockRecord{
@@ -174,7 +179,8 @@ func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now t
 			CreatedAt:   now,
 			ExpiresAt:   now.Add(ttl),
 			Host:        rt.Host,
-			PID:         stampPID(),
+			PID:         pid,
+			ProcStart:   procStartVal,
 		})
 	}
 	return recs

@@ -16,7 +16,7 @@ import (
 func TestReleaseBySession_ScopedToSession(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 
 	la := mkFileLockSession(t, "a.go", tcAlice, "session-1", time.Hour)
 	lb := mkFileLockSession(t, "b.go", tcAlice, "session-2", time.Hour)
@@ -53,7 +53,7 @@ func TestReleaseBySession_ScopedToSession(t *testing.T) {
 func TestReleaseBySession_AgentScoped(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 
 	la := mkFileLockSession(t, "a.go", tcAlice, "session-1", time.Hour)
 	lb := mkFileLockSession(t, "b.go", tcAlice, "session-2", time.Hour)
@@ -105,7 +105,7 @@ func TestReleaseBySession_EmptyResult(t *testing.T) {
 func TestReleaseBySession_RestoresChmod(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 
 	l := mkFileLockSession(t, "x.go", tcAlice, "session-1", time.Hour)
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {

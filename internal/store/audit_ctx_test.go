@@ -36,7 +36,7 @@ func TestAcquireLocks_CommitFailureBreadcrumbLandsWithoutSelfContention(t *testi
 		return &os.PathError{Op: "commit", Path: "loto.db", Err: syscall.EIO}
 	}
 
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 	rec := domain.LockRecord{
 		Target:      domain.Target{Canonical: p},
@@ -92,9 +92,9 @@ func TestDoctorRepair_RestoreAuditSurvivesCancelledCtx(t *testing.T) {
 	var stderr bytes.Buffer
 	s.SetStderr(&stderr)
 
-	dead := func(string, int) bool { return false }
+	dead := func(string, int, int64) bool { return false }
 	l := mkFileLock(t, "dr.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 

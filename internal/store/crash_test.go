@@ -20,7 +20,7 @@ func TestCrash_AcquireConflictNoPartialRow(t *testing.T) {
 	}
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 
 	aliceLock := domain.LockRecord{
@@ -53,7 +53,7 @@ func TestCrash_BreakLockAtomic(t *testing.T) {
 	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
 		t.Fatal(err)
 	}
