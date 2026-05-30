@@ -1,9 +1,10 @@
 # Boot
-updated: 2026-05-30 #60
+updated: 2026-05-30 #61
 
-→ pick next from `bd ready` — 4 P3 audit bugs left (loto-j863/ta02/zxjx, + loto-ltof likely WONTFIX). Verify each reproduces against the real binary before fixing (bead/gh state lies about fixed-status here).
+→ only loto-ltof left in `bd ready` (P3, likely WONTFIX — check/status read-locks without op-flock → transient spurious conflict verdict). Decide WONTFIX vs fix. Verify repro against the real binary first (bead/gh state lies about fixed-status here).
 
 ✓ done
+- #61: 3 P3 audit bugs shipped+merged to main (ta02 chmod Nlink-on-fd, j863 doctor orphan-recovery hint, zxjx permuteWith `--` escape). Beads closed; fix branches/worktrees deleted. Trap: integrated `make check` was red on merge → post-merge lint cleanup (7ac95a2) landed green. Always run full `make check` on main AFTER merging, before pushing.
 - #60: no open PRs, no stray branches/worktrees/stashes. `make audit` green. Fixed phantom lint (see trap), `.gitignore`+`.golangci.yml` now exclude `.claude/worktrees/`.
 - #53: All 3 P2 audit bugs shipped+merged (#155 h85e, #156 pody, #157 kwlp); beads closed, branches/worktrees cleaned.
 
