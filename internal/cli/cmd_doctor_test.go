@@ -67,6 +67,46 @@ func TestDoctor_OrphanModeFlaggedNotRepaired(t *testing.T) {
 	}
 }
 
+// TestDoctor_OrphanModeSurfacesRecoveryHint verifies that when orphan-mode files
+// are found, the output points the user at the recovery command. The orphan-mode
+// state is otherwise a dead-end: the file is read-only with no lock row, and a
+// user who does not already know about --restore-orphan-mode cannot recover it
+// (e.g. a SIGKILL between strip and commit in lock acquire, loto-j863).
+func TestDoctor_OrphanModeSurfacesRecoveryHint(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	orphan := filepath.Join(repo, "orphan.go")
+	if err := os.WriteFile(orphan, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	code := Run([]string{tcCmdDoctor, tcFlagOrphan}, &out, io.Discard)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "orphan-mode target=orphan.go") {
+		t.Fatalf("expected orphan finding in output: %s", got)
+	}
+	if !strings.Contains(got, "--restore-orphan-mode") {
+		t.Errorf("orphan-mode output must point at recovery command --restore-orphan-mode: %s", got)
+	}
+}
+
+func TestDoctor_NoOrphanHintWhenClean(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	var out bytes.Buffer
+	code := Run([]string{tcCmdDoctor, tcFlagOrphan}, &out, io.Discard)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, out.String())
+	}
+	if strings.Contains(out.String(), "--restore-orphan-mode") {
+		t.Errorf("clean scan must not emit recovery hint: %s", out.String())
+	}
+}
+
 func TestDoctor_DefaultDoesNotWalkTree(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)
