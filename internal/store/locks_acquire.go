@@ -58,14 +58,23 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 		return nil, chmodFailErr
 	}
 
-	if err := s.insertAllLocks(ctx, tx, sorted, stripped, now); err != nil {
-		return nil, err
-	}
-	if err := rotateEventsTx(ctx, tx, now); err != nil {
+	// On any failure from here on, the parent tx still holds the SQLite write
+	// lock. Release it via cleanup() BEFORE restoreAllAndAudit — the detached
+	// audit opens its own write tx, which would otherwise self-contend with
+	// the held lock and stall ~2s on busy_timeout, dropping the breadcrumb
+	// (loto-rmyg). cleanup() is idempotent, so the deferred call is harmless.
+	if err := s.insertAllLocks(ctx, tx, sorted, now); err != nil {
+		cleanup()
 		s.restoreAllAndAudit(ctx, stripped, sorted[0].OwnerUUID, now)
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := rotateEventsTx(ctx, tx, now); err != nil {
+		cleanup()
+		s.restoreAllAndAudit(ctx, stripped, sorted[0].OwnerUUID, now)
+		return nil, err
+	}
+	if err := commitTxFn(tx); err != nil {
+		cleanup()
 		s.restoreAllAndAudit(ctx, stripped, sorted[0].OwnerUUID, now)
 		return nil, err
 	}
@@ -135,10 +144,12 @@ func (s *Store) stripAndHandleFailure(tx *sql.Tx, sorted []domain.LockRecord, no
 	return nil, &ChmodFailureError{Failures: failures}
 }
 
-func (s *Store) insertAllLocks(ctx context.Context, tx *sql.Tx, sorted []domain.LockRecord, stripped []string, now time.Time) error {
+// insertAllLocks writes the lock rows and their lock_acquired events inside
+// the parent tx. On error the caller (AcquireLocks) releases the tx and runs
+// restoreAllAndAudit, so failures here just propagate the error.
+func (s *Store) insertAllLocks(ctx context.Context, tx *sql.Tx, sorted []domain.LockRecord, now time.Time) error {
 	for i := range sorted {
 		if err := insertOrRefreshLock(ctx, tx, sorted[i]); err != nil {
-			s.restoreAllAndAudit(ctx, stripped, sorted[0].OwnerUUID, now)
 			return err
 		}
 	}
@@ -153,11 +164,7 @@ func (s *Store) insertAllLocks(ctx context.Context, tx *sql.Tx, sorted []domain.
 			CreatedAt: now,
 		}
 	}
-	if err := appendEventsTx(ctx, tx, evs); err != nil {
-		s.restoreAllAndAudit(ctx, stripped, sorted[0].OwnerUUID, now)
-		return err
-	}
-	return nil
+	return appendEventsTx(ctx, tx, evs)
 }
 
 func validateAllFileTargets(sorted []domain.LockRecord) error {
@@ -242,17 +249,6 @@ func rollbackStripped(failedTarget domain.Target, failedErr error, stripped []st
 		}
 	}
 	return failures, restoreErrs
-}
-
-func (s *Store) appendModeRestoreFailedEvent(ctx context.Context, path, byAgent string, now time.Time, cause error) error {
-	_, err := s.AppendEvent(ctx, domain.Event{
-		Target:    domain.Target{Canonical: path},
-		Kind:      EventModeRestoreFailed,
-		ActorUUID: byAgent,
-		Reason:    fmt.Sprintf("mode_restore_failed: %v on %s", cause, path),
-		CreatedAt: now,
-	})
-	return err
 }
 
 func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, l domain.LockRecord, now time.Time, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
