@@ -25,7 +25,7 @@ func TestCmdTag_AddsExternalTag(t *testing.T) {
 
 	t.Setenv("LOTO_AGENT_ID", bob.UUID)
 	var out, errBuf bytes.Buffer
-	if code := Run([]string{tcCmdTag, tcTargetA, "why", "the", "refactor"}, &out, &errBuf); code != 0 {
+	if code := Run([]string{tcCmdTag, tcTargetA, tcIntentWhy, "the", "refactor"}, &out, &errBuf); code != 0 {
 		t.Fatalf("tag exit=%d err=%q", code, errBuf.String())
 	}
 	if !strings.HasPrefix(out.String(), "✓ tag id=t-") {

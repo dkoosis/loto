@@ -87,21 +87,11 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 	renderDoctorReport(stdout, report)
 
-	var orphans []string
-	scanIncomplete := false
-	if *orphanMode || *restoreOrphan {
-		orphans, scanIncomplete = runOrphanScan(rt, repoTop, stdout)
-		// Surface the recovery path. An orphan-mode file is read-only with no lock
-		// row (e.g. a SIGKILL between strip and commit in lock acquire, loto-j863):
-		// a dead-end unless the user knows the restore flag. Suppress when this run
-		// is already restoring — the repair line below says it all.
-		if len(orphans) > 0 && !(*repair && *restoreOrphan) {
-			fmt.Fprintf(stdout, "‡ %d orphan-mode file(s) read-only with no lock row — restore writable:\n", len(orphans))
-			fmt.Fprintln(stdout, "```bash")
-			fmt.Fprintln(stdout, "loto doctor --repair --restore-orphan-mode")
-			fmt.Fprintln(stdout, "```")
-		}
-	}
+	orphans, scanIncomplete := scanOrphansAndHint(rt, repoTop, orphanFlags{
+		orphanMode:    *orphanMode,
+		restoreOrphan: *restoreOrphan,
+		repair:        *repair,
+	}, stdout)
 
 	if *dryRun {
 		fmt.Fprintf(stdout, "✓ dry-run would_reclaim=%d\n", len(report.StaleLocks))
@@ -119,6 +109,34 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 3
 	}
 	return 0
+}
+
+// orphanFlags bundles the doctor flags that gate orphan-mode scanning.
+type orphanFlags struct {
+	orphanMode    bool
+	restoreOrphan bool
+	repair        bool
+}
+
+// scanOrphansAndHint runs the orphan-mode scan when requested and prints the
+// restore-recovery hint. It returns the orphan list and whether the scan was
+// incomplete (gh#130). Factored out of cmdDoctor to keep its complexity in check.
+func scanOrphansAndHint(rt *runtime, repoTop string, f orphanFlags, stdout io.Writer) (orphans []string, scanIncomplete bool) {
+	if !f.orphanMode && !f.restoreOrphan {
+		return nil, false
+	}
+	orphans, scanIncomplete = runOrphanScan(rt, repoTop, stdout)
+	// Surface the recovery path. An orphan-mode file is read-only with no lock
+	// row (e.g. a SIGKILL between strip and commit in lock acquire, loto-j863):
+	// a dead-end unless the user knows the restore flag. Suppress when this run
+	// is already restoring — the repair line below says it all.
+	if len(orphans) > 0 && (!f.repair || !f.restoreOrphan) {
+		fmt.Fprintf(stdout, "‡ %d orphan-mode file(s) read-only with no lock row — restore writable:\n", len(orphans))
+		fmt.Fprintln(stdout, "```bash")
+		fmt.Fprintln(stdout, "loto doctor --repair --restore-orphan-mode")
+		fmt.Fprintln(stdout, "```")
+	}
+	return orphans, scanIncomplete
 }
 
 func doRepair(rt *runtime, live domain.PidLiveProbe, restoreOrphan bool, orphans []string, stdout, stderr io.Writer) int {
