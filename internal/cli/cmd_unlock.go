@@ -112,6 +112,15 @@ func resolveUnlockArgs(args []string, stderr io.Writer) ([]domain.Target, int) {
 }
 
 func unlockAll(rt *runtime, stdout, stderr io.Writer) int {
+	// Guard: if no identity env var was set, Ensure minted a throwaway UUID
+	// that owns zero locks. Reporting "0 released" and exiting 0 is a silent
+	// false-success — the caller's real locks (held under a now-unreachable
+	// UUID) remain in place with files write-stripped. Refuse instead.
+	if !rt.AgentPinned {
+		fmt.Fprintln(stderr, "✗ --all requires a pinned identity: set LOTO_AGENT_ID to the UUID shown by loto whoami in the session that holds the locks")
+		return 2
+	}
+
 	// Scope: session-pinned → release only this session's locks (NORTH_STAR
 	// invariant 5). Unpinned → agent-scoped fallback (empty sessionUUID
 	// tells ReleaseBySession to match all sessions for this agent).

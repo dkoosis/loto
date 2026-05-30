@@ -41,6 +41,7 @@ type runtime struct {
 	StateDir      string
 	SessionUUID   string // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID
 	SessionPinned bool   // true iff LOTO_SESSION_ID was in env; gates session-scoped semantics
+	AgentPinned   bool   // true iff LOTO_AGENT_ID or CLAUDE_CODE_SESSION_ID was in env; false → Ensure minted a throwaway UUID
 }
 
 // sessionUUID resolves the per-session id. The SessionStart hook exports
@@ -58,6 +59,14 @@ func sessionUUID() (id string, pinned bool) {
 }
 
 func openRuntime(ctx context.Context) (*runtime, error) {
+	// Capture whether an explicit identity env var was set before Ensure runs.
+	// Ensure mints a fresh throwaway UUID when neither is present; that UUID
+	// owns no locks and must not be used as an --all release scope — doing so
+	// produces a false-success that silently leaves real locks in place
+	// (loto-pody). AgentPinned mirrors the SessionPinned pattern for sessions.
+	_, agentIDSet := os.LookupEnv("LOTO_AGENT_ID")
+	agentPinned := agentIDSet || os.Getenv("CLAUDE_CODE_SESSION_ID") != ""
+
 	a, err := identity.Ensure(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("identity: %w", err)
@@ -91,6 +100,7 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 		StateDir:      dir,
 		SessionUUID:   sid,
 		SessionPinned: pinned,
+		AgentPinned:   agentPinned,
 	}, nil
 }
 

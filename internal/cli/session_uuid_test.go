@@ -30,7 +30,7 @@ func TestUnlockAll_ScopedToSession(t *testing.T) {
 	// Back to session-1: --all should release only session-1's holdings.
 	t.Setenv("LOTO_SESSION_ID", "session-one")
 	var out bytes.Buffer
-	if code := Run([]string{tcCmdUnlock, "--all", "-t", "session-1 end"}, &out, io.Discard); code != 0 {
+	if code := Run([]string{tcCmdUnlock, tcFlagAll, "-t", "session-1 end"}, &out, io.Discard); code != 0 {
 		t.Fatalf("session-1 unlock --all: exit %d, out=%s", code, out.String())
 	}
 	if !strings.Contains(out.String(), "count=1") {
@@ -68,7 +68,7 @@ func TestUnlockAll_FallbackWhenNoSessionPin(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if code := Run([]string{tcCmdUnlock, "--all", "-t", "cleanup"}, &out, io.Discard); code != 0 {
+	if code := Run([]string{tcCmdUnlock, tcFlagAll, "-t", "cleanup"}, &out, io.Discard); code != 0 {
 		t.Fatalf("unlock --all: exit %d, out=%s", code, out.String())
 	}
 	if !strings.Contains(out.String(), "count=2") {
