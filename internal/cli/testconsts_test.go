@@ -20,4 +20,5 @@ const (
 	tcIntentDone   = "done"
 	tcCmdTag       = "tag"
 	tcCmdAck       = "ack"
+	tcFlagAll      = "--all"
 )

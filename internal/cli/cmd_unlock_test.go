@@ -9,6 +9,40 @@ import (
 	"testing"
 )
 
+// TestUnlockAll_NoPinnedIdentity_RefusesFalseSuccess pins the loto-pody
+// regression: when neither LOTO_AGENT_ID nor CLAUDE_CODE_SESSION_ID is set,
+// identity.Ensure mints a fresh UUID that owns zero locks, and the old
+// unlockAll reported "0 locks released" (exit 0) — a silent false-success
+// that left the caller's real locks in place with files write-stripped.
+// The fix refuses with a pin-required diagnostic and exits non-zero.
+func TestUnlockAll_NoPinnedIdentity_RefusesFalseSuccess(t *testing.T) {
+	repo := withTempProject(t)
+	// Seed a lock under a known agent so ReleaseBySession has rows to find —
+	// if the bug is present the command returns exit 0 reporting 0 released,
+	// which is the false-success we are guarding against.
+	alice := pinAgent(t)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("seed lock exit %d", code)
+	}
+	_ = alice
+	_ = repo
+
+	// Drop both pinning env vars so Ensure mints a brand-new throwaway UUID.
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcFlagAll, "-t", tcIntentDone}, &out, &errBuf)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit (pin-required refusal), got 0; stdout=%q stderr=%q",
+			out.String(), errBuf.String())
+	}
+	errOut := errBuf.String()
+	if !strings.Contains(errOut, "LOTO_AGENT_ID") {
+		t.Errorf("diagnostic should mention LOTO_AGENT_ID; stderr=%q", errOut)
+	}
+}
+
 // TestUnlock_ForceRestoresWriteMode confirms the break path (unlock --force)
 // restores owner-write on the target file. Store layer already does this for
 // owner-release; this test pins it through the CLI surface.
