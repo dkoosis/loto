@@ -160,13 +160,29 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	for _, p := range reclaimed {
-		s.restoreAndAudit(ctx, p, byAgent)
-	}
+	s.restoreReclaimedAndAudit(reclaimed, byAgent, now)
 	if err := vacuumFn(ctx, s.db); err != nil {
 		fmt.Fprintf(s.stderr, "loto: VACUUM after repair: %v (best-effort, repair succeeded)\n", err)
 	}
 	return nil
+}
+
+// restoreReclaimedAndAudit re-adds owner-write to every reclaimed target after
+// DoctorRepair's tx commits. Restore-failure audits go through the detached
+// helper (not the caller ctx) so a cancellation landing here — Ctrl-C right
+// after commit — can't scale busy_timeout to ~1ms and silently drop the
+// mode_restore_failed trail (loto-1qed). Matches the acquire/release/break
+// restore paths.
+func (s *Store) restoreReclaimedAndAudit(reclaimed []string, byAgent string, now time.Time) {
+	var failEvents []domain.Event
+	for _, p := range reclaimed {
+		if rerr := restoreWrite(p); rerr != nil {
+			failEvents = append(failEvents, modeRestoreFailedEvent(p, byAgent, now, rerr))
+		}
+	}
+	if len(failEvents) > 0 {
+		_ = s.appendAuditDetached(failEvents)
+	}
 }
 
 // tagsRetentionAge: acked tags older than this are hard-deleted by doctor

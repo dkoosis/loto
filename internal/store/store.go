@@ -214,6 +214,10 @@ func (s *Store) SetStderr(w io.Writer) { s.stderr = w }
 // short deadlines couldn't pre-empt SQLite's internal poll loop, and
 // longer deadlines were silently truncated to 5s. Per-tx scaling restores
 // the contract that ctx is authoritative.
+// commitTxFn indirects tx.Commit so tests can simulate a commit failure
+// (disk-full / SQLITE_IOERR) on a write path without a real I/O fault.
+var commitTxFn = func(tx *sql.Tx) error { return tx.Commit() }
+
 func (s *Store) beginTx(ctx context.Context) (*sql.Tx, func(), error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {

@@ -267,14 +267,3 @@ func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID 
 	}
 	return out, rows.Err()
 }
-
-// restoreAndAudit re-adds owner-write to a released target and emits a
-// mode_restore_failed event on failure. Spec contract (NORTH_STAR.md): strip
-// on acquire, restore on release. Callers: BreakLock, reclaimStaleTx,
-// DoctorRepair — every path that removes a `locks` row. ReleaseLocks inlines
-// the equivalent so it can also report per-target StateRestoreFailed.
-func (s *Store) restoreAndAudit(ctx context.Context, path, byAgent string) {
-	if err := restoreWrite(path); err != nil {
-		_ = s.appendModeRestoreFailedEvent(ctx, path, byAgent, time.Now(), err)
-	}
-}
