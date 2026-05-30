@@ -10,6 +10,11 @@ CREATE TABLE IF NOT EXISTS locks (
   expires_at       INTEGER NOT NULL,
   host             TEXT NOT NULL,
   pid              INTEGER NOT NULL,
+  -- proc_start: holder process start-time read at acquire (opaque, per-OS).
+  -- NULL/0 = unknown (legacy rows, or OS without a reader). Defeats PID reuse
+  -- in the liveness probe (loto-kwlp). Added in-place to existing DBs via the
+  -- guarded ALTER in migrate(); declared here so fresh DBs match without it.
+  proc_start       INTEGER,
   branch           TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_locks_owner    ON locks(owner_uuid);

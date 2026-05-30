@@ -128,12 +128,31 @@ func (r *runtime) DeferredTagFooter(w io.Writer) {
 // liveProbe returns a PidLiveProbe that treats remote-host PIDs as live and
 // probes local PIDs via pidLive. Centralizes the live-probe closure that
 // otherwise gets re-built at every lock/unlock/doctor call site.
+//
+// PID-reuse defense (loto-kwlp): for a live local pid, if the lock carries a
+// known start-time (storedStart != 0), the current occupant's start-time is
+// re-read and compared. A mismatch means the original holder died and the OS
+// recycled its pid to an unrelated process → report dead so IsStale reclaims
+// the lock. storedStart == 0 (legacy row, or an OS without a start-time
+// reader) falls back to pid-alive-only — preserving prior behavior.
 func (r *runtime) liveProbe() domain.PidLiveProbe {
-	return func(host string, pid int) bool {
+	return func(host string, pid int, storedStart int64) bool {
 		if host != r.Host {
 			return true
 		}
-		return pidLive(pid)
+		if !pidLive(pid) {
+			return false
+		}
+		if storedStart == 0 {
+			return true
+		}
+		cur, ok := procStart(pid)
+		if !ok {
+			// Can't read the occupant's start-time; don't escalate to "dead"
+			// on indeterminate reads — pidLive already said alive.
+			return true
+		}
+		return cur == storedStart
 	}
 }
 

@@ -270,20 +270,28 @@ func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domai
 }
 
 func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord) error {
+	// Map 0 (UNKNOWN) → NULL at the store boundary so an absent start-time is a
+	// SQL null, matching legacy rows. A refresh re-stamps proc_start because the
+	// holder is the same process (same pid, same start-time).
+	var procStart any
+	if l.ProcStart != 0 {
+		procStart = l.ProcStart
+	}
 	_, err := tx.ExecContext(ctx, `
-INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, branch)
-VALUES (?,?,?,?,?,?,?,?,?)
+INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch)
+VALUES (?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(target_canonical) DO UPDATE SET
   intent=excluded.intent,
   expires_at=excluded.expires_at,
   session_uuid=excluded.session_uuid,
   host=excluded.host,
   pid=excluded.pid,
+  proc_start=excluded.proc_start,
   branch=excluded.branch
 WHERE locks.owner_uuid = excluded.owner_uuid`,
 		l.Target.Canonical, l.OwnerUUID, l.SessionUUID,
 		l.Intent, l.CreatedAt.UnixNano(), l.ExpiresAt.UnixNano(),
-		l.Host, l.PID, l.Branch,
+		l.Host, l.PID, procStart, l.Branch,
 	)
 	return err
 }

@@ -31,7 +31,7 @@ func TestConcurrentOverlappingAcquire(t *testing.T) {
 		t.Fatal(err)
 	}
 	tgt := domain.Target{Canonical: target}
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 
 	var ready, start sync.WaitGroup

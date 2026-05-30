@@ -30,7 +30,7 @@ func TestSchemaVersionPaired(t *testing.T) {
 func acquireForTest(t *testing.T, s *Store, name, agent string) (domain.LockRecord, int64) {
 	t.Helper()
 	rec := mkFileLock(t, name, agent, time.Hour)
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{rec}, live); err != nil {
 		t.Fatalf("AcquireLocks: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestBreakLocks_DoesNotAckTags(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Force-break by a 3rd party (bob).
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	res, err := s.BreakLocks(ctx, []domain.Target{lock.Target}, tcBob, BreakForce, "break", "h", live)
 	if err != nil || res[0].Err != nil {
 		t.Fatalf("break: %v / %v", err, res[0].Err)
@@ -349,7 +349,7 @@ func TestDoctorRepair_GCsOrphanedTags(t *testing.T) {
 	if n := rawTagRowCount(t, s); n != 1 {
 		t.Fatalf("precondition: 1 orphan tag row, got %d", n)
 	}
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	if err := s.DoctorRepair(ctx, "h", tcAlice, live); err != nil {
 		t.Fatalf("DoctorRepair: %v", err)
 	}

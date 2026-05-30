@@ -288,6 +288,17 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
+	// Additive, in-place column upgrade for DBs created before proc_start
+	// existed (loto-kwlp). CREATE TABLE IF NOT EXISTS no-ops on an existing
+	// table, so the column is added here instead. Guarded by a table-info
+	// probe rather than catching the duplicate-column error, so it stays a
+	// no-op on fresh DBs (where CREATE already declared the column) and on
+	// every re-Open. user_version is intentionally NOT bumped — bumping would
+	// trip the move-aside path and destroy live locks; this upgrade preserves
+	// existing rows (their proc_start defaults to NULL = unknown).
+	if err := ensureLocksProcStart(ctx, tx); err != nil {
+		return fmt.Errorf("add locks.proc_start: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit schema: %w", err)
 	}
@@ -295,4 +306,21 @@ func (s *Store) migrate(ctx context.Context) error {
 		return fmt.Errorf("set user_version: %w", err)
 	}
 	return nil
+}
+
+// ensureLocksProcStart adds the locks.proc_start column to an existing DB that
+// predates it. No-op when the column is already present (fresh DBs declare it
+// in CREATE TABLE). Runs inside the migrate tx so a failure rolls back cleanly.
+func ensureLocksProcStart(ctx context.Context, tx *sql.Tx) error {
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('locks') WHERE name = 'proc_start'`,
+	).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `ALTER TABLE locks ADD COLUMN proc_start INTEGER`)
+	return err
 }

@@ -15,7 +15,7 @@ import (
 func TestReleaseLock(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
 		t.Fatal(err)
@@ -44,7 +44,7 @@ func TestReleaseLock(t *testing.T) {
 func TestBreakLockStaleOnly(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
 		t.Fatal(err)
@@ -89,7 +89,7 @@ func TestBreakLockStaleOnly_CrossHost(t *testing.T) {
 	l := mkFileLock(t, "cross.go", tcAlice, time.Hour)
 	l.Host = "remote-host"
 	l.PID = 9999
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestBreakLockStaleOnly_CrossHost(t *testing.T) {
 	}
 
 	// Same host, but pid probe says dead → stale, break succeeds.
-	dead := func(string, int) bool { return false }
+	dead := func(string, int, int64) bool { return false }
 	res, err = s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "same-host-dead", "remote-host", dead)
 	if err != nil || res[0].Err != nil {
 		t.Fatalf("BreakStale from same host with dead pid should succeed: %v / %v", err, res[0].Err)
@@ -159,7 +159,7 @@ func mkFileLock(t *testing.T, name, agent string, expIn time.Duration) domain.Lo
 func TestBreakLocks_RestoreErrSurfaced(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
 		t.Fatal(err)
@@ -203,7 +203,7 @@ func TestBreakLocks_RestoreErrSurfaced(t *testing.T) {
 func TestBreakLocks_BatchedMultiTarget(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 
 	la := mkFileLock(t, "a.go", tcAlice, time.Hour)
 	lb := mkFileLock(t, "b.go", tcAlice, time.Hour)
@@ -246,7 +246,7 @@ func TestBreakLocks_BatchedMultiTarget(t *testing.T) {
 func TestBreakLocks_MixedNoLockAndOwned(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 
 	la := mkFileLock(t, "a.go", tcAlice, time.Hour)
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{la}, live); err != nil {
@@ -275,7 +275,7 @@ func TestBreakLocks_MixedNoLockAndOwned(t *testing.T) {
 func TestReleaseLocks_BatchedMixedStates(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 
 	la := mkFileLock(t, "a.go", tcAlice, time.Hour)
 	lb := mkFileLock(t, "b.go", tcBob, time.Hour)
@@ -313,7 +313,7 @@ func TestAcquireOverlapBlocks(t *testing.T) {
 	}
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 
 	aliceLock := domain.LockRecord{
@@ -353,7 +353,7 @@ func TestAcquireSameAgentRefreshes(t *testing.T) {
 	}
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 
 	first := domain.LockRecord{
@@ -396,7 +396,7 @@ func TestAcquireLocks_MultiFile_AtomicSuccess(t *testing.T) {
 
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 	mk := func(p, owner string) domain.LockRecord {
 		return domain.LockRecord{
@@ -437,7 +437,7 @@ func TestAcquireLocks_MultiFile_ConflictAbortsNoChmod(t *testing.T) {
 	}
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 	mk := func(p, owner string) domain.LockRecord {
 		return domain.LockRecord{
@@ -501,7 +501,7 @@ func TestAcquireLocks_ChmodFailureRollsBack(t *testing.T) {
 		return orig(f, mode)
 	}
 
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 	mk := func(p string) domain.LockRecord {
 		return domain.LockRecord{
@@ -554,7 +554,7 @@ func TestAcquireLocks_RollbackRestoreFailureLeavesBreadcrumb(t *testing.T) {
 		return orig(f, mode)
 	}
 
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 	mk := func(p string) domain.LockRecord {
 		return domain.LockRecord{
@@ -607,7 +607,7 @@ func TestAcquireLocks_AuditSurvivesCancelledCtx(t *testing.T) {
 	s := mustOpen(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	rec := domain.LockRecord{
 		Target:      domain.Target{Canonical: p},
 		OwnerUUID:   tcAlice,
@@ -640,7 +640,7 @@ func TestAcquireLocks_AuditSurvivesCancelledCtx(t *testing.T) {
 func TestReleaseLock_RestoresWriteMode(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "r.go", tcAlice, time.Hour)
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
 		t.Fatal(err)
@@ -664,9 +664,9 @@ func TestReleaseLock_RestoresWriteMode(t *testing.T) {
 func TestBreakLock_RestoresWriteMode(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return false } // stale
+	live := func(string, int, int64) bool { return false } // stale
 	l := mkFileLock(t, "b.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "stale", "h", live)
@@ -682,7 +682,7 @@ func TestBreakLock_RestoresWriteMode(t *testing.T) {
 func TestReleaseLocks_NoLockVsNotOwner(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 
 	l := mkFileLock(t, "x.go", tcAlice, time.Hour)
 	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice)
@@ -707,8 +707,8 @@ func TestReleaseLocks_NoLockVsNotOwner(t *testing.T) {
 func TestAcquireLocks_LazyGCRestoresMode(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int) bool { return false }
-	live := func(string, int) bool { return true }
+	dead := func(string, int, int64) bool { return false }
+	live := func(string, int, int64) bool { return true }
 
 	// Alice acquires (live probe), then her lock goes stale (probe dead).
 	a := mkFileLock(t, "shared.go", tcAlice, time.Hour)
@@ -751,7 +751,7 @@ func TestAcquireLocks_LazyGCRestoresMode(t *testing.T) {
 func TestReleaseLocks_DistinguishesMissingFromNotOwner(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 
 	a := mkFileLock(t, "a.go", tcAlice, time.Hour)
 	c := mkFileLock(t, "c.go", tcBob, time.Hour)
@@ -801,7 +801,7 @@ func TestReleaseLocks_DistinguishesMissingFromNotOwner(t *testing.T) {
 func TestReleaseLocks_RestoreFailureIsReported(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 
 	rec := mkFileLock(t, "x.go", tcAlice, time.Hour)
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, live); err != nil {

@@ -147,7 +147,7 @@ func TestStripAndHandleFailure_AuditCommittedInTx(t *testing.T) {
 		return orig(f, mode)
 	}
 
-	live := func(string, int) bool { return true }
+	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 	mk := func(p string) domain.LockRecord {
 		return domain.LockRecord{

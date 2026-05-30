@@ -17,9 +17,9 @@ import (
 func TestDoctorListsStaleLocks(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int) bool { return false }
+	dead := func(string, int, int64) bool { return false }
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 
@@ -35,9 +35,9 @@ func TestDoctorListsStaleLocks(t *testing.T) {
 func TestDoctorRepairReclaims(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int) bool { return false }
+	dead := func(string, int, int64) bool { return false }
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 
@@ -91,7 +91,7 @@ func TestScanOrphanModes_OwnedFileSkipped(t *testing.T) {
 		Host:        "h",
 		PID:         1,
 	}
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 
@@ -208,7 +208,7 @@ func TestRestoreOrphanMode_SkipsRelockedPaths(t *testing.T) {
 	// AcquireLocks writes back the file to writable first, then strips write for
 	// KindFile — but for this test we only need the lock row in the DB. Reset
 	// the file back to read-only to replicate the real scenario.
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{racedLock}, func(string, int) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{racedLock}, func(string, int, int64) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(raced, 0o444); err != nil {
@@ -243,7 +243,7 @@ func TestRestoreOrphanMode_SkipsRelockedPaths(t *testing.T) {
 func TestDoctorSidecarMissingDirIsNoOp(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	alive := func(string, int) bool { return true }
+	alive := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
 		t.Fatal(err)
@@ -263,7 +263,7 @@ func TestDoctorSidecarMissingDirIsNoOp(t *testing.T) {
 func TestDoctorSidecarDisabledWhenDirEmpty(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	alive := func(string, int) bool { return true }
+	alive := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
 		t.Fatal(err)
@@ -280,7 +280,7 @@ func TestDoctorSidecarDisabledWhenDirEmpty(t *testing.T) {
 func TestDoctorSidecarCwdMismatch(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	alive := func(string, int) bool { return true }
+	alive := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
 		t.Fatal(err)
@@ -308,7 +308,7 @@ func TestDoctorSidecarCwdMismatch(t *testing.T) {
 func TestDoctorSidecarHealthyWhenCwdMatches(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	alive := func(string, int) bool { return true }
+	alive := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
 		t.Fatal(err)
@@ -334,9 +334,9 @@ func TestDoctorSidecarHealthyWhenCwdMatches(t *testing.T) {
 func TestDoctorSidecarSkippedForStaleLocks(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int) bool { return false }
+	dead := func(string, int, int64) bool { return false }
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 	report, err := s.DoctorAuditWith(ctx, l.Host, dead, SidecarCheck{
@@ -475,9 +475,9 @@ func TestMoveCorruptAsideAtomic(t *testing.T) {
 func TestDoctorRepair_RestoresWriteMode(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int) bool { return false }
+	dead := func(string, int, int64) bool { return false }
 	l := mkFileLock(t, "d.go", "alice", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.DoctorRepair(ctx, l.Host, "doctor", dead); err != nil {
@@ -492,13 +492,13 @@ func TestDoctorRepair_RestoresWriteMode(t *testing.T) {
 func TestDoctorRepair_MultipleStaleLocksSameOwner(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int) bool { return false }
+	dead := func(string, int, int64) bool { return false }
 	a := mkFileLock(t, "a.go", "alice", time.Hour)
 	b := mkFileLock(t, "b.go", "alice", time.Hour)
 	c := mkFileLock(t, "c.go", "alice", time.Hour)
 	// All three under one transaction, same actor + same now() inside reclaim
 	// — the old deterministic event ID would collide. Verify all reclaim.
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a, b, c}, func(string, int) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a, b, c}, func(string, int, int64) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.DoctorRepair(ctx, a.Host, "doctor", dead); err != nil {
@@ -568,9 +568,9 @@ func TestMoveCorruptAside_PreservesBytesOnCommitFailure(t *testing.T) {
 func TestDoctorRepair_VACUUMFailureDoesNotMaskSuccess(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int) bool { return false }
+	dead := func(string, int, int64) bool { return false }
 	l := mkFileLock(t, "v.go", "alice", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 
