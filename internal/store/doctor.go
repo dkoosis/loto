@@ -271,7 +271,33 @@ func (s *Store) RestoreOrphanMode(ctx context.Context, paths []string) (restored
 	}
 	defer flock.release()
 
+	// Re-validate ownership under the held op-flock: build the set of currently
+	// locked paths so we can skip any that became locked since the caller's scan
+	// (TOCTOU fix for loto-h85e). The flock ensures the lock table is stable for
+	// the duration of this query + chmod loop.
+	rows, err := s.db.QueryContext(ctx, `SELECT target_canonical FROM locks`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("RestoreOrphanMode: re-query locks: %w", err)
+	}
+	defer rows.Close()
+	nowOwned := map[string]bool{}
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, nil, fmt.Errorf("RestoreOrphanMode: scan locks row: %w", err)
+		}
+		nowOwned[c] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("RestoreOrphanMode: locks rows: %w", err)
+	}
+
 	for _, p := range paths {
+		if nowOwned[p] {
+			// Path acquired a lock after the caller's scan — skip to avoid
+			// defeating the freshly-held lock's write-strip.
+			continue
+		}
 		if err := restoreWrite(p); err != nil {
 			failures = append(failures, OrphanRestoreFailure{Path: p, Err: err})
 			continue
