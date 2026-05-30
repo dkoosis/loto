@@ -9,11 +9,23 @@ import (
 
 var errNotRegular = errors.New("not a regular file")
 
+// errMultiLinked is returned by stripWrite when the open fd's inode has
+// more than one hardlink. validateFileTarget rejects Nlink>1 up front, but
+// a racing process can add a link between validation and the fchmod
+// (loto-ta02); re-checking on the open fd closes that TOCTOU.
+var errMultiLinked = errors.New("multiple hardlinks")
+
 // fchmodFn is a package-private indirection so tests can inject EPERM
 // without an OS-specific fixture. Tests filter by f.Name() when needed.
 var fchmodFn = func(f *os.File, mode os.FileMode) error {
 	return f.Chmod(mode)
 }
+
+// afterOpenHook is a package-private indirection that fires inside
+// stripWrite right after the fd is opened, before the fd is re-stat'd.
+// Tests inject a racing hardlink here to exercise the validate→strip
+// TOCTOU deterministically. Production default is a no-op.
+var afterOpenHook = func(string) {}
 
 // safeOpenRegular opens path with O_NOFOLLOW and verifies the result is a
 // regular file. This binds subsequent fchmod calls to the inode that was
@@ -51,9 +63,17 @@ func stripWrite(path string) error {
 		return err
 	}
 	defer f.Close()
+	afterOpenHook(path)
 	st, err := f.Stat()
 	if err != nil {
 		return err
+	}
+	// Re-check Nlink on the OPEN fd, not the path: a racing process can add
+	// a hardlink between validateFileTarget's Lstat and this fchmod, which
+	// would otherwise clear write bits on an attacker-chosen name sharing
+	// the inode (loto-ta02). The fd binds the check to the inode we mutate.
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Nlink > 1 {
+		return &fs.PathError{Op: "stripwrite", Path: path, Err: errMultiLinked}
 	}
 	return fchmodFn(f, st.Mode().Perm()&^0o222)
 }
