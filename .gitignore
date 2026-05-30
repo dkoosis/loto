@@ -6,6 +6,7 @@ bin/
 .DS_Store
 .snipe/
 .claude/tmp/
+.claude/worktrees/
 .beads/*.db
 
 # Beads / Dolt files (added by bd init)

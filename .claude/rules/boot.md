@@ -1,11 +1,13 @@
 # Boot
-updated: 2026-05-30 #53
+updated: 2026-05-30 #60
 
 → pick next from `bd ready` — 4 P3 audit bugs left (loto-j863/ta02/zxjx, + loto-ltof likely WONTFIX). Verify each reproduces against the real binary before fixing (bead/gh state lies about fixed-status here).
 
 ✓ done
-- All 3 P2 audit bugs shipped+merged (#155 h85e, #156 pody, #157 kwlp); beads closed, branches/worktrees cleaned.
+- #60: no open PRs, no stray branches/worktrees/stashes. `make audit` green. Fixed phantom lint (see trap), `.gitignore`+`.golangci.yml` now exclude `.claude/worktrees/`.
+- #53: All 3 P2 audit bugs shipped+merged (#155 h85e, #156 pody, #157 kwlp); beads closed, branches/worktrees cleaned.
 
 ‡ traps
 - `git commit -am` sweeps daemon-churned docs/NORTH_STAR.md — use explicit `git add`.
 - `gh pr merge --delete-branch` breaks under worktree layout — push-delete the branch separately.
+- Phantom lint findings under `.claude/worktrees/agent-*/`: stale golangci cache + `./...` crawling live sub-agent worktree copies (same module path). Fix: `golangci-lint cache clean`; now excluded in `.golangci.yml`+`.gitignore`. Real source is clean — verify before "fixing".

@@ -185,6 +185,7 @@ linters:
     paths:
       - third_party$
       - examples$
+      - \.claude/ # sub-agent worktree copies share the module path; ./... must not lint them
 
 formatters:
   enable:
@@ -194,3 +195,4 @@ formatters:
     paths:
       - third_party$
       - examples$
+      - \.claude/ # sub-agent worktree copies share the module path; ./... must not lint them
