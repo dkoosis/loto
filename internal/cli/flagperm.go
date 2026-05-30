@@ -13,7 +13,15 @@ func permuteWith(fs *flag.FlagSet, args []string) []string {
 	var flags, positional []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if !strings.HasPrefix(a, "-") || a == "-" || a == "--" {
+		if a == "--" {
+			// End-of-flags escape: everything from -- onward is positional.
+			// Preserve -- itself so flag.Parse honors the boundary, letting
+			// leading-dash targets (e.g. "-weird.go") through as positionals
+			// instead of being misread as unknown flags.
+			positional = append(positional, args[i:]...)
+			break
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
 			positional = append(positional, a)
 			continue
 		}
