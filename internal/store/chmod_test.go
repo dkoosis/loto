@@ -89,3 +89,40 @@ func TestStripWrite_RefusesDirectory(t *testing.T) {
 		t.Fatal("stripWrite must refuse directory")
 	}
 }
+
+// Regression for loto-ta02: hardlink TOCTOU between validateFileTarget
+// (one-shot Lstat Nlink<=1) and stripWrite. A second hardlink created
+// after validation but before fchmod makes the strip clear write bits on
+// an attacker-chosen name on the shared inode. stripWrite must re-check
+// Nlink on the open fd and refuse when Nlink>1.
+//
+// afterOpenHook fires inside stripWrite right after the fd is opened,
+// simulating the racing process that hardlinks the locked target. This
+// makes the TOCTOU deterministic instead of relying on a real race.
+func TestStripWrite_RefusesHardlinkRace(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	attacker := filepath.Join(dir, "attacker")
+
+	prev := afterOpenHook
+	afterOpenHook = func(string) {
+		// Racing process hardlinks the locked inode to a name it owns.
+		if err := os.Link(target, attacker); err != nil {
+			t.Fatalf("inject hardlink: %v", err)
+		}
+		afterOpenHook = prev // fire once
+	}
+	defer func() { afterOpenHook = prev }()
+
+	if err := stripWrite(target); err == nil {
+		t.Fatal("stripWrite must refuse when Nlink>1 on the open fd, got nil error")
+	}
+	// The shared inode must be untouched — attacker's name keeps write bits.
+	st, _ := os.Stat(attacker)
+	if st.Mode().Perm()&0o200 == 0 {
+		t.Errorf("attacker file write-stripped via hardlink, mode=%o", st.Mode().Perm())
+	}
+}
