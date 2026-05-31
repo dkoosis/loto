@@ -91,7 +91,7 @@ func TestLockHappyPath(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 	var out, errBuf bytes.Buffer
-	code := Run([]string{tcCmdLock, tcTargetA, "--ttl", "10m", tcFlagIntent, tcIntentTest}, &out, &errBuf)
+	code := Run([]string{tcCmdLock, tcTargetA, tcFlagTTL, "10m", tcFlagIntent, tcIntentTest}, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("exit %d, out=%q err=%q", code, out.String(), errBuf.String())
 	}
