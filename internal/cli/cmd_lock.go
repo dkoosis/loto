@@ -182,14 +182,14 @@ func fetchTagsForBlockers(rt *runtime, blockers []domain.LockRecord) map[string]
 }
 
 func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now time.Time, ttl time.Duration) []domain.LockRecord {
-	pid, durable := stampPID()
+	pid, src := stampPID()
 	// A durable pid (LOTO_PID = the session process) lets a later liveness probe
 	// fast-reclaim this lock when the holder dies and detect PID reuse via the
 	// start-time (loto-kwlp). Without it, stamping the one-shot CLI's own pid
 	// would make the lock instantly reclaimable (loto-t1tq); pid stays 0 and we
 	// skip the start-time read so liveness degrades to the TTL lease (loto-j1bo).
 	var procStartVal int64
-	if durable {
+	if src == pidDurable {
 		procStartVal, _ = procStart(pid)
 	}
 	recs := make([]domain.LockRecord, 0, len(targets))
