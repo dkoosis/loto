@@ -5,8 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCheckClean(t *testing.T) {
@@ -121,4 +123,74 @@ func TestLoadCheckTargets_UsesRepoTopForGitDiff(t *testing.T) {
 	if len(paths) != 1 || filepath.ToSlash(paths[0]) != filepath.ToSlash(stagedRel) {
 		t.Fatalf("expected staged path %q, got %v", stagedRel, paths)
 	}
+}
+
+// loto-9t0q: a TTL-expired holder is reclaimable — `loto lock` would silently
+// reclaim it via reclaimStaleAndCollectBlockers / domain.IsStale. The advisory
+// `check` gate must agree: it must NOT report an expired lock as a hard
+// conflict (exit 1) that demands `unlock --force`. Before the fix, check did no
+// staleness filtering and emitted `✗ conflicts count=1` + a force fix-block.
+func TestCheckIgnoresExpiredHolder(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	// 1ms TTL: lapses immediately, same shape as a short-claim that timed out.
+	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagTTL, "1ms", "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice lock failed")
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcTargetA}, &out, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("expected exit 0 (reclaimable, not a hard conflict), got %d: %q", code, out.String())
+	}
+	if strings.Contains(out.String(), "✗ conflicts") {
+		t.Errorf("expired holder must not read as a hard conflict: %q", out.String())
+	}
+}
+
+// loto-9t0q: a holder whose PID is provably dead on this host is reclaimable —
+// domain.IsStale returns true via the live probe. `check` must build the same
+// liveProbe AcquireLocks uses and not report the dead-PID holder as a hard
+// conflict. LOTO_PID lets alice stamp a non-existent PID onto the lock.
+func TestCheckIgnoresDeadPidHolder(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	// A PID that is reliably dead: spawn `true`, wait for it to exit, reuse its
+	// PID. The OS will not have recycled it within the test window.
+	deadPID := spawnAndReap(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	t.Setenv("LOTO_PID", deadPID)
+	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagTTL, "10m", "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice lock failed")
+	}
+	os.Unsetenv("LOTO_PID")
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcTargetA}, &out, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("expected exit 0 (dead-PID reclaimable, not a hard conflict), got %d: %q", code, out.String())
+	}
+	if strings.Contains(out.String(), "✗ conflicts") {
+		t.Errorf("dead-PID holder must not read as a hard conflict: %q", out.String())
+	}
+}
+
+// spawnAndReap runs a short-lived process, waits for it to exit, and returns its
+// (now-dead) PID as a string. pidLive(pid) will report it dead on this host.
+func spawnAndReap(t *testing.T) string {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	pid := cmd.Process.Pid
+	_ = cmd.Wait()
+	return strconv.Itoa(pid)
 }

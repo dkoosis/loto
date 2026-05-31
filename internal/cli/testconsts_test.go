@@ -14,6 +14,7 @@ const (
 	tcFlagOrphan   = "--orphan-mode"
 	tcFlagMine     = "--mine"
 	tcFlagIntent   = "--intent"
+	tcFlagTTL      = "--ttl"
 	tcSlugDKLoto   = "dkoosis-loto"
 	tcStoreStoreGo = "internal/store/store.go"
 	tcIntentTest   = "test"

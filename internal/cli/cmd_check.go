@@ -56,7 +56,10 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return 3
 	}
 
-	rows, invalid := computeCheckConflicts(paths, all, rt.Agent.UUID, repoTop)
+	// Filter stale/dead-PID holders the same way AcquireLocks does
+	// (reclaimStaleAndCollectBlockers → domain.IsStale): a lock that `loto lock`
+	// would silently reclaim must not read as a hard conflict here (loto-9t0q).
+	rows, invalid := computeCheckConflicts(paths, all, rt.Agent.UUID, repoTop, time.Now(), rt.Host, rt.liveProbe())
 	if len(invalid) > 0 {
 		printCheckInvalid(stdout, invalid)
 		return 2
@@ -108,7 +111,7 @@ func loadCheckTargets(ctx context.Context, repoTop string, staged bool, posArgs 
 	return paths, 0
 }
 
-func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repoTop string) ([]checkConflict, []checkInvalid) {
+func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repoTop string, now time.Time, host string, live domain.PidLiveProbe) ([]checkConflict, []checkInvalid) {
 	var rows []checkConflict
 	var invalid []checkInvalid
 	seen := map[string]bool{}
@@ -118,7 +121,7 @@ func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repo
 			invalid = append(invalid, checkInvalid{Path: raw, Reason: classifyCanonicalizeErr(err)})
 			continue
 		}
-		rows = appendCheckConflictsForTarget(rows, seen, t.Canonical, t, all, myUUID)
+		rows = appendCheckConflictsForTarget(rows, seen, t.Canonical, t, all, myUUID, now, host, live)
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Path != rows[j].Path {
@@ -130,10 +133,17 @@ func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repo
 	return rows, invalid
 }
 
-func appendCheckConflictsForTarget(rows []checkConflict, seen map[string]bool, p string, t domain.Target, all []domain.LockRecord, myUUID string) []checkConflict {
+func appendCheckConflictsForTarget(rows []checkConflict, seen map[string]bool, p string, t domain.Target, all []domain.LockRecord, myUUID string, now time.Time, host string, live domain.PidLiveProbe) []checkConflict {
 	for i := range all {
 		l := &all[i]
 		if l.OwnerUUID == myUUID || !domain.Overlap(l.Target, t) {
+			continue
+		}
+		// A stale/dead-PID holder is reclaimable: AcquireLocks would silently
+		// reclaim it (reclaimStaleAndCollectBlockers), so the proceed/block gate
+		// must not report it as a hard conflict demanding `unlock --force`
+		// (loto-9t0q).
+		if domain.IsStale(*l, now, host, live) {
 			continue
 		}
 		key := p + "|" + l.Target.Canonical + "|" + l.OwnerUUID
