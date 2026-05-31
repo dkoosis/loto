@@ -1,0 +1,36 @@
+# `loto unlock <abs>` releases a lock acquired by the same absolute path.
+# Regression: unlock used to call domain.Canonicalize directly (no
+# normalizeRepoPath), so an absolute path inside repoTop hit ErrRepoEscape
+# and exited 2 — the lock and the write-stripped file were never released
+# (loto-tel0). Mirrors check_paths.txtar's absolute-path coverage for the
+# unlock verb.
+
+env LOTO_AGENT_ID=$ALICE
+
+touch src/x.go
+
+# Lock by absolute path — normalized to the repo-relative key src/x.go.
+loto lock $WORK/src/x.go -t 'edit by abs path'
+stdout '✓ locked count=1'
+
+loto status --mine
+stdout 'target=src/x.go'
+
+# Unlock by the same absolute path. Before the fix this exits 2 with
+# "target resolves outside the repository" and the lock persists.
+loto unlock $WORK/src/x.go -t 'done by abs path'
+stdout '✓ unlocked'
+
+# Lock is gone.
+loto status --mine
+! stdout 'target=src/x.go'
+
+# --force path (breakTargets) shares resolveUnlockArgs — verify it too.
+loto lock $WORK/src/x.go -t 're-lock for force'
+stdout '✓ locked count=1'
+
+loto unlock --force $WORK/src/x.go -t 'force release by abs path'
+stdout '✓ broken'
+
+loto status --mine
+! stdout 'target=src/x.go'
