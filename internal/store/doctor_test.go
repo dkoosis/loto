@@ -14,6 +14,8 @@ import (
 	"loto/internal/domain"
 )
 
+const tcRepoTop = "/repo"
+
 func TestDoctorListsStaleLocks(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
@@ -250,7 +252,7 @@ func TestDoctorSidecarMissingDirIsNoOp(t *testing.T) {
 	}
 	report, err := s.DoctorAuditWith(ctx, l.Host, alive, SidecarCheck{
 		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
-		RepoTop:    "/repo",
+		RepoTop:    tcRepoTop,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -341,7 +343,7 @@ func TestDoctorSidecarSkippedForStaleLocks(t *testing.T) {
 	}
 	report, err := s.DoctorAuditWith(ctx, l.Host, dead, SidecarCheck{
 		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
-		RepoTop:    "/repo",
+		RepoTop:    tcRepoTop,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -351,6 +353,32 @@ func TestDoctorSidecarSkippedForStaleLocks(t *testing.T) {
 	}
 	if len(report.SidecarFindings) != 0 {
 		t.Fatalf("sidecar check should not double-report stale locks, got %+v", report.SidecarFindings)
+	}
+}
+
+// TestDoctorSidecarSkippedForNoDurablePid covers the PID-0 sentinel
+// (loto-j1bo): a lock placed without LOTO_PID has no CC session sidecar keyed by
+// its pid, so the zombie cross-check must skip it rather than emit a spurious
+// no-cc-sidecar finding (contrast TestDoctorSidecarMissingDirIsNoOp, which
+// expects exactly that finding for a real pid).
+func TestDoctorSidecarSkippedForNoDurablePid(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	alive := func(string, int, int64) bool { return true }
+	l := mkFileLock(t, "a.go", "alice", time.Hour)
+	l.PID = 0
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
+		t.Fatal(err)
+	}
+	report, err := s.DoctorAuditWith(ctx, l.Host, alive, SidecarCheck{
+		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
+		RepoTop:    tcRepoTop,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.SidecarFindings) != 0 {
+		t.Fatalf("PID-0 lock must not produce a sidecar finding, got %+v", report.SidecarFindings)
 	}
 }
 

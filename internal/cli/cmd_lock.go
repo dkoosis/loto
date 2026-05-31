@@ -132,6 +132,9 @@ func classifyCanonicalizeErr(err error) string {
 
 func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.Duration, live domain.PidLiveProbe, stdout, stderr io.Writer) int {
 	now := time.Now()
+	if w := degradedPidWarning(); w != "" {
+		fmt.Fprint(stderr, w)
+	}
 	recs := buildLockRecords(targets, rt, intent, now, ttl)
 	acquired, err := rt.Store.AcquireLocks(rt.Ctx, recs, live)
 	if err != nil {
@@ -179,11 +182,16 @@ func fetchTagsForBlockers(rt *runtime, blockers []domain.LockRecord) map[string]
 }
 
 func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now time.Time, ttl time.Duration) []domain.LockRecord {
-	pid := stampPID()
-	// Read the stamped pid's start-time on the local host now, at acquire, so a
-	// later liveness probe can detect PID reuse (loto-kwlp). ok==false leaves
-	// ProcStart 0 (UNKNOWN) → liveness degrades to pid-alive-only.
-	procStartVal, _ := procStart(pid)
+	pid, src := stampPID()
+	// A durable pid (LOTO_PID = the session process) lets a later liveness probe
+	// fast-reclaim this lock when the holder dies and detect PID reuse via the
+	// start-time (loto-kwlp). Without it, stamping the one-shot CLI's own pid
+	// would make the lock instantly reclaimable (loto-t1tq); pid stays 0 and we
+	// skip the start-time read so liveness degrades to the TTL lease (loto-j1bo).
+	var procStartVal int64
+	if src == pidDurable {
+		procStartVal, _ = procStart(pid)
+	}
 	recs := make([]domain.LockRecord, 0, len(targets))
 	for _, t := range targets {
 		recs = append(recs, domain.LockRecord{

@@ -53,7 +53,10 @@ func (s *Store) DoctorAuditWith(ctx context.Context, thisHost string, live domai
 			r.StaleLocks = append(r.StaleLocks, locks[i])
 			continue
 		}
-		if locks[i].Host == thisHost && sc.SidecarDir != "" {
+		// PID <= 0 is the no-durable-pid sentinel (loto-j1bo): no CC session
+		// sidecar is keyed by it, so the zombie cross-check has nothing to read
+		// and would only emit a spurious no-cc-sidecar finding. Skip it.
+		if locks[i].PID > 0 && locks[i].Host == thisHost && sc.SidecarDir != "" {
 			if f, ok := checkSidecar(locks[i], sc); ok {
 				r.SidecarFindings = append(r.SidecarFindings, f)
 			}
