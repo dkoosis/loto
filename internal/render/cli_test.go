@@ -49,12 +49,12 @@ func TestEmitLockSuccess_SortedDeterministic(t *testing.T) {
 func TestEmitConflict_TriageFirst(t *testing.T) {
 	now := time.Date(2026, 5, 10, 18, 0, 0, 0, time.UTC)
 	var buf bytes.Buffer
-	EmitConflict(&buf, &store.MultiConflictError{
+	EmitConflictWithTags(&buf, &store.MultiConflictError{
 		Blockers: []domain.LockRecord{
 			{Target: domain.Target{Canonical: aGo}, OwnerUUID: "Green", Intent: "x", ExpiresAt: now},
 			{Target: domain.Target{Canonical: cGo}, OwnerUUID: "Red", Intent: "y", ExpiresAt: now},
 		},
-	})
+	}, nil)
 	got := buf.String()
 	if !strings.HasPrefix(got, "✗ blocked count=2\n") {
 		t.Errorf("triage first: %s", got)
@@ -68,6 +68,42 @@ func TestHolderTag_FallsBackToUUIDWhenUnknown(t *testing.T) {
 	uuid := "00000000-0000-0000-0000-000000000000"
 	if got := holderTag(uuid); got != uuid {
 		t.Errorf("expected fallback to UUID, got %q", got)
+	}
+}
+
+// TestHolderMemo_DedupsLookups is the N+1 guard: a render pass memoizes
+// identity resolution so a repeated UUID triggers exactly one underlying
+// lookup (ReadFile+Unmarshal), not one per row. The memo also caches the
+// formatted tag so distinct UUIDs each resolve once.
+func TestHolderMemo_DedupsLookups(t *testing.T) {
+	calls := map[string]int{}
+	m := &holderMemo{resolve: func(uuid string) string {
+		calls[uuid]++
+		return "H(" + uuid + ")"
+	}}
+	// Same UUID three times → one resolve. A second distinct UUID → one resolve.
+	for range 3 {
+		if got := m.tag("alice"); got != "H(alice)" {
+			t.Fatalf("tag(alice) = %q, want H(alice)", got)
+		}
+	}
+	m.tag("bob")
+	if calls["alice"] != 1 {
+		t.Errorf("alice resolved %d times, want 1 (memo miss = N+1 regression)", calls["alice"])
+	}
+	if calls["bob"] != 1 {
+		t.Errorf("bob resolved %d times, want 1", calls["bob"])
+	}
+}
+
+// TestHolderMemo_DefaultResolverFallsBack confirms a zero-value memo (nil
+// resolve) defaults to the real holderTag logic — bare UUID when unknown.
+func TestHolderMemo_DefaultResolverFallsBack(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := &holderMemo{}
+	uuid := "00000000-0000-0000-0000-000000000000"
+	if got := m.tag(uuid); got != uuid {
+		t.Errorf("default resolver should fall back to UUID, got %q", got)
 	}
 }
 
