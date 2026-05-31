@@ -594,6 +594,13 @@ func TestEnsureForSessionRecoverZeroByteCacheOnWinnerCrash(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
+	// Age the file past sessionWriteGrace so it reads as a genuine crash, not
+	// an in-flight winner mid-Write — recovery only unlinks aged corrupt
+	// caches (loto-d7sq).
+	old := time.Now().Add(-2 * sessionWriteGrace)
+	if err := os.Chtimes(cachePath, old, old); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Setenv("CLAUDE_CODE_SESSION_ID", sid)
 	a, err := Ensure(context.Background())
@@ -629,6 +636,12 @@ func TestEnsureForSessionRecoverUnparseableCacheOnWinnerCrash(t *testing.T) {
 	}
 	cachePath := filepath.Join(sessDir, sid+".json")
 	if err := os.WriteFile(cachePath, []byte(`{"uuid":"trunc`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Age past the grace: a fresh partial write looks like an in-flight winner
+	// and is left alone; only an aged corrupt cache is recovered (loto-d7sq).
+	old := time.Now().Add(-2 * sessionWriteGrace)
+	if err := os.Chtimes(cachePath, old, old); err != nil {
 		t.Fatal(err)
 	}
 
@@ -683,5 +696,107 @@ func TestRegistryDirIsAlwaysAbsolute(t *testing.T) {
 	sdir := sessionDir()
 	if !filepath.IsAbs(sdir) {
 		t.Fatalf("sessionDir() not absolute: %q", sdir)
+	}
+}
+
+// TestRecoverCorruptSessionCachePreservesFreshZeroByte asserts a 0-byte cache
+// younger than sessionWriteGrace is presumed an in-flight winner — claimSessionCache
+// publishes a 0-byte file via O_EXCL Create microseconds before its Write+Sync —
+// and is NOT removed. This is the descheduled-winner scenario in loto-d7sq, where
+// a re-read alone cannot disambiguate "crashed" from "mid-write": the file reads
+// 0-byte either way, so only its freshness tells them apart.
+func TestRecoverCorruptSessionCachePreservesFreshZeroByte(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	sid := "fresh-zero-byte"
+	sessDir := filepath.Join(dir, ".loto", "session")
+	if err := os.MkdirAll(sessDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(sessDir, sid+".json")
+	if err := os.WriteFile(cachePath, nil, 0o600); err != nil { // fresh, 0-byte
+		t.Fatal(err)
+	}
+
+	if recoverCorruptSessionCache(sid) {
+		t.Fatal("removed a fresh 0-byte cache — clobbers an in-flight winner's binding")
+	}
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("fresh cache was removed out from under the winner: %v", err)
+	}
+}
+
+// TestRecoverCorruptSessionCacheAbortsOnTOCTOURepair is the loto-d7sq
+// acceptance test: a hook flips the cache from 0-byte to a valid uuid between
+// recoverCorruptSessionCache's first read and the unlink — simulating a winner
+// completing its Write inside the read→remove window — and the function must
+// NOT remove the freshly-published binding.
+func TestRecoverCorruptSessionCacheAbortsOnTOCTOURepair(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	sid := "toctou-repair"
+	sessDir := filepath.Join(dir, ".loto", "session")
+	if err := os.MkdirAll(sessDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(sessDir, sid+".json")
+	// Aged + 0-byte so neither freshness guard nor an unmodified re-read would
+	// save it — only the winner's repair, applied via the hook, must.
+	if err := os.WriteFile(cachePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * sessionWriteGrace)
+	if err := os.Chtimes(cachePath, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	recoverCacheRecheckHook = func() {
+		if werr := os.WriteFile(cachePath, []byte(`{"uuid":"11111111-1111-4111-8111-111111111111"}`), 0o600); werr != nil {
+			t.Fatalf("hook write: %v", werr)
+		}
+	}
+	t.Cleanup(func() { recoverCacheRecheckHook = nil })
+
+	if recoverCorruptSessionCache(sid) {
+		t.Fatal("removed a cache the winner repaired inside the read→unlink window")
+	}
+	body, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("winner's binding was destroyed: %v", err)
+	}
+	if valid, _ := sessionCacheState(cachePath); !valid {
+		t.Fatalf("cache no longer holds a valid uuid: %q", body)
+	}
+}
+
+// TestRecoverCorruptSessionCacheRemovesAgedCorrupt asserts gh#115 recovery
+// still works under the loto-d7sq guards: a corrupt cache older than
+// sessionWriteGrace is a crashed winner and is unlinked so the caller can
+// re-claim.
+func TestRecoverCorruptSessionCacheRemovesAgedCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	sid := "aged-corrupt"
+	sessDir := filepath.Join(dir, ".loto", "session")
+	if err := os.MkdirAll(sessDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(sessDir, sid+".json")
+	if err := os.WriteFile(cachePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * sessionWriteGrace)
+	if err := os.Chtimes(cachePath, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if !recoverCorruptSessionCache(sid) {
+		t.Fatal("did not recover an aged crashed corrupt cache")
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("aged corrupt cache not removed: %v", err)
 	}
 }

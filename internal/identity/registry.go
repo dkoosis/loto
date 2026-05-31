@@ -48,6 +48,24 @@ const fallbackFreshness = 24 * time.Hour
 // overwhelmingly likely to be dead (crashed session, ephemeral pre-fix run).
 const agentsGCMaxAge = 30 * 24 * time.Hour
 
+// sessionWriteGrace bounds how recently the session cache file may have been
+// touched for recoverCorruptSessionCache to treat a still-corrupt (0-byte or
+// unparseable) file as a crashed winner rather than an in-flight one. The
+// O_EXCL Create in claimSessionCache publishes a 0-byte file microseconds
+// before its Write+Sync lands; a winner descheduled inside that window must
+// not have its file unlinked out from under it (loto-d7sq). A genuinely
+// crashed winner leaves the mtime fixed, so a later invocation past this grace
+// still recovers the cache (gh#115). One second comfortably exceeds any
+// non-pathological Create→Write gap while keeping crash recovery prompt for an
+// interactive CLI.
+const sessionWriteGrace = 1 * time.Second
+
+// recoverCacheRecheckHook, when non-nil, is invoked inside
+// recoverCorruptSessionCache after the file is first judged corrupt and before
+// the pre-unlink re-read. Tests use it to simulate a winner that completes its
+// Write within the read→unlink TOCTOU window; production leaves it nil.
+var recoverCacheRecheckHook func()
+
 var agentsGCOnce sync.Once
 
 type Agent struct {
@@ -242,21 +260,53 @@ func recoverCorruptSessionCache(sid string) bool {
 	if err != nil {
 		return false
 	}
+	valid, gone := sessionCacheState(path)
+	if gone {
+		return true // file vanished (another racer cleaned up) — caller can re-claim
+	}
+	if valid {
+		return false // another writer repaired it concurrently
+	}
+	// Corrupt-looking, but the unlink must be ownership-safe: removing a file a
+	// winner is actively writing orphans the inode its Write lands on and
+	// destroys the session→uuid binding (loto-d7sq). Two guards distinguish a
+	// crashed winner (safe to unlink) from an in-flight one (must not touch).
+	if recoverCacheRecheckHook != nil {
+		recoverCacheRecheckHook()
+	}
+	// Guard 1: re-read — the winner may have completed a valid Write since the
+	// first read. Never unlink a now-valid binding.
+	if valid2, gone2 := sessionCacheState(path); gone2 {
+		return true
+	} else if valid2 {
+		return false
+	}
+	// Guard 2: freshness — a still-corrupt file younger than the grace is
+	// presumed an in-flight winner (O_EXCL Create lands before Write+Sync), not
+	// a crash; a re-read can't tell them apart since both read 0-byte. A real
+	// crash leaves the mtime fixed, so a later invocation past the grace heals
+	// the cache (gh#115).
+	if fi, serr := os.Stat(path); serr == nil && time.Since(fi.ModTime()) < sessionWriteGrace {
+		return false
+	}
+	_ = os.Remove(path)
+	return true
+}
+
+// sessionCacheState reports whether the cache file at path currently holds a
+// valid (non-empty, parseable, uuid-bearing) record, and whether it is gone —
+// absent or otherwise unreadable in a way that lets the caller re-claim.
+// A permission error is neither valid nor gone: the file is an obstacle the
+// caller can't clear, so recovery must decline.
+func sessionCacheState(path string) (valid, gone bool) {
 	body, err := os.ReadFile(path)
 	if err != nil {
-		// File gone (another racer cleaned up) — caller can re-claim.
-		return !errors.Is(err, fs.ErrPermission)
+		return false, !errors.Is(err, fs.ErrPermission)
 	}
-	// Non-empty, parseable, with a uuid → the file is valid; no recovery.
 	var ref struct {
 		UUID string `json:"uuid"`
 	}
-	if len(body) > 0 && json.Unmarshal(body, &ref) == nil && ref.UUID != "" {
-		return false
-	}
-	// Corrupt: 0-byte, bad JSON, or empty uuid. Unlink and let caller retry.
-	_ = os.Remove(path)
-	return true
+	return len(body) > 0 && json.Unmarshal(body, &ref) == nil && ref.UUID != "", false
 }
 
 // claimSessionCache attempts to create ~/.loto/session/<sid>.json with
