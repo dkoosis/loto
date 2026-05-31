@@ -345,6 +345,48 @@ func TestAcquireOverlapBlocks(t *testing.T) {
 	}
 }
 
+// TestAcquireNoDurablePidBlocksUntilTTL is the core loto-j1bo acceptance: a
+// lock placed without a durable pid (PID 0 sentinel, LOTO_PID unset) must be
+// treated as a LIVE blocker until its TTL — even under a dead liveness probe — so
+// a peer cannot silently reclaim it. Contrast TestAcquireOverlapBlocks (real pid,
+// live probe) and the reclaim tests (real pid, dead probe → reclaimed).
+func TestAcquireNoDurablePidBlocksUntilTTL(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(a, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := mustOpen(t)
+	ctx := context.Background()
+	dead := func(string, int, int64) bool { return false }
+	now := time.Now()
+
+	aliceLock := domain.LockRecord{
+		Target:      domain.Target{Canonical: a},
+		OwnerUUID:   tcAlice,
+		SessionUUID: tcAlice,
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(time.Hour),
+		Host:        "h",
+		PID:         0, // no durable pid → TTL governs
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{aliceLock}, dead); err != nil {
+		t.Fatalf("alice acquire: %v", err)
+	}
+
+	bobLock := aliceLock
+	bobLock.OwnerUUID = tcBob
+	bobLock.SessionUUID = tcBob
+	_, err := s.AcquireLocks(ctx, []domain.LockRecord{bobLock}, dead)
+	var conflict *MultiConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("PID-0 lock within TTL must block a peer (not reclaim); got err=%v", err)
+	}
+	if len(conflict.Blockers) != 1 || conflict.Blockers[0].OwnerUUID != tcAlice {
+		t.Fatalf("expected single blocker alice; got %+v", conflict.Blockers)
+	}
+}
+
 func TestAcquireSameAgentRefreshes(t *testing.T) {
 	dir := t.TempDir()
 	a := filepath.Join(dir, "a.go")

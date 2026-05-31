@@ -72,3 +72,31 @@ func TestIsStale(t *testing.T) {
 		}
 	})
 }
+
+// TestIsStale_NoDurablePid covers the PID-0 sentinel: a lock placed without a
+// durable liveness pid (LOTO_PID unset → loto-t1tq/loto-j1bo). Liveness is
+// unknown, so the TTL lease alone governs — the dead-pid branch must never fire,
+// and the probe must not even be consulted.
+func TestIsStale_NoDurablePid(t *testing.T) {
+	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	probeCalled := false
+	probe := func(string, int, int64) bool { probeCalled = true; return false }
+	ctx := EvalContext{Now: now, ThisHost: "h", Live: probe}
+
+	t.Run("PID 0 within TTL is not stale and never probes liveness", func(t *testing.T) {
+		probeCalled = false
+		l := LockRecord{ExpiresAt: now.Add(time.Hour), Host: "h", PID: 0}
+		if ctx.IsStale(l) {
+			t.Fatal("PID-0 lock within TTL must not be stale (TTL-only liveness)")
+		}
+		if probeCalled {
+			t.Fatal("liveness probe must not be consulted for a PID-0 lock")
+		}
+	})
+	t.Run("PID 0 past TTL is still stale", func(t *testing.T) {
+		l := LockRecord{ExpiresAt: now.Add(-time.Minute), Host: "h", PID: 0}
+		if !ctx.IsStale(l) {
+			t.Fatal("PID-0 lock past TTL must be stale (TTL gate still applies)")
+		}
+	})
+}

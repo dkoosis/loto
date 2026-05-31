@@ -36,7 +36,11 @@ func (c EvalContext) IsStale(l LockRecord) bool {
 	if !c.Now.Before(l.ExpiresAt) {
 		return true
 	}
-	if l.Host == c.ThisHost && !c.Live(l.Host, l.PID, l.ProcStart) {
+	// PID <= 0 is the no-durable-liveness sentinel (a lock placed without
+	// LOTO_PID — loto-t1tq/loto-j1bo): the holder pid is unknown, so liveness
+	// can't be probed and the TTL gate above is the sole authority. Never
+	// instant-stale, never consult the probe. A real holder pid (>0) does.
+	if l.PID > 0 && l.Host == c.ThisHost && !c.Live(l.Host, l.PID, l.ProcStart) {
 		return true
 	}
 	return false
