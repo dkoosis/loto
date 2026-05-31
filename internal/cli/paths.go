@@ -200,16 +200,6 @@ func gitCmd(ctx context.Context, repoTop string, args ...string) (string, error)
 	return string(out), err
 }
 
-// resolveTargets canonicalizes arg into one or more Target values.
-// Currently returns a single target; glob expansion at call time is bead loto-1wl.
-func resolveTargets(arg string) ([]domain.Target, error) {
-	t, err := domain.Canonicalize(arg)
-	if err != nil {
-		return nil, err
-	}
-	return []domain.Target{t}, nil
-}
-
 // resolveCLITarget normalizes a user-supplied path (absolute, relative, or
 // inside repoTop) into a canonical domain.Target. Centralizes the
 // normalizeRepoPath + Canonicalize policy so future fixes land in one place.

@@ -44,17 +44,22 @@ func cmdUnlock(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	if *all {
 		return unlockAll(rt, stdout, stderr)
 	}
+	// Resolve repoTop so absolute paths inside the repo normalize to their
+	// repo-relative canonical key, exactly like lock/check/status/tag. Without
+	// this, `loto unlock /abs/path` hits ErrRepoEscape and the lock acquired by
+	// the same absolute path is never released (loto-tel0).
+	repoTop, _ := repoTopForCwd(ctx)
 	if *force {
-		return breakTargets(rt, fs.Args(), *intent, stdout, stderr)
+		return breakTargets(rt, fs.Args(), *intent, repoTop, stdout, stderr)
 	}
-	return unlockTargets(rt, fs.Args(), stdout, stderr)
+	return unlockTargets(rt, fs.Args(), repoTop, stdout, stderr)
 }
 
 // unlockTargets resolves CLI args to canonical targets and asks the store to
 // release them in one batch, then renders per-target outcomes through the
 // render package per docs/design.md.
-func unlockTargets(rt *runtime, args []string, stdout, stderr io.Writer) int {
-	targets, code := resolveUnlockArgs(args, stderr)
+func unlockTargets(rt *runtime, args []string, repoTop string, stdout, stderr io.Writer) int {
+	targets, code := resolveUnlockArgs(args, repoTop, stderr)
 	if code != 0 {
 		return code
 	}
@@ -70,8 +75,8 @@ func unlockTargets(rt *runtime, args []string, stdout, stderr io.Writer) int {
 // outcomes (success / no-lock / authorize-fail) come back in input order via
 // BreakResult.Err so the render walks one slice instead of looping a single-
 // target API.
-func breakTargets(rt *runtime, args []string, intent string, stdout, stderr io.Writer) int {
-	targets, code := resolveUnlockArgs(args, stderr)
+func breakTargets(rt *runtime, args []string, intent, repoTop string, stdout, stderr io.Writer) int {
+	targets, code := resolveUnlockArgs(args, repoTop, stderr)
 	if code != 0 {
 		return code
 	}
@@ -98,15 +103,15 @@ func breakTargets(rt *runtime, args []string, intent string, stdout, stderr io.W
 	return exit
 }
 
-func resolveUnlockArgs(args []string, stderr io.Writer) ([]domain.Target, int) {
+func resolveUnlockArgs(args []string, repoTop string, stderr io.Writer) ([]domain.Target, int) {
 	out := make([]domain.Target, 0, len(args))
 	for _, a := range args {
-		ts, err := resolveTargets(a)
+		t, err := resolveCLITarget(repoTop, a)
 		if err != nil {
 			fmt.Fprintf(stderr, "✗ target %q: %v\n", a, err)
 			return nil, 2
 		}
-		out = append(out, ts...)
+		out = append(out, t)
 	}
 	return out, 0
 }
