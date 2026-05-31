@@ -57,12 +57,13 @@ func TestProcStartRoundTrip(t *testing.T) {
 			}
 			return true
 		}
+		ec := domain.EvalContext{Now: now, ThisHost: "h", Live: recycleAware}
 		known := domain.LockRecord{Host: "h", PID: 1, ProcStart: 123456789, ExpiresAt: now.Add(time.Hour)}
-		if !domain.IsStale(known, now, "h", recycleAware) {
+		if !ec.IsStale(known) {
 			t.Fatal("known proc_start mismatching occupant must be stale")
 		}
 		legacy := domain.LockRecord{Host: "h", PID: 1, ProcStart: 0, ExpiresAt: now.Add(time.Hour)}
-		if domain.IsStale(legacy, now, "h", recycleAware) {
+		if ec.IsStale(legacy) {
 			t.Fatal("unknown proc_start must fall back to pid-alive (not stale)")
 		}
 	})

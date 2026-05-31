@@ -10,14 +10,15 @@ func TestAuthorizeBreak(t *testing.T) {
 	stale := LockRecord{OwnerUUID: tcAlice, ExpiresAt: now.Add(-time.Minute), Host: "h", PID: 1}
 	live := LockRecord{OwnerUUID: tcAlice, ExpiresAt: now.Add(time.Hour), Host: "h", PID: 1}
 	probe := func(string, int, int64) bool { return true }
+	ctx := EvalContext{Now: now, ThisHost: "h", Live: probe}
 
-	if err := AuthorizeBreak(stale, false, now, "h", probe); err != nil {
+	if err := ctx.AuthorizeBreak(stale, false); err != nil {
 		t.Fatalf("stale break without --force must succeed: %v", err)
 	}
-	if err := AuthorizeBreak(live, false, now, "h", probe); err == nil {
+	if err := ctx.AuthorizeBreak(live, false); err == nil {
 		t.Fatal("live break without --force must fail")
 	}
-	if err := AuthorizeBreak(live, true, now, "h", probe); err != nil {
+	if err := ctx.AuthorizeBreak(live, true); err != nil {
 		t.Fatalf("live break with --force must succeed: %v", err)
 	}
 }

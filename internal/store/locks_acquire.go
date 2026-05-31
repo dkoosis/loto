@@ -194,10 +194,13 @@ func validateFileTarget(p string) error {
 }
 
 func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, sorted []domain.LockRecord, now time.Time, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
+	// Bundle the (now, live) ambient pair once; ThisHost is set per-lock inside
+	// reclaimStaleAndCollectBlockers, where the acquiring lock's host is known.
+	ec := domain.EvalContext{Now: now, Live: live}
 	seen := map[string]bool{}
 	var blockers []domain.LockRecord
 	for i := range sorted {
-		bs, err := reclaimStaleAndCollectBlockers(ctx, tx, all, sorted[i], now, live)
+		bs, err := reclaimStaleAndCollectBlockers(ctx, tx, all, sorted[i], ec)
 		if err != nil {
 			return nil, err
 		}
@@ -251,15 +254,16 @@ func rollbackStripped(failedTarget domain.Target, failedErr error, stripped []st
 	return failures, restoreErrs
 }
 
-func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, l domain.LockRecord, now time.Time, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
+func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, l domain.LockRecord, ec domain.EvalContext) ([]domain.LockRecord, error) {
+	ec = ec.WithHost(l.Host)
 	var blockers []domain.LockRecord
 	for i := range all {
 		ex := &all[i]
 		if !domain.Overlap(ex.Target, l.Target) || ex.OwnerUUID == l.OwnerUUID {
 			continue
 		}
-		if domain.IsStale(*ex, now, l.Host, live) {
-			if err := reclaimStaleTx(ctx, tx, *ex, l.OwnerUUID, now); err != nil {
+		if ec.IsStale(*ex) {
+			if err := reclaimStaleTx(ctx, tx, *ex, l.OwnerUUID, ec.Now); err != nil {
 				return nil, err
 			}
 			continue
