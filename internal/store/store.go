@@ -71,15 +71,32 @@ func OpenContext(ctx context.Context, p string) (*Store, error) {
 // initial attempt fails with corruption/version mismatch.
 func acquireOpenLocks(ctx context.Context, p string) (*Store, error) {
 	if st, err := os.Stat(p); err == nil && st.Size() > 0 {
-		// Existing-DB path: no create race possible, so op-flock isn't
-		// needed. openWithRecovery may take recovery-lock alone.
-		return openWithRecovery(ctx, p)
+		// A non-empty file on disk is NOT proof the DB is usable: a
+		// concurrent first-Open creates the file and begins writing the
+		// schema/WAL well before it stamps user_version, so a peer that
+		// stats here mid-create would see size>0 and, on the old gate,
+		// skip op-flock straight into openWithRecovery — racing the
+		// in-flight create/migrate (loto-qev1: SQLITE_IOERR 1802,
+		// SQLITE_BUSY, or a user_version=0 mismatch that then triggered a
+		// bogus move-aside).
+		//
+		// Gate the fast lock-free path on the DB being PROVABLY initialized
+		// (user_version == schemaUserVersion), probed lock-free. Any probe
+		// error — including the transient I/O/BUSY of a mid-create DB — is
+		// treated as "not yet initialized" and falls through to the
+		// op-flock-guarded path, which serializes behind the create.
+		if dbInitialized(ctx, p) {
+			// Steady state: DB already stamped. No create race possible,
+			// so op-flock isn't needed. openWithRecovery may take
+			// recovery-lock alone.
+			return openWithRecovery(ctx, p)
+		}
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("stat db path: %w", err)
 	}
 
-	// Fresh-DB path: op-flock guards the create-race window, but is
-	// released before any recovery-lock acquire (gh#109).
+	// Fresh-or-mid-create path: op-flock guards the create-race window, but
+	// is released before any recovery-lock acquire (gh#109).
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir state dir: %w", err)
 	}
@@ -100,6 +117,33 @@ func acquireOpenLocks(ctx context.Context, p string) (*Store, error) {
 		return nil, openErr
 	}
 	return openWithRecovery(ctx, p)
+}
+
+// dbInitialized reports whether the DB at p is a fully-initialized loto store
+// — i.e. a lock-free read sees user_version == schemaUserVersion. It is the
+// gate for the fast lock-free Open path: only a stamped DB skips the op-flock.
+//
+// Crucially it is conservative on EVERY failure. A DB mid-create (concurrent
+// first-Open) may transiently return SQLITE_IOERR(1802)/SQLITE_BUSY or a stale
+// user_version=0; all of those return false here, routing the caller into the
+// op-flock-guarded path where it serializes behind the in-flight create rather
+// than racing it (loto-qev1). False negatives are cheap (one extra flock
+// acquire on an already-good DB under contention); a false positive would
+// reintroduce the race, so the bias is deliberate.
+func dbInitialized(ctx context.Context, p string) bool {
+	db, err := sql.Open("sqlite", connDSN(p))
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+	if err := db.PingContext(ctx); err != nil {
+		return false
+	}
+	var v int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&v); err != nil {
+		return false
+	}
+	return v == schemaUserVersion
 }
 
 // opFlockPathFor returns the op-flock path for a DB at p — used during

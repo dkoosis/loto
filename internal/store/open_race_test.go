@@ -10,7 +10,26 @@ import (
 // Concurrent first-Open: N goroutines hit Open() on a freshly-empty state
 // dir. All must succeed; the op-flock ensures exactly one initializes the
 // canonical schema and the rest reuse it.
+//
+// loto-qev1: the create-race window is narrow, so a single 16-way burst
+// only fails intermittently. Repeating the burst against a fresh temp dir
+// each iteration makes the SQLITE_IOERR(1802) / SQLITE_BUSY / stale
+// user_version race reliably reproducible in one `go test` run — and, post-
+// fix, reliably green.
 func TestOpen_ConcurrentFirstOpen(t *testing.T) {
+	const iterations = 40
+	for iter := range iterations {
+		if !runConcurrentFirstOpenBurst(t, iter) {
+			return // t.Fatalf already fired; stop the loop
+		}
+	}
+}
+
+// runConcurrentFirstOpenBurst races N goroutines on the first Open() of a
+// fresh DB and asserts all succeed. Returns false (after t.Fatalf) on any
+// failure so the caller stops looping.
+func runConcurrentFirstOpenBurst(t *testing.T, iter int) bool {
+	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "loto.db")
 
@@ -31,7 +50,7 @@ func TestOpen_ConcurrentFirstOpen(t *testing.T) {
 			start.Wait()
 			s, err := Open(dbPath)
 			if err != nil {
-				t.Logf("goroutine %d: Open err: %v", idx, err)
+				t.Logf("iter %d goroutine %d: Open err: %v", iter, idx, err)
 				fail.Add(1)
 				return
 			}
@@ -50,6 +69,8 @@ func TestOpen_ConcurrentFirstOpen(t *testing.T) {
 	}
 
 	if ok.Load() != N {
-		t.Fatalf("ok=%d (want %d), fail=%d", ok.Load(), N, fail.Load())
+		t.Fatalf("iter %d: ok=%d (want %d), fail=%d", iter, ok.Load(), N, fail.Load())
+		return false
 	}
+	return true
 }
