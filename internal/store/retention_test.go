@@ -8,6 +8,24 @@ import (
 	"loto/internal/domain"
 )
 
+// rotateEventsNow drives the same-package rotateEventsTx in its own committed
+// tx — the production seam exercised by AcquireLocks and `doctor --repair`.
+// Replaces the former test-only Store.RotateEvents export (loto-qnz8).
+func rotateEventsNow(ctx context.Context, t *testing.T, s *Store) {
+	t.Helper()
+	tx, cleanup, err := s.beginTx(ctx)
+	if err != nil {
+		t.Fatalf("beginTx: %v", err)
+	}
+	defer cleanup()
+	if err := rotateEventsTx(ctx, tx, time.Now()); err != nil {
+		t.Fatalf("rotateEventsTx: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
 // Cap by count: > 1000 events present, rotate trims to exactly 1000 (newest).
 func TestRotateEvents_CapByCount(t *testing.T) {
 	s := mustOpen(t)
@@ -28,9 +46,7 @@ func TestRotateEvents_CapByCount(t *testing.T) {
 		}
 	}
 
-	if err := s.RotateEvents(ctx); err != nil {
-		t.Fatalf("RotateEvents: %v", err)
-	}
+	rotateEventsNow(ctx, t, s)
 
 	got, err := s.ListEvents(ctx)
 	if err != nil {
@@ -94,9 +110,7 @@ func TestRotateEvents_CapByCount_TieDeterminism(t *testing.T) {
 		}
 	}
 
-	if err := s.RotateEvents(ctx); err != nil {
-		t.Fatalf("RotateEvents: %v", err)
-	}
+	rotateEventsNow(ctx, t, s)
 
 	got, err := s.ListEvents(ctx)
 	if err != nil {
@@ -155,9 +169,7 @@ func TestRotateEvents_CapByAge(t *testing.T) {
 		}
 	}
 
-	if err := s.RotateEvents(ctx); err != nil {
-		t.Fatal(err)
-	}
+	rotateEventsNow(ctx, t, s)
 
 	got, err := s.ListEvents(ctx)
 	if err != nil {
