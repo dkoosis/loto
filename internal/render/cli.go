@@ -6,6 +6,7 @@
 package render
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -198,7 +199,53 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 		case store.StateNotOwner:
 			fmt.Fprintf(w, "✗ target=%s state=not-owner holder=%s\n", path, r.Holder)
 		case store.StateRestoreFailed:
-			fmt.Fprintf(w, "⚠ target=%s state=restore-failed err=%q\n", path, errString(r.RestoreErr))
+			if r.AuditErr != nil {
+				// The mode_restore_failed audit event was itself lost — surface
+				// the trail hole so the operator can re-emit or alert (gh#107).
+				fmt.Fprintf(w, "⚠ target=%s state=restore-failed err=%q audit-hole=%q\n",
+					path, errString(r.RestoreErr), errString(r.AuditErr))
+			} else {
+				fmt.Fprintf(w, "⚠ target=%s state=restore-failed err=%q\n", path, errString(r.RestoreErr))
+			}
+		}
+	}
+	return exit
+}
+
+// EmitBreakResults renders per-target outcomes of `unlock --force` (BreakLocks).
+// Clean breaks go to outW; problems — missing lock, authorize/break errors, a
+// post-break write-mode restore failure, and a lost mode_restore_failed audit
+// event — go to errW. Returns the suggested exit code. Surfaces RestoreErr and
+// AuditErr (gh#107), which the prior inline renderer dropped: a forced break
+// that left the file read-only, or whose audit event was lost, was silently
+// reported as a clean "✓ broken".
+func EmitBreakResults(outW, errW io.Writer, results []store.BreakResult) int {
+	cwd := getCwd()
+	exit := 0
+	for _, r := range results {
+		path := relToCwd(r.Target.Canonical, cwd)
+		switch {
+		case r.Err == nil && r.RestoreErr != nil:
+			if r.AuditErr != nil {
+				fmt.Fprintf(errW, "⚠ broken target=%s state=restore-failed err=%q audit-hole=%q\n",
+					path, errString(r.RestoreErr), errString(r.AuditErr))
+			} else {
+				fmt.Fprintf(errW, "⚠ broken target=%s state=restore-failed err=%q\n",
+					path, errString(r.RestoreErr))
+			}
+			if exit < 1 {
+				exit = 1
+			}
+		case r.Err == nil:
+			fmt.Fprintf(outW, "✓ broken target=%s\n", path)
+		case errors.Is(r.Err, store.ErrNoLockAtTarget):
+			fmt.Fprintf(errW, "✗ no lock at target=%s\n", path)
+			if exit < 1 {
+				exit = 1
+			}
+		default:
+			fmt.Fprintf(errW, "✗ target=%s err=%v\n", path, r.Err)
+			exit = 3
 		}
 	}
 	return exit

@@ -12,13 +12,23 @@ import (
 	"loto/internal/store"
 )
 
-const aGo = "a.go"
+const (
+	aGo = "a.go"
+	bGo = "b.go"
+	cGo = "c.go"
+)
 
 var errPermissionDenied error = permDeniedError{}
 
 type permDeniedError struct{}
 
 func (permDeniedError) Error() string { return "permission denied" }
+
+var errAuditWriteFailed error = auditWriteError{}
+
+type auditWriteError struct{}
+
+func (auditWriteError) Error() string { return "audit-write failed: database is closed" }
 
 func TestEmitLockSuccess_SortedDeterministic(t *testing.T) {
 	var buf bytes.Buffer
@@ -42,7 +52,7 @@ func TestEmitConflict_TriageFirst(t *testing.T) {
 	EmitConflict(&buf, &store.MultiConflictError{
 		Blockers: []domain.LockRecord{
 			{Target: domain.Target{Canonical: aGo}, OwnerUUID: "Green", Intent: "x", ExpiresAt: now},
-			{Target: domain.Target{Canonical: "c.go"}, OwnerUUID: "Red", Intent: "y", ExpiresAt: now},
+			{Target: domain.Target{Canonical: cGo}, OwnerUUID: "Red", Intent: "y", ExpiresAt: now},
 		},
 	})
 	got := buf.String()
@@ -65,8 +75,8 @@ func TestEmitReleaseResults_MixedOutcomes(t *testing.T) {
 	var buf bytes.Buffer
 	exit := EmitReleaseResults(&buf, []store.ReleaseResult{
 		{Target: domain.Target{Canonical: aGo}, State: store.StateUnlocked},
-		{Target: domain.Target{Canonical: "b.go"}, State: store.StateNoLock},
-		{Target: domain.Target{Canonical: "c.go"}, State: store.StateNotOwner, Holder: "BlueOak"},
+		{Target: domain.Target{Canonical: bGo}, State: store.StateNoLock},
+		{Target: domain.Target{Canonical: cGo}, State: store.StateNotOwner, Holder: "BlueOak"},
 	})
 	if exit != 1 {
 		t.Errorf("any not-owner → exit 1, got %d", exit)
@@ -80,6 +90,62 @@ func TestEmitReleaseResults_MixedOutcomes(t *testing.T) {
 	}
 	if !strings.Contains(got, "holder=BlueOak") {
 		t.Errorf("missing holder: %s", got)
+	}
+}
+
+// TestEmitReleaseResults_SurfacesAuditHole covers loto-vmym's sibling loto-c6rg:
+// a restore-failed release whose mode_restore_failed audit event was also lost
+// must surface the audit hole to the operator (gh#107), not just the restore
+// error. Pre-fix, ReleaseResult.AuditErr was populated but never rendered.
+func TestEmitReleaseResults_SurfacesAuditHole(t *testing.T) {
+	var buf bytes.Buffer
+	exit := EmitReleaseResults(&buf, []store.ReleaseResult{
+		{
+			Target:     domain.Target{Canonical: aGo},
+			State:      store.StateRestoreFailed,
+			RestoreErr: errPermissionDenied,
+			AuditErr:   errAuditWriteFailed,
+		},
+	})
+	if exit != 1 {
+		t.Errorf("restore-failed → exit 1, got %d", exit)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "state=restore-failed") {
+		t.Errorf("missing restore-failed state: %s", got)
+	}
+	if !strings.Contains(got, "audit-hole=") {
+		t.Errorf("AuditErr must surface as audit-hole (gh#107): %s", got)
+	}
+}
+
+// TestEmitBreakResults_SurfacesRestoreAndAuditHoles covers loto-c6rg on the
+// break path: unlock --force results carry RestoreErr/AuditErr that the prior
+// inline renderer dropped — a forced break that left a file read-only or lost
+// its audit event was silently reported as a clean "✓ broken".
+func TestEmitBreakResults_SurfacesRestoreAndAuditHoles(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	exit := EmitBreakResults(&out, &errBuf, []store.BreakResult{
+		{Target: domain.Target{Canonical: aGo}}, // clean break
+		{
+			Target:     domain.Target{Canonical: bGo},
+			RestoreErr: errPermissionDenied,
+			AuditErr:   errAuditWriteFailed,
+		},
+		{Target: domain.Target{Canonical: cGo}, Err: store.ErrNoLockAtTarget},
+	})
+	if exit != 1 {
+		t.Errorf("restore-failed or no-lock → exit 1, got %d", exit)
+	}
+	if !strings.Contains(out.String(), "✓ broken target=a.go") {
+		t.Errorf("clean break must still report success on stdout: %s", out.String())
+	}
+	gotErr := errBuf.String()
+	if !strings.Contains(gotErr, "state=restore-failed") || !strings.Contains(gotErr, "audit-hole=") {
+		t.Errorf("break restore-failure + audit hole must surface on stderr (gh#107): %s", gotErr)
+	}
+	if !strings.Contains(gotErr, "no lock at target=c.go") {
+		t.Errorf("missing no-lock line: %s", gotErr)
 	}
 }
 
@@ -183,7 +249,7 @@ func TestEmitChmodFailure_FailedQuotedAndCountsErrOnly(t *testing.T) {
 	EmitChmodFailure(&buf, &store.ChmodFailureError{
 		Failures: []store.ChmodFailure{
 			{Target: domain.Target{Canonical: aGo}, Err: errPermissionDenied},
-			{Target: domain.Target{Canonical: "b.go"}, RolledBack: true},
+			{Target: domain.Target{Canonical: bGo}, RolledBack: true},
 		},
 	})
 	got := buf.String()

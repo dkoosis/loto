@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -85,22 +84,7 @@ func breakTargets(rt *runtime, args []string, intent, repoTop string, stdout, st
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	exit := 0
-	for _, r := range results {
-		switch {
-		case r.Err == nil:
-			fmt.Fprintf(stdout, "✓ broken target=%s\n", relPath(r.Target.Canonical))
-		case errors.Is(r.Err, store.ErrNoLockAtTarget):
-			fmt.Fprintf(stderr, "✗ no lock at target=%s\n", relPath(r.Target.Canonical))
-			if exit < 1 {
-				exit = 1
-			}
-		default:
-			fmt.Fprintf(stderr, "✗ target=%s err=%v\n", relPath(r.Target.Canonical), r.Err)
-			exit = 3
-		}
-	}
-	return exit
+	return render.EmitBreakResults(stdout, stderr, results)
 }
 
 func resolveUnlockArgs(args []string, repoTop string, stderr io.Writer) ([]domain.Target, int) {
