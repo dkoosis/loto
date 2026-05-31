@@ -121,7 +121,7 @@ func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repo
 			invalid = append(invalid, checkInvalid{Path: raw, Reason: classifyCanonicalizeErr(err)})
 			continue
 		}
-		rows = appendCheckConflictsForTarget(rows, seen, t.Canonical, t, all, myUUID, now, host, live)
+		rows = appendCheckConflictsForTarget(rows, seen, t, all, myUUID, now, host, live)
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Path != rows[j].Path {
@@ -133,7 +133,7 @@ func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repo
 	return rows, invalid
 }
 
-func appendCheckConflictsForTarget(rows []checkConflict, seen map[string]bool, p string, t domain.Target, all []domain.LockRecord, myUUID string, now time.Time, host string, live domain.PidLiveProbe) []checkConflict {
+func appendCheckConflictsForTarget(rows []checkConflict, seen map[string]bool, t domain.Target, all []domain.LockRecord, myUUID string, now time.Time, host string, live domain.PidLiveProbe) []checkConflict {
 	for i := range all {
 		l := &all[i]
 		if l.OwnerUUID == myUUID || !domain.Overlap(l.Target, t) {
@@ -146,12 +146,12 @@ func appendCheckConflictsForTarget(rows []checkConflict, seen map[string]bool, p
 		if domain.IsStale(*l, now, host, live) {
 			continue
 		}
-		key := p + "|" + l.Target.Canonical + "|" + l.OwnerUUID
+		key := t.Canonical + "|" + l.Target.Canonical + "|" + l.OwnerUUID
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		rows = append(rows, checkConflict{Path: p, Blocker: all[i]})
+		rows = append(rows, checkConflict{Path: t.Canonical, Blocker: all[i]})
 	}
 	return rows
 }
