@@ -1,4 +1,10 @@
-Usage of lock:
+usage: loto lock <target> [<target>...] -t "why"
+
+Acquire a lock on one or more targets. -t (intent) is required.
+
+examples:
+  loto lock internal/store/store.go -t "store refactor"
+  loto lock a.go b.go -t "rename sweep"
   -intent string
     	intent (required)
   -t string

@@ -48,7 +48,12 @@ func writeGolden(path, content string) error {
 func helpCommandNames() []string {
 	names := make([]string, 0, len(registry))
 	for name := range registry {
-		if _, stderr, _ := executeCommand(name, "-h"); strings.Contains(stderr, "Usage of "+name+":") {
+		// A command participates in the help golden suite if `-h` emits a usage
+		// surface — either the flag-package default ("Usage of <name>:") or a
+		// hand-rolled teaching surface ("usage: loto <name>").
+		_, stderr, _ := executeCommand(name, "-h")
+		if strings.Contains(stderr, "Usage of "+name+":") ||
+			strings.Contains(stderr, "usage: loto "+name) {
 			names = append(names, name)
 		}
 	}

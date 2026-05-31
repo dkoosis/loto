@@ -36,6 +36,46 @@ func TestCmdTag_AddsExternalTag(t *testing.T) {
 	}
 }
 
+func TestCmdTag_WarnsWhenTextLacksBeadIDPrefix(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	must0(t, []string{tcCmdLock, tcTargetA, "-t", tcIntentTest})
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out, errBuf bytes.Buffer
+	// Free-text without a "bead-id:" prefix: accepted (exit 0, tag inserted)
+	// but warned, since the bead id is loto's tag-content convention.
+	code := Run([]string{tcCmdTag, tcTargetA, "want", "next"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("missing bead-id prefix must warn, not reject; exit=%d err=%q", code, errBuf.String())
+	}
+	if !strings.HasPrefix(out.String(), "✓ tag id=t-") {
+		t.Fatalf("tag must still be inserted; out=%q", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "∇") || !strings.Contains(errBuf.String(), "bead id") {
+		t.Fatalf("expected a bead-id convention warning on stderr; err=%q", errBuf.String())
+	}
+}
+
+func TestCmdTag_NoWarnWhenTextHasBeadIDPrefix(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	must0(t, []string{tcCmdLock, tcTargetA, "-t", tcIntentTest})
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out, errBuf bytes.Buffer
+	// Convention-following text: "<bead-id>: <ask>" — no warning.
+	code := Run([]string{tcCmdTag, tcTargetA, "loto-c6rg:", "want", "next"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("convention-following tag exit=%d err=%q", code, errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "∇") {
+		t.Fatalf("must not warn when bead-id prefix present; err=%q", errBuf.String())
+	}
+}
+
 func TestCmdTag_RejectsUnlockedTarget(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)

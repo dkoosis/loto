@@ -1,1 +1,10 @@
-Usage of tag:
+usage: loto tag <file> <text...>
+
+Leave a note on a target locked by another agent.
+
+Convention: open the text with your bead id, then a <=3-word ask.
+The bead id resolves epic/gh-issue via beads metadata — don't duplicate them.
+
+examples:
+  loto tag internal/store/store.go loto-c6rg: want next
+  loto tag a.go loto-5rwc: ETA?
