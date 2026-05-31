@@ -31,3 +31,6 @@ docs/feedback/
 # jscpd fo-render temp dir
 .jscpd-tmp/
 report/
+
+# fleet coordination heartbeats (ephemeral)
+.team/

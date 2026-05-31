@@ -199,17 +199,23 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 		case store.StateNotOwner:
 			fmt.Fprintf(w, "✗ target=%s state=not-owner holder=%s\n", path, r.Holder)
 		case store.StateRestoreFailed:
-			if r.AuditErr != nil {
-				// The mode_restore_failed audit event was itself lost — surface
-				// the trail hole so the operator can re-emit or alert (gh#107).
-				fmt.Fprintf(w, "⚠ target=%s state=restore-failed err=%q audit-hole=%q\n",
-					path, errString(r.RestoreErr), errString(r.AuditErr))
-			} else {
-				fmt.Fprintf(w, "⚠ target=%s state=restore-failed err=%q\n", path, errString(r.RestoreErr))
-			}
+			writeRestoreFailed(w, "target", path, r.RestoreErr, r.AuditErr)
 		}
 	}
 	return exit
+}
+
+// writeRestoreFailed renders a post-unlock write-mode restore failure. When the
+// mode_restore_failed audit event was itself lost, it appends the audit-hole
+// signal so the operator can re-emit or alert (gh#107). label distinguishes a
+// plain unlock ("target") from a forced break ("broken target").
+func writeRestoreFailed(w io.Writer, label, path string, restoreErr, auditErr error) {
+	if auditErr != nil {
+		fmt.Fprintf(w, "⚠ %s=%s state=restore-failed err=%q audit-hole=%q\n",
+			label, path, errString(restoreErr), errString(auditErr))
+		return
+	}
+	fmt.Fprintf(w, "⚠ %s=%s state=restore-failed err=%q\n", label, path, errString(restoreErr))
 }
 
 // EmitBreakResults renders per-target outcomes of `unlock --force` (BreakLocks).
@@ -226,13 +232,7 @@ func EmitBreakResults(outW, errW io.Writer, results []store.BreakResult) int {
 		path := relToCwd(r.Target.Canonical, cwd)
 		switch {
 		case r.Err == nil && r.RestoreErr != nil:
-			if r.AuditErr != nil {
-				fmt.Fprintf(errW, "⚠ broken target=%s state=restore-failed err=%q audit-hole=%q\n",
-					path, errString(r.RestoreErr), errString(r.AuditErr))
-			} else {
-				fmt.Fprintf(errW, "⚠ broken target=%s state=restore-failed err=%q\n",
-					path, errString(r.RestoreErr))
-			}
+			writeRestoreFailed(errW, "broken target", path, r.RestoreErr, r.AuditErr)
 			if exit < 1 {
 				exit = 1
 			}
