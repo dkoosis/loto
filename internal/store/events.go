@@ -12,27 +12,14 @@ import (
 const eventCols = `id,target_canonical,event_kind,actor_uuid,subject_uuid,reason,created_at`
 
 // Events retention: cap at 1000 rows AND 7 days; rows violating either rule
-// are deleted. Rotation runs opportunistically on each AcquireLocks call
-// (cheap, in-txn) and on demand via Store.RotateEvents (called by
-// `loto doctor --repair`).
+// are deleted. Rotation runs in-txn via rotateEventsTx — opportunistically on
+// each AcquireLocks call (cheap) and inside the `loto doctor --repair` tx.
 const (
 	eventsRetentionMax = 1000
 	eventsRetentionAge = 7 * 24 * time.Hour
 )
 
-// RotateEvents trims the events table per retention policy.
-func (s *Store) RotateEvents(ctx context.Context) error {
-	tx, cleanup, err := s.beginTx(ctx)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-	if err := rotateEventsTx(ctx, tx, time.Now()); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
+// rotateEventsTx trims the events table per retention policy, in the caller's tx.
 func rotateEventsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	cutoffNs := now.Add(-eventsRetentionAge).UnixNano()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE created_at < ?`, cutoffNs); err != nil {
