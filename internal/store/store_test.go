@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"loto/internal/domain"
 )
 
 func TestOpenAppliesSchemaIdempotently(t *testing.T) {
@@ -72,6 +75,59 @@ func TestOpen_WipesOnUserVersionMismatch(t *testing.T) {
 	matches, _ := filepath.Glob(path + ".corrupt.*")
 	if len(matches) != 1 {
 		t.Errorf("expected 1 aside file, got %d", len(matches))
+	}
+}
+
+// TestOpen_RecoversStaleVersionOnIntactSchema covers loto-vmym: a DB whose
+// schema is structurally intact but whose user_version is stale (a crash
+// between the schema-tx commit and the user_version PRAGMA write, or a DB
+// created before schemaUserVersion was bumped) must re-migrate in place — NOT
+// move aside, which destroys live locks. Contrast TestOpen_WipesOnUserVersion-
+// Mismatch, which uses a FOREIGN schema (no real `locks` table) and correctly
+// wipes.
+func TestOpen_RecoversStaleVersionOnIntactSchema(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "loto.db")
+
+	// Build a real loto DB carrying a live lock, then stamp a stale version.
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+	live := func(string, int, int64) bool { return true }
+	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{l}, live); err != nil {
+		t.Fatalf("seed acquire: %v", err)
+	}
+	// Simulate the window: schema present, user_version behind current.
+	if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaUserVersion-1)); err != nil {
+		t.Fatalf("stamp stale version: %v", err)
+	}
+	s.Close()
+
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s2.Close()
+
+	// The live lock must survive — proof the DB re-migrated, not move-aside'd.
+	locks, err := s2.ListLocks(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locks) != 1 {
+		t.Errorf("live lock destroyed: got %d locks, want 1 (DB move-aside'd?)", len(locks))
+	}
+	if matches, _ := filepath.Glob(path + ".corrupt.*"); len(matches) != 0 {
+		t.Errorf("DB moved aside (%d aside files); expected in-place re-migrate", len(matches))
+	}
+	var v int
+	if err := s2.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != schemaUserVersion {
+		t.Errorf("user_version = %d after recovery, want %d", v, schemaUserVersion)
 	}
 }
 

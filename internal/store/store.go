@@ -163,7 +163,15 @@ func openOnce(ctx context.Context, p string) (*Store, error) {
 			db.Close()
 			return nil, fmt.Errorf("read user_version: %w", err)
 		}
-		if v != schemaUserVersion {
+		// A version mismatch only forces move-aside when the DB is genuinely
+		// incompatible. A STALE version (below current) on a structurally-intact
+		// loto schema is the loto-vmym window: a crash between the schema-tx
+		// commit and the separate user_version PRAGMA write, or a DB created
+		// before schemaUserVersion was bumped. Those re-migrate idempotently in
+		// place (migrate re-stamps the version) rather than destroying live
+		// locks. A FUTURE version (above current), or a foreign schema with no
+		// `locks` table, is still moved aside.
+		if v != schemaUserVersion && (v > schemaUserVersion || !schemaStructurallyIntact(ctx, db)) {
 			db.Close()
 			return nil, fmt.Errorf("%w: have %d, want %d", errUserVersionMismatch, v, schemaUserVersion)
 		}
@@ -195,6 +203,18 @@ func isCorruptDB(err error) bool {
 }
 
 func isUserVersionMismatch(err error) bool { return errors.Is(err, errUserVersionMismatch) }
+
+// schemaStructurallyIntact reports whether the core loto `locks` table exists,
+// the sentinel for "this is a loto DB with a stale version stamp" vs "a foreign
+// or incompatibly-old DB". Used by the openOnce version gate (loto-vmym) to
+// decide re-migrate-in-place over destructive move-aside. A probe failure is
+// treated as not-intact (conservative: prefer move-aside on an unreadable DB).
+func schemaStructurallyIntact(ctx context.Context, db *sql.DB) bool {
+	var name string
+	err := db.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='locks'`).Scan(&name)
+	return err == nil && name == "locks"
+}
 
 func (s *Store) Close() error { return s.db.Close() }
 
@@ -278,7 +298,9 @@ func (s *Store) opFlockPath() string {
 // in a separate statement. PRAGMA user_version is not transactional in
 // SQLite (it takes effect immediately regardless of tx state), so it runs
 // after the DDL tx commits. If a crash occurs between commit and PRAGMA,
-// the next Open re-runs migrate (all DDL is IF NOT EXISTS) and retries.
+// the schema is intact but user_version is stale; openOnce's gate detects
+// that (stale version + present `locks` table) and routes the next Open back
+// through this idempotent migrate, which re-stamps user_version (loto-vmym).
 func (s *Store) migrate(ctx context.Context) error {
 	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {

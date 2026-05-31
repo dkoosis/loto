@@ -1,5 +1,6 @@
 -- loto v5 schema. Applied on every Open(); all DDL is IF NOT EXISTS so re-apply
--- is a no-op. PRAGMA user_version mismatch triggers MoveCorruptAside (start fresh).
+-- is a no-op. A STALE user_version on this intact schema re-migrates in place
+-- (loto-vmym); only a future version or a foreign schema triggers MoveCorruptAside.
 
 CREATE TABLE IF NOT EXISTS locks (
   target_canonical TEXT PRIMARY KEY,
