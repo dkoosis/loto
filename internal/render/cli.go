@@ -34,6 +34,32 @@ func holderTag(uuid string) string {
 	return uuid
 }
 
+// holderMemo caches holderTag results within a single render pass. Each
+// EmitConflictWithTags / EmitTagFooter call resolves a given UUID once —
+// identity.LookupByUUID does a ReadFile+Unmarshal, so without the memo a
+// blocker list or tag footer sharing a holder UUID was an N+1 (loto-kyib).
+// The zero value is usable; a nil resolve defaults to holderTag.
+type holderMemo struct {
+	cache   map[string]string
+	resolve func(uuid string) string // overridable for tests; nil → holderTag
+}
+
+func (m *holderMemo) tag(uuid string) string {
+	if v, ok := m.cache[uuid]; ok {
+		return v
+	}
+	r := m.resolve
+	if r == nil {
+		r = holderTag
+	}
+	v := r(uuid)
+	if m.cache == nil {
+		m.cache = make(map[string]string)
+	}
+	m.cache[uuid] = v
+	return v
+}
+
 // relToCwd returns p relative to cwd when p is absolute and the relative form
 // is a clean descent (doesn't escape cwd). Relative inputs are returned as-is,
 // since the store enforces repo-relative canonical paths and any conversion
@@ -72,15 +98,12 @@ func EmitLockSuccess(w io.Writer, targets []domain.Target) {
 	}
 }
 
-func EmitConflict(w io.Writer, ce *store.MultiConflictError) {
-	EmitConflictWithTags(w, ce, nil)
-}
-
-// EmitConflictWithTags renders the same conflict block as EmitConflict and, for
-// each blocker, appends pending tags from tagsByTarget[canonical] as `ℹ tag …`
-// rows beneath the `⚠ target=…` line. Pass nil to suppress tag surfacing.
+// EmitConflictWithTags renders the conflict block and, for each blocker,
+// appends pending tags from tagsByTarget[canonical] as `ℹ tag …` rows beneath
+// the `⚠ target=…` line. Pass nil to suppress tag surfacing.
 func EmitConflictWithTags(w io.Writer, ce *store.MultiConflictError, tagsByTarget map[string][]store.Tag) {
 	cwd := getCwd()
+	holders := &holderMemo{}
 	blockers := append([]domain.LockRecord(nil), ce.Blockers...)
 	sort.Slice(blockers, func(i, j int) bool {
 		return blockers[i].Target.Canonical < blockers[j].Target.Canonical
@@ -89,10 +112,10 @@ func EmitConflictWithTags(w io.Writer, ce *store.MultiConflictError, tagsByTarge
 	for i := range blockers {
 		b := &blockers[i]
 		fmt.Fprintf(w, "⚠ target=%s blocker=%s intent=%q expires_at=%s\n",
-			relToCwd(b.Target.Canonical, cwd), holderTag(b.OwnerUUID), b.Intent,
+			relToCwd(b.Target.Canonical, cwd), holders.tag(b.OwnerUUID), b.Intent,
 			b.ExpiresAt.UTC().Format(time.RFC3339))
 		for _, t := range tagsByTarget[b.Target.Canonical] {
-			emitTagRow(w, t, "  ")
+			emitTagRow(w, t, "  ", cwd, holders)
 		}
 	}
 }
@@ -105,9 +128,11 @@ func EmitTagFooter(w io.Writer, tags []store.Tag, holderUUID string) {
 	if len(tags) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "ℹ tags count=%d holder=%s\n", len(tags), holderTag(holderUUID))
+	cwd := getCwd()
+	holders := &holderMemo{}
+	fmt.Fprintf(w, "ℹ tags count=%d holder=%s\n", len(tags), holders.tag(holderUUID))
 	for _, t := range tags {
-		emitTagRow(w, t, "")
+		emitTagRow(w, t, "", cwd, holders)
 	}
 }
 
@@ -115,16 +140,20 @@ func EmitTagFooter(w io.Writer, tags []store.Tag, holderUUID string) {
 // blocks beneath a per-file status line where the surrounding context already
 // names the target. Empty input emits nothing.
 func EmitTagRows(w io.Writer, tags []store.Tag) {
+	cwd := getCwd()
+	holders := &holderMemo{}
 	for _, t := range tags {
-		emitTagRow(w, t, "  ")
+		emitTagRow(w, t, "  ", cwd, holders)
 	}
 }
 
-func emitTagRow(w io.Writer, t store.Tag, indent string) {
-	cwd := getCwd()
+// emitTagRow renders one tag line. cwd and holders are passed in so callers
+// hoist the os.Getwd() syscall and identity lookups out of their loops
+// (the file convention documented on relToCwd; loto-kyib).
+func emitTagRow(w io.Writer, t store.Tag, indent, cwd string, holders *holderMemo) {
 	at := time.Unix(0, t.CreatedAt).UTC().Format(time.RFC3339)
 	fmt.Fprintf(w, "ℹ %stag id=%s at=%s from=%s target=%s text=%q\n",
-		indent, t.ID, at, holderTag(t.TaggerUUID), relToCwd(t.TargetCanonical, cwd), t.Text)
+		indent, t.ID, at, holders.tag(t.TaggerUUID), relToCwd(t.TargetCanonical, cwd), t.Text)
 }
 
 func EmitChmodFailure(w io.Writer, cfe *store.ChmodFailureError) {
