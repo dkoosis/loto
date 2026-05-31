@@ -136,9 +136,9 @@ func dbInitialized(ctx context.Context, p string) bool {
 		return false
 	}
 	defer db.Close()
-	if err := db.PingContext(ctx); err != nil {
-		return false
-	}
+	// No separate PingContext: QueryRowContext establishes the connection and
+	// its error covers the same transient mid-create failures (IOERR/BUSY),
+	// so a dedicated ping would only double the fast-path round-trips.
 	var v int
 	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&v); err != nil {
 		return false

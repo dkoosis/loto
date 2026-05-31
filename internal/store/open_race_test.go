@@ -19,16 +19,14 @@ import (
 func TestOpen_ConcurrentFirstOpen(t *testing.T) {
 	const iterations = 40
 	for iter := range iterations {
-		if !runConcurrentFirstOpenBurst(t, iter) {
-			return // t.Fatalf already fired; stop the loop
-		}
+		runConcurrentFirstOpenBurst(t, iter)
 	}
 }
 
 // runConcurrentFirstOpenBurst races N goroutines on the first Open() of a
-// fresh DB and asserts all succeed. Returns false (after t.Fatalf) on any
-// failure so the caller stops looping.
-func runConcurrentFirstOpenBurst(t *testing.T, iter int) bool {
+// fresh DB and asserts all succeed. A failure calls t.Fatalf, which ends the
+// test (and the iteration loop) via runtime.Goexit.
+func runConcurrentFirstOpenBurst(t *testing.T, iter int) {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "loto.db")
@@ -70,7 +68,5 @@ func runConcurrentFirstOpenBurst(t *testing.T, iter int) bool {
 
 	if ok.Load() != N {
 		t.Fatalf("iter %d: ok=%d (want %d), fail=%d", iter, ok.Load(), N, fail.Load())
-		return false
 	}
-	return true
 }
