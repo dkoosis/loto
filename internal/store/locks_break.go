@@ -50,13 +50,14 @@ func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, byAgent
 	}
 
 	now := time.Now()
+	ec := domain.EvalContext{Now: now, ThisHost: thisHost, Live: live}
 	force := mode == BreakForce
 	kind := EventLockBroken
 	if !force {
 		kind = EventLockReclaimedStale
 	}
 
-	results, events, deleteByOwner := classifyBreaks(targets, existing, byAgent, force, kind, reason, now, thisHost, live)
+	results, events, deleteByOwner := classifyBreaks(targets, existing, byAgent, force, kind, reason, ec)
 
 	if len(events) > 0 {
 		if err := appendEventsTx(ctx, tx, events); err != nil {
@@ -87,9 +88,7 @@ func classifyBreaks(
 	force bool,
 	kind string,
 	reason string,
-	now time.Time,
-	thisHost string,
-	live domain.PidLiveProbe,
+	ec domain.EvalContext,
 ) (results []BreakResult, events []domain.Event, deleteByOwner map[string][]string) {
 	results = make([]BreakResult, len(targets))
 	deleteByOwner = map[string][]string{}
@@ -100,7 +99,7 @@ func classifyBreaks(
 			results[i].Err = ErrNoLockAtTarget
 			continue
 		}
-		if err := domain.AuthorizeBreak(l, force, now, thisHost, live); err != nil {
+		if err := ec.AuthorizeBreak(l, force); err != nil {
 			results[i].Err = err
 			continue
 		}
@@ -110,7 +109,7 @@ func classifyBreaks(
 			ActorUUID:   byAgent,
 			SubjectUUID: l.OwnerUUID,
 			Reason:      reason,
-			CreatedAt:   now,
+			CreatedAt:   ec.Now,
 		})
 		deleteByOwner[l.OwnerUUID] = append(deleteByOwner[l.OwnerUUID], t.Canonical)
 	}

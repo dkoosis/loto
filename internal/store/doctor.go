@@ -47,9 +47,9 @@ func (s *Store) DoctorAuditWith(ctx context.Context, thisHost string, live domai
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
+	ec := domain.EvalContext{Now: time.Now(), ThisHost: thisHost, Live: live}
 	for i := range locks {
-		if domain.IsStale(locks[i], now, thisHost, live) {
+		if ec.IsStale(locks[i]) {
 			r.StaleLocks = append(r.StaleLocks, locks[i])
 			continue
 		}
@@ -142,9 +142,10 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 		return err
 	}
 	now := time.Now()
+	ec := domain.EvalContext{Now: now, ThisHost: thisHost, Live: live}
 	var reclaimed []string
 	for i := range all {
-		if domain.IsStale(all[i], now, thisHost, live) {
+		if ec.IsStale(all[i]) {
 			if err := reclaimStaleTx(ctx, tx, all[i], byAgent, now); err != nil {
 				return err
 			}

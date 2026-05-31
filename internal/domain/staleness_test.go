@@ -11,26 +11,30 @@ func TestIsStale(t *testing.T) {
 	dead := func(string, int, int64) bool { return false }
 
 	t.Run("past TTL is stale", func(t *testing.T) {
+		ctx := EvalContext{Now: now, ThisHost: "h", Live: live}
 		l := LockRecord{ExpiresAt: now.Add(-time.Minute), Host: "h", PID: 1}
-		if !IsStale(l, now, "h", live) {
+		if !ctx.IsStale(l) {
 			t.Fatal("past TTL must be stale")
 		}
 	})
 	t.Run("dead pid same host is stale even when TTL not reached", func(t *testing.T) {
+		ctx := EvalContext{Now: now, ThisHost: "h", Live: dead}
 		l := LockRecord{ExpiresAt: now.Add(time.Hour), Host: "h", PID: 1}
-		if !IsStale(l, now, "h", dead) {
+		if !ctx.IsStale(l) {
 			t.Fatal("dead pid on same host must be stale")
 		}
 	})
 	t.Run("dead pid other host is NOT stale (out of scope)", func(t *testing.T) {
+		ctx := EvalContext{Now: now, ThisHost: "this", Live: dead}
 		l := LockRecord{ExpiresAt: now.Add(time.Hour), Host: "other", PID: 1}
-		if IsStale(l, now, "this", dead) {
+		if ctx.IsStale(l) {
 			t.Fatal("dead pid on other host must not stale-flag")
 		}
 	})
 	t.Run("live and within TTL is not stale", func(t *testing.T) {
+		ctx := EvalContext{Now: now, ThisHost: "h", Live: live}
 		l := LockRecord{ExpiresAt: now.Add(time.Hour), Host: "h", PID: 1}
-		if IsStale(l, now, "h", live) {
+		if ctx.IsStale(l) {
 			t.Fatal("live within TTL must not be stale")
 		}
 	})
@@ -47,20 +51,23 @@ func TestIsStale(t *testing.T) {
 	}
 
 	t.Run("recycled pid (stored start differs from occupant) is stale", func(t *testing.T) {
+		ctx := EvalContext{Now: now, ThisHost: "h", Live: recycleAware}
 		l := LockRecord{ExpiresAt: now.Add(time.Hour), Host: "h", PID: 1, ProcStart: 4000}
-		if !IsStale(l, now, "h", recycleAware) {
+		if !ctx.IsStale(l) {
 			t.Fatal("recycled pid (start mismatch) must be stale")
 		}
 	})
 	t.Run("matching start-time is not stale", func(t *testing.T) {
+		ctx := EvalContext{Now: now, ThisHost: "h", Live: recycleAware}
 		l := LockRecord{ExpiresAt: now.Add(time.Hour), Host: "h", PID: 1, ProcStart: 5000}
-		if IsStale(l, now, "h", recycleAware) {
+		if ctx.IsStale(l) {
 			t.Fatal("matching start-time must not be stale")
 		}
 	})
 	t.Run("legacy row (ProcStart 0) falls back to pid-alive-only", func(t *testing.T) {
+		ctx := EvalContext{Now: now, ThisHost: "h", Live: recycleAware}
 		l := LockRecord{ExpiresAt: now.Add(time.Hour), Host: "h", PID: 1, ProcStart: 0}
-		if IsStale(l, now, "h", recycleAware) {
+		if ctx.IsStale(l) {
 			t.Fatal("unknown start-time (legacy) must fall back to pid-alive: not stale when alive")
 		}
 	})

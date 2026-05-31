@@ -1,17 +1,16 @@
 package domain
 
-import (
-	"errors"
-	"time"
-)
+import "errors"
 
 var ErrLiveLockNoForce = errors.New("lock is live; --force required")
 
-func AuthorizeBreak(l LockRecord, force bool, now time.Time, thisHost string, live PidLiveProbe) error {
+// AuthorizeBreak permits breaking a lock when force is set or the lock is stale
+// under the evaluation context; otherwise a live lock requires --force.
+func (c EvalContext) AuthorizeBreak(l LockRecord, force bool) error {
 	if force {
 		return nil
 	}
-	if IsStale(l, now, thisHost, live) {
+	if c.IsStale(l) {
 		return nil
 	}
 	return ErrLiveLockNoForce
