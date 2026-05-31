@@ -19,9 +19,24 @@ func init() { //nolint:gochecknoinits // command registry pattern
 	register("lock", cmdLock)
 }
 
+// lockUsageHead is the point-of-use teaching surface for lock (loto-5rwc):
+// usage line plus worked examples. The flag list is appended by PrintDefaults.
+const lockUsageHead = `usage: loto lock <target> [<target>...] -t "why"
+
+Acquire a lock on one or more targets. -t (intent) is required.
+
+examples:
+  loto lock internal/store/store.go -t "store refactor"
+  loto lock a.go b.go -t "rename sweep"
+`
+
 func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("lock", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprint(stderr, lockUsageHead)
+		fs.PrintDefaults()
+	}
 	ttl := fs.Duration("ttl", 30*time.Minute, "lock TTL")
 	intent := fs.String("t", "", "intent (required)")
 	fs.StringVar(intent, "intent", "", "intent (required)")
