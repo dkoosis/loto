@@ -2,7 +2,7 @@ package domain
 
 import "testing"
 
-func TestOverlap(t *testing.T) {
+func TestSameCanonical(t *testing.T) {
 	cases := []struct {
 		a, b string
 		want bool
@@ -17,11 +17,11 @@ func TestOverlap(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			ta, _ := Canonicalize(c.a)
 			tb, _ := Canonicalize(c.b)
-			if got := Overlap(ta, tb); got != c.want {
-				t.Errorf("Overlap(%q,%q) = %v; want %v", c.a, c.b, got, c.want)
+			if got := SameCanonical(ta, tb); got != c.want {
+				t.Errorf("SameCanonical(%q,%q) = %v; want %v", c.a, c.b, got, c.want)
 			}
-			if got := Overlap(tb, ta); got != c.want {
-				t.Errorf("Overlap(%q,%q) symmetry = %v; want %v", c.b, c.a, got, c.want)
+			if got := SameCanonical(tb, ta); got != c.want {
+				t.Errorf("SameCanonical(%q,%q) symmetry = %v; want %v", c.b, c.a, got, c.want)
 			}
 		})
 	}

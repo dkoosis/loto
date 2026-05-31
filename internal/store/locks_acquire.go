@@ -259,7 +259,7 @@ func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domai
 	var blockers []domain.LockRecord
 	for i := range all {
 		ex := &all[i]
-		if !domain.Overlap(ex.Target, l.Target) || ex.OwnerUUID == l.OwnerUUID {
+		if !domain.SameCanonical(ex.Target, l.Target) || ex.OwnerUUID == l.OwnerUUID {
 			continue
 		}
 		if ec.IsStale(*ex) {

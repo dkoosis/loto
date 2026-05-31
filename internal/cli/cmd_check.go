@@ -137,7 +137,7 @@ func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repo
 func appendCheckConflictsForTarget(rows []checkConflict, seen map[string]bool, t domain.Target, all []domain.LockRecord, myUUID string, ec domain.EvalContext) []checkConflict {
 	for i := range all {
 		l := &all[i]
-		if l.OwnerUUID == myUUID || !domain.Overlap(l.Target, t) {
+		if l.OwnerUUID == myUUID || !domain.SameCanonical(l.Target, t) {
 			continue
 		}
 		// A stale/dead-PID holder is reclaimable: AcquireLocks would silently

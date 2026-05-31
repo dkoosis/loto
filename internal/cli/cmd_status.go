@@ -100,7 +100,7 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 	}
 	var overlapping []domain.LockRecord
 	for i := range all {
-		if domain.Overlap(all[i].Target, t) {
+		if domain.SameCanonical(all[i].Target, t) {
 			overlapping = append(overlapping, all[i])
 		}
 	}

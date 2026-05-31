@@ -1,7 +1,7 @@
 package domain
 
-// Overlap reports whether two canonical targets refer to the same path.
+// SameCanonical reports whether two targets share the same canonical path.
 // Paths are byte-compared; case-insensitive filesystems get OS resolution.
-func Overlap(a, b Target) bool {
+func SameCanonical(a, b Target) bool {
 	return a.Canonical == b.Canonical
 }
