@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS locks (
   mode             TEXT NOT NULL DEFAULT 'exclusive',
   PRIMARY KEY (target_canonical, owner_uuid)
 );
-CREATE INDEX IF NOT EXISTS idx_locks_target   ON locks(target_canonical);
+-- No standalone target_canonical index: the composite PK's automatic index has
+-- target_canonical as its leftmost column, so target-only lookups (the conflict
+-- probe's hot path) already use it.
 CREATE INDEX IF NOT EXISTS idx_locks_owner    ON locks(owner_uuid);
 CREATE INDEX IF NOT EXISTS idx_locks_session  ON locks(session_uuid);
 CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);

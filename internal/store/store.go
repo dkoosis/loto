@@ -300,22 +300,15 @@ func schemaFullyCurrent(ctx context.Context, db *sql.DB) bool {
 			return false
 		}
 	}
-	var n int
-	if err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM pragma_table_info('locks') WHERE name = 'proc_start'`).Scan(&n); err != nil {
-		return false
-	}
 	// loto-k5el.2: a v9 DB carrying the old single-column-PK / no-mode locks
-	// table is NOT fully current — without these probes migrate's fast path
-	// would skip ensureLocksModeAndPK and the rebuild would never run.
-	var modeN int
-	if err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM pragma_table_info('locks') WHERE name = 'mode'`).Scan(&modeN); err != nil {
-		return false
-	}
-	var pkCols int
-	if err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM pragma_table_info('locks') WHERE pk > 0`).Scan(&pkCols); err != nil {
+	// table is NOT fully current — without the mode + composite-PK probes
+	// migrate's fast path would skip ensureLocksModeAndPK and the rebuild would
+	// never run. All three locks-column facts come from one pragma_table_info
+	// scan (this gate runs on every Open, including read-only commands).
+	var procStartN, modeN, pkCols int
+	if err := db.QueryRowContext(ctx, `
+SELECT sum(name = 'proc_start'), sum(name = 'mode'), sum(pk > 0)
+FROM pragma_table_info('locks')`).Scan(&procStartN, &modeN, &pkCols); err != nil {
 		return false
 	}
 	// events CHECK must already admit lock_downgraded, else ensureEventsCheckCurrent
@@ -325,7 +318,7 @@ func schemaFullyCurrent(ctx context.Context, db *sql.DB) bool {
 		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&eventsDDL); err != nil {
 		return false
 	}
-	return n > 0 && modeN == 1 && pkCols == 2 && strings.Contains(eventsDDL, "lock_downgraded")
+	return procStartN > 0 && modeN == 1 && pkCols == 2 && strings.Contains(eventsDDL, "'lock_downgraded'")
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -533,7 +526,7 @@ SELECT target_canonical, owner_uuid, session_uuid, intent, created_at,
 FROM locks;
 DROP TABLE locks;
 ALTER TABLE locks_new RENAME TO locks;
-CREATE INDEX IF NOT EXISTS idx_locks_target   ON locks(target_canonical);
+-- target-only lookups ride the composite PK's leftmost column; no separate index.
 CREATE INDEX IF NOT EXISTS idx_locks_owner    ON locks(owner_uuid);
 CREATE INDEX IF NOT EXISTS idx_locks_session  ON locks(session_uuid);
 CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);`
@@ -552,7 +545,7 @@ func ensureEventsCheckCurrent(ctx context.Context, tx *sql.Tx) error {
 		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&ddl); err != nil {
 		return err
 	}
-	if strings.Contains(ddl, "lock_downgraded") {
+	if strings.Contains(ddl, "'lock_downgraded'") {
 		return nil // already current
 	}
 	const rebuild = `
