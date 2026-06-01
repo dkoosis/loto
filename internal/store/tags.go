@@ -205,12 +205,29 @@ func scanTags(rows *sql.Rows) ([]Tag, error) {
 	return out, rows.Err()
 }
 
+// ackClassifyHook fires between the UPDATE and the classifying SELECT inside
+// Ack. Production no-op; a test seam to drive a concurrent mutation into the
+// exact race window the immediate-mode tx must serialize against (loto-3c7y).
+var ackClassifyHook = func() {}
+
 // Ack marks one tag acked by byUUID. Idempotent: already-acked, orphaned, or
 // unknown IDs return nil (no-op). Returns ErrTagNotMine when the tag exists
 // but is addressed to a different holder.
 func (s *Store) Ack(ctx context.Context, tagID, byUUID string) error {
+	// The UPDATE and its 0-row classifying SELECT run in one immediate-mode tx
+	// so the SELECT reads the same snapshot the UPDATE matched against. A
+	// concurrent ReleaseLocks/gc (ackTagsForReleaseTx, gcTagsTx) takes the
+	// write lock at its own BeginTx and serializes behind ours, so classify
+	// can't see a reclaim+retag that landed mid-flight → deterministic result
+	// (nil or a stable error) for the same logical state (loto-3c7y).
+	tx, cleanup, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
 	now := time.Now().UnixNano()
-	res, err := s.db.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE tags SET acked_at = ?
 		WHERE id = ? AND lock_owner_uuid = ? AND acked_at IS NULL`,
 		now, tagID, byUUID)
@@ -222,13 +239,15 @@ func (s *Store) Ack(ctx context.Context, tagID, byUUID string) error {
 		return err
 	}
 	if n > 0 {
-		return nil
+		return commitTxFn(tx)
 	}
+
+	ackClassifyHook()
 
 	// 0 rows: either unknown id, already acked, or addressed to someone else.
 	var owner sql.NullString
 	var acked sql.NullInt64
-	err = s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT lock_owner_uuid, acked_at FROM tags WHERE id = ?`, tagID).Scan(&owner, &acked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil // unknown id → no-op (edge #11)

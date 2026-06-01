@@ -224,6 +224,87 @@ func TestAck_NotMine_Rejects(t *testing.T) {
 	}
 }
 
+// TestAck_ClassifyIsTransactional_RaceWithReclaim pins the loto-3c7y fix: the
+// 0-row-UPDATE classify path must read the SAME transactional snapshot as the
+// UPDATE. We drive a concurrent mutation into the window between the UPDATE and
+// the classifying SELECT (via the ackClassifyHook seam) that rewrites the tag's
+// lock_owner_uuid to a different holder — exactly the reclaim+retag race the
+// audit describes. The owner-of-record at UPDATE time is Alice and the tag is
+// already acked, so the only correct result is idempotent nil. The pre-fix
+// autocommit code lets the SELECT see Bob and misclassifies as ErrTagNotMine;
+// an immediate-mode tx serializes the writer behind the held lock so the SELECT
+// sees Alice. We assert deterministic nil across repeated runs.
+func TestAck_ClassifyIsTransactional_RaceWithReclaim(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
+	id, err := s.InsertTag(ctx, NewTag{
+		TargetCanonical: lock.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
+		TaggerUUID: tcBob, Text: tcPing,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Alice legitimately acks first → the racing Ack below hits 0 rows and must
+	// classify idempotently (already-acked → nil), not as not-mine.
+	if err := s.Ack(ctx, id, tcAlice); err != nil {
+		t.Fatalf("priming ack: %v", err)
+	}
+
+	orig := ackClassifyHook
+	defer func() { ackClassifyHook = orig }()
+	// raceDone is closed when the racing writer goroutine finishes; the test
+	// body waits on it after each Ack so the writer never leaks across
+	// iterations and hookErr is read with a happens-before edge.
+	var raceDone chan struct{}
+	var hookErr error
+	// The hook runs after the 0-row UPDATE and before the classifying SELECT.
+	// It opens a SEPARATE writer (s.db pool / fresh conn) and rewrites the
+	// owner — the reclaim-by-another-owner mutation. With the classify path in
+	// one immediate-mode tx, this writer blocks on the held write lock until
+	// the Ack tx commits, so it can never poison the snapshot the SELECT reads.
+	// Run it in a goroutine with a brief settle so the no-tx path (which does
+	// NOT hold a write lock) actually loses the race and the SELECT sees Bob.
+	ackClassifyHook = func() {
+		raceDone = make(chan struct{})
+		done := raceDone
+		go func() {
+			defer close(done)
+			if _, e := s.db.ExecContext(ctx,
+				`UPDATE tags SET lock_owner_uuid = ? WHERE id = ?`, tcBob, id); e != nil {
+				hookErr = e
+			}
+		}()
+		// Give the racing writer a chance to commit before the SELECT. Under
+		// the immediate-mode tx fix it is blocked on the write lock, so this is
+		// the writer waiting on us, not us waiting on it — the Ack proceeds and
+		// commits, then the writer lands harmlessly after.
+		select {
+		case <-done:
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	for i := range 5 {
+		// Reset owner to Alice and re-ack-prime before each iteration so every
+		// run exercises the same logical state (Alice owns, already acked).
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE tags SET lock_owner_uuid = ?, acked_at = ? WHERE id = ?`,
+			tcAlice, time.Now().UnixNano(), id); err != nil {
+			t.Fatalf("reset iter %d: %v", i, err)
+		}
+		if err := s.Ack(ctx, id, tcAlice); err != nil {
+			t.Fatalf("iter %d: Ack must be idempotent nil under reclaim race, got %v", i, err)
+		}
+		// Drain the racing writer before the next reset so its delayed UPDATE
+		// can't bleed into the following iteration and so hookErr is read safely.
+		<-raceDone
+		if hookErr != nil {
+			t.Fatalf("iter %d: hook mutation failed: %v", i, hookErr)
+		}
+	}
+}
+
 func TestOrphanFilter_OnLockDeletion(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
