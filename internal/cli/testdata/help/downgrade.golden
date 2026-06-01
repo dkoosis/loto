@@ -1,0 +1,5 @@
+usage: loto downgrade <target> [<target>...]
+
+Downgrade your exclusive lock(s) to shared, in place — peers may then take
+shared locks on the same target without you releasing first. Restores the
+file's write bit. A lock that is already shared is a no-op.

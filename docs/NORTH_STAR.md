@@ -28,7 +28,7 @@ $XDG_STATE_HOME/loto/                     # canonical, shared across subtrees
 ```
 
 SQLite tables:
-- `locks` — one row per held target. Keyed by `target_canonical`. Carries owner, session, intent, expiry, host, pid, branch.
+- `locks` — one row per holder per target. Keyed by the composite PK `(target_canonical, owner_uuid)` so a target can carry several coexisting shared holders. Carries owner, session, intent, expiry, host, pid, branch, **mode** (`shared` | `exclusive`; empty legacy → exclusive).
 
 ‡ **Identity is host-global, state is project-scoped.** Agent identity
 lives at `~/.loto/agents/`, not under any project — one Claude session
@@ -88,6 +88,42 @@ only signal). Reclamation happens in three layers:
 When reclamation displaces a holder (forced break, GC of an expired
 row), loto writes a `system` event so `loto status` and `loto doctor`
 surface it. No silent dispossession.
+
+## lock modes (shared / exclusive)
+
+A lock is `exclusive` (sole writer — the default) or `shared` (multi-reader
+lease). The point: several agents can declare a read-hold on the same target
+without false contention, and a writer can step down to a reader in place when
+a peer needs to read alongside — "conflicts as a negotiation, not a wall."
+
+```
+LockMode = shared | exclusive          -- empty/legacy reads as exclusive
+
+Conflicts(a, l):                        -- incoming a vs existing holder l
+  same owner            → false         -- re-acquire is an upsert
+  different target       → false
+  l is stale            → false         -- reclaimable; never a hard block
+  else → a.exclusive OR l.exclusive     -- shared+shared coexist; exclusive walls
+```
+
+Invariants:
+- **I1** shared + shared on one target coexist (any number of readers).
+- **I2** exclusive on either side conflicts (sole writer).
+- **I3** the owner-write bit is stripped **iff** the lock is exclusive; shared
+  locks are advisory-only and never touch file mode.
+- **I4** `downgrade` flips exclusive → shared in place — no unlock/relock, no new
+  `created_at`, the hold is continuous — and restores the write bit. Already-shared
+  is a no-op. There is **no** shared → exclusive upgrade (a non-goal).
+- **I5** under the composite PK, a per-owner lookup uses `LockForOwnerAt`; a
+  release/downgrade always resolves the caller's **own** row, never a peer's.
+- **I6** `check --staged` is **liveness-gated**: a *provably-live* exclusive peer
+  is a hard block (exit 1); an indeterminate/expiring exclusive peer (PID-0
+  sentinel, cross-host) is an advisory `✓ … liveness=unknown` that does not block;
+  a shared peer never blocks. (Whether to weaken further to pure grant-with-warning
+  remains an open dk decision.)
+
+CLI: `loto lock <t> --shared` takes a read lease (default is exclusive);
+`loto downgrade <t>` steps an exclusive hold down to shared.
 
 ## the operating loop (Claude's POV)
 

@@ -32,9 +32,9 @@ func (auditWriteError) Error() string { return "audit-write failed: database is 
 
 func TestEmitLockSuccess_SortedDeterministic(t *testing.T) {
 	var buf bytes.Buffer
-	EmitLockSuccess(&buf, []domain.Target{
-		{Canonical: "z.go"},
-		{Canonical: aGo},
+	EmitLockSuccess(&buf, []domain.LockRecord{
+		{Target: domain.Target{Canonical: "z.go"}},
+		{Target: domain.Target{Canonical: aGo}},
 	})
 	got := buf.String()
 	wantHead := "✓ locked count=2\n"
@@ -43,6 +43,16 @@ func TestEmitLockSuccess_SortedDeterministic(t *testing.T) {
 	}
 	if strings.Index(got, "target=a.go") > strings.Index(got, "target=z.go") {
 		t.Errorf("not sorted: %s", got)
+	}
+}
+
+func TestEmitLockSuccess_ShowsMode(t *testing.T) {
+	var buf bytes.Buffer
+	EmitLockSuccess(&buf, []domain.LockRecord{
+		{Target: domain.Target{Canonical: aGo}, Mode: domain.ModeShared},
+	})
+	if !strings.Contains(buf.String(), "mode=shared") {
+		t.Fatalf("want mode=shared in: %q", buf.String())
 	}
 }
 

@@ -96,3 +96,21 @@ func (c EvalContext) RemainingTTL(l LockRecord) time.Duration {
 	}
 	return d
 }
+
+// Conflicts reports whether an incoming acquire `incoming` is blocked by existing
+// holder `existing`. Shared+shared on the same target coexist; an exclusive lease on
+// either side conflicts. Same-owner holders never conflict (re-acquire is an
+// upsert). A stale holder never conflicts — the caller is expected to have
+// reclaimed it, but this guards the predicate independently (loto-k5el.2).
+func (c EvalContext) Conflicts(incoming, existing LockRecord) bool {
+	if existing.OwnerUUID == incoming.OwnerUUID {
+		return false
+	}
+	if !SameCanonical(incoming.Target, existing.Target) {
+		return false
+	}
+	if c.IsStale(existing) {
+		return false
+	}
+	return incoming.EffectiveMode() == ModeExclusive || existing.EffectiveMode() == ModeExclusive
+}

@@ -19,7 +19,11 @@ const (
 	tcStoreStoreGo = "internal/store/store.go"
 	tcIntentTest   = "test"
 	tcIntentDone   = "done"
+	tcIntentWrite  = "write"
+	tcIntentRead   = "read"
 	tcCmdTag       = "tag"
 	tcCmdAck       = "ack"
+	tcCmdDowngrade = "downgrade"
 	tcFlagAll      = "--all"
+	tcFlagShared   = "--shared"
 )

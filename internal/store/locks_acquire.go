@@ -224,6 +224,9 @@ func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord
 func stripAll(sorted []domain.LockRecord) ([]string, *ChmodFailure) {
 	stripped := make([]string, 0, len(sorted))
 	for i := range sorted {
+		if sorted[i].EffectiveMode() != domain.ModeExclusive {
+			continue // shared locks are advisory-only; write bit untouched
+		}
 		p := sorted[i].Target.Canonical
 		if err := stripWrite(p); err != nil {
 			return stripped, &ChmodFailure{Target: sorted[i].Target, Err: err}
@@ -268,7 +271,13 @@ func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domai
 			}
 			continue
 		}
-		blockers = append(blockers, all[i])
+		// Mode-aware: a shared peer does not block a shared acquire. The
+		// same-canonical/same-owner/stale guards above are kept for the reclaim
+		// side-effect; Conflicts is the final gate on whether a live, non-self
+		// peer actually blocks (loto-k5el.2 T3).
+		if ec.Conflicts(l, *ex) {
+			blockers = append(blockers, all[i])
+		}
 	}
 	return blockers, nil
 }
@@ -285,12 +294,11 @@ func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord) e
 	// loto-k5el.2 — so a same-owner re-acquire upserts its single row while a
 	// different owner inserts a coexisting row (multi-holder). The old
 	// `WHERE locks.owner_uuid = excluded.owner_uuid` guard is now redundant (the
-	// conflict is keyed on owner) and dropped. The mode column is omitted here:
-	// its schema DEFAULT 'exclusive' preserves binary-lock semantics until PR B
-	// wires mode write-through (loto-k5el.2 T3).
+	// conflict is keyed on owner) and dropped. Persist EffectiveMode() (not raw
+	// l.Mode) so the column never stores '' (loto-k5el.2 T3).
 	_, err := tx.ExecContext(ctx, `
-INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch)
-VALUES (?,?,?,?,?,?,?,?,?,?)
+INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, mode)
+VALUES (?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
   intent=excluded.intent,
   expires_at=excluded.expires_at,
@@ -298,10 +306,11 @@ ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
   host=excluded.host,
   pid=excluded.pid,
   proc_start=excluded.proc_start,
-  branch=excluded.branch`,
+  branch=excluded.branch,
+  mode=excluded.mode`,
 		l.Target.Canonical, l.OwnerUUID, l.SessionUUID,
 		l.Intent, l.CreatedAt.UnixNano(), l.ExpiresAt.UnixNano(),
-		l.Host, l.PID, procStart, l.Branch,
+		l.Host, l.PID, procStart, l.Branch, l.EffectiveMode(),
 	)
 	return err
 }

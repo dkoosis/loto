@@ -88,13 +88,16 @@ func getCwd() string {
 	return cwd
 }
 
-func EmitLockSuccess(w io.Writer, targets []domain.Target) {
+// EmitLockSuccess renders the acquired-lock block. It takes records (not bare
+// targets) so each row carries its mode (loto-k5el.2). Mode is normalized via
+// EffectiveMode so a legacy/empty value renders as exclusive.
+func EmitLockSuccess(w io.Writer, recs []domain.LockRecord) {
 	cwd := getCwd()
-	sorted := append([]domain.Target(nil), targets...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Canonical < sorted[j].Canonical })
+	sorted := append([]domain.LockRecord(nil), recs...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })
 	fmt.Fprintf(w, "✓ locked count=%d\n", len(sorted))
-	for _, t := range sorted {
-		fmt.Fprintf(w, "✓ target=%s\n", relToCwd(t.Canonical, cwd))
+	for i := range sorted {
+		fmt.Fprintf(w, "✓ target=%s mode=%s\n", relToCwd(sorted[i].Target.Canonical, cwd), sorted[i].EffectiveMode())
 	}
 }
 

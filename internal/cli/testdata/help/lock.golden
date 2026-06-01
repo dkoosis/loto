@@ -1,12 +1,15 @@
-usage: loto lock <target> [<target>...] -t "why"
+usage: loto lock <target> [<target>...] -t "why" [--shared]
 
 Acquire a lock on one or more targets. -t (intent) is required.
+Default mode is exclusive (sole writer). --shared takes a multi-reader lease.
 
 examples:
   loto lock internal/store/store.go -t "store refactor"
-  loto lock a.go b.go -t "rename sweep"
+  loto lock README.md -t "reading docs" --shared
   -intent string
     	intent (required)
+  -shared
+    	acquire a shared (multi-reader) lock; default is exclusive
   -t string
     	intent (required)
   -ttl duration

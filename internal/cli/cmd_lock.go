@@ -21,13 +21,14 @@ func init() { //nolint:gochecknoinits // command registry pattern
 
 // lockUsageHead is the point-of-use teaching surface for lock (loto-5rwc):
 // usage line plus worked examples. The flag list is appended by PrintDefaults.
-const lockUsageHead = `usage: loto lock <target> [<target>...] -t "why"
+const lockUsageHead = `usage: loto lock <target> [<target>...] -t "why" [--shared]
 
 Acquire a lock on one or more targets. -t (intent) is required.
+Default mode is exclusive (sole writer). --shared takes a multi-reader lease.
 
 examples:
   loto lock internal/store/store.go -t "store refactor"
-  loto lock a.go b.go -t "rename sweep"
+  loto lock README.md -t "reading docs" --shared
 `
 
 func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -40,6 +41,7 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	ttl := fs.Duration("ttl", 30*time.Minute, "lock TTL")
 	intent := fs.String("t", "", "intent (required)")
 	fs.StringVar(intent, "intent", "", "intent (required)")
+	shared := fs.Bool("shared", false, "acquire a shared (multi-reader) lock; default is exclusive")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
@@ -65,7 +67,11 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
 
-	return acquireBatch(rt, targets, *intent, *ttl, rt.liveProbe(), stdout, stderr)
+	mode := domain.ModeExclusive
+	if *shared {
+		mode = domain.ModeShared
+	}
+	return acquireBatch(rt, targets, *intent, *ttl, mode, rt.liveProbe(), stdout, stderr)
 }
 
 // validateLockTargets canonicalizes and Lstat-validates each path before any
@@ -130,12 +136,12 @@ func classifyCanonicalizeErr(err error) string {
 	}
 }
 
-func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.Duration, live domain.PidLiveProbe, stdout, stderr io.Writer) int {
+func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.Duration, mode string, live domain.PidLiveProbe, stdout, stderr io.Writer) int {
 	now := time.Now()
 	if w := degradedPidWarning(); w != "" {
 		fmt.Fprint(stderr, w)
 	}
-	recs := buildLockRecords(targets, rt, intent, now, ttl)
+	recs := buildLockRecords(targets, rt, intent, now, ttl, mode)
 	acquired, err := rt.Store.AcquireLocks(rt.Ctx, recs, live)
 	if err != nil {
 		var mce *store.MultiConflictError
@@ -151,11 +157,7 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	emitted := make([]domain.Target, len(acquired))
-	for i := range acquired {
-		emitted[i] = acquired[i].Target
-	}
-	render.EmitLockSuccess(stdout, emitted)
+	render.EmitLockSuccess(stdout, acquired)
 	return 0
 }
 
@@ -181,7 +183,7 @@ func fetchTagsForBlockers(rt *runtime, blockers []domain.LockRecord) map[string]
 	return out
 }
 
-func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now time.Time, ttl time.Duration) []domain.LockRecord {
+func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now time.Time, ttl time.Duration, mode string) []domain.LockRecord {
 	pid, src := stampPID()
 	// A durable pid (LOTO_PID = the session process) lets a later liveness probe
 	// fast-reclaim this lock when the holder dies and detect PID reuse via the
@@ -204,6 +206,7 @@ func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now t
 			Host:        rt.Host,
 			PID:         pid,
 			ProcStart:   procStartVal,
+			Mode:        mode,
 		})
 	}
 	return recs

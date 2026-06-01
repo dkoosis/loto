@@ -17,6 +17,7 @@ const (
 	EventLockReclaimedStale   = "lock_reclaimed_stale"
 	EventModeRestoreFailed    = "mode_restore_failed"
 	EventAcquireRollbackStart = "acquire_rollback_started"
+	EventLockDowngraded       = "lock_downgraded"
 )
 
 var ErrNoLockAtTarget = errors.New("no lock at target")
@@ -103,6 +104,7 @@ type ReleaseResult struct {
 	Target     domain.Target
 	State      ReleaseOutcome
 	Holder     string // populated when State == StateNotOwner
+	Mode       string // mode of the released row; "" → exclusive (loto-k5el.2)
 	RestoreErr error  // populated when State == StateRestoreFailed
 	// AuditErr is populated when the per-target mode_restore_failed audit
 	// event could not be persisted (tx contention, SQLITE_BUSY, ctx tail).
@@ -126,7 +128,7 @@ type BreakResult struct {
 	AuditErr error
 }
 
-const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch`
+const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch,mode`
 
 func inClause(targets []domain.Target) (string, []any) {
 	ph := make([]byte, 0, len(targets)*2)
@@ -189,7 +191,11 @@ func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	// Map NULL → 0 (UNKNOWN) at the store boundary so domain logic never sees
 	// the SQL-null distinction.
 	var procStart sql.NullInt64
-	if err := r.Scan(&canonical, &l.OwnerUUID, &l.SessionUUID, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch); err != nil {
+	// mode is NOT NULL DEFAULT 'exclusive' in fresh schema, but a NullString
+	// keeps scan robust against any NULL legacy row; "" → EffectiveMode treats
+	// it as exclusive.
+	var mode sql.NullString
+	if err := r.Scan(&canonical, &l.OwnerUUID, &l.SessionUUID, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &mode); err != nil {
 		return l, err
 	}
 	l.Target = domain.Target{Canonical: canonical}
@@ -197,6 +203,9 @@ func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	l.ExpiresAt = time.Unix(0, expiresNs).UTC()
 	if procStart.Valid {
 		l.ProcStart = procStart.Int64
+	}
+	if mode.Valid {
+		l.Mode = mode.String
 	}
 	return l, nil
 }

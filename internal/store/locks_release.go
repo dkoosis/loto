@@ -31,7 +31,7 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, byAge
 	}
 	defer cleanup()
 
-	owners, err := loadOwnersTx(ctx, tx, targets)
+	owners, err := loadOwnersTx(ctx, tx, targets, byAgent)
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +77,7 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, byAge
 
 // classifyReleases walks input targets in order, classifying each against the
 // owners map and collecting the canonical paths to delete in one statement.
-func classifyReleases(targets []domain.Target, owners map[string]string, byAgent string) ([]ReleaseResult, []string) {
+func classifyReleases(targets []domain.Target, owners map[string]ownerMode, byAgent string) ([]ReleaseResult, []string) {
 	results := make([]ReleaseResult, len(targets))
 	owned := make([]string, 0, len(targets))
 	for i, t := range targets {
@@ -86,11 +86,12 @@ func classifyReleases(targets []domain.Target, owners map[string]string, byAgent
 		switch {
 		case !ok:
 			results[i].State = StateNoLock
-		case o != byAgent:
+		case o.Owner != byAgent:
 			results[i].State = StateNotOwner
-			results[i].Holder = o
+			results[i].Holder = o.Owner
 		default:
 			results[i].State = StateUnlocked
+			results[i].Mode = o.Mode
 			owned = append(owned, t.Canonical)
 		}
 	}
@@ -104,6 +105,9 @@ func (s *Store) restoreAndAuditReleases(results []ReleaseResult, byAgent string)
 	for i := range results {
 		if results[i].State != StateUnlocked {
 			continue
+		}
+		if results[i].Mode == domain.ModeShared {
+			continue // shared lock never stripped the bit — nothing to restore
 		}
 		if rerr := restoreWrite(results[i].Target.Canonical); rerr != nil {
 			results[i].State = StateRestoreFailed
@@ -123,24 +127,37 @@ func (s *Store) restoreAndAuditReleases(results []ReleaseResult, byAgent string)
 	}
 }
 
-// loadOwnersTx reads owner_uuid for the given targets via a single SELECT.
-// Returned map is keyed by target_canonical; missing keys = no row.
-func loadOwnersTx(ctx context.Context, tx *sql.Tx, targets []domain.Target) (map[string]string, error) {
+// ownerMode pairs a lock's owner with its mode for the release path's
+// classify-then-restore decision (loto-k5el.2 T4).
+type ownerMode struct{ Owner, Mode string }
+
+// loadOwnersTx reads owner_uuid + mode for the given targets via a single
+// SELECT. Returned map is keyed by target_canonical; missing keys = no row.
+// Under the composite PK a shared target may have several holders; the map
+// PREFERS byAgent's own row when present, so a holder can always release its
+// own lock on a multi-holder shared target (otherwise an arbitrary other
+// holder could shadow it and the release would misclassify as not-owner,
+// leaving the caller's row undeleted — loto-k5el.2). When byAgent holds no row
+// at a target, an arbitrary other holder is kept to drive the not-owner state.
+func loadOwnersTx(ctx context.Context, tx *sql.Tx, targets []domain.Target, byAgent string) (map[string]ownerMode, error) {
 	placeholders, args := inClause(targets)
 	// placeholders is built from '?' chars only; user data flows via args.
-	rows, err := tx.QueryContext(ctx, `SELECT target_canonical, owner_uuid FROM locks WHERE target_canonical IN (`+placeholders+`)`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+	rows, err := tx.QueryContext(ctx, `SELECT target_canonical, owner_uuid, mode FROM locks WHERE target_canonical IN (`+placeholders+`)`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := make(map[string]string, len(targets))
+	out := make(map[string]ownerMode, len(targets))
 	for rows.Next() {
-		var canonical, owner string
-		if err := rows.Scan(&canonical, &owner); err != nil {
+		var canonical, owner, mode string
+		if err := rows.Scan(&canonical, &owner, &mode); err != nil {
 			return nil, err
 		}
-		out[canonical] = owner
+		cur, seen := out[canonical]
+		if !seen || (owner == byAgent && cur.Owner != byAgent) {
+			out[canonical] = ownerMode{Owner: owner, Mode: mode}
+		}
 	}
 	return out, rows.Err()
 }
@@ -201,12 +218,16 @@ func (s *Store) ReleaseBySession(ctx context.Context, byAgent, sessionUUID strin
 	if len(canonicals) == 0 {
 		return []ReleaseResult{}, nil
 	}
+	paths := make([]string, len(canonicals))
+	for i, c := range canonicals {
+		paths[i] = c.Canonical
+	}
 
 	// Ack tags before deleting host locks (same ordering as ReleaseLocks).
-	if err := ackTagsForReleaseTx(ctx, tx, canonicals, byAgent); err != nil {
+	if err := ackTagsForReleaseTx(ctx, tx, paths, byAgent); err != nil {
 		return nil, err
 	}
-	if err := deleteOwnedTx(ctx, tx, canonicals, byAgent); err != nil {
+	if err := deleteOwnedTx(ctx, tx, paths, byAgent); err != nil {
 		return nil, err
 	}
 	// Emit lock_released events in the same tx (atomic with the row deletes).
@@ -214,7 +235,7 @@ func (s *Store) ReleaseBySession(ctx context.Context, byAgent, sessionUUID strin
 	evs := make([]domain.Event, len(canonicals))
 	for i, c := range canonicals {
 		evs[i] = domain.Event{
-			Target:    domain.Target{Canonical: c},
+			Target:    domain.Target{Canonical: c.Canonical},
 			Kind:      EventLockReleased,
 			ActorUUID: byAgent,
 			CreatedAt: now,
@@ -231,36 +252,44 @@ func (s *Store) ReleaseBySession(ctx context.Context, byAgent, sessionUUID strin
 	results := make([]ReleaseResult, len(canonicals))
 	for i, c := range canonicals {
 		results[i] = ReleaseResult{
-			Target: domain.Target{Canonical: c},
+			Target: domain.Target{Canonical: c.Canonical},
 			State:  StateUnlocked,
+			Mode:   c.Mode,
 		}
 	}
 	s.restoreAndAuditReleases(results, byAgent)
 	return results, nil
 }
 
-// loadSessionTargetsTx returns canonical paths for all locks owned by agent
-// (and optionally scoped to session). Returns them in deterministic order.
-func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID string) ([]string, error) {
+// sessionTarget pairs a session-owned lock's canonical path with its mode so
+// the release restore guard can skip shared rows (loto-k5el.2 T4).
+type sessionTarget struct {
+	Canonical string
+	Mode      string
+}
+
+// loadSessionTargetsTx returns canonical paths + modes for all locks owned by
+// agent (and optionally scoped to session). Returns them in deterministic order.
+func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID string) ([]sessionTarget, error) {
 	var rows *sql.Rows
 	var err error
 	if sessionUUID != "" {
 		rows, err = tx.QueryContext(ctx,
-			`SELECT target_canonical FROM locks WHERE owner_uuid = ? AND session_uuid = ? ORDER BY target_canonical`,
+			`SELECT target_canonical, mode FROM locks WHERE owner_uuid = ? AND session_uuid = ? ORDER BY target_canonical`,
 			byAgent, sessionUUID)
 	} else {
 		rows, err = tx.QueryContext(ctx,
-			`SELECT target_canonical FROM locks WHERE owner_uuid = ? ORDER BY target_canonical`,
+			`SELECT target_canonical, mode FROM locks WHERE owner_uuid = ? ORDER BY target_canonical`,
 			byAgent)
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	var out []sessionTarget
 	for rows.Next() {
-		var c string
-		if err := rows.Scan(&c); err != nil {
+		var c sessionTarget
+		if err := rows.Scan(&c.Canonical, &c.Mode); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
