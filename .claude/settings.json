@@ -10,6 +10,10 @@
           {
             "command": "p=$PPID; i=0; while [ $i -lt 12 ]; do c=$(ps -o comm= -p \"$p\" 2>/dev/null | sed 's#.*/##'); if [ \"$c\" = claude ]; then echo \"LOTO_PID=$p\" >> \"$CLAUDE_ENV\"; break; fi; np=$(ps -o ppid= -p \"$p\" 2>/dev/null | tr -d ' '); case \"$np\" in ''|*[!0-9]*) break;; esac; [ \"$np\" -le 1 ] && break; p=$np; i=$((i+1)); done 2>/dev/null || true",
             "type": "command"
+          },
+          {
+            "command": "p=$PPID; i=0; while [ $i -lt 12 ]; do c=$(ps -o comm= -p \"$p\" 2>/dev/null | sed 's#.*/##'); if [ \"$c\" = claude ]; then echo \"LOTO_PID=$p\" >> \"$CLAUDE_ENV\"; break; fi; np=$(ps -o ppid= -p \"$p\" 2>/dev/null | tr -d ' '); case \"$np\" in ''|*[!0-9]*) break;; esac; [ \"$np\" -le 1 ] && break; p=$np; i=$((i+1)); done 2>/dev/null || true",
+            "type": "command"
           }
         ],
         "matcher": ""

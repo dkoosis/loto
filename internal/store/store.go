@@ -260,6 +260,34 @@ func schemaStructurallyIntact(ctx context.Context, db *sql.DB) bool {
 	return err == nil && name == "locks"
 }
 
+// schemaFullyCurrent reports whether the DB is at the current schema in every
+// respect the migrate write path would otherwise apply: the core tables exist
+// AND the additive locks.proc_start column is present (loto-kwlp). It is the
+// gate for migrate's steady-state no-write fast path (loto-0gsu). Unlike
+// schemaStructurallyIntact — which only sentinels "is this a loto DB" for the
+// move-aside decision — this must be true ONLY when a re-migrate would be a
+// pure no-op, so a DB carrying the current user_version stamp but missing the
+// proc_start upgrade still falls through to the full migrate. A probe failure
+// is treated as not-current (conservative: prefer running migrate).
+func schemaFullyCurrent(ctx context.Context, db *sql.DB) bool {
+	if !schemaStructurallyIntact(ctx, db) {
+		return false
+	}
+	for _, tbl := range []string{"events", "tags"} {
+		var name string
+		if err := db.QueryRowContext(ctx,
+			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&name); err != nil || name != tbl {
+			return false
+		}
+	}
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('locks') WHERE name = 'proc_start'`).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
+
 func (s *Store) Close() error { return s.db.Close() }
 
 // SetStderr overrides the writer used for diagnostic messages (audit-write
@@ -346,6 +374,23 @@ func (s *Store) opFlockPath() string {
 // that (stale version + present `locks` table) and routes the next Open back
 // through this idempotent migrate, which re-stamps user_version (loto-vmym).
 func (s *Store) migrate(ctx context.Context) error {
+	// Steady-state fast path (loto-0gsu): if the DB is already at the current
+	// version with an intact schema, do nothing. A redundant migrate here would
+	// open an immediate-mode (write) tx that takes SQLite's WAL writer lock and
+	// re-stamp user_version on every Open — even for read-only commands
+	// (cmdCheck, cmdStatus) that reach openOnce → migrate. That serialized
+	// concurrent reads on the writer lock and dirtied the DB on every read.
+	// Both probes are read-only PRAGMA/SELECTs on the pool conn — no write tx.
+	// The stale-but-intact case (loto-vmym crash window: version below target)
+	// falls through and re-migrates in place, re-stamping user_version.
+	var v int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&v); err != nil {
+		return fmt.Errorf("read user_version: %w", err)
+	}
+	if v == schemaUserVersion && schemaFullyCurrent(ctx, s.db) {
+		return nil
+	}
+
 	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("begin migrate tx: %w", err)
@@ -365,7 +410,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := ensureLocksProcStart(ctx, tx); err != nil {
 		return fmt.Errorf("add locks.proc_start: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitTxFn(tx); err != nil {
 		return fmt.Errorf("commit schema: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaUserVersion)); err != nil {

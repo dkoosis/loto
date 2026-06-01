@@ -207,17 +207,32 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 	cwd := getCwd()
 	sorted := append([]store.ReleaseResult(nil), results...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })
+	// A restore-failed release deleted the lock row in-tx (locks_release.go) — a
+	// successful unlock with a failed chmod restore — so it counts toward the
+	// unlocked total. The restore failures surface as a distinct first-line field
+	// (and per-row ⚠ lines below) so the Claude consumer sees both facts.
 	successCount := 0
+	restoreFailed := 0
 	exit := 0
 	for _, r := range sorted {
-		if r.State == store.StateUnlocked {
+		switch r.State {
+		case store.StateUnlocked:
 			successCount++
-		}
-		if r.State == store.StateNotOwner || r.State == store.StateRestoreFailed {
+		case store.StateRestoreFailed:
+			successCount++
+			restoreFailed++
 			exit = 1
+		case store.StateNotOwner:
+			exit = 1
+		case store.StateNoLock:
+			// no-op: nothing was owned at this target, not a release.
 		}
 	}
-	fmt.Fprintf(w, "✓ unlocked count=%d\n", successCount)
+	if restoreFailed > 0 {
+		fmt.Fprintf(w, "✓ unlocked count=%d restore-failed=%d\n", successCount, restoreFailed)
+	} else {
+		fmt.Fprintf(w, "✓ unlocked count=%d\n", successCount)
+	}
 	for _, r := range sorted {
 		path := relToCwd(r.Target.Canonical, cwd)
 		switch r.State {
