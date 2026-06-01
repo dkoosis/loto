@@ -1,17 +1,17 @@
 # Boot
 updated: 2026-06-01
 
-→ Dispatch loto-k5el.2 PR B (feature) per docs/superpowers/plans/loto-k5el.2-shared-exclusive.md.
-  Tasks 2-5, 5.5, 7-9: domain Mode/Conflicts, write-bit, DowngradeLock, CLI --shared/downgrade, liveness-gated check.
+→ Queue near-empty. Next ready: loto-t8dd (P3) — store: collapse schemaFullyCurrent into ensure* migration hooks.
   ‡ store/race-path → PR, never direct-to-main (linux -race runs CI-only).
 
-state: φ docs/superpowers/plans/loto-k5el.2-shared-exclusive.md — Tasks 2-5,5.5,7-9 = PR B, impl-ready
+state: epic loto-k5el ✓ COMPLETE. Backlog: 1 ready (loto-t8dd P3). φ docs/wt-harness-migration-brief.md = untracked planning doc (graduate wt-* worktree harness from trixi → loto; dk decision 2026-06-01) — not yet a bead/epic.
 
 ✓ done
-- #171: loto-k5el.1 SC3 surfacing → merged; worktree pruned
-- #172: loto-k5el.2 PR A (composite PK + mode col + events-CHECK + legacy round-trip) → merged cdadc511, CI linux -race green; branch deleted
+- #171: loto-k5el.1 TTL self-heal surfacing → merged
+- #172: loto-k5el.2 PR A (composite PK + mode col + events-CHECK + legacy round-trip) → merged cdadc511
+- #174: loto-k5el.2 PR B (shared/exclusive modes + downgrade + liveness-gated check) → merged 1d6a6cd, CI linux -race green; impl+feat branches deleted. Folded Gemini review (Conflicts incoming/existing) + /simplify (dropped throwaway-struct EffectiveMode idiom). Epic closed.
 
 ‡ traps
-- loto-k5el gated: .1 merged ✓ → .2 PR A merged ✓ → .2 PR B (now unblocked)
-- PR B hand-merges .1's 2 seams: cmd_status.go::printStatusLocks + locks_acquire.go::reclaimStaleAndCollectBlockers. PR B consumes .1's Classify for liveness-gated check --staged.
-- PR A folded two deliberate deviations (in #172 body + commit): legacy round-trip is raw-SQL not domain-level; insertOrRefreshLock ON CONFLICT composite-key fix pulled forward from T3 (PK change breaks the upsert).
+- loto-k5el epic DONE (.1 ✓ #171, .2 ✓ #172+#174). Self-healing advisory file-lease conflict layer (TTL expiry + shared/exclusive) is live end-to-end.
+- During #174 cleanup a stale uncommitted revert of docs/NORTH_STAR.md appeared in the worktree (stripped the lock-modes section) — discarded against merged main (authoritative). Watch for parallel-session clobbers on shared docs; `git fetch` + diff-vs-main before trusting worktree doc state.
+- wt-harness migration (brief in docs/) = likely next epic: graduate wt-status/wt-gc/wt-land/wt-discard + supporting scripts trixi → loto so bead+code colive. Decompose to beads before dispatching.
