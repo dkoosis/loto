@@ -108,11 +108,11 @@ PRAGMA user_version = 9;`
 	if _, err := db.ExecContext(ctx, legacyDDL); err != nil {
 		t.Fatalf("seed legacy ddl: %v", err)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if _, err := db.ExecContext(ctx,
 			`INSERT INTO locks(target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch)
 			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
-			filepath.Join("/tmp", "legacy", makeUUID(i)+".go"),
+			"/tmp/legacy/"+makeUUID(i)+".go",
 			makeUUID(i), makeUUID(i), "legacy", 1, 1<<62, "h", 1, nil, ""); err != nil {
 			t.Fatalf("seed legacy lock row %d: %v", i, err)
 		}
