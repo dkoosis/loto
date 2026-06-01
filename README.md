@@ -81,6 +81,29 @@ Exception: rows with a non-zero, unexpired `expires_at` are authoritative
 for that TTL window — the record-tier carve-out that bridges CC hook
 events without a daemon.
 
+### Self-healing locks (liveness-primary, TTL backstop)
+
+A lock frees the instant its owner is provably gone — no manual `loto doctor`:
+
+- **Liveness-primary.** Each lock stamps the owning **session** pid (`LOTO_PID`,
+  exported by the SessionStart hook — NOT the one-shot CLI pid) plus the
+  process start-time (`proc_start`, defeats PID reuse). On any `loto lock` or
+  `loto check`, a holder whose session is provably dead is reclaimed in-line.
+  A clean session exit releases eagerly via the SessionEnd hook.
+- **TTL backstop.** `--ttl` (default 30m) bounds the residual cases liveness
+  can't cover: no durable `LOTO_PID` (bare shell / cron), cross-host rows, or a
+  store that crossed a host reboot. Generous by design — the backstop, not the
+  path.
+- **Mid-edit expiry.** A live session (durable PID, probe alive) is NEVER
+  TTL-reaped, so a long edit past the TTL is safe. Only an UNKNOWN holder
+  (PID-0 sentinel) can expire mid-edit; extend it by re-running `loto lock` on
+  the same target (the owner-match upsert refreshes the TTL), or fix the
+  SessionStart hook to export `LOTO_PID` (promoting it to alive). loto warns at
+  acquire when liveness has degraded to TTL-only.
+- **`loto status`** shows `liveness=alive|dead|unknown` and `ttl_remaining=` per
+  lock so the cause of every verdict is visible. status is read-only — it never
+  reaps.
+
 ## on-disk layout
 
 ```

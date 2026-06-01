@@ -910,3 +910,67 @@ func TestValidateFileTarget_TypedErrors(t *testing.T) {
 		t.Fatalf("Nlink not preserved: got %d, want >= 2", tve.Nlink)
 	}
 }
+
+// TestAcquireReclaimsDeadSession pins loto-k5el.1 SC2 (dead half): a holder whose
+// session pid is provably dead is reclaimed on a peer's acquire, within TTL.
+//
+// Not TDD — the IsStale+injected-probe mechanism already ships; this test passes
+// on first write and pins SC2 against regression.
+//
+// Harness note (Task 0): there is no openTestStore/mustInsertLock. We use the
+// real helpers mustOpen + mkFileLock (which creates the on-disk target
+// AcquireLocks Lstat-validates) and seed the holder via a first AcquireLocks
+// with a live probe. The holder carries a durable pid (PID>0, ProcStart set) and
+// Host "h" — matching the acquirer's host so reclaimStaleAndCollectBlockers
+// probes it. The peer's acquire then drives IsStale through a dead probe.
+func TestAcquireReclaimsDeadSession(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	live := func(string, int, int64) bool { return true }
+
+	dead := mkFileLock(t, "a.go", tcAlice, time.Hour) // TTL NOT expired
+	dead.PID = 4242                                   // durable pid (probe will say dead)
+	dead.ProcStart = 9999
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{dead}, live); err != nil {
+		t.Fatalf("seed alice lock: %v", err)
+	}
+
+	// Probe reports pid 4242 dead → liveness-primary reclaim despite live TTL.
+	deadProbe := func(host string, pid int, start int64) bool { return false }
+	bob := dead
+	bob.OwnerUUID, bob.SessionUUID, bob.PID = tcBob, tcBob, 5555
+	got, err := s.AcquireLocks(ctx, []domain.LockRecord{bob}, deadProbe)
+	if err != nil {
+		t.Fatalf("bob acquire over dead-session holder must succeed: %v", err)
+	}
+	if len(got) != 1 || got[0].OwnerUUID != tcBob {
+		t.Fatalf("expected bob to hold the reclaimed lock, got %+v", got)
+	}
+	held, _ := s.LockAt(ctx, dead.Target)
+	if held == nil || held.OwnerUUID != tcBob {
+		t.Fatalf("store should show bob as holder after reclaim, got %+v", held)
+	}
+}
+
+// TestAcquireBlocksOnLiveSession pins loto-k5el.1 SC2 (live half): a holder whose
+// session pid is alive and TTL unexpired is NOT reclaimed — peer acquire conflicts.
+func TestAcquireBlocksOnLiveSession(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	live := func(string, int, int64) bool { return true }
+
+	held := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	held.PID = 4242
+	held.ProcStart = 9999
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{held}, live); err != nil {
+		t.Fatalf("seed alice lock: %v", err)
+	}
+
+	bob := held
+	bob.OwnerUUID, bob.SessionUUID, bob.PID = tcBob, tcBob, 5555
+	_, err := s.AcquireLocks(ctx, []domain.LockRecord{bob}, live)
+	var mce *MultiConflictError
+	if !errors.As(err, &mce) {
+		t.Fatalf("bob acquire over LIVE holder must conflict, got err=%v", err)
+	}
+}

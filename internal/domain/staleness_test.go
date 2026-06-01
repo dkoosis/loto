@@ -100,3 +100,69 @@ func TestIsStale_NoDurablePid(t *testing.T) {
 		}
 	})
 }
+
+// TestClassifyAndRemainingTTL pins loto-k5el.1 SC3 display helpers: Classify is
+// the display-tier refinement of IsStale (DEAD ⟺ IsStale; splits ¬stale into
+// ALIVE vs UNKNOWN) and RemainingTTL is the clamped TTL countdown.
+//
+// Package-local test (package domain) — types referenced unqualified.
+func TestClassifyAndRemainingTTL(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	host := "h"
+	aliveProbe := func(string, int, int64) bool { return true }
+	deadProbe := func(string, int, int64) bool { return false }
+
+	t.Run("ALIVE: durable pid, probe live, TTL ahead", func(t *testing.T) {
+		ec := EvalContext{Now: now, ThisHost: host, Live: aliveProbe}
+		l := LockRecord{ExpiresAt: now.Add(time.Hour), Host: host, PID: 1, ProcStart: 7}
+		if got := ec.Classify(l); got != LivenessAlive {
+			t.Errorf("Classify=%v want ALIVE", got)
+		}
+		if got := ec.RemainingTTL(l); got != time.Hour {
+			t.Errorf("RemainingTTL=%v want 1h", got)
+		}
+	})
+	t.Run("DEAD by dead probe, TTL still ahead", func(t *testing.T) {
+		ec := EvalContext{Now: now, ThisHost: host, Live: deadProbe}
+		l := LockRecord{ExpiresAt: now.Add(time.Hour), Host: host, PID: 1, ProcStart: 7}
+		if got := ec.Classify(l); got != LivenessDead {
+			t.Errorf("Classify=%v want DEAD", got)
+		}
+	})
+	t.Run("DEAD by expired TTL even if probe live", func(t *testing.T) {
+		ec := EvalContext{Now: now, ThisHost: host, Live: aliveProbe}
+		l := LockRecord{ExpiresAt: now.Add(-time.Minute), Host: host, PID: 1, ProcStart: 7}
+		if got := ec.Classify(l); got != LivenessDead {
+			t.Errorf("Classify=%v want DEAD", got)
+		}
+		if got := ec.RemainingTTL(l); got != 0 {
+			t.Errorf("RemainingTTL=%v want 0 (clamped)", got)
+		}
+	})
+	t.Run("UNKNOWN: PID-0 sentinel, TTL ahead", func(t *testing.T) {
+		ec := EvalContext{Now: now, ThisHost: host, Live: aliveProbe}
+		l := LockRecord{ExpiresAt: now.Add(time.Hour), Host: host, PID: 0}
+		if got := ec.Classify(l); got != LivenessUnknown {
+			t.Errorf("Classify=%v want UNKNOWN", got)
+		}
+	})
+	t.Run("UNKNOWN: cross-host holder, TTL ahead", func(t *testing.T) {
+		ec := EvalContext{Now: now, ThisHost: host, Live: aliveProbe}
+		l := LockRecord{ExpiresAt: now.Add(time.Hour), Host: "other-host", PID: 1, ProcStart: 7}
+		if got := ec.Classify(l); got != LivenessUnknown {
+			t.Errorf("Classify=%v want UNKNOWN (cross-host, no probe)", got)
+		}
+	})
+	t.Run("Classify=DEAD iff IsStale (invariant I1)", func(t *testing.T) {
+		ec := EvalContext{Now: now, ThisHost: host, Live: deadProbe}
+		for _, l := range []LockRecord{
+			{ExpiresAt: now.Add(-time.Minute), Host: host, PID: 1, ProcStart: 7},
+			{ExpiresAt: now.Add(time.Hour), Host: host, PID: 1, ProcStart: 7},
+			{ExpiresAt: now.Add(time.Hour), Host: host, PID: 0},
+		} {
+			if (ec.Classify(l) == LivenessDead) != ec.IsStale(l) {
+				t.Errorf("I1 violated for %+v: Classify=%v IsStale=%v", l, ec.Classify(l), ec.IsStale(l))
+			}
+		}
+	})
+}
