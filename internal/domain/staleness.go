@@ -67,6 +67,8 @@ func (l Liveness) String() string {
 		return "alive"
 	case LivenessDead:
 		return "dead"
+	case LivenessUnknown:
+		return "unknown"
 	default:
 		return "unknown"
 	}
