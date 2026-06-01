@@ -22,6 +22,24 @@ type LockRecord struct {
 	// pid-alive-only (today's behavior).
 	ProcStart int64
 	Branch    string
+	// Mode is the lease mode: ModeShared (multi-reader, advisory only, write-bit
+	// NOT stripped) or ModeExclusive (sole-writer, write-bit stripped). Empty
+	// string reads as exclusive — preserves the pre-mode binary-lock semantics
+	// for legacy rows (loto-k5el.2). Normalize via EffectiveMode().
+	Mode string
+}
+
+const (
+	ModeShared    = "shared"
+	ModeExclusive = "exclusive"
+)
+
+// EffectiveMode normalizes a possibly-empty Mode to exclusive (legacy default).
+func (l LockRecord) EffectiveMode() string {
+	if l.Mode == ModeShared {
+		return ModeShared
+	}
+	return ModeExclusive // empty or any non-"shared" value → exclusive
 }
 
 // Event is an append-only audit row. SubjectUUID is the affected agent (for
