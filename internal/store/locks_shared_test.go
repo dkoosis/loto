@@ -62,6 +62,44 @@ func TestAcquire_ExclusiveBlocksShared(t *testing.T) {
 	}
 }
 
+// TestLockForOwnerAt_MultiHolderUnambiguous pins the composite-PK regression
+// guard (loto-k5el.2 T5.5): with two shared holders on one target, LockForOwnerAt
+// returns the RIGHT owner's row for each, and ListLocks surfaces both. Guards
+// against re-introducing the single-row-per-target assumption.
+func TestLockForOwnerAt_MultiHolderUnambiguous(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	a := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	a.Mode = domain.ModeShared
+	b := peerOn(a, tcBob, domain.ModeShared)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
+		t.Fatalf("alice: %v", err)
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe); err != nil {
+		t.Fatalf("bob: %v", err)
+	}
+
+	la, err := s.LockForOwnerAt(ctx, a.Target, tcAlice)
+	if err != nil || la == nil || la.OwnerUUID != tcAlice {
+		t.Fatalf("LockForOwnerAt(alice) = %v, err=%v; want alice's row", la, err)
+	}
+	lb, err := s.LockForOwnerAt(ctx, a.Target, tcBob)
+	if err != nil || lb == nil || lb.OwnerUUID != tcBob {
+		t.Fatalf("LockForOwnerAt(bob) = %v, err=%v; want bob's row", lb, err)
+	}
+
+	rows, _ := s.ListLocks(ctx)
+	holders := map[string]bool{}
+	for _, r := range rows {
+		if r.Target.Canonical == a.Target.Canonical {
+			holders[r.OwnerUUID] = true
+		}
+	}
+	if !holders[tcAlice] || !holders[tcBob] {
+		t.Fatalf("ListLocks must surface both shared holders, got %v", holders)
+	}
+}
+
 func TestAcquire_SharedDoesNotStripWriteBit(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()

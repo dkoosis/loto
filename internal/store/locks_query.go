@@ -48,6 +48,12 @@ func (s *Store) LockForOwnerAt(ctx context.Context, t domain.Target, owner strin
 	return &l, rows.Err()
 }
 
+// LockAt returns one lock at target, or (nil,nil) if none. Under the composite
+// PK a shared target may have several holders; LockAt returns an ARBITRARY one.
+// Callers needing a specific holder must use LockForOwnerAt; callers needing all
+// holders must filter ListLocks. The sole remaining caller (tag delivery) only
+// needs "is anyone holding this, and who can I attach the tag to" — any holder
+// is acceptable there (loto-k5el.2 T5.5).
 func (s *Store) LockAt(ctx context.Context, t domain.Target) (*domain.LockRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+lockCols+` FROM locks WHERE target_canonical = ?`, t.Canonical)
 	if err != nil {
