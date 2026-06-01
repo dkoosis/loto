@@ -293,12 +293,12 @@ func schemaFullyCurrent(ctx context.Context, db *sql.DB) bool {
 	if !schemaStructurallyIntact(ctx, db) {
 		return false
 	}
-	for _, tbl := range []string{"events", "tags"} {
-		var name string
-		if err := db.QueryRowContext(ctx,
-			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&name); err != nil || name != tbl {
-			return false
-		}
+	// events existence is covered by the DDL read below (ErrNoRows → not-current),
+	// so only tags needs a standalone existence probe here.
+	var tagsName string
+	if err := db.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='tags'`).Scan(&tagsName); err != nil || tagsName != "tags" {
+		return false
 	}
 	// loto-k5el.2: a v9 DB carrying the old single-column-PK / no-mode locks
 	// table is NOT fully current — without the mode + composite-PK probes
@@ -312,7 +312,8 @@ FROM pragma_table_info('locks')`).Scan(&procStartN, &modeN, &pkCols); err != nil
 		return false
 	}
 	// events CHECK must already admit lock_downgraded, else ensureEventsCheckCurrent
-	// still has work to do.
+	// still has work to do. This read also doubles as the events-table existence
+	// probe (ErrNoRows → not-current).
 	var eventsDDL string
 	if err := db.QueryRowContext(ctx,
 		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&eventsDDL); err != nil {
