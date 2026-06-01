@@ -281,18 +281,24 @@ func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord) e
 	if l.ProcStart != 0 {
 		procStart = l.ProcStart
 	}
+	// ON CONFLICT targets the composite PK (target_canonical, owner_uuid) added in
+	// loto-k5el.2 — so a same-owner re-acquire upserts its single row while a
+	// different owner inserts a coexisting row (multi-holder). The old
+	// `WHERE locks.owner_uuid = excluded.owner_uuid` guard is now redundant (the
+	// conflict is keyed on owner) and dropped. The mode column is omitted here:
+	// its schema DEFAULT 'exclusive' preserves binary-lock semantics until PR B
+	// wires mode write-through (loto-k5el.2 T3).
 	_, err := tx.ExecContext(ctx, `
 INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch)
 VALUES (?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(target_canonical) DO UPDATE SET
+ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
   intent=excluded.intent,
   expires_at=excluded.expires_at,
   session_uuid=excluded.session_uuid,
   host=excluded.host,
   pid=excluded.pid,
   proc_start=excluded.proc_start,
-  branch=excluded.branch
-WHERE locks.owner_uuid = excluded.owner_uuid`,
+  branch=excluded.branch`,
 		l.Target.Canonical, l.OwnerUUID, l.SessionUUID,
 		l.Intent, l.CreatedAt.UnixNano(), l.ExpiresAt.UnixNano(),
 		l.Host, l.PID, procStart, l.Branch,
