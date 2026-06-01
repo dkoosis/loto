@@ -38,7 +38,7 @@ func (s *Store) DowngradeLock(ctx context.Context, target domain.Target, owner s
 		}
 		return err
 	}
-	if (domain.LockRecord{Mode: curMode}).EffectiveMode() == domain.ModeShared {
+	if curMode == domain.ModeShared {
 		return tx.Commit() // already shared — no-op
 	}
 

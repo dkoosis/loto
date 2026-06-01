@@ -106,7 +106,7 @@ func (s *Store) restoreAndAuditReleases(results []ReleaseResult, byAgent string)
 		if results[i].State != StateUnlocked {
 			continue
 		}
-		if (domain.LockRecord{Mode: results[i].Mode}).EffectiveMode() == domain.ModeShared {
+		if results[i].Mode == domain.ModeShared {
 			continue // shared lock never stripped the bit — nothing to restore
 		}
 		if rerr := restoreWrite(results[i].Target.Canonical); rerr != nil {
