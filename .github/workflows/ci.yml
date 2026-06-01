@@ -16,7 +16,10 @@ jobs:
           - name: linux
             runs-on: [self-hosted, Linux, loto]
           - name: macos
-            runs-on: [self-hosted, macOS, loto]
+            # GitHub-hosted arm64 (Apple Silicon, = self-hosted mac-loto arch);
+            # escapes the serial self-hosted runner queue. ~10x linux billing
+            # rate on private repos, but a ~4-min run is cents.
+            runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
