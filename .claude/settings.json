@@ -4,7 +4,11 @@
       {
         "hooks": [
           {
-            "command": "loto whoami --ensure --json | python3 -c \"import sys,json,os; d=json.load(sys.stdin); print('LOTO_AGENT_ID='+d['id'])\" >> $CLAUDE_ENV 2>/dev/null || true",
+            "command": "loto whoami --ensure --json | python3 -c \"import sys,json; d=json.load(sys.stdin); print('LOTO_AGENT_ID='+d['uuid'])\" >> $CLAUDE_ENV 2>/dev/null || true",
+            "type": "command"
+          },
+          {
+            "command": "p=$PPID; i=0; while [ $i -lt 12 ]; do c=$(ps -o comm= -p \"$p\" 2>/dev/null | sed 's#.*/##'); if [ \"$c\" = claude ]; then echo \"LOTO_PID=$p\" >> \"$CLAUDE_ENV\"; break; fi; np=$(ps -o ppid= -p \"$p\" 2>/dev/null | tr -d ' '); case \"$np\" in ''|*[!0-9]*) break;; esac; [ \"$np\" -le 1 ] && break; p=$np; i=$((i+1)); done 2>/dev/null || true",
             "type": "command"
           },
           {

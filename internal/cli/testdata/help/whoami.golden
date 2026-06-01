@@ -1,0 +1,5 @@
+Usage of whoami:
+  -ensure
+    	ensure an identity exists (no-op: always ensured)
+  -json
+    	emit identity as a single JSON object (uuid/handle/host)
