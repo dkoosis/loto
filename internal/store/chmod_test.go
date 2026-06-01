@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"loto/internal/domain"
 )
 
 func TestStripWrite_RemovesAllWriteBits(t *testing.T) {
@@ -124,5 +126,91 @@ func TestStripWrite_RefusesHardlinkRace(t *testing.T) {
 	st, _ := os.Stat(attacker)
 	if st.Mode().Perm()&0o200 == 0 {
 		t.Errorf("attacker file write-stripped via hardlink, mode=%o", st.Mode().Perm())
+	}
+}
+
+// Regression for loto-pduc: the restore side has the same hardlink TOCTOU as
+// the strip side (loto-ta02). Between the validated strip at acquire and the
+// later restore at release/break/reclaim, a racing process can hardlink the
+// locked inode to a name it owns. safeOpenRegular accepts it (regular file),
+// then restoreWrite would add owner-write to the SHARED inode — silently
+// making the attacker's read-only file writable. restoreWrite must re-check
+// Nlink on the open fd and refuse when Nlink>1, mirroring stripWrite.
+//
+// afterOpenHook fires inside restoreWrite right after the fd is opened,
+// simulating the racing process. This makes the TOCTOU deterministic.
+func TestRestoreWrite_RefusesHardlinkRace(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	// 0o444: the locked file was write-stripped at acquire.
+	if err := os.WriteFile(target, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	attacker := filepath.Join(dir, "attacker")
+
+	prev := afterOpenHook
+	afterOpenHook = func(string) {
+		// Racing process hardlinks the locked inode to a name it owns.
+		if err := os.Link(target, attacker); err != nil {
+			t.Fatalf("inject hardlink: %v", err)
+		}
+		afterOpenHook = prev // fire once
+	}
+	defer func() { afterOpenHook = prev }()
+
+	if err := restoreWrite(target); err == nil {
+		t.Fatal("restoreWrite must refuse when Nlink>1 on the open fd, got nil error")
+	}
+	// The shared inode must be untouched — attacker's name stays read-only.
+	st, _ := os.Stat(attacker)
+	if st.Mode().Perm()&0o200 != 0 {
+		t.Errorf("attacker file gained owner-write via hardlink, mode=%o", st.Mode().Perm())
+	}
+}
+
+// Regression for loto-pduc: a restore-side hardlink race must surface through
+// the caller plumbing — restoreAndAuditReleases flips the result to
+// StateRestoreFailed and emits a mode_restore_failed audit event. This proves
+// the errMultiLinked guard reaches the audit trail end-to-end (acceptance
+// criterion), not just the fd-level refusal.
+func TestRestoreAndAuditReleases_HardlinkRaceEmitsModeRestoreFailed(t *testing.T) {
+	s := mustOpen(t)
+
+	dir := t.TempDir()
+	p := filepath.Join(dir, "x.go")
+	if err := os.WriteFile(p, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	attacker := filepath.Join(dir, "attacker")
+
+	prev := afterOpenHook
+	afterOpenHook = func(string) {
+		if err := os.Link(p, attacker); err != nil {
+			t.Fatalf("inject hardlink: %v", err)
+		}
+		afterOpenHook = prev // fire once
+	}
+	defer func() { afterOpenHook = prev }()
+
+	results := []ReleaseResult{
+		{Target: domain.Target{Canonical: p}, State: StateUnlocked},
+	}
+	s.restoreAndAuditReleases(results, tcAlice)
+
+	if results[0].State != StateRestoreFailed {
+		t.Fatalf("want StateRestoreFailed on Nlink>1, got %v", results[0].State)
+	}
+	if results[0].RestoreErr == nil {
+		t.Fatal("RestoreErr nil — restoreWrite must refuse Nlink>1")
+	}
+
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM events WHERE target_canonical=? AND event_kind='mode_restore_failed'`, p,
+	).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("want 1 mode_restore_failed event for %s, got %d", p, n)
 	}
 }

@@ -21,10 +21,10 @@ var fchmodFn = func(f *os.File, mode os.FileMode) error {
 	return f.Chmod(mode)
 }
 
-// afterOpenHook is a package-private indirection that fires inside
-// stripWrite right after the fd is opened, before the fd is re-stat'd.
-// Tests inject a racing hardlink here to exercise the validate→strip
-// TOCTOU deterministically. Production default is a no-op.
+// afterOpenHook is a package-private indirection that fires inside both
+// stripWrite and restoreWrite right after the fd is opened, before the fd is
+// re-stat'd. Tests inject a racing hardlink here to exercise the
+// validate→chmod TOCTOU deterministically. Production default is a no-op.
 var afterOpenHook = func(string) {}
 
 // safeOpenRegular opens path with O_NOFOLLOW and verifies the result is a
@@ -94,9 +94,19 @@ func restoreWrite(path string) error {
 		return err
 	}
 	defer f.Close()
+	afterOpenHook(path)
 	st, err := f.Stat()
 	if err != nil {
 		return err
+	}
+	// Re-check Nlink on the OPEN fd, mirroring stripWrite (loto-ta02): a racing
+	// process can hardlink the locked inode between the validated strip at
+	// acquire and this restore at release/break/reclaim. Restoring owner-write
+	// would then silently add write to an attacker-chosen name on the shared
+	// inode. Refuse Nlink>1 so the caller audits a mode_restore_failed event
+	// (loto-pduc).
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Nlink > 1 {
+		return &fs.PathError{Op: "restorewrite", Path: path, Err: errMultiLinked}
 	}
 	return fchmodFn(f, st.Mode().Perm()|0o200)
 }
