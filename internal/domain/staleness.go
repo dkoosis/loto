@@ -47,3 +47,50 @@ func (c EvalContext) IsStale(l LockRecord) bool {
 	}
 	return false
 }
+
+// Liveness is the display-tier refinement of IsStale: it splits a non-stale
+// lock into ALIVE (owner session probed live) vs UNKNOWN (no durable liveness
+// handle — PID-0 sentinel or cross-host — so TTL is the sole authority). DEAD
+// is exactly IsStale: TTL backstop fired OR owner provably gone. Surfaced by
+// `loto status` so the cause of a lock's verdict is visible (loto-k5el.1).
+type Liveness int
+
+const (
+	LivenessAlive Liveness = iota
+	LivenessDead
+	LivenessUnknown
+)
+
+func (l Liveness) String() string {
+	switch l {
+	case LivenessAlive:
+		return "alive"
+	case LivenessDead:
+		return "dead"
+	default:
+		return "unknown"
+	}
+}
+
+// Classify returns the display-tier liveness verdict. DEAD ⟺ IsStale (I1).
+func (c EvalContext) Classify(l LockRecord) Liveness {
+	if c.IsStale(l) {
+		return LivenessDead
+	}
+	if l.PID > 0 && l.Host == c.ThisHost && c.Live != nil {
+		// Not stale + durable handle on this host ⟹ probe said alive.
+		return LivenessAlive
+	}
+	return LivenessUnknown
+}
+
+// RemainingTTL is the time until the TTL backstop fires, clamped at 0. A live
+// durable-PID holder is never TTL-reaped (liveness governs), so this is purely
+// informational for ALIVE locks; for UNKNOWN locks it is the self-heal deadline.
+func (c EvalContext) RemainingTTL(l LockRecord) time.Duration {
+	d := l.ExpiresAt.Sub(c.Now)
+	if d < 0 {
+		return 0
+	}
+	return d
+}
