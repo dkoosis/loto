@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"modernc.org/sqlite"
@@ -292,19 +293,33 @@ func schemaFullyCurrent(ctx context.Context, db *sql.DB) bool {
 	if !schemaStructurallyIntact(ctx, db) {
 		return false
 	}
-	for _, tbl := range []string{"events", "tags"} {
-		var name string
-		if err := db.QueryRowContext(ctx,
-			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&name); err != nil || name != tbl {
-			return false
-		}
-	}
-	var n int
+	// events existence is covered by the DDL read below (ErrNoRows → not-current),
+	// so only tags needs a standalone existence probe here.
+	var tagsName string
 	if err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM pragma_table_info('locks') WHERE name = 'proc_start'`).Scan(&n); err != nil {
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='tags'`).Scan(&tagsName); err != nil || tagsName != "tags" {
 		return false
 	}
-	return n > 0
+	// loto-k5el.2: a v9 DB carrying the old single-column-PK / no-mode locks
+	// table is NOT fully current — without the mode + composite-PK probes
+	// migrate's fast path would skip ensureLocksModeAndPK and the rebuild would
+	// never run. All three locks-column facts come from one pragma_table_info
+	// scan (this gate runs on every Open, including read-only commands).
+	var procStartN, modeN, pkCols int
+	if err := db.QueryRowContext(ctx, `
+SELECT sum(name = 'proc_start'), sum(name = 'mode'), sum(pk > 0)
+FROM pragma_table_info('locks')`).Scan(&procStartN, &modeN, &pkCols); err != nil {
+		return false
+	}
+	// events CHECK must already admit lock_downgraded, else ensureEventsCheckCurrent
+	// still has work to do. This read also doubles as the events-table existence
+	// probe (ErrNoRows → not-current).
+	var eventsDDL string
+	if err := db.QueryRowContext(ctx,
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&eventsDDL); err != nil {
+		return false
+	}
+	return procStartN > 0 && modeN == 1 && pkCols == 2 && strings.Contains(eventsDDL, "'lock_downgraded'")
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -429,6 +444,20 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := ensureLocksProcStart(ctx, tx); err != nil {
 		return fmt.Errorf("add locks.proc_start: %w", err)
 	}
+	// Composite-PK + mode-column upgrade for DBs that predate loto-k5el.2.
+	// SQLite cannot ALTER a primary key in place, so this rebuilds the locks
+	// table (guarded — no-op when the PK is already composite) inside the same
+	// migrate tx. user_version is intentionally NOT bumped (same rationale as
+	// proc_start above). Must run AFTER ensureLocksProcStart so the rebuild's
+	// SELECT can rely on proc_start existing on the legacy table.
+	if err := ensureLocksModeAndPK(ctx, tx); err != nil {
+		return fmt.Errorf("upgrade locks mode/pk: %w", err)
+	}
+	// Widen the events CHECK for the lock_downgraded kind on pre-loto-k5el.2 DBs
+	// (a CHECK can't be ALTERed; rebuild guarded by a DDL substring probe).
+	if err := ensureEventsCheckCurrent(ctx, tx); err != nil {
+		return fmt.Errorf("upgrade events check: %w", err)
+	}
 	if err := commitTxFn(tx); err != nil {
 		return fmt.Errorf("commit schema: %w", err)
 	}
@@ -452,5 +481,91 @@ func ensureLocksProcStart(ctx context.Context, tx *sql.Tx) error {
 		return nil
 	}
 	_, err := tx.ExecContext(ctx, `ALTER TABLE locks ADD COLUMN proc_start INTEGER`)
+	return err
+}
+
+// ensureLocksModeAndPK brings a pre-loto-k5el.2 DB up to the composite-PK +
+// mode-column shape. SQLite cannot ALTER a primary key in place, so when the PK
+// is still the legacy single column the locks table is rebuilt (12-step idiom)
+// inside the migrate tx, defaulting every existing row's mode to 'exclusive'
+// (preserving the pre-mode binary-lock = sole-writer semantics). user_version is
+// intentionally NOT bumped — a bump trips MoveCorruptAside and destroys live
+// locks (loto-kwlp precedent). Guarded by a PK-shape probe so this is a no-op on
+// fresh DBs (CREATE TABLE already declared the composite PK) and on every re-Open.
+func ensureLocksModeAndPK(ctx context.Context, tx *sql.Tx) error {
+	var pkCols int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('locks') WHERE pk > 0`).Scan(&pkCols); err != nil {
+		return err
+	}
+	if pkCols == 2 {
+		return nil // already migrated (fresh DB or prior upgrade)
+	}
+	// Legacy single-column PK: rebuild. The old table has no `mode` column, so
+	// the SELECT supplies the literal 'exclusive' for it. proc_start is present
+	// (ensureLocksProcStart ran first), so the column list is valid.
+	const rebuild = `
+CREATE TABLE locks_new (
+  target_canonical TEXT NOT NULL,
+  owner_uuid       TEXT NOT NULL,
+  session_uuid     TEXT NOT NULL,
+  intent           TEXT NOT NULL DEFAULT '',
+  created_at       INTEGER NOT NULL,
+  expires_at       INTEGER NOT NULL,
+  host             TEXT NOT NULL,
+  pid              INTEGER NOT NULL,
+  proc_start       INTEGER,
+  branch           TEXT NOT NULL DEFAULT '',
+  mode             TEXT NOT NULL DEFAULT 'exclusive',
+  PRIMARY KEY (target_canonical, owner_uuid)
+);
+INSERT INTO locks_new
+  (target_canonical, owner_uuid, session_uuid, intent, created_at,
+   expires_at, host, pid, proc_start, branch, mode)
+SELECT target_canonical, owner_uuid, session_uuid, intent, created_at,
+       expires_at, host, pid, proc_start, branch, 'exclusive'
+FROM locks;
+DROP TABLE locks;
+ALTER TABLE locks_new RENAME TO locks;
+-- target-only lookups ride the composite PK's leftmost column; no separate index.
+CREATE INDEX IF NOT EXISTS idx_locks_owner    ON locks(owner_uuid);
+CREATE INDEX IF NOT EXISTS idx_locks_session  ON locks(session_uuid);
+CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);`
+	_, err := tx.ExecContext(ctx, rebuild)
+	return err
+}
+
+// ensureEventsCheckCurrent widens the events CHECK constraint to admit the
+// lock_downgraded kind on a DB created before loto-k5el.2. A CHECK can't be
+// ALTERed, so the events table is rebuilt — but only when the stored DDL lacks
+// the new kind (probe via sqlite_master.sql substring), making this a no-op on
+// fresh DBs and re-Opens. Runs inside the migrate tx; user_version not bumped.
+func ensureEventsCheckCurrent(ctx context.Context, tx *sql.Tx) error {
+	var ddl string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&ddl); err != nil {
+		return err
+	}
+	if strings.Contains(ddl, "'lock_downgraded'") {
+		return nil // already current
+	}
+	const rebuild = `
+CREATE TABLE events_new (
+  id               TEXT PRIMARY KEY,
+  target_canonical TEXT NOT NULL,
+  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started','lock_downgraded')),
+  actor_uuid       TEXT NOT NULL,
+  subject_uuid     TEXT,
+  reason           TEXT NOT NULL DEFAULT '',
+  created_at       INTEGER NOT NULL
+);
+INSERT INTO events_new (id, target_canonical, event_kind, actor_uuid, subject_uuid, reason, created_at)
+SELECT id, target_canonical, event_kind, actor_uuid, subject_uuid, reason, created_at FROM events;
+DROP TABLE events;
+ALTER TABLE events_new RENAME TO events;
+CREATE INDEX IF NOT EXISTS idx_events_target     ON events(target_canonical, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_kind       ON events(event_kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_created_id ON events(created_at, id);`
+	_, err := tx.ExecContext(ctx, rebuild)
 	return err
 }

@@ -3,7 +3,7 @@
 -- (loto-vmym); only a future version or a foreign schema triggers MoveCorruptAside.
 
 CREATE TABLE IF NOT EXISTS locks (
-  target_canonical TEXT PRIMARY KEY,
+  target_canonical TEXT NOT NULL,
   owner_uuid       TEXT NOT NULL,
   session_uuid     TEXT NOT NULL,
   intent           TEXT NOT NULL DEFAULT '',
@@ -16,8 +16,20 @@ CREATE TABLE IF NOT EXISTS locks (
   -- in the liveness probe (loto-kwlp). Added in-place to existing DBs via the
   -- guarded ALTER in migrate(); declared here so fresh DBs match without it.
   proc_start       INTEGER,
-  branch           TEXT NOT NULL DEFAULT ''
+  branch           TEXT NOT NULL DEFAULT '',
+  -- mode: 'shared' (multi-reader, write-bit NOT stripped) or 'exclusive'
+  -- (sole-writer, write-bit stripped). Legacy rows / NULL read as 'exclusive'
+  -- to preserve the pre-mode binary-lock semantics (loto-k5el.2). Added in-place
+  -- to existing DBs via the guarded table-rebuild in migrate(); declared here so
+  -- fresh DBs match. The composite PK (target_canonical, owner_uuid) lets several
+  -- shared holders coexist on one target — meaningless for the old binary lock,
+  -- mandatory for shared mode.
+  mode             TEXT NOT NULL DEFAULT 'exclusive',
+  PRIMARY KEY (target_canonical, owner_uuid)
 );
+-- No standalone target_canonical index: the composite PK's automatic index has
+-- target_canonical as its leftmost column, so target-only lookups (the conflict
+-- probe's hot path) already use it.
 CREATE INDEX IF NOT EXISTS idx_locks_owner    ON locks(owner_uuid);
 CREATE INDEX IF NOT EXISTS idx_locks_session  ON locks(session_uuid);
 CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);
@@ -25,7 +37,7 @@ CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);
 CREATE TABLE IF NOT EXISTS events (
   id               TEXT PRIMARY KEY,
   target_canonical TEXT NOT NULL,
-  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started')),
+  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started','lock_downgraded')),
   actor_uuid       TEXT NOT NULL,
   subject_uuid     TEXT,
   reason           TEXT NOT NULL DEFAULT '',
