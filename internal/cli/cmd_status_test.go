@@ -76,6 +76,30 @@ func TestStatusShowsTTLAndLiveness(t *testing.T) {
 	}
 }
 
+// TestStatusDeadVerdictMatchesReclaim pins loto-k5el.1 I3: a lock status calls
+// `dead` (expired TTL) is reclaimed by a peer acquire with no doctor run — so
+// status's verdict is trustworthy, not cosmetic.
+//
+// Harness note (Task 0): two agents via re-pinning (no pinAgentAs).
+func TestStatusDeadVerdictMatchesReclaim(t *testing.T) {
+	withTempProject(t)
+	t.Setenv("LOTO_PID", "") // PID-0 sentinel → TTL-only liveness
+	pinAgent(t)              // agent A
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagTTL, "-1s"},
+		&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice lock failed")
+	}
+	var st bytes.Buffer
+	Run([]string{tcCmdStatus}, &st, &bytes.Buffer{})
+	if !strings.Contains(st.String(), "liveness=dead") && !strings.Contains(st.String(), "ttl_remaining=0s") {
+		t.Fatalf("status should flag expired lock dead / 0s: %q", st.String())
+	}
+	pinAgent(t) // agent B (re-pin swaps active identity)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("bob should reclaim the dead-verdict lock with no doctor")
+	}
+}
+
 // loto-dvx: parity with check (loto-d3l). `loto status /abs/path` for a file
 // inside the repo must work instead of failing canonicalization.
 func TestStatus_AcceptsAbsolutePathInsideRepo(t *testing.T) {
