@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "loto whoami --ensure --json | python3 -c \"import sys,json,os; d=json.load(sys.stdin); print('LOTO_AGENT_ID='+d['id'])\" >> $CLAUDE_ENV 2>/dev/null || true",
+            "command": "loto whoami --ensure --json | python3 -c \"import sys,json; d=json.load(sys.stdin); print('LOTO_AGENT_ID='+d['uuid'])\" >> $CLAUDE_ENV 2>/dev/null || true",
             "type": "command"
           },
           {
