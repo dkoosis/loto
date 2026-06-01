@@ -256,3 +256,38 @@ func TestUnlockOwner(t *testing.T) {
 		t.Errorf("expected ✓ unlocked: %q", out.String())
 	}
 }
+
+// TestAcquireReclaimsExpiredHolder_NoDoctor pins loto-k5el.1 SC1: after a
+// holder's TTL has lapsed, a second agent acquires the same target with NO
+// intervening `loto doctor`. Mechanism: AcquireLocks→reclaimStaleAndCollectBlockers.
+//
+// Not TDD — the acquire-time reclaim mechanism already ships; this test passes
+// on first write and pins SC1 against regression.
+//
+// Harness note (Task 0): there is no pinAgentAs helper. Two agents are driven by
+// re-pinning: pinAgent mints+pins a fresh identity, and re-pinning swaps the
+// active LOTO_AGENT_ID (the same pattern TestLockConflictBetweenAgents uses).
+func TestAcquireReclaimsExpiredHolder_NoDoctor(t *testing.T) {
+	withTempProject(t)
+
+	// Agent A locks with an already-expired TTL and the PID-0 sentinel (no
+	// LOTO_PID), so liveness degrades to TTL and the lock is born stale.
+	t.Setenv("LOTO_PID", "") // force pidUnset → PID-0 sentinel, TTL-only liveness
+	pinAgent(t)              // agent A
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagTTL, "-1s"},
+		&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice initial lock failed")
+	}
+
+	// Agent B acquires the same target. No doctor run between.
+	pinAgent(t) // agent B (re-pin swaps active identity)
+	var out, errb bytes.Buffer
+	code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("bob acquire over expired holder should succeed, got exit %d: out=%q err=%q",
+			code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "✓ locked") {
+		t.Errorf("expected success glyph in acquire output: %q", out.String())
+	}
+}
