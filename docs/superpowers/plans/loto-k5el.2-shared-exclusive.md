@@ -15,7 +15,7 @@ A critical review ground-truthed this plan against live source. These **override
    - **PR A (migration only):** Task 1 (schema/PK/`ensureLocksModeAndPK`) + Task 6 (events-CHECK rebuild) + the **mandatory legacy-DB round-trip test** (Open Q4 — CLOSE it here, don't defer): open a DB at the OLD single-column PK with live rows, migrate, assert rows survive with `mode='exclusive'` + composite PK + `loto.db` opens with no `MoveCorruptAside`. Land PR A and let CI's linux `-race` clear it **before** feature work.
    - **PR B (feature):** Tasks 2–5, 7–9 on top of the migrated schema.
 3. **`LockAt → LockForOwnerAt` is a FIRST-CLASS correctness task, not a side-audit.** Under the composite PK, `LockAt`'s `WHERE target_canonical=?` matches multiple rows and silently returns an arbitrary one — a latent bug across 10+ callers. See **Task 5.5** (promoted): enumerate every `LockAt(` caller, decide per-caller (owner-scoped lookup vs. "any holder" lister), pin with a test that a two-holder shared target is queried unambiguously.
-4. **`check --staged` policy — RESOLVED to liveness-gated (see §check --staged, updated).** Not pure hard-block, not pure grant-with-warning: hard-block on a **provably-live** exclusive conflict; warn-and-proceed when the exclusive owner's liveness is indeterminate/expiring. Honors dk's grant-with-warning lean without dropping the gate where it bites. *(One-line flip to pure grant-with-warning if dk overrides.)*
+4. **`check --staged` policy — CONFIRMED by dk: liveness-gated (see §check --staged).** Not pure hard-block, not pure grant-with-warning: hard-block on a **provably-live** exclusive conflict; warn-and-proceed when the exclusive owner's liveness is indeterminate/expiring. Settled — build to this.
 5. **Sequencing: `.1` lands FIRST; `.2` hand-merges.** `.1` is verified **schema-neutral** (no schema/PK change) — so `.2`'s fear of a schema collision is overstated. Real merge seams are exactly two files: `cmd_status.go::printStatusLocks` and `locks_acquire.go::reclaimStaleAndCollectBlockers`. Not a rebase hope — a deliberate hand-merge of those two.
 6. **Embedded full-function bodies are reference, not gospel.** Keep the `Conflicts` truth table, invariants I1–I6, formal model, schema delta as the authoritative spec; write bodies against live code where a snippet cites a wrong helper.
 
@@ -135,7 +135,7 @@ The epic (loto-k5el) and bead .2 both flag this explicitly:
 
 ‡ **Dependency:** this consumes `.1`'s `Classify`. Land `.1` first (sequencing, binding correction 5); `.2`'s check path calls into it. If `.1` is not yet merged when PR B lands, fall back to plain hard-block-on-exclusive and wire the liveness gate in a follow-up — do NOT block PR B on it.
 
-**PENDING dk CONFIRM:** this is my recommendation back to dk's "I'll go with grant-with-warning unless you think it's a bad idea." If dk prefers **pure** grant-with-warning (warn on ANY exclusive conflict regardless of liveness), it's a one-line simplification — drop the `Classify` gate, always exit 0 + `⚠`.
+**CONFIRMED by dk (2026-06-01).** Liveness-gated is the settled policy — build to it. (For the record: the alternative, pure grant-with-warning, would be a one-line simplification — drop the `Classify` gate, always exit 0 + `⚠`.)
 
 ---
 
@@ -1520,7 +1520,7 @@ After PR B CI-green + merge: `bd close loto-k5el.2` (or `Closes #N` in the squas
 ## Decisions (settled in post-review)
 
 1. **`.1` schema reconciliation / landing order.** RESOLVED — `.1` is verified schema-neutral; land `.1` first, `.2` hand-merges two files (§Reconciliation, binding correction 5).
-2. **check --staged policy.** RESOLVED to **liveness-gated** (hard-block on a provably-live exclusive conflict; warn-and-proceed on indeterminate) — §check --staged, binding correction 4. *Pending dk's nod vs. pure grant-with-warning; one-line flip either way.*
+2. **check --staged policy.** RESOLVED + dk-CONFIRMED — **liveness-gated** (hard-block on a provably-live exclusive conflict; warn-and-proceed on indeterminate). §check --staged, binding correction 4.
 3. **PK migration weight.** ACCEPTED as a guarded, atomic, crash-safe table-rebuild — but de-risked by isolating it into **PR A** (migration only, CI-`-race`-green before feature work) with the mandatory legacy-DB round-trip test (binding correction 2, Task 1 Step 5b).
 4. **events CHECK on legacy DBs.** RESOLVED — gap CLOSED, not deferred: the legacy-DB round-trip test (Task 1 Step 5b) exercises the rebuild branch directly. Ships in PR A.
 
