@@ -77,6 +77,7 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord) {
 		return
 	}
 	fmt.Fprintf(stdout, "✓ locks count=%d\n", len(all))
+	ec := domain.EvalContext{Now: time.Now(), ThisHost: rt.Host, Live: rt.liveProbe()}
 	canonicals := make([]string, len(all))
 	for i := range all {
 		canonicals[i] = all[i].Target.Canonical
@@ -84,12 +85,20 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord) {
 	tagsByTarget, _ := rt.Store.ListAliveByTargets(rt.Ctx, canonicals)
 	for i := range all {
 		l := &all[i]
-		fmt.Fprintf(stdout, "✓ target=%s owner=%s intent=%q held_since=%s expires_at=%s host=%s pid=%d\n",
+		fmt.Fprintf(stdout, "✓ target=%s owner=%s intent=%q held_since=%s ttl_remaining=%s liveness=%s host=%s pid=%d\n",
 			relPath(l.Target.Canonical), l.OwnerUUID, l.Intent,
-			l.CreatedAt.UTC().Format(time.RFC3339), l.ExpiresAt.UTC().Format(time.RFC3339),
+			l.CreatedAt.UTC().Format(time.RFC3339),
+			fmtTTL(ec.RemainingTTL(*l)), ec.Classify(*l),
 			l.Host, l.PID)
 		render.EmitTagRows(stdout, tagsByTarget[l.Target.Canonical])
 	}
+}
+
+// fmtTTL renders a remaining-TTL duration deterministically (whole seconds,
+// "0s" when the backstop has fired). Avoids time.Duration's variable-precision
+// String so status output is byte-stable for golden tests (design.md).
+func fmtTTL(d time.Duration) string {
+	return fmt.Sprintf("%ds", int64(d.Round(time.Second)/time.Second))
 }
 
 func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
@@ -98,6 +107,7 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 		fmt.Fprintf(w, "✗ %v\n", err)
 		return 3
 	}
+	ec := domain.EvalContext{Now: time.Now(), ThisHost: rt.Host, Live: rt.liveProbe()}
 	var overlapping []domain.LockRecord
 	for i := range all {
 		if domain.SameCanonical(all[i].Target, t) {
@@ -114,8 +124,9 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 	fmt.Fprintf(w, "✗ overlap count=%d target=%s\n", len(overlapping), relPath(t.Canonical))
 	for i := range overlapping {
 		l := &overlapping[i]
-		fmt.Fprintf(w, "✗ holder target=%s owner=%s intent=%q expires_at=%s\n",
-			relPath(l.Target.Canonical), l.OwnerUUID, l.Intent, l.ExpiresAt.UTC().Format(time.RFC3339))
+		fmt.Fprintf(w, "✗ holder target=%s owner=%s intent=%q ttl_remaining=%s liveness=%s\n",
+			relPath(l.Target.Canonical), l.OwnerUUID, l.Intent,
+			fmtTTL(ec.RemainingTTL(*l)), ec.Classify(*l))
 	}
 	if tags, err := rt.Store.ListAliveForTarget(rt.Ctx, t.Canonical); err == nil {
 		render.EmitTagRows(w, tags)
