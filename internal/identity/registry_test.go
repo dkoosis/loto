@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -530,9 +531,14 @@ func TestEnsureForSessionFirstUseRace(t *testing.T) {
 }
 
 // TestEnsureForSessionRespectsCtxCancel asserts that a cancelled context
-// aborts the ensureForSession retry loop within one poll interval (~5ms)
-// rather than spinning through all 20 retries (~100ms). Without this fix,
-// Ctrl-C / parent deadline cannot abort the retry (gh#114).
+// aborts the ensureForSession retry loop on the first retry rather than
+// spinning through any of the 20 poll intervals. Without the non-blocking
+// ctx.Err() check, Go's uniform-random select between <-ctx.Done() and the
+// poll timer lets a cancelled ctx lose the race for up to the full retry
+// budget — the #162 linux-race flake (94ms vs the old 50ms bound) and the
+// original gh#114 Ctrl-C/deadline abort failure. Assertion is deterministic:
+// the fixed code reaches neither the poll sleep nor the select, so the
+// post-load hook count stays at zero regardless of scheduling.
 func TestEnsureForSessionRespectsCtxCancel(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
@@ -552,12 +558,30 @@ func TestEnsureForSessionRespectsCtxCancel(t *testing.T) {
 	}
 	f.Close() // 0-byte file — loadSessionAgent will fail every retry
 
+	// Drive the both-cases-ready race deterministically. The post-load hook
+	// sleeps past the (tiny) poll interval, so by the time the bare select runs
+	// the timer has ALREADY fired — exactly the slow-loadSessionAgent-under-race
+	// window from CI (#162). With both <-ctx.Done() and <-timer.C ready, Go
+	// picks uniformly at random, so the pre-fix code reaches the select (and the
+	// hook) on every retry and trips the hook ≥1 time. The non-blocking
+	// ctx.Err() check short-circuits before the hook and select, so the fixed
+	// code returns on the first retry with zero hook calls. (loto-qqy5)
+	const sleepPerRetry = 5 * time.Millisecond
+	var hookCalls atomic.Int32
+	prevInterval, prevHook := sessionPollInterval, sessionPostLoadHook
+	sessionPollInterval = 1 * time.Microsecond
+	sessionPostLoadHook = func() {
+		hookCalls.Add(1)
+		time.Sleep(sleepPerRetry)
+	}
+	defer func() {
+		sessionPollInterval, sessionPostLoadHook = prevInterval, prevHook
+	}()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
 
-	start := time.Now()
 	_, err = Ensure(ctx)
-	elapsed := time.Since(start)
 
 	if err == nil {
 		t.Fatal("Ensure with cancelled ctx must return error")
@@ -565,10 +589,15 @@ func TestEnsureForSessionRespectsCtxCancel(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("want context.Canceled, got %v", err)
 	}
-	// With 20 retries × 5ms sleep, the old code takes ~100ms. A ctx-aware
-	// loop should bail in <10ms.
-	if elapsed > 50*time.Millisecond {
-		t.Fatalf("retry loop took %v — ctx.Done() not checked in retry", elapsed)
+	// Deterministic invariant: a pre-cancelled ctx must short-circuit before
+	// the loop ever reaches the timer/select, so the post-load hook (which also
+	// stands in for the per-retry poll sleep) fires zero times. The pre-fix
+	// random-select code reaches the select every retry and trips the hook on
+	// those iterations it loses — this assertion fails for it regardless of
+	// scheduling luck, with no flaky wall-clock dependency. The original 50ms
+	// timing bound (#162) is subsumed: zero hook calls means zero retry sleeps.
+	if n := hookCalls.Load(); n != 0 {
+		t.Fatalf("post-load hook ran %d times — ctx.Done() not prioritized before select (would spin the retry budget)", n)
 	}
 }
 

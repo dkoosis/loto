@@ -194,19 +194,56 @@ func ensureForSession(ctx context.Context, sid string) (*Agent, error) {
 	return awaitOrRecoverSession(ctx, sid)
 }
 
-// awaitOrRecoverSession retries loading the session agent (the winner may
-// still be writing), then attempts crash recovery if the cache is corrupt.
-func awaitOrRecoverSession(ctx context.Context, sid string) (*Agent, error) {
+// sessionPollInterval is the per-retry backoff in awaitOrRecoverSession.
+// Var (not const) so tests can drive the select's both-cases-ready race.
+var sessionPollInterval = 5 * time.Millisecond
+
+// sessionPostLoadHook runs inside the retry loop after the poll timer is armed
+// but before the select. Nil in production; tests set it to deterministically
+// reproduce the slow-loadSessionAgent-under-race window where the timer is
+// already ready when the select is reached (loto-qqy5).
+var sessionPostLoadHook func()
+
+// awaitSession polls loadSessionAgent up to 20 times, sleeping
+// sessionPollInterval between tries, until the winner finishes writing the
+// session cache. The bool reports whether a is usable; when false with a nil
+// error, all retries were exhausted without a cache (the caller then attempts
+// crash recovery). A non-nil error means the context was cancelled.
+//
+// Cancellation is prioritized over the poll timer: a bare select between
+// <-ctx.Done() and <-time.After(...) picks uniformly at random when both are
+// ready (e.g. a slow loadSessionAgent under -race lets the timer fire first),
+// so a cancelled ctx could be ignored for up to the full 20×interval budget —
+// the #162 linux-race flake. The non-blocking ctx.Err() check below makes
+// cancellation win on the first retry. (loto-qqy5)
+func awaitSession(ctx context.Context, sid string) (*Agent, bool, error) {
 	for range 20 {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
 		a, lerr := loadSessionAgent(sid)
 		if lerr == nil {
-			return a, nil
+			return a, true, nil
+		}
+		timer := time.NewTimer(sessionPollInterval)
+		if sessionPostLoadHook != nil {
+			sessionPostLoadHook() // test seam: simulate slow -race load
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(5 * time.Millisecond):
+			timer.Stop()
+			return nil, false, ctx.Err()
+		case <-timer.C:
 		}
+	}
+	return nil, false, nil
+}
+
+// awaitOrRecoverSession retries loading the session agent (the winner may
+// still be writing), then attempts crash recovery if the cache is corrupt.
+func awaitOrRecoverSession(ctx context.Context, sid string) (*Agent, error) {
+	if a, ok, err := awaitSession(ctx, sid); ok || err != nil {
+		return a, err
 	}
 
 	if recoverCorruptSessionCache(sid) {
