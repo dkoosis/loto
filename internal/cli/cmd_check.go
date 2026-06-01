@@ -16,8 +16,10 @@ import (
 func init() { register("check", cmdCheck) } //nolint:gochecknoinits // command registry pattern
 
 type checkConflict struct {
-	Path    string
-	Blocker domain.LockRecord
+	Path     string
+	Blocker  domain.LockRecord
+	Blocking bool // true: provably-live exclusive holder → hard block (exit 1).
+	// false: indeterminate/expiring liveness → advisory warn (does not set exit 1).
 }
 
 func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -69,8 +71,10 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintln(stdout, "✓ no conflicts")
 		return 0
 	}
-	printCheckConflicts(stdout, rows)
-	return 1
+	if printCheckConflicts(stdout, rows) {
+		return 1
+	}
+	return 0
 }
 
 type checkInvalid struct {
@@ -135,16 +139,16 @@ func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repo
 }
 
 func appendCheckConflictsForTarget(rows []checkConflict, seen map[string]bool, t domain.Target, all []domain.LockRecord, myUUID string, ec domain.EvalContext) []checkConflict {
+	// Probe as SHARED, not exclusive: the committer's question is "does any peer
+	// hold a lease that excludes me?" Conflicts(shared, shared)=false (readers
+	// coexist) and Conflicts(shared, exclusive)=true — so only an exclusive peer
+	// conflicts, which is the intended check semantics (loto-k5el.2 T8). A stale
+	// holder is filtered inside Conflicts (AcquireLocks would reclaim it; the
+	// gate must not demand `unlock --force` for a reclaimable lock, loto-9t0q).
+	probe := domain.LockRecord{Target: t, OwnerUUID: myUUID, Mode: domain.ModeShared}
 	for i := range all {
 		l := &all[i]
-		if l.OwnerUUID == myUUID || !domain.SameCanonical(l.Target, t) {
-			continue
-		}
-		// A stale/dead-PID holder is reclaimable: AcquireLocks would silently
-		// reclaim it (reclaimStaleAndCollectBlockers), so the proceed/block gate
-		// must not report it as a hard conflict demanding `unlock --force`
-		// (loto-9t0q).
-		if ec.IsStale(*l) {
+		if !ec.Conflicts(probe, *l) {
 			continue
 		}
 		key := t.Canonical + "|" + l.Target.Canonical + "|" + l.OwnerUUID
@@ -152,20 +156,48 @@ func appendCheckConflictsForTarget(rows []checkConflict, seen map[string]bool, t
 			continue
 		}
 		seen[key] = true
-		rows = append(rows, checkConflict{Path: t.Canonical, Blocker: all[i]})
+		// Liveness gate (binding correction 4 / §check --staged): a provably-live
+		// exclusive holder hard-blocks (exit 1); an indeterminate/expiring one
+		// (PID-0 sentinel, cross-host) is an advisory warn that does not block.
+		// Classify is .1's display-tier verdict (loto-k5el.1).
+		blocking := ec.Classify(*l) == domain.LivenessAlive
+		rows = append(rows, checkConflict{Path: t.Canonical, Blocker: all[i], Blocking: blocking})
 	}
 	return rows
 }
 
-func printCheckConflicts(stdout io.Writer, rows []checkConflict) {
-	fmt.Fprintf(stdout, "✗ conflicts count=%d\n", len(rows))
+// printCheckConflicts renders one row per conflict and returns whether any row
+// is a hard blocker (provably-live exclusive holder). Blocking rows lead with ✗
+// and carry an actionable force-unlock fix block; advisory rows lead with ✓
+// (the committer may proceed) and a liveness=unknown field — they do not set
+// exit 1 (loto-k5el.2 T8). The closed glyph vocabulary (design.md) is ✓/✗ only,
+// so "warn" is signalled by ✓ + liveness=unknown rather than a third glyph.
+func printCheckConflicts(stdout io.Writer, rows []checkConflict) bool {
+	blocking := 0
+	for i := range rows {
+		if rows[i].Blocking {
+			blocking++
+		}
+	}
+	head := "✓"
+	if blocking > 0 {
+		head = "✗"
+	}
+	fmt.Fprintf(stdout, "%s conflicts count=%d blocking=%d\n", head, len(rows), blocking)
 	for i := range rows {
 		r := &rows[i]
-		fmt.Fprintf(stdout, "✗ path=%s blocker=%s holder_target=%s intent=%q expires_at=%s\n",
+		if r.Blocking {
+			fmt.Fprintf(stdout, "✗ path=%s blocker=%s holder_target=%s intent=%q expires_at=%s liveness=alive\n",
+				relPath(r.Path), r.Blocker.OwnerUUID, relPath(r.Blocker.Target.Canonical), r.Blocker.Intent,
+				r.Blocker.ExpiresAt.UTC().Format(time.RFC3339))
+			fmt.Fprintln(stdout, "```bash")
+			fmt.Fprintf(stdout, "loto unlock --force -t \"unblock\" %s\n", relPath(r.Blocker.Target.Canonical))
+			fmt.Fprintln(stdout, "```")
+			continue
+		}
+		fmt.Fprintf(stdout, "✓ path=%s blocker=%s holder_target=%s intent=%q expires_at=%s liveness=unknown\n",
 			relPath(r.Path), r.Blocker.OwnerUUID, relPath(r.Blocker.Target.Canonical), r.Blocker.Intent,
 			r.Blocker.ExpiresAt.UTC().Format(time.RFC3339))
-		fmt.Fprintln(stdout, "```bash")
-		fmt.Fprintf(stdout, "loto unlock --force -t \"unblock\" %s\n", relPath(r.Blocker.Target.Canonical))
-		fmt.Fprintln(stdout, "```")
 	}
+	return blocking > 0
 }

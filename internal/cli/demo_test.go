@@ -75,6 +75,15 @@ func solo(t *testing.T) actor {
 	return actor{handle: a.Handle, agent: a}
 }
 
+// liveHolder pins LOTO_PID to this live test process so locks placed in the
+// demo classify ALIVE — the provably-live case `check` hard-blocks on under the
+// liveness gate (loto-k5el.2). Demos that narrate "a live peer holds it, so
+// check blocks" call this before the holder locks.
+func liveHolder(t *testing.T) {
+	t.Helper()
+	t.Setenv("LOTO_PID", fmt.Sprintf("%d", os.Getpid()))
+}
+
 // triCast mints a third actor (carol) alongside alice + bob, for demos that
 // need three peers (e.g. parallel feature lanes).
 func triCast(t *testing.T) (alice, bob, carol actor) {
@@ -238,6 +247,7 @@ func TestDemo_02_LockAndStatus(t *testing.T) {
 func TestDemo_03_CheckBeforeEdit(t *testing.T) {
 	head(t, 3, "check — pre-flight before you touch a file")
 	repo := withTempProject(t)
+	liveHolder(t)
 	touch(t, repo, "b.go")
 	alice, bob := cast(t)
 
@@ -399,6 +409,7 @@ func TestDemo_09_LaneByAnchors(t *testing.T) {
 func TestDemo_10_HookGate(t *testing.T) {
 	head(t, 10, "hook gate — check before every write")
 	repo := withTempProject(t)
+	liveHolder(t)
 	touch(t, repo, "owned.go")
 	touch(t, repo, "free.go")
 	alice, bob := cast(t)
@@ -459,6 +470,7 @@ func TestDemo_11_DrainLoop(t *testing.T) {
 func TestDemo_12_MigrationTTL(t *testing.T) {
 	head(t, 12, "migration TTL — long claim that explains itself")
 	repo := withTempProject(t)
+	liveHolder(t)
 	touch(t, repo, "internal/api/api.go")
 	alice, bob := cast(t)
 
@@ -490,6 +502,7 @@ func TestDemo_12_MigrationTTL(t *testing.T) {
 func TestDemo_13_QueueBehind(t *testing.T) {
 	head(t, 13, "queue behind — poll check until peer releases")
 	repo := withTempProject(t)
+	liveHolder(t)
 	touch(t, repo, "hot.go")
 	alice, bob := cast(t)
 

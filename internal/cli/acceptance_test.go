@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +43,10 @@ func TestAcceptance_BasicMultiAgentFlow(t *testing.T) {
 	alice, bob := twoAgents(t)
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	// Durable, live PID: alice is a live session, so her exclusive lock
+	// classifies ALIVE — the provably-live case that hard-blocks bob's check
+	// under the liveness gate (loto-k5el.2).
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
 	if code := Run([]string{tcCmdLock, tcStoreStoreGo, tcFlagIntent, "refactor"}, io.Discard, io.Discard); code != 0 {
 		t.Fatal("alice lock failed")
 	}

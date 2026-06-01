@@ -85,8 +85,8 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord) {
 	tagsByTarget, _ := rt.Store.ListAliveByTargets(rt.Ctx, canonicals)
 	for i := range all {
 		l := &all[i]
-		fmt.Fprintf(stdout, "✓ target=%s owner=%s intent=%q held_since=%s ttl_remaining=%s liveness=%s host=%s pid=%d\n",
-			relPath(l.Target.Canonical), l.OwnerUUID, l.Intent,
+		fmt.Fprintf(stdout, "✓ target=%s owner=%s mode=%s intent=%q held_since=%s ttl_remaining=%s liveness=%s host=%s pid=%d\n",
+			relPath(l.Target.Canonical), l.OwnerUUID, l.EffectiveMode(), l.Intent,
 			l.CreatedAt.UTC().Format(time.RFC3339),
 			fmtTTL(ec.RemainingTTL(*l)), ec.Classify(*l),
 			l.Host, l.PID)
@@ -124,8 +124,8 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 	fmt.Fprintf(w, "✗ overlap count=%d target=%s\n", len(overlapping), relPath(t.Canonical))
 	for i := range overlapping {
 		l := &overlapping[i]
-		fmt.Fprintf(w, "✗ holder target=%s owner=%s intent=%q ttl_remaining=%s liveness=%s\n",
-			relPath(l.Target.Canonical), l.OwnerUUID, l.Intent,
+		fmt.Fprintf(w, "✗ holder target=%s owner=%s mode=%s intent=%q ttl_remaining=%s liveness=%s\n",
+			relPath(l.Target.Canonical), l.OwnerUUID, l.EffectiveMode(), l.Intent,
 			fmtTTL(ec.RemainingTTL(*l)), ec.Classify(*l))
 	}
 	if tags, err := rt.Store.ListAliveForTarget(rt.Ctx, t.Canonical); err == nil {

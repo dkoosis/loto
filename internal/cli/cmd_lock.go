@@ -157,11 +157,7 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	emitted := make([]domain.Target, len(acquired))
-	for i := range acquired {
-		emitted[i] = acquired[i].Target
-	}
-	render.EmitLockSuccess(stdout, emitted)
+	render.EmitLockSuccess(stdout, acquired)
 	return 0
 }
 

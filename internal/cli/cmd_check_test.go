@@ -29,6 +29,9 @@ func TestCheckConflictsWithOtherAgent(t *testing.T) {
 	alice, bob := twoAgents(t)
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	// Durable, live PID → alice's exclusive lock classifies ALIVE, the
+	// provably-live case that hard-blocks under the liveness gate (loto-k5el.2).
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
 	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("alice lock failed")
 	}
@@ -51,6 +54,7 @@ func TestCheckAcceptsAbsolutePathInsideRepo(t *testing.T) {
 	alice, bob := twoAgents(t)
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid())) // ALIVE holder → hard block
 	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("alice lock failed")
 	}
