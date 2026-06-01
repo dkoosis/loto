@@ -11,7 +11,7 @@ func mk(owner, mode string) LockRecord {
 		OwnerUUID: owner,
 		Mode:      mode,
 		ExpiresAt: time.Now().Add(time.Hour), // not stale
-		PID:       0,                          // PID<=0 → never instant-stale
+		PID:       0,                         // PID<=0 → never instant-stale
 	}
 }
 

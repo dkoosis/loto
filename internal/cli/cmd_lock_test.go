@@ -169,13 +169,13 @@ func TestLock_MultiTarget_HappyPath(t *testing.T) {
 func TestCmdLock_SharedFlag_AllowsCoexist(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t) // alice
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", "read", "--shared"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentRead, tcFlagShared}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("alice shared lock failed, exit %d", code)
 	}
 	t.Setenv("LOTO_AGENT_ID", "")
 	pinAgent(t) // bob
 	var out, errBuf bytes.Buffer
-	code := Run([]string{tcCmdLock, tcTargetA, "-t", "read", "--shared"}, &out, &errBuf)
+	code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentRead, tcFlagShared}, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("second shared lock should succeed; code=%d out=%q err=%q", code, out.String(), errBuf.String())
 	}
@@ -184,13 +184,13 @@ func TestCmdLock_SharedFlag_AllowsCoexist(t *testing.T) {
 func TestCmdLock_DefaultExclusive_Blocks(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t) // alice
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", "write"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentWrite}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("alice exclusive lock failed, exit %d", code)
 	}
 	t.Setenv("LOTO_AGENT_ID", "")
 	pinAgent(t) // bob
 	var out, errBuf bytes.Buffer
-	code := Run([]string{tcCmdLock, tcTargetA, "-t", "write"}, &out, &errBuf)
+	code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentWrite}, &out, &errBuf)
 	if code != 1 {
 		t.Fatalf("default exclusive should block; code=%d out=%q err=%q", code, out.String(), errBuf.String())
 	}

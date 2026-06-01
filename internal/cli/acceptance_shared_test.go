@@ -44,14 +44,14 @@ func TestAcceptance_SharedExclusiveDowngrade(t *testing.T) {
 	}
 
 	// 1. two shared locks coexist.
-	if code, out := runAs(alice, tcCmdLock, tcTargetA, "-t", "read", "--shared"); code != 0 {
+	if code, out := runAs(alice, tcCmdLock, tcTargetA, "-t", tcIntentRead, tcFlagShared); code != 0 {
 		t.Fatalf("alice shared: code=%d %s", code, out)
 	}
-	if code, out := runAs(bob, tcCmdLock, tcTargetA, "-t", "read", "--shared"); code != 0 {
+	if code, out := runAs(bob, tcCmdLock, tcTargetA, "-t", tcIntentRead, tcFlagShared); code != 0 {
 		t.Fatalf("shared+shared must coexist: code=%d %s", code, out)
 	}
 	// 2. exclusive conflicts with the shared holders.
-	if code, _ := runAs(carol, tcCmdLock, tcTargetA, "-t", "write"); code != 1 {
+	if code, _ := runAs(carol, tcCmdLock, tcTargetA, "-t", tcIntentWrite); code != 1 {
 		t.Fatalf("exclusive must conflict with existing shared holders, got code=%d", code)
 	}
 	// 3. release shared holders, then exclusive succeeds.
@@ -61,14 +61,14 @@ func TestAcceptance_SharedExclusiveDowngrade(t *testing.T) {
 	if code, out := runAs(bob, tcCmdUnlock, tcTargetA, "-t", tcIntentDone); code != 0 {
 		t.Fatalf("bob unlock: code=%d %s", code, out)
 	}
-	if code, out := runAs(carol, tcCmdLock, tcTargetA, "-t", "write"); code != 0 {
+	if code, out := runAs(carol, tcCmdLock, tcTargetA, "-t", tcIntentWrite); code != 0 {
 		t.Fatalf("exclusive should acquire once shared holders gone: code=%d %s", code, out)
 	}
 	// 4. carol downgrades; dave can then take shared.
-	if code, out := runAs(carol, "downgrade", tcTargetA); code != 0 {
+	if code, out := runAs(carol, tcCmdDowngrade, tcTargetA); code != 0 {
 		t.Fatalf("downgrade should succeed: code=%d %s", code, out)
 	}
-	if code, out := runAs(dave, tcCmdLock, tcTargetA, "-t", "read", "--shared"); code != 0 {
+	if code, out := runAs(dave, tcCmdLock, tcTargetA, "-t", tcIntentRead, tcFlagShared); code != 0 {
 		t.Fatalf("shared should succeed after downgrade: code=%d %s", code, out)
 	}
 }

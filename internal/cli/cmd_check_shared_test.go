@@ -13,13 +13,13 @@ import (
 func TestCheck_SharedPeerNotConflict(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t) // alice
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", "read", "--shared"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentRead, tcFlagShared}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("alice shared lock failed, exit %d", code)
 	}
 	t.Setenv("LOTO_AGENT_ID", "")
 	pinAgent(t) // bob
 	var out, errBuf bytes.Buffer
-	code := Run([]string{"check", tcTargetA}, &out, &errBuf)
+	code := Run([]string{tcCmdCheck, tcTargetA}, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("shared peer must not block check; code=%d out=%q", code, out.String())
 	}
@@ -30,15 +30,15 @@ func TestCheck_SharedPeerNotConflict(t *testing.T) {
 // the holder classifies ALIVE.
 func TestCheck_AliveExclusivePeerBlocks(t *testing.T) {
 	withTempProject(t)
-	pinAgent(t) // alice
+	pinAgent(t)                                     // alice
 	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid())) // durable, alive
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", "write"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentWrite}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("alice exclusive lock failed, exit %d", code)
 	}
 	t.Setenv("LOTO_AGENT_ID", "")
 	pinAgent(t) // bob
 	var out, errBuf bytes.Buffer
-	code := Run([]string{"check", tcTargetA}, &out, &errBuf)
+	code := Run([]string{tcCmdCheck, tcTargetA}, &out, &errBuf)
 	if code != 1 {
 		t.Fatalf("alive exclusive peer must hard-block; code=%d out=%q", code, out.String())
 	}
@@ -49,15 +49,15 @@ func TestCheck_AliveExclusivePeerBlocks(t *testing.T) {
 // (exit 0 with ⚠). binding correction 4 / §check --staged.
 func TestCheck_UnknownExclusivePeerWarns(t *testing.T) {
 	withTempProject(t)
-	pinAgent(t) // alice
+	pinAgent(t)              // alice
 	t.Setenv("LOTO_PID", "") // PID-0 sentinel → liveness UNKNOWN
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", "write"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentWrite}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("alice exclusive lock failed, exit %d", code)
 	}
 	t.Setenv("LOTO_AGENT_ID", "")
 	pinAgent(t) // bob
 	var out, errBuf bytes.Buffer
-	code := Run([]string{"check", tcTargetA}, &out, &errBuf)
+	code := Run([]string{tcCmdCheck, tcTargetA}, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("unknown-liveness exclusive peer must warn, not block; code=%d out=%q", code, out.String())
 	}

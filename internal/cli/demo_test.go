@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -81,7 +82,7 @@ func solo(t *testing.T) actor {
 // check blocks" call this before the holder locks.
 func liveHolder(t *testing.T) {
 	t.Helper()
-	t.Setenv("LOTO_PID", fmt.Sprintf("%d", os.Getpid()))
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
 }
 
 // triCast mints a third actor (carol) alongside alice + bob, for demos that
