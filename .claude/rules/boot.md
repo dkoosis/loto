@@ -1,7 +1,14 @@
 # Boot
 updated: 2026-06-01
 
-→ Pick fresh work: `bd ready` (empty now) or a new ask. Queue clear · 0 open PRs · tree clean · build/vet/lint/race green.
+→ Merge PR #171 (loto-k5el.1, CI green), then dispatch loto-k5el.2 PR A (migration).
+  `gh pr checks 171 && gh pr merge 171`
+
+state: φ docs/superpowers/plans/loto-k5el.{1,2}-*.md — dk-reviewed, impl-ready
 
 ✓ done
-- #166–169 (the queued `/team impl 4` fixes) merged by a parallel session; #170 shipped the `/simplify` cleanup (dedup TOCTOU guard + test helpers). All beads closed.
+- #171: loto-k5el.1 SC3 surfacing → PR; .1/.2 plans revised per dk assessment, on main
+
+‡ traps
+- loto-k5el gated: .1 merge → .2 PR A → .2 PR B (PR A hand-merges .1's 2 seam files; PR B needs .1's Classify)
+- prune worktree impl-loto-k5el.1 post-#171-merge
