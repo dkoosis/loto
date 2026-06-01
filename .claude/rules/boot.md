@@ -4,6 +4,8 @@ updated: 2026-06-01
 → Queue near-empty. Next ready: loto-t8dd (P3) — store: collapse schemaFullyCurrent into ensure* migration hooks.
   ‡ store/race-path → PR, never direct-to-main (linux -race runs CI-only).
 
+≈ cleanup pass 2026-06-01 pm: ∅ open PRs · ∅ stray branches/worktrees/stashes · `make audit` fully green (vet·lint·test·race·eval·dupl·vuln all no-findings) · beads unchanged. Nothing to merge/cherry-pick/prune. Repo is at rest.
+
 state: epic loto-k5el ✓ COMPLETE. Backlog: 1 ready (loto-t8dd P3). φ docs/wt-harness-migration-brief.md = untracked planning doc (graduate wt-* worktree harness from trixi → loto; dk decision 2026-06-01) — not yet a bead/epic.
 
 ✓ done
