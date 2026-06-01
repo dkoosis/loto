@@ -104,12 +104,23 @@ func acquireOpenLocks(ctx context.Context, p string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Safety net for an unwind (panic) through the gap below: release()
+	// nil-guards, so on the normal path this is a no-op once we've nulled
+	// the handle's file after the explicit release. This must NOT replace
+	// the explicit release at the end of the gap — the gh#109 invariant
+	// requires op-flock be freed BEFORE any recovery-lock acquire, and a
+	// bare defer would only fire after openWithRecovery returns.
+	defer flock.release()
 	s, openErr := openOnce(ctx, p)
 	// Release op-flock BEFORE any recovery-lock acquire. If openOnce
 	// succeeded the create race is resolved; if it failed with corruption
 	// or version mismatch, openWithRecovery will retake recovery-lock
-	// alone — never with op-flock held.
+	// alone — never with op-flock held. Null the handle's file afterward so
+	// the deferred safety-net release above becomes a no-op (release()
+	// nil-guards on h.f == nil), preserving the explicit-before-recovery
+	// ordering.
 	flock.release()
+	flock.f = nil
 	if openErr == nil {
 		return s, nil
 	}
@@ -186,7 +197,15 @@ func openWithRecovery(ctx context.Context, p string) (*Store, error) {
 	return openOnce(ctx, p)
 }
 
+// openOnceHook is a test seam fired at the very top of openOnce, inside the
+// op-flock gap of the fresh-DB path. Nil in production. Tests set it to inject
+// a panic and assert the op-flock is still released on unwind (loto-8yst).
+var openOnceHook func()
+
 func openOnce(ctx context.Context, p string) (*Store, error) {
+	if openOnceHook != nil {
+		openOnceHook()
+	}
 	preExisted := false
 	if st, err := os.Stat(p); err == nil && st.Size() > 0 {
 		preExisted = true
