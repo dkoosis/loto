@@ -155,6 +155,31 @@ func TestEmitReleaseResults_SurfacesAuditHole(t *testing.T) {
 	}
 }
 
+// TestEmitReleaseResults_RestoreFailedCountsAsUnlocked covers loto-qv91: a
+// restore-failed release deleted the lock row in-tx (a successful unlock) but
+// the chmod restore failed. The first-line triage count must count it as
+// unlocked, not drop it to 0, while still surfacing the restore failures via a
+// distinct restore-failed field. Pre-fix the header read "✓ unlocked count=0"
+// for an all-restore-failed slice — actively misleading to the Claude consumer.
+func TestEmitReleaseResults_RestoreFailedCountsAsUnlocked(t *testing.T) {
+	var buf bytes.Buffer
+	exit := EmitReleaseResults(&buf, []store.ReleaseResult{
+		{Target: domain.Target{Canonical: aGo}, State: store.StateRestoreFailed, RestoreErr: errPermissionDenied},
+		{Target: domain.Target{Canonical: bGo}, State: store.StateRestoreFailed, RestoreErr: errPermissionDenied},
+		{Target: domain.Target{Canonical: cGo}, State: store.StateRestoreFailed, RestoreErr: errPermissionDenied},
+	})
+	if exit != 1 {
+		t.Errorf("restore-failed → exit 1, got %d", exit)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "✓ unlocked count=3") {
+		t.Errorf("restore-failed rows are unlocked (row deleted), header must report count=3: %s", got)
+	}
+	if !strings.Contains(got, "restore-failed=3") {
+		t.Errorf("restore failures must surface as a distinct first-line field: %s", got)
+	}
+}
+
 // TestEmitBreakResults_SurfacesRestoreAndAuditHoles covers loto-c6rg on the
 // break path: unlock --force results carry RestoreErr/AuditErr that the prior
 // inline renderer dropped — a forced break that left a file read-only or lost
