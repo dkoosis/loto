@@ -92,6 +92,22 @@ func TestStripWrite_RefusesDirectory(t *testing.T) {
 	}
 }
 
+// injectHardlinkOnce installs a one-shot afterOpenHook that hardlinks
+// target→link on its first fire — simulating a racing process inside the
+// strip/restore TOCTOU window — then restores the previous hook. The hook is
+// auto-restored on test cleanup.
+func injectHardlinkOnce(t *testing.T, target, link string) {
+	t.Helper()
+	prev := afterOpenHook
+	afterOpenHook = func(string) {
+		if err := os.Link(target, link); err != nil {
+			t.Fatalf("inject hardlink: %v", err)
+		}
+		afterOpenHook = prev // fire once
+	}
+	t.Cleanup(func() { afterOpenHook = prev })
+}
+
 // Regression for loto-ta02: hardlink TOCTOU between validateFileTarget
 // (one-shot Lstat Nlink<=1) and stripWrite. A second hardlink created
 // after validation but before fchmod makes the strip clear write bits on
@@ -109,15 +125,7 @@ func TestStripWrite_RefusesHardlinkRace(t *testing.T) {
 	}
 	attacker := filepath.Join(dir, "attacker")
 
-	prev := afterOpenHook
-	afterOpenHook = func(string) {
-		// Racing process hardlinks the locked inode to a name it owns.
-		if err := os.Link(target, attacker); err != nil {
-			t.Fatalf("inject hardlink: %v", err)
-		}
-		afterOpenHook = prev // fire once
-	}
-	defer func() { afterOpenHook = prev }()
+	injectHardlinkOnce(t, target, attacker)
 
 	if err := stripWrite(target); err == nil {
 		t.Fatal("stripWrite must refuse when Nlink>1 on the open fd, got nil error")
@@ -148,15 +156,7 @@ func TestRestoreWrite_RefusesHardlinkRace(t *testing.T) {
 	}
 	attacker := filepath.Join(dir, "attacker")
 
-	prev := afterOpenHook
-	afterOpenHook = func(string) {
-		// Racing process hardlinks the locked inode to a name it owns.
-		if err := os.Link(target, attacker); err != nil {
-			t.Fatalf("inject hardlink: %v", err)
-		}
-		afterOpenHook = prev // fire once
-	}
-	defer func() { afterOpenHook = prev }()
+	injectHardlinkOnce(t, target, attacker)
 
 	if err := restoreWrite(target); err == nil {
 		t.Fatal("restoreWrite must refuse when Nlink>1 on the open fd, got nil error")
@@ -183,14 +183,7 @@ func TestRestoreAndAuditReleases_HardlinkRaceEmitsModeRestoreFailed(t *testing.T
 	}
 	attacker := filepath.Join(dir, "attacker")
 
-	prev := afterOpenHook
-	afterOpenHook = func(string) {
-		if err := os.Link(p, attacker); err != nil {
-			t.Fatalf("inject hardlink: %v", err)
-		}
-		afterOpenHook = prev // fire once
-	}
-	defer func() { afterOpenHook = prev }()
+	injectHardlinkOnce(t, p, attacker)
 
 	results := []ReleaseResult{
 		{Target: domain.Target{Canonical: p}, State: StateUnlocked},

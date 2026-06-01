@@ -55,6 +55,24 @@ func safeOpenRegular(path string) (*os.File, error) {
 	return f, nil
 }
 
+// permAfterNlinkCheck stats an open fd and re-checks Nlink on it — the shared
+// validate→chmod TOCTOU guard both stripWrite and restoreWrite need. A racing
+// process can add a hardlink between validateFileTarget's Lstat and the fchmod,
+// which would otherwise redirect the mode change onto an attacker-chosen name
+// sharing the inode (loto-ta02). Binding the check to the open fd closes that
+// window. op names the caller for the PathError; returns the inode's current
+// permission bits for the caller to mask.
+func permAfterNlinkCheck(f *os.File, path, op string) (os.FileMode, error) {
+	st, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Nlink > 1 {
+		return 0, &fs.PathError{Op: op, Path: path, Err: errMultiLinked}
+	}
+	return st.Mode().Perm(), nil
+}
+
 // stripWrite removes all write bits (owner/group/other) from path.
 // Refuses symlinks and non-regular files to prevent TOCTOU swap.
 func stripWrite(path string) error {
@@ -64,18 +82,11 @@ func stripWrite(path string) error {
 	}
 	defer f.Close()
 	afterOpenHook(path)
-	st, err := f.Stat()
+	perm, err := permAfterNlinkCheck(f, path, "stripwrite")
 	if err != nil {
 		return err
 	}
-	// Re-check Nlink on the OPEN fd, not the path: a racing process can add
-	// a hardlink between validateFileTarget's Lstat and this fchmod, which
-	// would otherwise clear write bits on an attacker-chosen name sharing
-	// the inode (loto-ta02). The fd binds the check to the inode we mutate.
-	if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Nlink > 1 {
-		return &fs.PathError{Op: "stripwrite", Path: path, Err: errMultiLinked}
-	}
-	return fchmodFn(f, st.Mode().Perm()&^0o222)
+	return fchmodFn(f, perm&^0o222)
 }
 
 // restoreWrite adds owner-write to path. Missing-file is a no-op
@@ -95,18 +106,14 @@ func restoreWrite(path string) error {
 	}
 	defer f.Close()
 	afterOpenHook(path)
-	st, err := f.Stat()
+	// Mirror stripWrite's open-fd Nlink guard: a racing process can hardlink the
+	// locked inode between the validated strip at acquire and this restore at
+	// release/break/reclaim. Restoring owner-write would then silently add write
+	// to an attacker-chosen name on the shared inode. Refusing Nlink>1 makes the
+	// caller audit a mode_restore_failed event (loto-pduc).
+	perm, err := permAfterNlinkCheck(f, path, "restorewrite")
 	if err != nil {
 		return err
 	}
-	// Re-check Nlink on the OPEN fd, mirroring stripWrite (loto-ta02): a racing
-	// process can hardlink the locked inode between the validated strip at
-	// acquire and this restore at release/break/reclaim. Restoring owner-write
-	// would then silently add write to an attacker-chosen name on the shared
-	// inode. Refuse Nlink>1 so the caller audits a mode_restore_failed event
-	// (loto-pduc).
-	if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Nlink > 1 {
-		return &fs.PathError{Op: "restorewrite", Path: path, Err: errMultiLinked}
-	}
-	return fchmodFn(f, st.Mode().Perm()|0o200)
+	return fchmodFn(f, perm|0o200)
 }

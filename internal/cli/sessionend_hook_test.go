@@ -57,6 +57,18 @@ func loadSettingsHooks(t *testing.T) settingsHooks {
 	return s
 }
 
+// commandsForEvent flattens every hook command registered for the given
+// lifecycle event into one newline-joined string for substring assertions.
+func commandsForEvent(s settingsHooks, event string) string {
+	var cmds []string
+	for _, e := range s.Hooks[event] {
+		for _, h := range e.Hooks {
+			cmds = append(cmds, h.Command)
+		}
+	}
+	return strings.Join(cmds, "\n")
+}
+
 // TestSessionEndHookReleasesLocks pins the loto-l3as contract: .claude/
 // settings.json must register a SessionEnd hook that eagerly releases this
 // session's locks via `loto unlock --all` so a clean session exit reclaims
@@ -67,18 +79,10 @@ func loadSettingsHooks(t *testing.T) settingsHooks {
 func TestSessionEndHookReleasesLocks(t *testing.T) {
 	s := loadSettingsHooks(t)
 
-	entries, ok := s.Hooks["SessionEnd"]
-	if !ok || len(entries) == 0 {
+	if len(s.Hooks["SessionEnd"]) == 0 {
 		t.Fatal("settings.json has no SessionEnd hook; clean exit falls back to TTL (loto-l3as)")
 	}
-
-	var cmds []string
-	for _, e := range entries {
-		for _, h := range e.Hooks {
-			cmds = append(cmds, h.Command)
-		}
-	}
-	joined := strings.Join(cmds, "\n")
+	joined := commandsForEvent(s, "SessionEnd")
 
 	// Must invoke the eager release.
 	if !strings.Contains(joined, "loto unlock") || !strings.Contains(joined, "--all") {
@@ -103,14 +107,7 @@ func TestSessionEndHookReleasesLocks(t *testing.T) {
 // would refuse with exit 2 and locks would linger to TTL.
 func TestSessionStartExportsAgentIDForSessionEnd(t *testing.T) {
 	s := loadSettingsHooks(t)
-	entries := s.Hooks["SessionStart"]
-	var cmds []string
-	for _, e := range entries {
-		for _, h := range e.Hooks {
-			cmds = append(cmds, h.Command)
-		}
-	}
-	joined := strings.Join(cmds, "\n")
+	joined := commandsForEvent(s, "SessionStart")
 	if !strings.Contains(joined, "LOTO_AGENT_ID") {
 		t.Fatalf("SessionStart must export LOTO_AGENT_ID so SessionEnd's `unlock --all` is pinned; got:\n%s", joined)
 	}
