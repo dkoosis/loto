@@ -4,6 +4,23 @@
 
 **Bead:** loto-k5el.2 (parent epic loto-k5el; sibling loto-k5el.1 = TTL/liveness)
 
+---
+
+## ‡‡ BINDING CORRECTIONS (post-review 2026-06-01) — read before any task
+
+A critical review ground-truthed this plan against live source. These **override** anything below that conflicts. (Evidence: `~/.claude/plans/critically-assess-these-plans-staged-bee.md`.)
+
+1. **Embedded code is ILLUSTRATIVE — verify every helper name before use (do Task 0 first).** These cited helpers DO NOT EXIST: `newCLITestEnv`, `env.As()`, `.RunCode()`, `.TempFile()`, `openTestStore`, `mustInsertLock`, `mustLockRecord`, `deadProbe`, `tmpFile`. **Real CLI harness:** `withTempProject(t)`, `pinAgent(t)`, `twoAgents(t)` → `alice, bob` (and you'll need more agents for the 4-actor acceptance test — extend the helper, don't assume `carol`/`dave` exist), `Run(argv, &stdout, &stderr) int`. **Real store harness:** confirm with `rg` — there is no `openTestStore`; build any needed insert/probe helper deliberately as an explicit first commit.
+2. **SHIP AS TWO PRs, not one ~10-task PR.** This is loto's FIRST table-rebuild migration (verified — no rebuild idiom exists in `internal/store`). Bundling a first-ever PK rebuild + events-CHECK rebuild with feature logic is the riskiest possible shape.
+   - **PR A (migration only):** Task 1 (schema/PK/`ensureLocksModeAndPK`) + Task 6 (events-CHECK rebuild) + the **mandatory legacy-DB round-trip test** (Open Q4 — CLOSE it here, don't defer): open a DB at the OLD single-column PK with live rows, migrate, assert rows survive with `mode='exclusive'` + composite PK + `loto.db` opens with no `MoveCorruptAside`. Land PR A and let CI's linux `-race` clear it **before** feature work.
+   - **PR B (feature):** Tasks 2–5, 7–9 on top of the migrated schema.
+3. **`LockAt → LockForOwnerAt` is a FIRST-CLASS correctness task, not a side-audit.** Under the composite PK, `LockAt`'s `WHERE target_canonical=?` matches multiple rows and silently returns an arbitrary one — a latent bug across 10+ callers. See **Task 5.5** (promoted): enumerate every `LockAt(` caller, decide per-caller (owner-scoped lookup vs. "any holder" lister), pin with a test that a two-holder shared target is queried unambiguously.
+4. **`check --staged` policy — RESOLVED to liveness-gated (see §check --staged, updated).** Not pure hard-block, not pure grant-with-warning: hard-block on a **provably-live** exclusive conflict; warn-and-proceed when the exclusive owner's liveness is indeterminate/expiring. Honors dk's grant-with-warning lean without dropping the gate where it bites. *(One-line flip to pure grant-with-warning if dk overrides.)*
+5. **Sequencing: `.1` lands FIRST; `.2` hand-merges.** `.1` is verified **schema-neutral** (no schema/PK change) — so `.2`'s fear of a schema collision is overstated. Real merge seams are exactly two files: `cmd_status.go::printStatusLocks` and `locks_acquire.go::reclaimStaleAndCollectBlockers`. Not a rebase hope — a deliberate hand-merge of those two.
+6. **Embedded full-function bodies are reference, not gospel.** Keep the `Conflicts` truth table, invariants I1–I6, formal model, schema delta as the authoritative spec; write bodies against live code where a snippet cites a wrong helper.
+
+---
+
 **Goal:** Give loto locks a `shared` (multi-reader) vs `exclusive` (sole-writer) mode so several agents can hold a read lease on the same target without false contention, and let a holder downgrade `exclusive → shared` in place — "conflicts as a negotiation, not a wall".
 
 **Architecture:** Add a `mode` column to the `locks` record (the same row sibling .1 extends with TTL/liveness fields). Change the lock table's primary key from `target_canonical` alone to a composite `(target_canonical, owner_uuid)` so a target can carry multiple coexisting shared holders. Rewrite the single conflict predicate that currently means "any other live holder blocks" into a mode-aware predicate (shared+shared = OK, exclusive-vs-anything = conflict). Add a store-level in-place downgrade that flips `exclusive → shared` and restores the write bit without an unlock/relock. CLI gains a `--shared` flag on `loto lock` and a `loto downgrade` verb.
@@ -16,23 +33,21 @@
 
 Per `.claude/rules/workflow.md`: **every change under `internal/store/*` or `internal/identity/registry.go` ships through a PR.** `go test -race` runs only on the self-hosted CI runners (linux + macos), never on local macOS. This plan touches `internal/store/*` heavily (schema, acquire, release, query, chmod) — so:
 
-- Implement on a feature branch, push, open a PR. Do **not** merge to main locally.
-- The merge-conflict-prone files are shared with sibling .1 (`schema.sql`, `store.go`, `records.go`, `staleness.go`, `locks_acquire.go`). Coordinate ordering with .1 — see "§ Reconciliation with loto-k5el.1" below.
+- **TWO PRs** (binding correction 2): PR A = migration (Tasks 1, 6, legacy-DB round-trip), landed CI-`-race`-green first; PR B = feature on top. Do **not** merge to main locally.
+- The merge seams with sibling .1 are exactly `cmd_status.go::printStatusLocks` + `locks_acquire.go::reclaimStaleAndCollectBlockers` (`.1` is schema-neutral — verified). Land `.1` first; hand-merge those two — see "§ Reconciliation with loto-k5el.1" below.
 - CI runners are serial (`mac-loto`, `trixi-loto`); a burst of merges backlogs ~15–20 min. That lag is not breakage.
 
 ---
 
 ## § Reconciliation with loto-k5el.1 (READ FIRST — open question for dk)
 
-Sibling **loto-k5el.1** adds TTL/liveness fields to the **same** `locks` record this plan extends with `mode`. At the time of writing **.1 has no committed plan or schema** (`docs/superpowers/plans/` has no `k5el.1` file; the .1 worktree has no plan commit). So .1's exact column set is **undecided**.
+Sibling **loto-k5el.1** adds TTL/liveness surfacing to the **same** `locks` record this plan extends with `mode`. Post-review, `.1`'s plan exists and was ground-truthed: **`.1` is schema-neutral** — it adds NO schema/PK change (the TTL/liveness fields `expires_at`/`pid`/`proc_start` already ship; `.1` only adds domain display helpers + a status render). This **confirms** the assumptions below — `.2` owns the schema change outright.
 
-**Assumption taken by this plan (flag for dk):**
+1. **`.1` does NOT change the lock table's primary key.** CONFIRMED (its plan changes no schema). This plan owns the PK change `target_canonical → (target_canonical, owner_uuid)` — multi-holder is meaningless for TTL but mandatory for shared mode.
+2. **`.2` follows the additive-ALTER-without-version-bump precedent** (`store.go::ensureLocksProcStart`, loto-kwlp) for the `mode` column, plus the guarded table-rebuild for the PK (SQLite can't ALTER a PK in place). `schemaUserVersion` is **not** bumped (a bump trips `MoveCorruptAside`, destroying live locks).
+3. **`.1`'s `Classify`/`IsStale` and `.2`'s `Conflicts` compose cleanly.** The acquire path filters stale holders *before* collecting blockers; `.2` inserts the mode check after the stale filter. `.2`'s liveness-gated `check` also CONSUMES `.1`'s `Classify` — another reason `.1` lands first.
 
-1. **.1 does NOT change the lock table's primary key.** TTL/liveness are per-row scalar fields (`expires_at` already exists; .1 adds liveness handles like a session/boot id). This plan owns the PK change `target_canonical → (target_canonical, owner_uuid)`, because multi-holder is meaningless for TTL but mandatory for shared mode.
-2. **Both .1 and .2 follow the existing additive-ALTER-without-version-bump migration precedent** (the `proc_start` upgrade in `store.go::ensureLocksProcStart`, loto-kwlp). New columns are added in-place; `schemaUserVersion` is **not** bumped, because a bump trips `MoveCorruptAside` and destroys live locks. Both siblings add their columns this way; neither bumps the version.
-3. **.1's IsStale predicate and .2's conflict predicate compose cleanly.** Today's acquire path already filters stale holders *before* collecting blockers (`reclaimStaleAndCollectBlockers`). This plan inserts the mode check at the blocker-collection step, *after* the stale filter. So a stale shared lock is reclaimed (per .1) and never reaches the mode check (per .2). No ordering conflict — but if .1 restructures `reclaimStaleAndCollectBlockers`, the two changes touch the same function and must be merged by hand.
-
-**RECONCILIATION POINT FOR dk:** If .1's final schema *does* change the PK, or *does* restructure the blocker-collection loop, tasks 1 and 3 below need a rebase. Whichever sibling lands second rebases onto the first. Recommend .1 (liveness, the higher-value piece per its bead) lands first; .2 rebases its PK change and conflict predicate on top.
+**Sequencing (RESOLVED — binding correction 5):** land `.1` FIRST. The merge seam is just two files — `cmd_status.go::printStatusLocks` (both add a per-lock field) and `locks_acquire.go::reclaimStaleAndCollectBlockers` (`.2` inserts the mode check after `.1`'s stale filter — but `.1` post-trim does NOT restructure this function, so even that seam is light). Hand-merge those two; not a blind rebase.
 
 ---
 
@@ -110,12 +125,17 @@ The epic (loto-k5el) and bead .2 both flag this explicitly:
 
 `loto check --staged` is the **machine surface** the trixi pre-commit/PreToolUse guard parses (`cmd_check.go::appendCheckConflictsForTarget`). Its current predicate: any non-self, non-stale holder on a staged path = a hard conflict (exit 1).
 
-**This plan does the minimal correct thing and stops at the policy line:**
+**RESOLVED POLICY (post-review): liveness-gated.** Neither pure hard-block nor pure grant-with-warning. The reasoning: pure grant-with-warning is mcp_agent_mail's model because IT has no commit gate — the warning is its enforcement ceiling. loto has a real pre-commit block, and the pain that made hard-block feel wrong (a **stale** exclusive lock from a crashed agent walling a live commit) is exactly what sibling `.1`'s liveness self-heal removes. Post-`.1`, a genuine exclusive conflict means another **provably-live** agent is actively editing this path — the one case you most want a hard wall.
 
-- `check` adopts the **same mode-aware conflict predicate** as acquire (a shared peer reading a file you're committing is not a conflict; an exclusive holder is). This is a pure correctness fix — a shared peer was never a real blocker.
-- `check` continues to **hard-block (exit 1) on a genuine conflict** (exclusive holder on a staged path). It does **NOT** move to grant-with-warning. The "conflicts as negotiation" softening for the pre-commit gate is deliberately **left as a dk decision** — the epic says the protocol "currently favors hard refuse for safety," and silently relaxing the commit gate is exactly the kind of safety change that needs a human call.
+- `check` adopts the **mode-aware conflict predicate** (a shared peer is never a conflict; only exclusive). Pure correctness fix.
+- On a conflicting exclusive holder, `check` **gates on the holder's liveness** (the same `Classify` from `.1`):
+  - **`ALIVE` exclusive holder** → **hard-block (exit 1)** — real clobber risk, a live peer about to commit the same path.
+  - **`UNKNOWN`/expiring exclusive holder** (degraded PID-0 / TTL-only) → **warn + exit 0** (`⚠ exclusive holder present, liveness indeterminate — proceeding`) — never let a ghost block a live commit.
+- This honors dk's grant-with-warning lean (he noted mcp_agent_mail is battle-tested) **and** keeps the gate where it bites. It is the most loto-native answer: liveness-primary everywhere, one reused probe.
 
-**RECONCILIATION POINT FOR dk:** Do you want `check --staged` to (a) stay a hard block on exclusive conflicts [this plan's choice], or (b) move to grant-with-warning so a committing agent is told "exclusive holder present — wait / ask them to downgrade" but is not blocked? Option (b) is a one-line change in `cmd_check.go` (exit 0 + a `⚠` line instead of exit 1) but changes a safety-critical gate. Flagged, not taken.
+‡ **Dependency:** this consumes `.1`'s `Classify`. Land `.1` first (sequencing, binding correction 5); `.2`'s check path calls into it. If `.1` is not yet merged when PR B lands, fall back to plain hard-block-on-exclusive and wire the liveness gate in a follow-up — do NOT block PR B on it.
+
+**PENDING dk CONFIRM:** this is my recommendation back to dk's "I'll go with grant-with-warning unless you think it's a bad idea." If dk prefers **pure** grant-with-warning (warn on ANY exclusive conflict regardless of liveness), it's a one-line simplification — drop the `Classify` gate, always exit 0 + `⚠`.
 
 ---
 
@@ -199,7 +219,35 @@ event_kind TEXT NOT NULL CHECK (event_kind IN (
 
 ## Tasks
 
-### Task 1: schema — composite PK + mode column + migration
+> **PR boundary (binding correction 2):** Tasks 1 + 6 + the legacy-DB round-trip test = **PR A (migration)**, landed and CI-`-race`-green first. Tasks 2–5, 5.5, 7–9 = **PR B (feature)** on top.
+
+### Task 0: Harness rebind (NO CODE — do this first)
+
+**Files:** none (inventory only)
+
+Every snippet below is illustrative; several cite helpers that do not exist. Inventory the real harness so each TDD test fails RED for the right reason, not a compile error.
+
+- [ ] **Step 1: CLI harness**
+
+```bash
+rg -n 'func (withTempProject|pinAgent|twoAgents|Run)\b' internal/cli/*_test.go
+rg -n 'newCLITestEnv|\.RunCode\(|\.TempFile\(|\.As\(' internal/cli/*_test.go   # expect ZERO hits — confirm absence
+```
+Two-agent tests use `twoAgents(t)` → `alice, bob`. The 4-actor acceptance test (Task 9) needs `carol`/`dave` — extend the agent helper, don't assume they exist.
+
+- [ ] **Step 2: store harness**
+
+```bash
+rg -n 'func (openTestStore|openStore|newStore|mustInsert|mustLockRecord)\b' internal/store/*_test.go  # confirm what's real
+rg -n 'AcquireLocks\(' internal/store/*_test.go | head   # crib the real record-construction + probe pattern
+```
+If `openTestStore`/`mustLockRecord`/`deadProbe`/`tmpFile` are absent, add minimal helpers as an explicit first commit — do NOT inline-invent store internals.
+
+- [ ] **Step 3: Rewrite every snippet to confirmed names before writing it.** `go build ./internal/...` + `go vet ./internal/cli/ ./internal/store/` clean before Task 1.
+
+---
+
+### Task 1: schema — composite PK + mode column + migration  ·  **[PR A]**
 
 **Files:**
 - Modify: `internal/store/schema.sql`
@@ -351,11 +399,38 @@ CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);`
 Run: `go test ./internal/store/ -run 'TestMigrate_AddsModeColumn|TestMigrate_LocksPKIsComposite' -v`
 Expected: PASS. Then `go test ./internal/store/...` — existing tests should still pass (legacy rows default to `exclusive`, behavior unchanged).
 
+- [ ] **Step 5b: MANDATORY — legacy-DB round-trip test (closes Open Q4; do NOT defer)**
+
+The fresh-DB assertions above do NOT exercise the rebuild branch — they hit the already-composite `CREATE TABLE`. The actual rebuild only runs against a DB carrying the OLD single-column PK with live rows. Ship the rebuild covered by a test that drives it, or it ships untested.
+
+Build a DB at the **old** shape (the pre-mode `CREATE TABLE locks` with `target_canonical PRIMARY KEY`, no `mode` column), insert ≥2 live lock rows, then `Open()` it (triggers migrate) and assert: (a) both rows survive, (b) each now reads `mode='exclusive'`, (c) the PK is composite (`pk>0` count == 2), (d) no `MoveCorruptAside` fired (the file is the same DB, not moved aside). Sketch:
+
+```go
+func TestMigrate_LegacyDBRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "loto.db")
+	// 1. hand-create the OLD schema (single-col PK, no mode) + insert 2 rows
+	seedLegacyLocksDB(t, dbPath) // writes old CREATE TABLE + 2 INSERTs via raw sql.Open
+	// 2. Open through the real store → runs migrate()/ensureLocksModeAndPK
+	s := mustOpenStoreAt(t, dbPath)
+	rows, _ := s.ListLocks(context.Background())
+	if len(rows) != 2 { t.Fatalf("legacy rows lost in rebuild: got %d want 2", len(rows)) }
+	for _, l := range rows {
+		if l.EffectiveMode() != domain.ModeExclusive {
+			t.Fatalf("legacy row must default to exclusive, got %q", l.Mode)
+		}
+	}
+	// 3. composite PK present; 4. assert dbPath still the live DB (no .corrupt sibling)
+}
+```
+
+> `seedLegacyLocksDB` / `mustOpenStoreAt` are NEW helpers (Task 0 confirmed no existing equivalent) — write them here. The old DDL is recoverable from git history of `schema.sql` (pre-`proc_start` if needed). This test is the gate that makes the rebuild safe to ship.
+
 - [ ] **Step 6: Commit**
 
 ```bash
 git add internal/store/schema.sql internal/store/store.go internal/store/migrate_mode_test.go
-git commit -m "feat(store): locks composite PK + mode column, in-place rebuild (loto-k5el.2 T1)"
+git commit -m "feat(store): locks composite PK + mode column, in-place rebuild + legacy round-trip (loto-k5el.2 T1, PR A)"
 ```
 
 ---
@@ -956,7 +1031,36 @@ git commit -m "feat(store): DowngradeLock exclusive→shared in place (loto-k5el
 
 ---
 
-### Task 6: events CHECK constraint for existing DBs
+### Task 5.5: `LockAt` → `LockForOwnerAt` caller migration (correctness — not a side-audit)  ·  **[PR B]**
+
+**Files:**
+- Modify: every caller of `LockAt(` surfaced by the grep below
+- Test: `internal/store/locks_query_test.go` (or the owning package's test)
+
+Under the composite PK, the existing `LockAt`'s `WHERE target_canonical=?` can match **multiple** rows (a shared target with several holders) and silently returns an arbitrary one — a latent correctness bug. This task closes it deliberately, not as a footnote in Task 5.
+
+- [ ] **Step 1: Enumerate every caller**
+
+```bash
+rg -n 'LockAt\(' internal/ cmd/
+```
+
+- [ ] **Step 2: Decide per caller.** For each hit, classify the intent:
+  - "does *this owner* hold this target?" → `LockForOwnerAt(ctx, t, owner)`.
+  - "who holds this target?" (status, conflict display) → a plural lister (`ListLocksAt`/filter `ListLocks` by canonical) that returns ALL holders, so a multi-holder shared target shows every reader.
+  - genuinely "any one holder is fine" → keep `LockAt`, but add a doc comment stating it returns an arbitrary holder under shared mode.
+
+- [ ] **Step 3: Pin the ambiguity with a test** — two shared holders on one target, assert `LockForOwnerAt` returns the *right* owner's row for each, and the plural lister returns both. This is the regression guard that the composite PK didn't reintroduce single-row assumptions.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git commit -am "refactor(store): migrate LockAt callers to owner-scoped / plural lookup under composite PK (loto-k5el.2 T5.5)"
+```
+
+---
+
+### Task 6: events CHECK constraint for existing DBs  ·  **[PR A]**
 
 **Files:**
 - Modify: `internal/store/store.go` (add `ensureEventsCheckCurrent`, call from `migrate`)
@@ -1243,9 +1347,10 @@ func cmdDowngrade(ctx context.Context, args []string, stdout, stderr io.Writer) 
 
 ```go
 // internal/cli/cmd_check.go — appendCheckConflictsForTarget
-// Replace the manual same-canonical + IsStale skip with the Conflicts predicate.
-// The committing agent's intent is to WRITE (it's staging a change), so probe as
-// exclusive — a shared peer is then correctly NOT a conflict, an exclusive peer IS.
+// The committing agent's intent is to WRITE, so probe as exclusive — a shared
+// peer is then correctly NOT a conflict, an exclusive peer IS. Liveness-gated
+// (binding correction 4 / §check --staged): an ALIVE exclusive holder is a hard
+// blocker; an UNKNOWN/expiring one is reported as a WARN, not a blocker.
 func appendCheckConflictsForTarget(rows []checkConflict, seen map[string]bool, t domain.Target, all []domain.LockRecord, myUUID string, ec domain.EvalContext) []checkConflict {
 	probe := domain.LockRecord{Target: t, OwnerUUID: myUUID, Mode: domain.ModeExclusive}
 	for i := range all {
@@ -1258,13 +1363,17 @@ func appendCheckConflictsForTarget(rows []checkConflict, seen map[string]bool, t
 			continue
 		}
 		seen[key] = true
-		rows = append(rows, checkConflict{Path: t.Canonical, Blocker: all[i]})
+		// Liveness gate: ALIVE exclusive holder → hard blocker (Severity blocks
+		// exit 1); UNKNOWN/expiring → advisory warn (does not set exit 1).
+		// Classify is .1's display-tier verdict; see §check --staged.
+		blocking := ec.Classify(*l) == domain.LivenessAlive
+		rows = append(rows, checkConflict{Path: t.Canonical, Blocker: all[i], Blocking: blocking})
 	}
 	return rows
 }
 ```
 
-‡ **Policy note (epic open question):** this keeps `check` a **hard block** (exit 1) on a genuine exclusive-peer conflict, unchanged. It only stops reporting *shared* peers as conflicts — a pure correctness fix. The grant-with-warning softening is left for dk (§ check --staged interaction, Open Q2). Do NOT change the exit code here. The existing `check` tests asserting exit 1 on a real conflict must still pass; add `TestCheck_SharedPeerNotConflict` (alice holds shared, bob `check`s the path → exit 0) and keep an exclusive-peer exit-1 case.
+‡ **Implementation notes:** `checkConflict` gains a `Blocking bool`; the caller computes the exit code as `exit 1 iff any row.Blocking`, and renders non-blocking rows with `⚠` + an explanatory `liveness=unknown` field rather than `✗`. The `Classify` call requires `.1` merged (binding correction 5); if `.1` is not yet in, ship PR B with `blocking := true` always (plain hard-block) and add the liveness gate in a follow-up. Tests: `TestCheck_SharedPeerNotConflict` (shared peer → exit 0), `TestCheck_AliveExclusivePeerBlocks` (alive exclusive → exit 1), `TestCheck_UnknownExclusivePeerWarns` (PID-0 exclusive → exit 0 + `⚠`).
 
 - [ ] **Step 5: status + render show mode**
 
@@ -1366,35 +1475,41 @@ git commit -m "test+docs: shared/exclusive e2e + NORTH_STAR (loto-k5el.2 T9)"
 
 ---
 
-### Task 10: full verification + open the PR
+### Task 10: verification + open the PRs (TWO PRs — binding correction 2)
 
-- [ ] **Step 1: Local full suite (note: -race is CI-only on macOS)**
+Ship in two PRs. **PR A (migration) lands and goes CI-`-race`-green BEFORE PR B is opened.**
 
-Run: `go build ./... && go vet ./... && go test ./...`
-Expected: all green. (`-race` runs on CI; do not gate locally on it.)
-
-- [ ] **Step 2: lint**
-
-Run: `golangci-lint run` (if phantom-worktree findings appear, verify against real `internal/` and `golangci-lint cache clean` per workflow.md).
-
-- [ ] **Step 3: push + PR (NOT a local merge to main)**
+- [ ] **Step 1: PR A — migration** (Tasks 1 + 6 + the legacy-DB round-trip test only)
 
 ```bash
-git push -u origin <feature-branch>
-gh pr create --title "feat(loto): shared/exclusive lock modes + downgrade (loto-k5el.2)" \
-  --body "Implements loto-k5el.2. Composite PK, mode column, mode-aware conflict predicate, exclusive→shared downgrade, --shared flag + downgrade verb. check --staged stays hard-block on exclusive conflict (grant-with-warning left as dk decision per epic). Coordinated with sibling .1 on the shared lock record — see plan §Reconciliation."
+go build ./... && go vet ./... && go test ./internal/store/... && golangci-lint run
+git push -u origin <branch>-migration
+gh pr create --title "feat(store): locks composite PK + mode column migration (loto-k5el.2 PR A)" \
+  --body "PR A of loto-k5el.2. Schema-only: composite PK (target,owner), mode column (legacy→exclusive), events CHECK widened for lock_downgraded, guarded atomic table-rebuild + legacy-DB round-trip test. No feature behavior yet. Store-touch → CI -race gate. Sibling .1 (schema-neutral) lands first; this hand-merges cmd_status.go + locks_acquire.go seams."
+```
+**Wait for PR A merge + CI green before PR B.** A rebuilt schema landing cleanly de-risks everything downstream.
+
+- [ ] **Step 2: PR B — feature** (Tasks 2–5, 5.5, 7–9) on top of merged PR A
+
+```bash
+go build ./... && go vet ./... && go test ./... && golangci-lint run
+git push -u origin <branch>-feature
+gh pr create --title "feat(loto): shared/exclusive lock modes + downgrade (loto-k5el.2 PR B)" \
+  --body "PR B of loto-k5el.2 (on PR A's migrated schema). Mode-aware Conflicts predicate, write-bit stripped only for exclusive, exclusive→shared DowngradeLock, LockAt→LockForOwnerAt caller migration, --shared flag + downgrade verb, liveness-gated check --staged (consumes .1's Classify). Closes loto-k5el.2."
 ```
 
-- [ ] **Step 4: close the bead on merge**
+> phantom-lint caveat (workflow.md): if golangci flags `.claude/worktrees/agent-*` copies, verify against real `internal/` and `golangci-lint cache clean`. `-race` runs on CI only — do not gate locally on it.
 
-After CI green + merge: `bd close loto-k5el.2` (or `Closes #N` in the squash commit). If this completes the epic's children, check whether loto-k5el can close too.
+- [ ] **Step 3: close the bead on merge**
+
+After PR B CI-green + merge: `bd close loto-k5el.2` (or `Closes #N` in the squash commit). If this completes the epic's children, check whether loto-k5el can close too.
 
 ---
 
 ## Non-goals (this bead)
 
 - **Upgrade shared→exclusive.** Out of scope. Requires re-stripping the write bit AND a fresh conflict check against peer shared holders (which must be gone first). File a follow-up if needed.
-- **check --staged grant-with-warning.** Deliberately left as a dk decision (epic open question). This plan keeps the hard block on exclusive conflicts.
+- **Pure grant-with-warning on check --staged.** Resolved to liveness-gated instead (hard-block live exclusive, warn on indeterminate) — see §check --staged. Not a non-goal so much as a narrowed decision.
 - **Auto-downgrade on conflict ("negotiation").** No automatic downgrade when a peer requests; downgrade is an explicit `loto downgrade` call. The "negotiation" framing is realized by *making downgrade cheap and in-place*, not by automating it.
 - **TTL / liveness fields.** Owned by sibling loto-k5el.1.
 - **Shared-lock count limits.** No cap on concurrent shared holders.
@@ -1402,17 +1517,16 @@ After CI green + merge: `bd close loto-k5el.2` (or `Closes #N` in the squash com
 
 ---
 
-## Open Questions (for dk)
+## Decisions (settled in post-review)
 
-1. **[.1 schema reconciliation — highest priority]** Sibling loto-k5el.1 (TTL/liveness) has no committed schema yet. This plan **assumes** .1 does not change the lock table's PK and that both siblings add columns via additive ALTER without a `schemaUserVersion` bump (the `proc_start` precedent). **If .1's final design changes the PK or restructures `reclaimStaleAndCollectBlockers`, Tasks 1 and 3 need a rebase.** Recommend .1 lands first; .2 rebases its PK change on top. Confirm landing order.
+1. **`.1` schema reconciliation / landing order.** RESOLVED — `.1` is verified schema-neutral; land `.1` first, `.2` hand-merges two files (§Reconciliation, binding correction 5).
+2. **check --staged policy.** RESOLVED to **liveness-gated** (hard-block on a provably-live exclusive conflict; warn-and-proceed on indeterminate) — §check --staged, binding correction 4. *Pending dk's nod vs. pure grant-with-warning; one-line flip either way.*
+3. **PK migration weight.** ACCEPTED as a guarded, atomic, crash-safe table-rebuild — but de-risked by isolating it into **PR A** (migration only, CI-`-race`-green before feature work) with the mandatory legacy-DB round-trip test (binding correction 2, Task 1 Step 5b).
+4. **events CHECK on legacy DBs.** RESOLVED — gap CLOSED, not deferred: the legacy-DB round-trip test (Task 1 Step 5b) exercises the rebuild branch directly. Ships in PR A.
 
-2. **[check --staged policy — the epic's open question]** This plan keeps `check --staged` a **hard block (exit 1)** on a genuine exclusive-peer conflict, only fixing the correctness bug where a *shared* peer was wrongly reported as a conflict. The epic asks whether the pre-commit gate should instead **grant-with-warning** (tell the committing agent "exclusive holder present, wait/ask-to-downgrade" but don't block). That's a one-line change but relaxes a safety gate — **left for you to decide.** Which way?
+## Open Question (still for dk)
 
-3. **[PK migration weight]** Changing the locks PK requires a SQLite table rebuild (not an in-place ALTER), heavier than the `proc_start` precedent. The plan does this inside the migrate tx without bumping `user_version`. Confirm you're comfortable with a table-rebuild migration on existing `loto.db` files (atomic and crash-safe, but a bigger migration than loto has done before).
-
-4. **[events CHECK on legacy DBs]** Adding the `lock_downgraded` event kind requires widening the events-table CHECK constraint, which also needs a rebuild for pre-existing DBs (Task 6). The guard is a no-op when the CHECK already contains the kind, but the rebuild branch may lack a direct test if no legacy-DB fixture exists. Acceptable to ship covered by the fresh-DB assertion, or build the fixture now?
-
-5. **[downgrade granularity]** `loto downgrade <target>` downgrades the caller's exclusive lock to shared. There's no `loto downgrade --all`. Is per-target sufficient, or do you want an all-my-locks downgrade?
+- **[downgrade granularity]** `loto downgrade <target>` downgrades the caller's exclusive lock to shared; there's no `loto downgrade --all`. Per-target sufficient, or add an all-my-locks form?
 
 ---
 

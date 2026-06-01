@@ -4,6 +4,21 @@
 
 **Bead:** loto-k5el.1 (parent epic loto-k5el)
 
+---
+
+## ‡‡ BINDING CORRECTIONS (post-review 2026-06-01) — read before any task
+
+A critical review ground-truthed this plan against live source. These corrections **override** anything below that conflicts. (Evidence: `~/.claude/plans/critically-assess-these-plans-staged-bee.md`.)
+
+1. **Embedded code is ILLUSTRATIVE — verify every helper name against real source before use.** The original snippets cite helpers that DO NOT EXIST: `pinAgentAs`, `openTestStore`, `mustInsertLock`, `deadProbe`, `ctx(t)`. **Real harness:** CLI tests use `withTempProject(t)`, `pinAgent(t)`, `twoAgents(t)` (returns `alice, bob` — there is no `pinAgentAs`), `Run(argv, &stdout, &stderr) int`. Store tests have **no** `openTestStore`/`mustInsertLock` — confirm or add a helper deliberately. **Do Task 0 first.**
+2. **Scope is SC3 (status surfacing) only.** Grounding confirmed liveness/TTL/sentinel/reclaim/SessionEnd are all already shipped. Real work = Tasks 3–6 (domain helpers + status render + cross-check + docs). **Tasks 1–2 are regression-pinning, NOT TDD** — they pass on first write; do not hunt a red that never comes.
+3. **`--renew` is CUT (Task 7 dropped).** A plain owner re-`lock` already refreshes `expires_at` (`ON CONFLICT(target_canonical) DO UPDATE … WHERE owner_uuid=excluded`). "To extend, just re-lock" is documented in Task 6 instead. This is the /simplify move: smaller PR, honest scope.
+4. **Policy decisions (dk, settled — do not re-open):** `status` is **read-only** (classifies, never reaps — invariant I5). 
+5. **Sequencing:** land `.1` FIRST. It is schema-neutral (verified — no schema/PK change). Sibling `.2` (shared/exclusive) hand-merges on top; its only seams with `.1` are `cmd_status.go::printStatusLocks` and `locks_acquire.go::reclaimStaleAndCollectBlockers`.
+6. **Embedded full-function bodies are a reference, not gospel.** Where a body cites a wrong helper, write the body against live code instead of copy-pasting. Keep the truth table / invariants I1–I5 / formal model as the authoritative spec.
+
+---
+
 **Goal:** Make a crashed/abandoned agent's lock self-heal with no manual `loto doctor`, and surface each lock's liveness verdict + remaining TTL in `loto status`.
 
 **Architecture:** Liveness-primary, TTL-as-backstop — exactly as the bead's design guidance pins it. **Critical finding from grounding in the real code (see "State of the world" below): the schema, the liveness probe, the lazy reaping in `lock`/`check`, the durable-session-PID trap fix, the PID-reuse defense, and the SessionEnd eager-release are ALL already shipped across prior beads (loto-t1tq, loto-j1bo, loto-kwlp, loto-9t0q, loto-vtg6, loto-l3as).** This plan is therefore a **gap-closing + read-time-surfacing** plan, not a greenfield build. The two real gaps are: (1) `loto status` neither reaps nor shows owner-alive / TTL-remaining (the **only unmet Success Criterion**, SC#3); (2) the mid-edit-expiry hazard has a de-facto policy in the code but it is undocumented and has no renewal escape hatch. We close both, add the missing tests that pin each Success Criterion, and explicitly decide the mid-edit policy.
@@ -14,7 +29,7 @@
 
 ## ‡ Hard constraint: store-touch ships via PR
 
-`.claude/rules/workflow.md`: **any change under `internal/store/*` or `internal/identity/registry.go` ships via PR, never direct-to-main** — linux `go test -race ./...` runs CI-only (self-hosted serial runners `mac-loto`/`trixi-loto`, matrix linux+macos). This plan touches `internal/store/locks_query.go` (Task 4) and `internal/domain/*` + `internal/cli/*`. **The whole change ships as ONE PR on branch `plan/loto-k5el.1`'s implementation follow-on** — do not push any store-touching commit to main. A merge backlog of ~15–20 min on the runners is lag, not breakage.
+`.claude/rules/workflow.md`: **any change under `internal/store/*` or `internal/identity/registry.go` ships via PR, never direct-to-main** — linux `go test -race ./...` runs CI-only (self-hosted serial runners `mac-loto`/`trixi-loto`, matrix linux+macos). Post-trim this plan changes **no store production code** — the only `internal/store/*` touch is the regression-pin test `locks_test.go` (Task 2), which still trips the PR rule by path. Production changes are `internal/domain/*` (Task 3) + `internal/cli/*` (Task 4–5). **The whole change ships as ONE PR** off main — do not push any store-touching commit to main. A merge backlog of ~15–20 min on the runners is lag, not breakage.
 
 ---
 
@@ -71,7 +86,7 @@ So **owning-SESSION liveness, not CLI-process-pid liveness, is what the code alr
 
 ### What is NOT yet built (the actual work)
 1. **`loto status` does not reap and does not show liveness verdict or remaining TTL.** `internal/cli/cmd_status.go: printStatusLocks` prints raw `expires_at=<RFC3339>` and `pid=`, with **no** owner-alive verdict and **no** TTL-remaining duration. It never consults `IsStale`/`liveProbe`. This is SC#3 and the bulk of the work.
-2. **No renewal / refresh escape hatch** for the mid-edit-expiry hazard, and the existing de-facto policy ("backstop only fires when liveness is indeterminate; a live durable-PID holder is never TTL-reaped because the probe says alive") is **undocumented**. We document it and add an optional `loto lock --renew` re-stamp.
+2. **The mid-edit-expiry policy is undocumented.** The de-facto behavior ("backstop only fires when liveness is indeterminate; a live durable-PID holder is never TTL-reaped because the probe says alive") is correct but unwritten. We document it, including "to extend, just re-lock" (the owner-match upsert already refreshes `expires_at` — no new flag needed; a dedicated `--renew` was considered and CUT per review).
 3. **No tests pinning the three Success Criteria end-to-end** through the CLI.
 
 ---
@@ -80,21 +95,20 @@ So **owning-SESSION liveness, not CLI-process-pid liveness, is what the code alr
 
 | Success Criterion (from bead) | Status before | Task that pins it |
 |---|---|---|
-| SC1: acquire a lock with TTL; after expiry another agent acquires same target, no manual doctor | mechanism shipped (acquire reclaim) | **Task 1** (e2e test only) |
-| SC2: a killed agent's lock expires within the TTL window / liveness frees it; a live agent's lock stays fresh | mechanism shipped (IsStale + probe) | **Task 2** (e2e test only) |
+| SC1: acquire a lock with TTL; after expiry another agent acquires same target, no manual doctor | mechanism shipped (acquire reclaim) | **Task 1** (regression-pin only) |
+| SC2: a killed agent's lock expires within the TTL window / liveness frees it; a live agent's lock stays fresh | mechanism shipped (IsStale + probe) | **Task 2** (regression-pin only) |
 | SC3: `loto status` shows remaining TTL per lock | **NOT built** | **Task 3, 4, 5** |
-| Mid-edit-expiry policy decided + documented (design guidance) | undocumented | **Task 6** (docs) + **Task 7** (`--renew`) |
+| Mid-edit-expiry policy decided + documented (design guidance) | undocumented | **Task 6** (docs — incl. "re-lock to extend"; `--renew` CUT per review) |
 
 ---
 
 ## File Structure
 
-- `internal/domain/staleness.go` — **add** pure helpers `LockLiveness` enum + `Classify(LockRecord) Liveness` + `RemainingTTL(LockRecord) time.Duration`. Pure, no I/O — domain may depend only on stdlib (per `.go-arch-lint.yml`). (Task 4 — domain, NOT store, so no `-race`-only risk, but bundled into the same PR for cohesion.)
-- `internal/store/locks_query.go` — **read only** to confirm `ListLocks` shape; no change unless Task 5 needs a reap-on-read variant (it does not — reaping stays in `lock`/`check`/`doctor`; `status` *classifies* but must not mutate, see Task 6 decision). ‡ store-touch → PR.
+- `internal/domain/staleness.go` — **add** pure helpers `Liveness` enum + `Classify(LockRecord) Liveness` + `RemainingTTL(LockRecord) time.Duration`. Pure, no I/O — domain may depend only on stdlib (per `.go-arch-lint.yml`). (Task 3 — domain, NOT store, so no `-race`-only risk, but bundled into the same PR for cohesion.)
+- `internal/store/locks_query.go` — **no change.** `status` reads via existing `ListLocks` and *classifies* the result; reaping stays in `lock`/`check`/`doctor` (status is read-only, invariant I5).
 - `internal/cli/cmd_status.go` — **modify** `printStatusLocks` + `statusSingleTarget` to render liveness verdict + remaining TTL via the new domain helpers and `rt.liveProbe()`.
-- `internal/cli/cmd_lock.go` — **modify** to add `--renew` flag wiring (Task 7).
 - `internal/cli/cmd_status_test.go` — **modify**: add status-shows-TTL + status-shows-liveness tests.
-- `internal/cli/cmd_lock_test.go` — **modify**: add the SC1/SC2 e2e reclaim tests + `--renew` test.
+- `internal/cli/cmd_lock_test.go` — **modify**: add the SC1/SC2 regression-pin reclaim tests. (`--renew` CUT per review — no `cmd_lock.go` change.)
 - `internal/domain/staleness_test.go` — **modify**: add `Classify`/`RemainingTTL` unit tests.
 - `README.md` — **modify**: document the mid-edit-expiry policy + status liveness columns.
 
@@ -132,7 +146,36 @@ I5: status NEVER mutates the lock store (read-only command; reaping is lock/chec
 
 ## Tasks
 
-### Task 1: e2e test — SC1 (TTL/dead-owner self-heal on acquire, no doctor)
+### Task 0: Harness rebind (NO CODE — do this first)
+
+**Files:** none (inventory only)
+
+Every test snippet below is illustrative and several cite helpers that do not exist. Before writing any test, inventory the real harness so TDD fails RED for the right reason, never a compile error.
+
+- [ ] **Step 1: Inventory CLI test helpers**
+
+```bash
+rg -n 'func (withTempProject|pinAgent|twoAgents|Run)\b' internal/cli/*_test.go internal/cli/run_helper_test.go
+rg -n 'tcTargetA|tcIntentTest|tcCmdStatus|tcAlice|tcBob' internal/cli/*_test.go | head
+```
+
+- [ ] **Step 2: Inventory store test helpers** (the snippets assume `openTestStore`/`mustInsertLock` — confirm real names or plan to add one)
+
+```bash
+rg -n 'func (openStore|newStore|mustInsert|insertLock|ctx)\b' internal/store/*_test.go
+rg -n 'AcquireLocks\(' internal/store/*_test.go | head
+```
+
+- [ ] **Step 3: Rewrite every snippet below to the confirmed names.** Two-agent tests use `twoAgents(t)` → `alice, bob` (there is NO `pinAgentAs`). If a needed store helper is genuinely absent, add it as an explicit first commit; do NOT invent store internals inline.
+
+- [ ] **Step 4: Sanity** — `go build ./internal/...` and `go vet ./internal/cli/ ./internal/store/` compile clean before starting Task 1.
+
+---
+
+### Task 1: regression-pin — SC1 (TTL/dead-owner self-heal on acquire, no doctor)
+
+> **Not TDD.** The mechanism (acquire-time reclaim) already ships; this test PASSES on first write and pins SC1 against regression. Do not chase a red.
+
 
 **Files:**
 - Test: `internal/cli/cmd_lock_test.go` (append)
@@ -189,7 +232,9 @@ git commit -m "test(cli): pin loto-k5el.1 SC1 — acquire reclaims expired holde
 
 ---
 
-### Task 2: e2e test — SC2 (dead session reclaimed; live session NOT reclaimed)
+### Task 2: regression-pin — SC2 (dead session reclaimed; live session NOT reclaimed)
+
+> **Not TDD.** Mechanism (`IsStale` + injected probe) already ships; both tests PASS on first write and pin SC2.
 
 **Files:**
 - Test: `internal/cli/cmd_lock_test.go` (append)
@@ -576,7 +621,7 @@ The design guidance demands a decided, documented policy for "the backstop fires
 
 **The decided policy (lift-from-Jeff-adapted-to-local):**
 1. **Liveness-primary means the hazard rarely materializes.** A durable-PID (LOTO_PID) holder whose session is alive is `ALIVE` and is **never** TTL-reaped — `IsStale` returns false because the probe says alive, regardless of `expires_at`. So a real, live Claude session editing for hours past a 30m TTL is *not* stolen. (This is the key divergence from pure-TTL leases the bead calls out.)
-2. **The residual hazard is the UNKNOWN holder** (PID-0 sentinel: no LOTO_PID, e.g. bare-shell/cron/hook-misconfig). For those, TTL is the sole authority and *can* expire mid-edit. Policy: **TTL default is generous (30m) and renewable** (Task 7 `loto lock --renew` re-stamps `expires_at`). A wrapper/long task re-locks to extend. We do **not** add a grace period or a "warn don't steal" mode — the PID-0 case is already the degraded path, flagged at acquire by `degradedPidWarning()`; the fix is to set LOTO_PID (promoting the holder to ALIVE), not to soften the backstop.
+2. **The residual hazard is the UNKNOWN holder** (PID-0 sentinel: no LOTO_PID, e.g. bare-shell/cron/hook-misconfig). For those, TTL is the sole authority and *can* expire mid-edit. Policy: **TTL default is generous (30m) and renewable by re-locking** — a plain `loto lock` on a target you already hold refreshes `expires_at` (the upsert's `ON CONFLICT … WHERE owner_uuid=excluded` path), so a wrapper/long task just re-locks to extend. (A dedicated `--renew` flag was considered and CUT per review — it added CLI surface over behavior re-lock already provides.) We do **not** add a grace period or a "warn don't steal" mode — the PID-0 case is already the degraded path, flagged at acquire by `degradedPidWarning()`; the fix is to set LOTO_PID (promoting the holder to ALIVE), not to soften the backstop.
 3. **`status` is read-only** (invariant I5): it shows `liveness=` and `ttl_remaining=` so an operator sees an imminent expiry, but never reaps. Reaping is `lock`/`check`/`doctor`.
 
 - [ ] **Step 1: Add a "Self-healing locks" subsection to README**
@@ -599,9 +644,10 @@ A lock frees the instant its owner is provably gone — no manual `loto doctor`:
   path.
 - **Mid-edit expiry.** A live session (durable PID, probe alive) is NEVER
   TTL-reaped, so a long edit past the TTL is safe. Only an UNKNOWN holder
-  (PID-0 sentinel) can expire mid-edit; extend it with `loto lock --renew`, or
-  fix the SessionStart hook to export `LOTO_PID` (promoting it to alive). loto
-  warns at acquire when liveness has degraded to TTL-only.
+  (PID-0 sentinel) can expire mid-edit; extend it by re-running `loto lock` on
+  the same target (the owner-match upsert refreshes the TTL), or fix the
+  SessionStart hook to export `LOTO_PID` (promoting it to alive). loto warns at
+  acquire when liveness has degraded to TTL-only.
 - **`loto status`** shows `liveness=alive|dead|unknown` and `ttl_remaining=` per
   lock so the cause of every verdict is visible. status is read-only — it never
   reaps.
@@ -621,130 +667,7 @@ git commit -m "docs(readme): document liveness-primary self-heal + mid-edit-expi
 
 ---
 
-### Task 7: `loto lock --renew` — re-stamp TTL on an owned lock (failing test first)
-
-**Files:**
-- Test: `internal/cli/cmd_lock_test.go` (append)
-- Modify: `internal/cli/cmd_lock.go`
-
-This is the renewal escape hatch the mid-edit policy promises. **No store-API change is needed** — `insertOrRefreshLock` already `ON CONFLICT DO UPDATE`s `expires_at` *when `owner_uuid` matches* (see `locks_acquire.go:287`). `loto lock <target> --renew` is just a normal acquire by the same owner with a fresh TTL: the upsert refreshes the row. `--renew` mainly changes semantics on **conflict** — without it, re-locking your own held target already succeeds (owner match), so `--renew` is largely a clarity alias. **Scope decision:** implement `--renew` as a flag that (a) is documented intent, (b) errors clearly if the target is NOT currently held by this owner (so "renew" can't silently create a brand-new lock). Keep it minimal.
-
-- [ ] **Step 1: Write the failing test**
-
-```go
-// TestLockRenewExtendsOwnHeldLock pins the renewal escape hatch (loto-k5el.1):
-// `loto lock --renew` on an owned target pushes expires_at forward.
-func TestLockRenewExtendsOwnHeldLock(t *testing.T) {
-	withTempProject(t)
-	t.Setenv("LOTO_PID", "")
-	pinAgent(t)
-	if code := Run([]string{"lock", tcTargetA, "-t", tcIntentTest, "--ttl", "5m"},
-		&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatal("initial lock failed")
-	}
-	var before bytes.Buffer
-	Run([]string{tcCmdStatus}, &before, &bytes.Buffer{})
-
-	// Renew with a longer TTL.
-	var out, errb bytes.Buffer
-	if code := Run([]string{"lock", tcTargetA, "-t", tcIntentTest, "--renew", "--ttl", "60m"},
-		&out, &errb); code != 0 {
-		t.Fatalf("renew should succeed on owned lock: exit, out=%q err=%q", out.String(), errb.String())
-	}
-	if !strings.Contains(out.String(), "✓") {
-		t.Errorf("renew should report success: %q", out.String())
-	}
-}
-
-// TestLockRenewFailsOnUnheldTarget: --renew must not silently create a fresh lock.
-func TestLockRenewFailsOnUnheldTarget(t *testing.T) {
-	withTempProject(t)
-	pinAgent(t)
-	var out, errb bytes.Buffer
-	code := Run([]string{"lock", tcTargetA, "-t", tcIntentTest, "--renew"}, &out, &errb)
-	if code == 0 {
-		t.Errorf("--renew on an unheld target must fail, got success: %q", out.String())
-	}
-}
-```
-
-- [ ] **Step 2: Run to verify it fails**
-
-Run: `go test ./internal/cli/ -run 'TestLockRenew' -v`
-Expected: FAIL — `--renew` flag unknown (exit 2).
-
-- [ ] **Step 3: Implement the flag**
-
-In `internal/cli/cmd_lock.go`, add the flag next to `--ttl` and a pre-acquire ownership check:
-
-```go
-	ttl := fs.Duration("ttl", 30*time.Minute, "lock TTL")
-	renew := fs.Bool("renew", false, "re-stamp TTL on a lock you already hold; errors if you don't hold it")
-```
-
-Before `acquireBatch`, when `*renew` is set, verify the owner holds every target (use `rt.Store.ListLocks` filtered by `rt.Agent.UUID` and target canonical). If any target is not held by this owner, emit a glyph-led error and return 2:
-
-```go
-	if *renew {
-		if code := ensureHeldByMe(rt, targets, stderr); code != 0 {
-			return code
-		}
-	}
-	return acquireBatch(rt, targets, *intent, *ttl, rt.liveProbe(), stdout, stderr)
-```
-
-Add the helper (same file):
-
-```go
-// ensureHeldByMe verifies every target is currently locked by this owner, so
-// `--renew` extends an existing lease rather than silently minting a new one.
-func ensureHeldByMe(rt *runtime, targets []domain.Target, stderr io.Writer) int {
-	all, err := rt.Store.ListLocks(rt.Ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return 3
-	}
-	held := map[string]bool{}
-	for i := range all {
-		if all[i].OwnerUUID == rt.Agent.UUID {
-			held[all[i].Target.Canonical] = true
-		}
-	}
-	var missing []string
-	for _, t := range targets {
-		if !held[t.Canonical] {
-			missing = append(missing, relPath(t.Canonical))
-		}
-	}
-	if len(missing) > 0 {
-		sort.Strings(missing)
-		fmt.Fprintf(stderr, "✗ renew count=%d not-held-by-you\n", len(missing))
-		for _, m := range missing {
-			fmt.Fprintf(stderr, "✗ target=%s reason=not-held\n", m)
-		}
-		return 2
-	}
-	return 0
-}
-```
-
-> Add `"sort"` to the import block if absent. `relPath` and `domain.Target` are already used in this package.
-
-- [ ] **Step 4: Run to verify it passes**
-
-Run: `go test ./internal/cli/ -run 'TestLockRenew' -v`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add internal/cli/cmd_lock.go internal/cli/cmd_lock_test.go
-git commit -m "feat(cli): loto lock --renew re-stamps TTL on owned lock (loto-k5el.1)"
-```
-
----
-
-### Task 8: Full verification + PR
+### Task 7: Full verification + PR
 
 **Files:** none (verification gate)
 
@@ -763,8 +686,8 @@ This change touches `internal/store/locks_test.go` and `internal/domain/*` + `in
 
 ```bash
 git push -u origin <impl-branch>
-gh pr create --title "feat(loto): TTL self-heal surfacing + renew (loto-k5el.1)" \
-  --body "Closes via loto-k5el.1. Liveness-primary self-heal already shipped (loto-t1tq/j1bo/kwlp/9t0q); this PR closes SC3 (status shows ttl_remaining + liveness), adds the --renew escape hatch, documents the mid-edit-expiry policy, and pins SC1/SC2 with tests. Store-touch → CI -race gate."
+gh pr create --title "feat(loto): TTL self-heal surfacing (loto-k5el.1 SC3)" \
+  --body "Closes via loto-k5el.1. Liveness-primary self-heal already shipped (loto-t1tq/j1bo/kwlp/9t0q); this PR closes SC3 (status shows ttl_remaining + liveness), documents the mid-edit-expiry policy (re-lock to extend), and pins SC1/SC2 with regression tests. Store-touch → CI -race gate."
 ```
 
 - [ ] **Step 3: Update bead + close on merge**
@@ -777,16 +700,14 @@ bd close loto-k5el.1 --reason "TTL self-heal surfacing + renew shipped; SC1-3 pi
 
 ---
 
-## Open Questions (for dk)
+## Decisions (settled in post-review — kept for the record)
 
-1. **Is loto-k5el.1 effectively already done?** The grounding pass found liveness-primary self-heal, TTL backstop, the CLI-PID-trap fix, PID-reuse defense, lazy reaping in `lock`/`check`, and SessionEnd eager-release all shipped (loto-t1tq, j1bo, kwlp, 9t0q, vtg6, l3as). The **only unmet Success Criterion is SC3** (`status` showing remaining TTL). If you consider SC3 the whole remaining scope, this plan over-delivers (it also adds `--renew` + docs). **Want me to trim to just Task 3–5 (status TTL/liveness) and close the bead, deferring `--renew` to a follow-up?**
+1. **Scope = SC3 only; bead all-but-done otherwise.** RESOLVED — trimmed. Tasks 3–6 are the real work; Tasks 1–2 are regression-pins; `--renew` cut.
+2. **`--renew`.** RESOLVED — CUT (re-lock already refreshes the TTL).
+3. **status read-only vs. reap-on-read.** RESOLVED (dk) — **read-only** (invariant I5). status classifies, never reaps.
+4. **`expires_at` → `ttl_remaining` swap.** Task 4 swaps to the actionable signal (design.md favors it). If a `status` golden asserts the old `expires_at=` substring, update it in the same commit. *(Still confirm: any external grep on `expires_at`? None known in-repo.)*
+5. **Mid-edit policy: no grace period.** RESOLVED — the only mid-edit-expirable holder is the UNKNOWN (PID-0) case whose real fix is exporting `LOTO_PID`; loto can probe liveness so a grace window is redundant. Documented in Task 6.
 
-2. **`--renew` value vs. cost.** Because `insertOrRefreshLock` already refreshes `expires_at` for the owner on a plain re-`lock`, `--renew` is largely a guardrail (it errors if you don't already hold the target) rather than new capability. Is the explicit `--renew` worth the surface area, or is "just re-lock to extend" sufficient (drop Task 7)?
+## Open Question (still for dk)
 
-3. **status read-only vs. reap-on-read.** I decided `status` classifies but never reaps (invariant I5) — a read command mutating rows is surprising and races the writers' op-flock. Acceptable, or do you want `status` to reap dead rows so the table self-cleans even when nobody acquires? (Would require taking the op-flock in a read path — I'd advise against.)
-
-4. **`expires_at` → `ttl_remaining` swap in status output.** Task 4 replaces the absolute `expires_at=<RFC3339>` field with `ttl_remaining=<Ns>` (more actionable per the bead). If any external consumer greps `expires_at` from `status`, that's a breaking output change. Keep both, or swap? (design.md favors the actionable signal; I swapped.)
-
-5. **Mid-edit policy: no grace period.** I deliberately did NOT add a grace period or "warn-don't-steal" mode for backstop expiry, because the only holder that can expire mid-edit is the UNKNOWN (PID-0) case, whose real fix is exporting `LOTO_PID`. Jeff's mcp_agent_mail uses grace/renewal because it's networked and can't probe liveness; loto can, so the grace period is redundant here. Agree, or do you want a grace window on the PID-0 path as defense-in-depth?
-
-6. **Shared/exclusive (loto-k5el.2) interaction.** This plan is exclusive-only (matches today's binary locks). The sibling bead loto-k5el.2 adds shared/exclusive + downgrade. The `Classify`/`ttl_remaining` surfacing here is mode-agnostic and should compose, but I did not design for shared-mode TTL semantics (e.g. does a shared lock's TTL behave differently?). Flagging so loto-k5el.2's plan accounts for it.
+- **Shared/exclusive (loto-k5el.2) interaction.** This plan is exclusive-only (matches today's binary locks). Sibling `.2` adds shared/exclusive + downgrade; the `Classify`/`ttl_remaining` surfacing here is mode-agnostic and should compose, but shared-mode TTL semantics (does a shared lock's TTL behave differently? does one reader's expiry free the shared row while others hold?) are designed in `.2`, not here. Land `.1` first; `.2` accounts for it.
