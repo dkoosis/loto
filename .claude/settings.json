@@ -19,6 +19,17 @@
         "matcher": ""
       }
     ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "loto unlock --all -t \"session end\" >/dev/null 2>&1 || true",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
     "Stop": []
   }
 }
