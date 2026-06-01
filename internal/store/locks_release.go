@@ -31,7 +31,7 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, byAge
 	}
 	defer cleanup()
 
-	owners, err := loadOwnersTx(ctx, tx, targets)
+	owners, err := loadOwnersTx(ctx, tx, targets, byAgent)
 	if err != nil {
 		return nil, err
 	}
@@ -133,10 +133,13 @@ type ownerMode struct{ Owner, Mode string }
 
 // loadOwnersTx reads owner_uuid + mode for the given targets via a single
 // SELECT. Returned map is keyed by target_canonical; missing keys = no row.
-// (Under the composite PK a shared target may have several holders; the map
-// keeps an arbitrary one — sufficient for the single-owner release path, which
-// scopes its DELETE by owner_uuid separately.)
-func loadOwnersTx(ctx context.Context, tx *sql.Tx, targets []domain.Target) (map[string]ownerMode, error) {
+// Under the composite PK a shared target may have several holders; the map
+// PREFERS byAgent's own row when present, so a holder can always release its
+// own lock on a multi-holder shared target (otherwise an arbitrary other
+// holder could shadow it and the release would misclassify as not-owner,
+// leaving the caller's row undeleted — loto-k5el.2). When byAgent holds no row
+// at a target, an arbitrary other holder is kept to drive the not-owner state.
+func loadOwnersTx(ctx context.Context, tx *sql.Tx, targets []domain.Target, byAgent string) (map[string]ownerMode, error) {
 	placeholders, args := inClause(targets)
 	// placeholders is built from '?' chars only; user data flows via args.
 	rows, err := tx.QueryContext(ctx, `SELECT target_canonical, owner_uuid, mode FROM locks WHERE target_canonical IN (`+placeholders+`)`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
@@ -151,7 +154,10 @@ func loadOwnersTx(ctx context.Context, tx *sql.Tx, targets []domain.Target) (map
 		if err := rows.Scan(&canonical, &owner, &mode); err != nil {
 			return nil, err
 		}
-		out[canonical] = ownerMode{Owner: owner, Mode: mode}
+		cur, seen := out[canonical]
+		if !seen || (owner == byAgent && cur.Owner != byAgent) {
+			out[canonical] = ownerMode{Owner: owner, Mode: mode}
+		}
 	}
 	return out, rows.Err()
 }

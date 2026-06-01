@@ -100,6 +100,38 @@ func TestLockForOwnerAt_MultiHolderUnambiguous(t *testing.T) {
 	}
 }
 
+// TestRelease_MultiHolderEachReleasesOwn guards the multi-holder release fix
+// (loto-k5el.2): two shared holders on one target; each must be able to release
+// its OWN row without the other's row shadowing it into a not-owner misclassify.
+func TestRelease_MultiHolderEachReleasesOwn(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	a := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	a.Mode = domain.ModeShared
+	b := peerOn(a, tcBob, domain.ModeShared)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
+		t.Fatalf("alice: %v", err)
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe); err != nil {
+		t.Fatalf("bob: %v", err)
+	}
+
+	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, tcAlice)
+	if err != nil {
+		t.Fatalf("alice release: %v", err)
+	}
+	if len(res) != 1 || res[0].State != StateUnlocked {
+		t.Fatalf("alice must unlock her own shared row, got %+v", res)
+	}
+	// Alice's row gone, bob's row survives.
+	if la, _ := s.LockForOwnerAt(ctx, a.Target, tcAlice); la != nil {
+		t.Fatalf("alice's row should be deleted, got %+v", la)
+	}
+	if lb, _ := s.LockForOwnerAt(ctx, a.Target, tcBob); lb == nil {
+		t.Fatalf("bob's shared row must survive alice's release")
+	}
+}
+
 func TestAcquire_SharedDoesNotStripWriteBit(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
