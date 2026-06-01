@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -58,5 +59,66 @@ func TestAcquire_ExclusiveBlocksShared(t *testing.T) {
 	var mce *MultiConflictError
 	if !errors.As(err, &mce) {
 		t.Fatalf("want MultiConflictError (exclusive blocks shared), got %v", err)
+	}
+}
+
+func TestAcquire_SharedDoesNotStripWriteBit(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	rec := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	rec.Mode = domain.ModeShared
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
+		t.Fatalf("shared acquire: %v", err)
+	}
+	fi, err := os.Stat(rec.Target.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm()&0o200 == 0 {
+		t.Fatalf("shared lock must NOT strip owner-write bit; perm=%v", fi.Mode().Perm())
+	}
+}
+
+func TestAcquire_ExclusiveStripsWriteBit(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	rec := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	rec.Mode = domain.ModeExclusive
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
+		t.Fatalf("exclusive acquire: %v", err)
+	}
+	fi, err := os.Stat(rec.Target.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm()&0o200 != 0 {
+		t.Fatalf("exclusive lock must strip owner-write bit; perm=%v", fi.Mode().Perm())
+	}
+}
+
+// TestRelease_SharedDoesNotRestoreWriteBit guards the release-side guard: a
+// shared release never stripped the bit, so restore must be skipped (restoring
+// would spuriously ADD owner-write). Start the file read-only; a shared
+// acquire leaves it untouched, and release must NOT flip it writable.
+func TestRelease_SharedDoesNotRestoreWriteBit(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	rec := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	rec.Mode = domain.ModeShared
+	if err := os.Chmod(rec.Target.Canonical, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
+		t.Fatalf("shared acquire: %v", err)
+	}
+	if _, err := s.ReleaseLocks(ctx, []domain.Target{rec.Target}, tcAlice); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	fi, err := os.Stat(rec.Target.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm()&0o200 != 0 {
+		t.Fatalf("shared release must NOT restore owner-write; perm=%v", fi.Mode().Perm())
 	}
 }

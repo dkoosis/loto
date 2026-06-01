@@ -224,6 +224,9 @@ func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord
 func stripAll(sorted []domain.LockRecord) ([]string, *ChmodFailure) {
 	stripped := make([]string, 0, len(sorted))
 	for i := range sorted {
+		if sorted[i].EffectiveMode() != domain.ModeExclusive {
+			continue // shared locks are advisory-only; write bit untouched
+		}
 		p := sorted[i].Target.Canonical
 		if err := stripWrite(p); err != nil {
 			return stripped, &ChmodFailure{Target: sorted[i].Target, Err: err}

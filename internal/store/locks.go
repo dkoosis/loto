@@ -103,6 +103,7 @@ type ReleaseResult struct {
 	Target     domain.Target
 	State      ReleaseOutcome
 	Holder     string // populated when State == StateNotOwner
+	Mode       string // mode of the released row; "" → exclusive (loto-k5el.2)
 	RestoreErr error  // populated when State == StateRestoreFailed
 	// AuditErr is populated when the per-target mode_restore_failed audit
 	// event could not be persisted (tx contention, SQLITE_BUSY, ctx tail).
