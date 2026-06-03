@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -48,6 +49,36 @@ func TestStateDirRespectsLOTO_BASE(t *testing.T) {
 	got := StateDir("/anywhere")
 	if got != "/tmp/override" {
 		t.Errorf("StateDir = %q; want /tmp/override", got)
+	}
+}
+
+// loto-d3l (case variant): on a case-insensitive filesystem a repo checked out
+// at .../MixedCaseRepo can receive a path with a different case in the segments
+// at/above the checkout root — a git worktree minted from a lowercase cwd hands
+// loto /Users/x/projects/... while git records /Users/x/Projects/.... Lexical,
+// case-sensitive filepath.Rel reports a bogus escape; normalizeRepoPath must
+// recover repo-relative containment via a case-insensitive comparison.
+//
+// Skips on a case-sensitive filesystem, where the case mismatch cannot occur.
+func TestNormalizeRepoPath_CaseInsensitiveContainment(t *testing.T) {
+	top := t.TempDir()
+	repo := filepath.Join(top, "MixedCaseRepo")
+	if err := os.MkdirAll(filepath.Join(repo, "pkg", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "pkg", "sub", "file.go"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lowerRepo := filepath.Join(top, "mixedcaserepo")
+	if _, err := os.Stat(lowerRepo); err != nil {
+		t.Skip("case-sensitive filesystem: case-mismatch cannot reproduce")
+	}
+	lowerFile := filepath.Join(lowerRepo, "pkg", "sub", "file.go")
+
+	got := normalizeRepoPath(lowerFile, repo)
+	if got != "pkg/sub/file.go" {
+		t.Fatalf("normalizeRepoPath(%q, %q) = %q; want pkg/sub/file.go", lowerFile, repo, got)
 	}
 }
 

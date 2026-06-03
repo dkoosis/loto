@@ -245,9 +245,76 @@ func normalizeRepoPath(p, repoTop string) string {
 		return p
 	}
 	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		// filepath.Rel is lexical and case-sensitive. On a case-insensitive
+		// filesystem (macOS APFS default, Windows) the segments at/above the
+		// checkout root can differ in case from git's recorded path: a worktree
+		// minted from a lowercase cwd yields /Users/x/projects/... while git
+		// reports /Users/x/Projects/.... Rel then reports a bogus escape and the
+		// file is wrongly rejected as repo-escape (loto-d3l, case variant).
+		// Retry containment case-insensitively, but only when the filesystem
+		// actually folds case, so case-sensitive systems keep exact semantics.
+		if sub, ok := foldContains(absTop, absP); ok && caseInsensitiveFS(absTop) {
+			return filepath.ToSlash(sub)
+		}
 		return p
 	}
 	return filepath.ToSlash(rel)
+}
+
+// foldContains reports whether child lies within parent using a case-insensitive
+// boundary comparison, returning the in-repo remainder. Inputs must be cleaned
+// absolute paths. Only the prefix up to parent's length is compared by fold; the
+// returned remainder preserves child's casing (below the checkout root both
+// sessions reference the same on-disk names, so that case is authoritative).
+func foldContains(parent, child string) (string, bool) {
+	if len(child) <= len(parent) {
+		return "", false
+	}
+	if child[len(parent)] != filepath.Separator {
+		return "", false // parent is a string prefix, not a path-component prefix
+	}
+	if !strings.EqualFold(child[:len(parent)], parent) {
+		return "", false
+	}
+	return child[len(parent)+1:], true
+}
+
+// caseInsensitiveFS reports whether dir resides on a case-insensitive filesystem
+// by checking that a case-flipped variant of dir resolves to the same inode. dir
+// must exist. Returns false (the conservative, case-sensitive assumption) on any
+// error or when dir's basename has no ASCII letter to flip.
+func caseInsensitiveFS(dir string) bool {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return false
+	}
+	flipped := flipBasenameCase(dir)
+	if flipped == dir {
+		return false
+	}
+	ffi, err := os.Stat(flipped)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(fi, ffi)
+}
+
+// flipBasenameCase returns dir with the case of the first ASCII letter in its
+// basename inverted, or dir unchanged if the basename has no ASCII letter.
+func flipBasenameCase(dir string) string {
+	d, base := filepath.Split(dir)
+	b := []byte(base)
+	for i := range b {
+		switch {
+		case b[i] >= 'a' && b[i] <= 'z':
+			b[i] -= 32
+			return d + string(b)
+		case b[i] >= 'A' && b[i] <= 'Z':
+			b[i] += 32
+			return d + string(b)
+		}
+	}
+	return dir
 }
 
 // relPath returns p relative to the current working directory when both lie
