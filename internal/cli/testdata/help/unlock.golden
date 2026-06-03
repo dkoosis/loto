@@ -4,6 +4,6 @@ Usage of unlock:
   -force
     	break another agent's lock (or a live lock)
   -intent string
-    	intent (required)
+    	intent (required only with --force)
   -t string
-    	intent (required)
+    	intent (required only with --force)

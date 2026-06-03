@@ -18,13 +18,18 @@ func cmdUnlock(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fs.SetOutput(stderr)
 	force := fs.Bool("force", false, "break another agent's lock (or a live lock)")
 	all := fs.Bool("all", false, "release every lock owned by my uuid")
-	intent := fs.String("t", "", "intent (required)")
-	fs.StringVar(intent, "intent", "", "intent (required)")
+	intent := fs.String("t", "", "intent (required only with --force)")
+	fs.StringVar(intent, "intent", "", "intent (required only with --force)")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
-	if *intent == "" {
-		fmt.Fprintln(stderr, "✗ -t required: loto unlock <target> [<target>...] -t \"why\"")
+	// -t is required only for --force: BreakLocks records it in the break audit
+	// trail. Plain unlock and --all discard intent (ReleaseLocks/ReleaseBySession
+	// take no intent arg), so demanding it there was pure ceremony — and its
+	// stderr+exit2 rejection read as a silent no-op to a stdout-only agent,
+	// leaving locks dangling (loto-e0mz).
+	if *force && *intent == "" {
+		fmt.Fprintln(stderr, "✗ -t required to break a lock (--force): loto unlock <target> --force -t \"why\"")
 		return 2
 	}
 	if !*all && fs.NArg() == 0 {

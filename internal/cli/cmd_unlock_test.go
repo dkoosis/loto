@@ -43,6 +43,44 @@ func TestUnlockAll_NoPinnedIdentity_RefusesFalseSuccess(t *testing.T) {
 	}
 }
 
+// TestUnlock_NoIntent_Succeeds pins loto-e0mz: plain unlock of your own lock
+// must NOT require -t. ReleaseLocks takes no intent arg — the flag was validated
+// then discarded, and the rejection landed on stderr (exit 2) while stdout (the
+// Claude channel) stayed empty, reading to a subagent as a silent no-op that
+// left the lock dangling. Releasing without -t must succeed and report it.
+func TestUnlock_NoIntent_Succeeds(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("seed lock exit %d", code)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcTargetA}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("unlock without -t exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.HasPrefix(out.String(), "✓ unlocked count=1") {
+		t.Errorf("expected unlock success on stdout, got out=%q err=%q", out.String(), errBuf.String())
+	}
+}
+
+// TestUnlock_ForceWithoutIntent_Rejected keeps -t required where it is actually
+// consumed: --force feeds intent to BreakLocks for the break audit trail. Unlike
+// plain unlock, breaking another agent's lock must still explain why.
+func TestUnlock_ForceWithoutIntent_Rejected(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcTargetA, "--force"}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("force unlock without -t exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "-t required") {
+		t.Errorf("expected -t required diagnostic, got %q", errBuf.String())
+	}
+}
+
 // TestUnlock_ForceRestoresWriteMode confirms the break path (unlock --force)
 // restores owner-write on the target file. Store layer already does this for
 // owner-release; this test pins it through the CLI surface.
