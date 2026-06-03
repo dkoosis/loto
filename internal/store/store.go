@@ -494,6 +494,7 @@ func ensureLocksProcStart(ctx context.Context, db sqlExecQuerier, apply bool) (b
 		if _, err := db.ExecContext(ctx, `ALTER TABLE locks ADD COLUMN proc_start INTEGER`); err != nil {
 			return false, err
 		}
+		return false, nil // applied: no longer outstanding
 	}
 	return true, nil
 }
@@ -549,6 +550,7 @@ CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);`
 		if _, err := db.ExecContext(ctx, rebuild); err != nil {
 			return false, err
 		}
+		return false, nil // applied: no longer outstanding
 	}
 	return true, nil
 }
@@ -589,6 +591,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created_id ON events(created_at, id);`
 		if _, err := db.ExecContext(ctx, rebuild); err != nil {
 			return false, err
 		}
+		return false, nil // applied: no longer outstanding
 	}
 	return true, nil
 }
