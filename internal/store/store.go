@@ -280,46 +280,67 @@ func schemaStructurallyIntact(ctx context.Context, db *sql.DB) bool {
 	return err == nil && name == "locks"
 }
 
-// schemaFullyCurrent reports whether the DB is at the current schema in every
-// respect the migrate write path would otherwise apply: the core tables exist
-// AND the additive locks.proc_start column is present (loto-kwlp). It is the
-// gate for migrate's steady-state no-write fast path (loto-0gsu). Unlike
+// sqlExecQuerier is the read+write surface an ensure step needs. Both *sql.DB
+// (used by the read-only dry-run gate) and *sql.Tx (used by migrate's apply
+// path) satisfy it, so one ensureFn body serves both callers.
+type sqlExecQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// ensureFn is one guarded, additive in-place migration. It probes (read-only)
+// whether the DB already satisfies the step and returns pending=true when the
+// upgrade is still outstanding. When apply is true and the step is pending it
+// also executes the DDL. The probe is identical in both modes, so the same fn
+// is the single source of truth for "is this step done?" — consulted by the
+// steady-state gate (apply=false, no write tx) and the writer (apply=true).
+type ensureFn func(ctx context.Context, db sqlExecQuerier, apply bool) (pending bool, err error)
+
+// migrationEnsures are the additive in-place upgrades migrate applies after the
+// base schemaSQL, in dependency order (proc_start before the locks rebuild,
+// whose SELECT relies on the column existing). migrate's apply path and
+// schemaCurrent's steady-state gate iterate THIS one list — the gate runs each
+// step with apply=false, the apply path with apply=true — so a new step is
+// impossible to add to one path without the other. This closes the drift
+// loto-t8dd targeted: the old schemaFullyCurrent hand-mirrored each probe and
+// could silently fall behind a newly added ensure, leaving a steady-state DB
+// to skip an upgrade forever.
+var migrationEnsures = []struct {
+	name string
+	fn   ensureFn
+}{
+	{"add locks.proc_start", ensureLocksProcStart},
+	{"upgrade locks mode/pk", ensureLocksModeAndPK},
+	{"upgrade events check", ensureEventsCheckCurrent},
+}
+
+// schemaCurrent reports whether a re-migrate would be a pure no-op — the gate
+// for migrate's steady-state no-write fast path (loto-0gsu). It is the dry-run
+// counterpart of migrate's apply loop: every migrationEnsures step is probed
+// with apply=false (read-only, no write tx) and the DB is current only when
+// none is pending. Base-schema tables (locks via schemaStructurallyIntact,
+// tags) are not ensure steps, so their existence is checked directly first;
+// events existence is covered by ensureEventsCheckCurrent's own probe
+// (ErrNoRows → pending). Any probe failure or pending step is treated as
+// not-current (conservative: prefer running migrate). Unlike
 // schemaStructurallyIntact — which only sentinels "is this a loto DB" for the
-// move-aside decision — this must be true ONLY when a re-migrate would be a
-// pure no-op, so a DB carrying the current user_version stamp but missing the
-// proc_start upgrade still falls through to the full migrate. A probe failure
-// is treated as not-current (conservative: prefer running migrate).
-func schemaFullyCurrent(ctx context.Context, db *sql.DB) bool {
+// move-aside decision — this must be true ONLY when migrate has nothing to do.
+func schemaCurrent(ctx context.Context, db *sql.DB) bool {
 	if !schemaStructurallyIntact(ctx, db) {
 		return false
 	}
-	// events existence is covered by the DDL read below (ErrNoRows → not-current),
-	// so only tags needs a standalone existence probe here.
 	var tagsName string
 	if err := db.QueryRowContext(ctx,
 		`SELECT name FROM sqlite_master WHERE type='table' AND name='tags'`).Scan(&tagsName); err != nil || tagsName != "tags" {
 		return false
 	}
-	// loto-k5el.2: a v9 DB carrying the old single-column-PK / no-mode locks
-	// table is NOT fully current — without the mode + composite-PK probes
-	// migrate's fast path would skip ensureLocksModeAndPK and the rebuild would
-	// never run. All three locks-column facts come from one pragma_table_info
-	// scan (this gate runs on every Open, including read-only commands).
-	var procStartN, modeN, pkCols int
-	if err := db.QueryRowContext(ctx, `
-SELECT sum(name = 'proc_start'), sum(name = 'mode'), sum(pk > 0)
-FROM pragma_table_info('locks')`).Scan(&procStartN, &modeN, &pkCols); err != nil {
-		return false
+	for _, step := range migrationEnsures {
+		pending, err := step.fn(ctx, db, false)
+		if err != nil || pending {
+			return false
+		}
 	}
-	// events CHECK must already admit lock_downgraded, else ensureEventsCheckCurrent
-	// still has work to do. This read also doubles as the events-table existence
-	// probe (ErrNoRows → not-current).
-	var eventsDDL string
-	if err := db.QueryRowContext(ctx,
-		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&eventsDDL); err != nil {
-		return false
-	}
-	return procStartN > 0 && modeN == 1 && pkCols == 2 && strings.Contains(eventsDDL, "'lock_downgraded'")
+	return true
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -421,7 +442,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&v); err != nil {
 		return fmt.Errorf("read user_version: %w", err)
 	}
-	if v == schemaUserVersion && schemaFullyCurrent(ctx, s.db) {
+	if v == schemaUserVersion && schemaCurrent(ctx, s.db) {
 		return nil
 	}
 
@@ -433,30 +454,18 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
-	// Additive, in-place column upgrade for DBs created before proc_start
-	// existed (loto-kwlp). CREATE TABLE IF NOT EXISTS no-ops on an existing
-	// table, so the column is added here instead. Guarded by a table-info
-	// probe rather than catching the duplicate-column error, so it stays a
-	// no-op on fresh DBs (where CREATE already declared the column) and on
-	// every re-Open. user_version is intentionally NOT bumped — bumping would
-	// trip the move-aside path and destroy live locks; this upgrade preserves
-	// existing rows (their proc_start defaults to NULL = unknown).
-	if err := ensureLocksProcStart(ctx, tx); err != nil {
-		return fmt.Errorf("add locks.proc_start: %w", err)
-	}
-	// Composite-PK + mode-column upgrade for DBs that predate loto-k5el.2.
-	// SQLite cannot ALTER a primary key in place, so this rebuilds the locks
-	// table (guarded — no-op when the PK is already composite) inside the same
-	// migrate tx. user_version is intentionally NOT bumped (same rationale as
-	// proc_start above). Must run AFTER ensureLocksProcStart so the rebuild's
-	// SELECT can rely on proc_start existing on the legacy table.
-	if err := ensureLocksModeAndPK(ctx, tx); err != nil {
-		return fmt.Errorf("upgrade locks mode/pk: %w", err)
-	}
-	// Widen the events CHECK for the lock_downgraded kind on pre-loto-k5el.2 DBs
-	// (a CHECK can't be ALTERed; rebuild guarded by a DDL substring probe).
-	if err := ensureEventsCheckCurrent(ctx, tx); err != nil {
-		return fmt.Errorf("upgrade events check: %w", err)
+	// Apply every additive in-place upgrade in order. Each step is guarded and
+	// idempotent (no-op on a fresh DB where schemaSQL already declared the
+	// shape, and on every re-Open), so this is safe to run unconditionally
+	// after schemaSQL. user_version is intentionally NOT bumped by any step —
+	// bumping would trip the move-aside path and destroy live locks (loto-kwlp
+	// precedent); these upgrades preserve existing rows. The dependency order
+	// lives in migrationEnsures (proc_start before the locks rebuild). The same
+	// list backs schemaCurrent's no-write gate, so the two cannot drift apart.
+	for _, step := range migrationEnsures {
+		if _, err := step.fn(ctx, tx, true); err != nil {
+			return fmt.Errorf("%s: %w", step.name, err)
+		}
 	}
 	if err := commitTxFn(tx); err != nil {
 		return fmt.Errorf("commit schema: %w", err)
@@ -468,20 +477,26 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 // ensureLocksProcStart adds the locks.proc_start column to an existing DB that
-// predates it. No-op when the column is already present (fresh DBs declare it
-// in CREATE TABLE). Runs inside the migrate tx so a failure rolls back cleanly.
-func ensureLocksProcStart(ctx context.Context, tx *sql.Tx) error {
+// predates it (loto-kwlp). Pending when the column is absent; not-pending on a
+// fresh DB (CREATE TABLE already declared it) and on every re-Open. The probe
+// is read-only, so apply=false makes this a pure predicate for schemaCurrent.
+func ensureLocksProcStart(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	var n int
-	if err := tx.QueryRowContext(ctx,
+	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('locks') WHERE name = 'proc_start'`,
 	).Scan(&n); err != nil {
-		return err
+		return false, err
 	}
 	if n > 0 {
-		return nil
+		return false, nil
 	}
-	_, err := tx.ExecContext(ctx, `ALTER TABLE locks ADD COLUMN proc_start INTEGER`)
-	return err
+	if apply {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE locks ADD COLUMN proc_start INTEGER`); err != nil {
+			return false, err
+		}
+		return false, nil // applied: no longer outstanding
+	}
+	return true, nil
 }
 
 // ensureLocksModeAndPK brings a pre-loto-k5el.2 DB up to the composite-PK +
@@ -492,14 +507,14 @@ func ensureLocksProcStart(ctx context.Context, tx *sql.Tx) error {
 // intentionally NOT bumped — a bump trips MoveCorruptAside and destroys live
 // locks (loto-kwlp precedent). Guarded by a PK-shape probe so this is a no-op on
 // fresh DBs (CREATE TABLE already declared the composite PK) and on every re-Open.
-func ensureLocksModeAndPK(ctx context.Context, tx *sql.Tx) error {
+func ensureLocksModeAndPK(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	var pkCols int
-	if err := tx.QueryRowContext(ctx,
+	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('locks') WHERE pk > 0`).Scan(&pkCols); err != nil {
-		return err
+		return false, err
 	}
 	if pkCols == 2 {
-		return nil // already migrated (fresh DB or prior upgrade)
+		return false, nil // already migrated (fresh DB or prior upgrade)
 	}
 	// Legacy single-column PK: rebuild. The old table has no `mode` column, so
 	// the SELECT supplies the literal 'exclusive' for it. proc_start is present
@@ -531,23 +546,29 @@ ALTER TABLE locks_new RENAME TO locks;
 CREATE INDEX IF NOT EXISTS idx_locks_owner    ON locks(owner_uuid);
 CREATE INDEX IF NOT EXISTS idx_locks_session  ON locks(session_uuid);
 CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);`
-	_, err := tx.ExecContext(ctx, rebuild)
-	return err
+	if apply {
+		if _, err := db.ExecContext(ctx, rebuild); err != nil {
+			return false, err
+		}
+		return false, nil // applied: no longer outstanding
+	}
+	return true, nil
 }
 
 // ensureEventsCheckCurrent widens the events CHECK constraint to admit the
 // lock_downgraded kind on a DB created before loto-k5el.2. A CHECK can't be
 // ALTERed, so the events table is rebuilt — but only when the stored DDL lacks
 // the new kind (probe via sqlite_master.sql substring), making this a no-op on
-// fresh DBs and re-Opens. Runs inside the migrate tx; user_version not bumped.
-func ensureEventsCheckCurrent(ctx context.Context, tx *sql.Tx) error {
+// fresh DBs and re-Opens. The probe doubles as the events-table existence
+// check for schemaCurrent (ErrNoRows → pending). user_version not bumped.
+func ensureEventsCheckCurrent(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	var ddl string
-	if err := tx.QueryRowContext(ctx,
+	if err := db.QueryRowContext(ctx,
 		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&ddl); err != nil {
-		return err
+		return false, err
 	}
 	if strings.Contains(ddl, "'lock_downgraded'") {
-		return nil // already current
+		return false, nil // already current
 	}
 	const rebuild = `
 CREATE TABLE events_new (
@@ -566,6 +587,11 @@ ALTER TABLE events_new RENAME TO events;
 CREATE INDEX IF NOT EXISTS idx_events_target     ON events(target_canonical, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_kind       ON events(event_kind, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_created_id ON events(created_at, id);`
-	_, err := tx.ExecContext(ctx, rebuild)
-	return err
+	if apply {
+		if _, err := db.ExecContext(ctx, rebuild); err != nil {
+			return false, err
+		}
+		return false, nil // applied: no longer outstanding
+	}
+	return true, nil
 }
