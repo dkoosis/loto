@@ -8,5 +8,8 @@
 
 ‡ **CI = self-hosted serial runners** (`mac-loto`, `trixi-loto`), matrix linux+macos, each runs `go test -race ./...`. A burst of merges backlogs the queue ~15–20 min — that's lag, not breakage. Check `gh api repos/dkoosis/loto/actions/runners` for busy state.
 
-- docs(boot) / docs-only commits → direct to main is fine.
+- docs(boot) / docs-only commits → direct to main is fine. test-only (non-store/identity) → direct fine.
 - phantom-lint: golangci can flag findings in `.claude/worktrees/agent-*` copies — verify against real `internal/` source; `golangci-lint cache clean` if stale.
+
+‡ **Tests are stdlib-only — no testify/go-cmp.** Convention is plain `t.Errorf`/`errors.Is` (φ `internal/domain/target_test.go`). Reject PRs that add assertion-helper deps/packages; fold their value in stdlib style. (#176 dragged in testcmp/testrequire clones — closed, rewritten.)
+‡ **Arch linter rejects black-box `*_test` self-import.** `package foo_test` importing its own `loto/internal/foo` trips `make check`'s dependency-violation gate. Use internal `package foo` for in-package tests.
