@@ -103,6 +103,7 @@ func classifyBreaks(
 			results[i].Err = err
 			continue
 		}
+		results[i].Mode = l.Mode
 		events = append(events, domain.Event{
 			Target:      t,
 			Kind:        kind,
@@ -122,6 +123,9 @@ func (s *Store) restoreAndAuditBreaks(results []BreakResult, byAgent string, now
 	for i := range results {
 		if results[i].Err != nil {
 			continue
+		}
+		if !shouldRestoreOwnerWrite(results[i].Mode) {
+			continue // shared lock never stripped the bit — nothing to restore
 		}
 		if rerr := restoreWrite(results[i].Target.Canonical); rerr != nil {
 			results[i].RestoreErr = rerr

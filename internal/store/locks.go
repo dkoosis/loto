@@ -122,10 +122,24 @@ type ReleaseResult struct {
 type BreakResult struct {
 	Target     domain.Target
 	Err        error
+	Mode       string // mode of the broken row; "" → exclusive (mirrors ReleaseResult.Mode)
 	RestoreErr error
 	// AuditErr is populated when the per-target mode_restore_failed audit
 	// event could not be persisted alongside RestoreErr. See ReleaseResult.AuditErr (gh#107).
 	AuditErr error
+}
+
+// shouldRestoreOwnerWrite is THE skip-ModeShared-on-restore guard: every path
+// that deletes a `locks` row and then considers restoreWrite must consult it.
+// Shared locks never strip the owner-write bit on acquire (locks_acquire.go),
+// so "restoring" it would spuriously flip a possibly-deliberately-read-only
+// file writable — and do so while surviving co-holders may still hold the
+// shared lock. Empty mode is a legacy row → exclusive (domain.EffectiveMode
+// semantics), which DID strip and must restore. Reference behavior:
+// restoreAndAuditReleases (locks_release.go). Reused by the break path here;
+// doctor-reclaim and acquire-reclaim paths adopt it next (loto-ihh5, loto-22ka).
+func shouldRestoreOwnerWrite(mode string) bool {
+	return mode != domain.ModeShared
 }
 
 const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch,mode`

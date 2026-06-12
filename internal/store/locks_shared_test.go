@@ -166,6 +166,65 @@ func TestAcquire_ExclusiveStripsWriteBit(t *testing.T) {
 	}
 }
 
+// TestBreakLocks_SharedDoesNotRestoreWriteBit guards the break-side restore
+// guard (loto-o09s): two shared holders on a deliberately read-only file;
+// breaking one holder must NOT flip the file writable (shared never stripped
+// the bit — restoring would spuriously grant owner-write while the survivor's
+// shared lock still stands) and the surviving holder's row must stay intact.
+func TestBreakLocks_SharedDoesNotRestoreWriteBit(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	a := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	a.Mode = domain.ModeShared
+	b := peerOn(a, tcBob, domain.ModeShared)
+	if err := os.Chmod(a.Target.Canonical, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
+		t.Fatalf("alice shared acquire: %v", err)
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe); err != nil {
+		t.Fatalf("bob shared acquire: %v", err)
+	}
+
+	res, err := s.BreakLocks(ctx, []domain.Target{a.Target}, "carol", BreakForce, "test break", "h", liveProbe)
+	if err != nil {
+		t.Fatalf("BreakLocks: %v", err)
+	}
+	if res[0].Err != nil {
+		t.Fatalf("break should succeed, got Err=%v", res[0].Err)
+	}
+	if res[0].RestoreErr != nil {
+		t.Fatalf("no restore should be attempted on a shared break, got RestoreErr=%v", res[0].RestoreErr)
+	}
+
+	fi, err := os.Stat(a.Target.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o444 {
+		t.Errorf("breaking a shared holder must leave file mode unchanged; want 444, got %o", fi.Mode().Perm())
+	}
+
+	// Exactly one shared holder must survive the break.
+	rows, err := s.ListLocks(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var survivors []domain.LockRecord
+	for _, r := range rows {
+		if r.Target.Canonical == a.Target.Canonical {
+			survivors = append(survivors, r)
+		}
+	}
+	if len(survivors) != 1 {
+		t.Fatalf("want exactly 1 surviving shared holder, got %d: %+v", len(survivors), survivors)
+	}
+	if survivors[0].EffectiveMode() != domain.ModeShared {
+		t.Errorf("survivor must remain a shared lock, got mode %q", survivors[0].Mode)
+	}
+}
+
 // TestRelease_SharedDoesNotRestoreWriteBit guards the release-side guard: a
 // shared release never stripped the bit, so restore must be skipped (restoring
 // would spuriously ADD owner-write). Start the file read-only; a shared
