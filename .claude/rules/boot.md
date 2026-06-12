@@ -1,11 +1,12 @@
 # Boot
-updated: 2026-06-06
+updated: 2026-06-12
 
-→ Backlog empty, repo at rest (`make check` green). Decompose the wt-harness migration epic to beads before dispatching — φ docs/wt-harness-migration-brief.md.
+→ Clear the review queue: `/team review` — 4 draft store PRs (#177 first; #179/#180 stack on it; #178 independent). dk merges after.
 
 ✓ done
-- 8b50f97: test(domain) Canonicalize contract test (loto-0nk6); closed/folded PR #176.
+- /team backlog drained: 4 bug beads → draft PRs #177–180, both wave verifies green.
+- loto-7sf3 plan on main (374f840), deferred gate-pending. Approve: `bd update loto-7sf3 --status open --set-metadata plan_approved=true`
 
 ‡ traps
-- CI linux self-hosted runner OFFLINE (`gh api repos/dkoosis/loto/actions/runners` → 0). macos leg (GitHub-hosted) still runs `-race`, so store merges covered there.
-- NORTH_STAR.md stale-revert recurs each session — `git checkout --` it, ✗ commit.
+- CI linux runner OFFLINE — macos covers `-race`.
+- NORTH_STAR.md stale-revert — `git checkout --`, ✗ commit.
