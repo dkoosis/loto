@@ -12,16 +12,23 @@ import (
 	"loto/internal/domain"
 )
 
-func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
-	if len(recs) == 0 {
-		return nil, nil
-	}
-
+// sortedByCanonical returns a copy of recs ordered by canonical target path,
+// the deterministic lock-acquisition order that prevents ABBA deadlocks.
+func sortedByCanonical(recs []domain.LockRecord) []domain.LockRecord {
 	sorted := make([]domain.LockRecord, len(recs))
 	copy(sorted, recs)
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i].Target.Canonical < sorted[j].Target.Canonical
 	})
+	return sorted
+}
+
+func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
+	if len(recs) == 0 {
+		return nil, nil
+	}
+
+	sorted := sortedByCanonical(recs)
 
 	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
 	if err != nil {
