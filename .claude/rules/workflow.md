@@ -8,6 +8,8 @@
 
 ‡ **Parallel sessions are routine here.** `git fetch` before judging any branch's state — a branch that looks like cruft may be live unmerged work. Verify with `git cherry main origin/<branch>`: `+` = unapplied, `-` = already applied. (#166–169 merged out from under a session mid-review.)
 
+‡ **Stacked PRs: merge children BEFORE deleting the parent branch.** Deleting a PR's base branch (e.g. `--delete-branch` on the parent) auto-CLOSES every PR stacked on it, and GitHub won't reopen a PR whose base is gone. Recovery: `git rebase --onto main <parent-tip-sha> <child>` to drop the now-squashed parent commit, force-push, open fresh PRs. Better: base stacked PRs on `main` from the start, or merge bottom-up before any branch delete. (#177→#179/#180 hit this; recovered as #181/#182.)
+
 ‡ **CI = self-hosted serial runners** (`mac-loto`, `trixi-loto`), matrix linux+macos, each runs `go test -race ./...`. A burst of merges backlogs the queue ~15–20 min — that's lag, not breakage. Check `gh api repos/dkoosis/loto/actions/runners` for busy state.
 
 - docs(boot) / docs-only commits → direct to main is fine. test-only (non-store/identity) → direct fine.
