@@ -251,3 +251,126 @@ func TestRelease_SharedDoesNotRestoreWriteBit(t *testing.T) {
 		t.Fatalf("shared release must NOT restore owner-write; perm=%v", fi.Mode().Perm())
 	}
 }
+
+// deadProbe reports every pid dead — makes seeded holders stale so a peer's
+// acquire reclaims them despite a live TTL.
+func deadProbe(string, int, int64) bool { return false }
+
+// TestAcquire_SharedReclaimRestoresWriteBit guards the acquire-reclaim restore
+// (loto-22ka): a stale EXCLUSIVE holder left the file write-stripped (0o444);
+// a SHARED acquirer reclaims the stale row but never re-strips, so the acquire
+// must restore owner-write. Without the restore the row state says advisory
+// shared lock while the inode stays read-only, and no release/break/downgrade
+// of the shared lock will ever flip it back.
+func TestAcquire_SharedReclaimRestoresWriteBit(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	stale := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	stale.Mode = domain.ModeExclusive
+	stale.PID = 4242 // durable pid; deadProbe will report it dead
+	stale.ProcStart = 9999
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{stale}, liveProbe); err != nil {
+		t.Fatalf("seed stale exclusive: %v", err)
+	}
+	fi, err := os.Stat(stale.Target.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm()&0o200 != 0 {
+		t.Fatalf("precondition: exclusive acquire must strip owner-write; perm=%v", fi.Mode().Perm())
+	}
+
+	bob := peerOn(stale, tcBob, domain.ModeShared)
+	bob.PID = 5555
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{bob}, deadProbe); err != nil {
+		t.Fatalf("bob shared acquire over stale exclusive must succeed: %v", err)
+	}
+
+	fi, err = os.Stat(stale.Target.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm()&0o200 == 0 {
+		t.Errorf("shared acquire reclaiming stale exclusive must restore owner-write; perm=%v", fi.Mode().Perm())
+	}
+}
+
+// TestAcquire_MixedBatchReclaimRestoresOnlySharedTargets is the mixed-batch
+// variant (loto-22ka): one batch acquires SHARED over a stale-exclusive holder
+// on a.go and EXCLUSIVE over a stale-exclusive holder on b.go. The reclaim
+// restore must re-add owner-write on a.go (shared acquirer never re-strips)
+// but must NOT undo the acquirer's own re-strip on b.go.
+func TestAcquire_MixedBatchReclaimRestoresOnlySharedTargets(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	staleA := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	staleA.Mode = domain.ModeExclusive
+	staleA.PID = 4242
+	staleA.ProcStart = 9999
+	staleB := mkFileLock(t, "b.go", tcAlice, time.Hour)
+	staleB.Mode = domain.ModeExclusive
+	staleB.PID = 4242
+	staleB.ProcStart = 9999
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{staleA, staleB}, liveProbe); err != nil {
+		t.Fatalf("seed stale exclusive holders: %v", err)
+	}
+
+	bobShared := peerOn(staleA, tcBob, domain.ModeShared)
+	bobShared.PID = 5555
+	bobExcl := peerOn(staleB, tcBob, domain.ModeExclusive)
+	bobExcl.PID = 5555
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{bobShared, bobExcl}, deadProbe); err != nil {
+		t.Fatalf("bob mixed-batch acquire over stale holders must succeed: %v", err)
+	}
+
+	fiA, err := os.Stat(staleA.Target.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fiA.Mode().Perm()&0o200 == 0 {
+		t.Errorf("shared-acquired a.go must end writable after reclaim; perm=%v", fiA.Mode().Perm())
+	}
+	fiB, err := os.Stat(staleB.Target.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fiB.Mode().Perm()&0o200 != 0 {
+		t.Errorf("exclusive-acquired b.go must stay write-stripped (acquirer re-stripped); perm=%v", fiB.Mode().Perm())
+	}
+}
+
+// TestAcquire_ReclaimStaleSharedDoesNotRestoreWriteBit guards the mode guard
+// on the reclaim restore (shouldRestoreOwnerWrite, loto-o09s): a stale SHARED
+// holder never stripped owner-write, so reclaiming it must NOT flip a
+// deliberately read-only file writable.
+func TestAcquire_ReclaimStaleSharedDoesNotRestoreWriteBit(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	stale := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	stale.Mode = domain.ModeShared
+	stale.PID = 4242
+	stale.ProcStart = 9999
+	if err := os.Chmod(stale.Target.Canonical, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{stale}, liveProbe); err != nil {
+		t.Fatalf("seed stale shared: %v", err)
+	}
+
+	bob := peerOn(stale, tcBob, domain.ModeShared)
+	bob.PID = 5555
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{bob}, deadProbe); err != nil {
+		t.Fatalf("bob shared acquire over stale shared must succeed: %v", err)
+	}
+
+	fi, err := os.Stat(stale.Target.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o444 {
+		t.Errorf("reclaiming a stale SHARED row must leave file mode unchanged; want 444, got %o", fi.Mode().Perm())
+	}
+}

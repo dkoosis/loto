@@ -12,16 +12,23 @@ import (
 	"loto/internal/domain"
 )
 
-func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
-	if len(recs) == 0 {
-		return nil, nil
-	}
-
+// sortedByCanonical returns a copy of recs ordered by canonical target path,
+// the deterministic lock-acquisition order that prevents ABBA deadlocks.
+func sortedByCanonical(recs []domain.LockRecord) []domain.LockRecord {
 	sorted := make([]domain.LockRecord, len(recs))
 	copy(sorted, recs)
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i].Target.Canonical < sorted[j].Target.Canonical
 	})
+	return sorted
+}
+
+func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
+	if len(recs) == 0 {
+		return nil, nil
+	}
+
+	sorted := sortedByCanonical(recs)
 
 	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
 	if err != nil {
@@ -45,7 +52,7 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 	}
 	now := time.Now()
 
-	blockers, err := collectAllBlockers(ctx, tx, all, sorted, now, live)
+	blockers, reclaimed, err := collectAllBlockers(ctx, tx, all, sorted, now, live)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +85,41 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 		s.restoreAllAndAudit(ctx, stripped, sorted[0].OwnerUUID, now)
 		return nil, err
 	}
+	// Failure paths above roll the tx back, which reinstates the reclaimed
+	// stale rows — so the file correctly stays stripped there. Only after a
+	// successful commit are the stale rows truly gone and the restore due.
+	s.restoreReclaimedSkippingRestripped(reclaimed, stripped, sorted[0].OwnerUUID, now)
 	return sorted, nil
+}
+
+// restoreReclaimedSkippingRestripped re-adds owner-write to paths whose stale
+// EXCLUSIVE rows were reclaimed during this acquire (the stale holder stripped
+// the bit and is gone; nothing else would ever restore it, loto-22ka) — except
+// paths this acquire itself re-stripped: an exclusive acquirer on the same
+// target keeps the bit off. Runs post-commit; mirrors DoctorRepair's
+// restoreReclaimedAndAudit (doctor.go). Restore failures are audited via the
+// detached helper so a cancelled caller ctx can't drop the
+// mode_restore_failed trail.
+func (s *Store) restoreReclaimedSkippingRestripped(reclaimed, stripped []string, byAgent string, now time.Time) {
+	if len(reclaimed) == 0 {
+		return
+	}
+	restripped := make(map[string]bool, len(stripped))
+	for _, p := range stripped {
+		restripped[p] = true
+	}
+	var failEvents []domain.Event
+	for _, p := range reclaimed {
+		if restripped[p] {
+			continue
+		}
+		if rerr := restoreWrite(p); rerr != nil {
+			failEvents = append(failEvents, modeRestoreFailedEvent(p, byAgent, now, rerr))
+		}
+	}
+	if len(failEvents) > 0 {
+		_ = s.appendAuditDetached(failEvents)
+	}
 }
 
 // restoreAllAndAudit restores write bits on every stripped path. Emits
@@ -193,22 +234,33 @@ func validateFileTarget(p string) error {
 	return nil
 }
 
-func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, sorted []domain.LockRecord, now time.Time, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
+// collectAllBlockers returns the live conflicting holders plus the canonical
+// paths of reclaimed stale EXCLUSIVE rows (deduped) — the caller must restore
+// owner-write on those after commit unless it re-stripped them itself.
+func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, sorted []domain.LockRecord, now time.Time, live domain.PidLiveProbe) ([]domain.LockRecord, []string, error) {
 	// Bundle the (now, live) ambient pair once; ThisHost is set per-lock inside
 	// reclaimStaleAndCollectBlockers, where the acquiring lock's host is known.
 	ec := domain.EvalContext{Now: now, Live: live}
 	seen := map[string]bool{}
+	seenReclaimed := map[string]bool{}
 	var blockers []domain.LockRecord
+	var reclaimed []string
 	for i := range sorted {
-		bs, err := reclaimStaleAndCollectBlockers(ctx, tx, all, sorted[i], ec)
+		bs, rc, err := reclaimStaleAndCollectBlockers(ctx, tx, all, sorted[i], ec)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for j := range bs {
 			key := bs[j].OwnerUUID + "|" + bs[j].Target.Canonical
 			if !seen[key] {
 				seen[key] = true
 				blockers = append(blockers, bs[j])
+			}
+		}
+		for _, p := range rc {
+			if !seenReclaimed[p] {
+				seenReclaimed[p] = true
+				reclaimed = append(reclaimed, p)
 			}
 		}
 	}
@@ -218,7 +270,7 @@ func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord
 		}
 		return blockers[i].Target.Canonical < blockers[j].Target.Canonical
 	})
-	return blockers, nil
+	return blockers, reclaimed, nil
 }
 
 func stripAll(sorted []domain.LockRecord) ([]string, *ChmodFailure) {
@@ -257,9 +309,15 @@ func rollbackStripped(failedTarget domain.Target, failedErr error, stripped []st
 	return failures, restoreErrs
 }
 
-func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, l domain.LockRecord, ec domain.EvalContext) ([]domain.LockRecord, error) {
+// reclaimStaleAndCollectBlockers deletes stale rows contending with l and
+// returns the surviving blockers, plus the canonical paths of reclaimed rows
+// that had stripped owner-write (stale EXCLUSIVE holders — per the
+// shouldRestoreOwnerWrite guard, locks.go) so the caller can restore the bit
+// once the deletes commit.
+func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, l domain.LockRecord, ec domain.EvalContext) ([]domain.LockRecord, []string, error) {
 	ec = ec.WithHost(l.Host)
 	var blockers []domain.LockRecord
+	var reclaimed []string
 	for i := range all {
 		ex := &all[i]
 		if !domain.SameCanonical(ex.Target, l.Target) || ex.OwnerUUID == l.OwnerUUID {
@@ -267,7 +325,10 @@ func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domai
 		}
 		if ec.IsStale(*ex) {
 			if err := reclaimStaleTx(ctx, tx, *ex, l.OwnerUUID, ec.Now); err != nil {
-				return nil, err
+				return nil, nil, err
+			}
+			if shouldRestoreOwnerWrite(ex.Mode) {
+				reclaimed = append(reclaimed, ex.Target.Canonical)
 			}
 			continue
 		}
@@ -279,7 +340,7 @@ func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domai
 			blockers = append(blockers, all[i])
 		}
 	}
-	return blockers, nil
+	return blockers, reclaimed, nil
 }
 
 func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord) error {
