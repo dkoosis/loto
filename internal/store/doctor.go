@@ -146,14 +146,9 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 	}
 	now := time.Now()
 	ec := domain.EvalContext{Now: now, ThisHost: thisHost, Live: live}
-	var reclaimed []string
-	for i := range all {
-		if ec.IsStale(all[i]) {
-			if err := reclaimStaleTx(ctx, tx, all[i], byAgent, now); err != nil {
-				return err
-			}
-			reclaimed = append(reclaimed, all[i].Target.Canonical)
-		}
+	reclaimed, err := reclaimStaleLocks(ctx, tx, all, ec, byAgent, now)
+	if err != nil {
+		return err
 	}
 	if err := rotateEventsTx(ctx, tx, now); err != nil {
 		return err
@@ -171,8 +166,29 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 	return nil
 }
 
+// reclaimStaleLocks deletes every stale lock row and returns the canonicals
+// whose owner-write bit is due a post-commit restore. Shared locks never
+// stripped owner-write on acquire, so they must not be "restored" here
+// (shouldRestoreOwnerWrite, loto-ihh5).
+func reclaimStaleLocks(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, ec domain.EvalContext, byAgent string, now time.Time) ([]string, error) {
+	var reclaimed []string
+	for i := range all {
+		if !ec.IsStale(all[i]) {
+			continue
+		}
+		if err := reclaimStaleTx(ctx, tx, all[i], byAgent, now); err != nil {
+			return nil, err
+		}
+		if shouldRestoreOwnerWrite(all[i].Mode) {
+			reclaimed = append(reclaimed, all[i].Target.Canonical)
+		}
+	}
+	return reclaimed, nil
+}
+
 // restoreReclaimedAndAudit re-adds owner-write to every reclaimed target after
-// DoctorRepair's tx commits. Restore-failure audits go through the detached
+// DoctorRepair's tx commits. Callers pre-filter via shouldRestoreOwnerWrite:
+// only exclusive-mode reclaims land here (shared never stripped, loto-ihh5). Restore-failure audits go through the detached
 // helper (not the caller ctx) so a cancellation landing here — Ctrl-C right
 // after commit — can't scale busy_timeout to ~1ms and silently drop the
 // mode_restore_failed trail (loto-1qed). Matches the acquire/release/break

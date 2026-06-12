@@ -517,6 +517,36 @@ func TestDoctorRepair_RestoresWriteMode(t *testing.T) {
 	}
 }
 
+func TestDoctorRepair_SharedReclaimLeavesModeUntouched(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	dead := func(string, int, int64) bool { return false }
+	l := mkFileLock(t, "ro.md", "alice", time.Hour)
+	l.Mode = domain.ModeShared
+	// Deliberately read-only file: shared acquire never strips owner-write,
+	// so doctor --repair must not "restore" it either.
+	if err := os.Chmod(l.Target.Canonical, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DoctorRepair(ctx, l.Host, "doctor", dead); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.LockAt(ctx, l.Target)
+	if got != nil {
+		t.Fatalf("stale shared lock should be reclaimed, got %+v", got)
+	}
+	st, err := os.Stat(l.Target.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o444 {
+		t.Fatalf("repair must not touch mode of shared-reclaimed target: want 0444, got %o", st.Mode().Perm())
+	}
+}
+
 func TestDoctorRepair_MultipleStaleLocksSameOwner(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
