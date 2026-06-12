@@ -2,6 +2,8 @@
 
 *Dev/PR/CI conventions for the loto repo. Durable — migrated from recurring boot.md traps.*
 
+‡ Go symbol questions → `snipe` (def/refs/callers/pack/impact/tests) before rg/Grep. rg = non-symbol text only.
+
 ‡ **store Open / race-path fixes → ALWAYS via PR, never direct-to-main.** linux `-race` runs only on CI, not local macOS. Even a no-op refactor touching `internal/store/*` or `internal/identity/registry.go` goes through a PR (#170 honored this).
 
 ‡ **Parallel sessions are routine here.** `git fetch` before judging any branch's state — a branch that looks like cruft may be live unmerged work. Verify with `git cherry main origin/<branch>`: `+` = unapplied, `-` = already applied. (#166–169 merged out from under a session mid-review.)
