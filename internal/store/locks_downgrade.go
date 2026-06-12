@@ -11,8 +11,9 @@ import (
 
 // DowngradeLock flips an exclusive lock held by owner on target to shared, in
 // place, and restores the owner-write bit — no unlock/relock, no new created_at
-// (the hold is continuous). A lock that is already shared is a no-op. No lock at
-// all returns ErrNoLockAtTarget. Emits a lock_downgraded audit event. The
+// (the hold is continuous). A lock that is already shared is a no-op resolved by
+// a lock-free read probe — no immediate-mode write tx, no WAL writer lock
+// (loto-kw5k). No lock at all returns ErrNoLockAtTarget. Emits a lock_downgraded audit event. The
 // write-bit restore happens AFTER commit (mirrors release): the row state is
 // authoritative; a restore failure is audited, not rolled back (loto-k5el.2).
 func (s *Store) DowngradeLock(ctx context.Context, target domain.Target, owner string) error {
@@ -22,14 +23,14 @@ func (s *Store) DowngradeLock(ctx context.Context, target domain.Target, owner s
 	}
 	defer flock.release()
 
-	tx, cleanup, err := s.beginTx(ctx)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-
+	// Fast path (loto-kw5k): probe the mode with a plain read BEFORE opening
+	// the immediate-mode write tx — beginTx takes SQLite's WAL writer lock at
+	// BeginTx, which an already-shared no-op (or a missing lock) never needs.
+	// The op-flock held above serializes lock mutators across processes, so
+	// the probe is authoritative. Mirrors the migrate steady-state fast path
+	// (store.go).
 	var curMode string
-	row := tx.QueryRowContext(ctx,
+	row := s.db.QueryRowContext(ctx,
 		`SELECT mode FROM locks WHERE target_canonical = ? AND owner_uuid = ?`,
 		target.Canonical, owner)
 	if err := row.Scan(&curMode); err != nil {
@@ -39,8 +40,14 @@ func (s *Store) DowngradeLock(ctx context.Context, target domain.Target, owner s
 		return err
 	}
 	if curMode == domain.ModeShared {
-		return tx.Commit() // already shared — no-op
+		return nil // already shared — no-op, no write tx
 	}
+
+	tx, cleanup, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 
 	now := time.Now()
 	if _, err := tx.ExecContext(ctx,

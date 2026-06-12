@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"testing"
@@ -53,5 +54,43 @@ func TestDowngrade_AlreadyShared_NoOp(t *testing.T) {
 	}
 	if err := s.DowngradeLock(ctx, rec.Target, tcAlice); err != nil {
 		t.Fatalf("downgrade of already-shared should be a no-op, got %v", err)
+	}
+}
+
+// TestDowngrade_AlreadyShared_NoWriteTx asserts the already-shared no-op
+// avoids the immediate-mode write tx (loto-kw5k): the mode is probed with a
+// plain read before beginTx, so the no-op must succeed even while a peer
+// connection holds SQLite's WAL writer lock. Without the fix, beginTx's
+// BEGIN IMMEDIATE blocks on the held writer lock until the ctx-scaled
+// busy_timeout and fails SQLITE_BUSY.
+func TestDowngrade_AlreadyShared_NoWriteTx(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	rec := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	rec.Mode = domain.ModeShared
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	// Hold the WAL writer lock from a peer connection. connDSN sets
+	// _txlock=immediate, so BeginTx issues BEGIN IMMEDIATE and takes the
+	// writer lock right here.
+	db2, err := sql.Open("sqlite", connDSN(s.dbPath))
+	if err != nil {
+		t.Fatalf("open peer db: %v", err)
+	}
+	defer db2.Close()
+	tx2, err := db2.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("peer BeginTx: %v", err)
+	}
+	defer func() { _ = tx2.Rollback() }()
+
+	// Bound the call: a write tx would stall on the peer's writer lock for
+	// the full ctx-scaled busy_timeout, then surface SQLITE_BUSY.
+	dlCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := s.DowngradeLock(dlCtx, rec.Target, tcAlice); err != nil {
+		t.Fatalf("already-shared downgrade must not open a write tx, got %v", err)
 	}
 }
