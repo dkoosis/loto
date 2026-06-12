@@ -146,18 +146,9 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 	}
 	now := time.Now()
 	ec := domain.EvalContext{Now: now, ThisHost: thisHost, Live: live}
-	var reclaimed []string
-	for i := range all {
-		if ec.IsStale(all[i]) {
-			if err := reclaimStaleTx(ctx, tx, all[i], byAgent, now); err != nil {
-				return err
-			}
-			// Shared locks never stripped owner-write on acquire, so they
-			// must not be "restored" here (shouldRestoreOwnerWrite, loto-ihh5).
-			if shouldRestoreOwnerWrite(all[i].Mode) {
-				reclaimed = append(reclaimed, all[i].Target.Canonical)
-			}
-		}
+	reclaimed, err := reclaimStaleLocks(ctx, tx, all, ec, byAgent, now)
+	if err != nil {
+		return err
 	}
 	if err := rotateEventsTx(ctx, tx, now); err != nil {
 		return err
@@ -173,6 +164,26 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 		fmt.Fprintf(s.stderr, "loto: VACUUM after repair: %v (best-effort, repair succeeded)\n", err)
 	}
 	return nil
+}
+
+// reclaimStaleLocks deletes every stale lock row and returns the canonicals
+// whose owner-write bit is due a post-commit restore. Shared locks never
+// stripped owner-write on acquire, so they must not be "restored" here
+// (shouldRestoreOwnerWrite, loto-ihh5).
+func reclaimStaleLocks(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, ec domain.EvalContext, byAgent string, now time.Time) ([]string, error) {
+	var reclaimed []string
+	for i := range all {
+		if !ec.IsStale(all[i]) {
+			continue
+		}
+		if err := reclaimStaleTx(ctx, tx, all[i], byAgent, now); err != nil {
+			return nil, err
+		}
+		if shouldRestoreOwnerWrite(all[i].Mode) {
+			reclaimed = append(reclaimed, all[i].Target.Canonical)
+		}
+	}
+	return reclaimed, nil
 }
 
 // restoreReclaimedAndAudit re-adds owner-write to every reclaimed target after
