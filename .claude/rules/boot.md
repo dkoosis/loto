@@ -1,12 +1,10 @@
 # Boot
 updated: 2026-06-12
 
-→ Clear the review queue: `/team review` — 4 draft store PRs (#177 first; #179/#180 stack on it; #178 independent). dk merges after.
+→ Review queue empty. Approve the gated loto-7sf3 plan, then start it: `bd update loto-7sf3 --status open --set-metadata plan_approved=true` (plan on main @374f840 — pid liveness=unknown on own exclusive locks + branch-switch gate gap).
 
 ✓ done
-- /team backlog drained: 4 bug beads → draft PRs #177–180, both wave verifies green.
-- loto-7sf3 plan on main (374f840), deferred gate-pending. Approve: `bd update loto-7sf3 --status open --set-metadata plan_approved=true`
+- 4 store PRs merged (#177/#178/#181/#182): shouldRestoreOwnerWrite invariant + lock-free downgrade probe. -race green, beads closed.
 
 ‡ traps
 - CI linux runner OFFLINE — macos covers `-race`.
-- NORTH_STAR.md stale-revert — `git checkout --`, ✗ commit.
