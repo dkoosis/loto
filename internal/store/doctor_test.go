@@ -656,3 +656,45 @@ func TestDoctorRepair_VACUUMFailureDoesNotMaskSuccess(t *testing.T) {
 		t.Fatalf("expected VACUUM warning on stderr, got %q", stderr.String())
 	}
 }
+
+// TestDoctorRepair_ReleasesOpFlockBeforeVACUUM asserts the op-flock is freed
+// before vacuumFn runs, so peers aren't stalled for the whole-file rewrite
+// (loto-3bl0). VACUUM is post-commit and needs SQLite's own locking, not the
+// op-flock — the reclaim + chmod restore that DO need it have already run.
+// The injected vacuumFn probes the op-flock with a second handle under a short
+// timeout: it must acquire (flock released), not time out (flock still held).
+func TestDoctorRepair_ReleasesOpFlockBeforeVACUUM(t *testing.T) {
+	t.Setenv("LOTO_FLOCK_TIMEOUT", "100ms")
+	s := mustOpen(t)
+	ctx := context.Background()
+	dead := func(string, int, int64) bool { return false }
+	l := mkFileLock(t, "v.go", "alice", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+
+	var lockedAtVacuum bool
+	origVacuum := vacuumFn
+	vacuumFn = func(vctx context.Context, _ *sql.DB) error {
+		// A second handle must be able to take the op-flock during VACUUM iff
+		// DoctorRepair released it first. A timeout means it's still held.
+		h, err := acquireOpFlock(vctx, s.opFlockPath(), nil)
+		if err != nil {
+			if errors.Is(err, ErrFlockTimeout) {
+				lockedAtVacuum = true
+				return nil
+			}
+			return err
+		}
+		h.release()
+		return nil
+	}
+	t.Cleanup(func() { vacuumFn = origVacuum })
+
+	if err := s.DoctorRepair(ctx, l.Host, "doctor", dead); err != nil {
+		t.Fatalf("DoctorRepair: %v", err)
+	}
+	if lockedAtVacuum {
+		t.Error("op-flock still held during VACUUM — peers stall for the whole-file rewrite")
+	}
+}
