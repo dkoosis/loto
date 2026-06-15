@@ -40,7 +40,26 @@ func (s *Store) DowngradeLock(ctx context.Context, target domain.Target, owner s
 		return err
 	}
 	if curMode == domain.ModeShared {
-		return nil // already shared — no-op, no write tx
+		// Already shared — no mode write needed, so no write tx (loto-kw5k).
+		// But the write bit can be stale-stripped relative to the row: an
+		// earlier downgrade whose post-commit restoreWrite failed (audited
+		// mode_restore_failed, row already shared) or a crash between commit
+		// and restore leaves the file read-only with no further remedy, since
+		// re-running downgrade lands here. restoreWrite is idempotent (only
+		// adds owner-write, missing-file is a no-op), so reconcile it now —
+		// matching the post-commit restore semantics of the excl→shared branch
+		// below. Audited-not-rolled-back on failure (loto-k5el.2). This is a
+		// pure filesystem op, so it preserves the no-write-tx property.
+		now := time.Now()
+		if rerr := restoreWrite(target.Canonical); rerr != nil {
+			_ = s.appendAuditDetached([]domain.Event{
+				modeRestoreFailedEvent(target.Canonical, owner, now, rerr),
+			})
+			return &ChmodFailureError{Failures: []ChmodFailure{
+				{Target: target, Err: rerr, RolledBack: false},
+			}}
+		}
+		return nil
 	}
 
 	tx, cleanup, err := s.beginTx(ctx)
