@@ -78,26 +78,47 @@ func warnIfNoBeadID(text string, stderr io.Writer) {
 }
 
 func runTag(rt *runtime, canonical, text string, stdout, stderr io.Writer) int {
-	host, err := rt.Store.LockAt(rt.Ctx, domain.Target{Canonical: canonical})
+	// Deliver to EVERY current holder, not an arbitrary one: a target held
+	// shared by N agents has N blockers, and a note "on this file" must reach
+	// each (loto-2nc5). InsertTag binds to the (target, owner, created_at)
+	// triple, so one tag per holder.
+	holders, err := rt.Store.LocksAt(rt.Ctx, domain.Target{Canonical: canonical})
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	if host == nil {
+	if len(holders) == 0 {
 		fmt.Fprintf(stderr, "✗ %s not locked — acquire it yourself\n", relPath(canonical))
 		return 3
 	}
-	id, err := rt.Store.InsertTag(rt.Ctx, store.NewTag{
-		TargetCanonical: canonical,
-		LockOwnerUUID:   host.OwnerUUID,
-		LockCreatedAt:   host.CreatedAt.UnixNano(),
-		TaggerUUID:      rt.Agent.UUID,
-		Text:            text,
-	})
-	if err != nil {
-		return tagInsertErr(err, canonical, stderr)
+	var ids []string
+	var firstErr error
+	for i := range holders {
+		id, err := rt.Store.InsertTag(rt.Ctx, store.NewTag{
+			TargetCanonical: canonical,
+			LockOwnerUUID:   holders[i].OwnerUUID,
+			LockCreatedAt:   holders[i].CreatedAt.UnixNano(),
+			TaggerUUID:      rt.Agent.UUID,
+			Text:            text,
+		})
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		ids = append(ids, id)
 	}
-	fmt.Fprintf(stdout, "✓ tag id=%s target=%s\n", id, relPath(canonical))
+	// All holders rejected the note (every per-holder cap reached, or the lock
+	// dropped mid-loop): surface the first error, nothing delivered.
+	if len(ids) == 0 {
+		return tagInsertErr(firstErr, canonical, stderr)
+	}
+	if len(ids) == 1 {
+		fmt.Fprintf(stdout, "✓ tag id=%s target=%s\n", ids[0], relPath(canonical))
+		return 0
+	}
+	fmt.Fprintf(stdout, "✓ tag delivered=%d target=%s ids=%s\n", len(ids), relPath(canonical), strings.Join(ids, ","))
 	return 0
 }
 

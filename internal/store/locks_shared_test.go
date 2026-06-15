@@ -206,7 +206,8 @@ func TestBreakLocks_SharedDoesNotRestoreWriteBit(t *testing.T) {
 		t.Errorf("breaking a shared holder must leave file mode unchanged; want 444, got %o", fi.Mode().Perm())
 	}
 
-	// Exactly one shared holder must survive the break.
+	// A forced break removes EVERY holder of the target (loto-w77f); the
+	// write-bit must still be left untouched (shared never stripped it).
 	rows, err := s.ListLocks(ctx)
 	if err != nil {
 		t.Fatalf("list: %v", err)
@@ -217,11 +218,8 @@ func TestBreakLocks_SharedDoesNotRestoreWriteBit(t *testing.T) {
 			survivors = append(survivors, r)
 		}
 	}
-	if len(survivors) != 1 {
-		t.Fatalf("want exactly 1 surviving shared holder, got %d: %+v", len(survivors), survivors)
-	}
-	if survivors[0].EffectiveMode() != domain.ModeShared {
-		t.Errorf("survivor must remain a shared lock, got mode %q", survivors[0].Mode)
+	if len(survivors) != 0 {
+		t.Fatalf("forced break must remove all shared holders, got %d survivors: %+v", len(survivors), survivors)
 	}
 }
 
@@ -373,4 +371,63 @@ func TestAcquire_ReclaimStaleSharedDoesNotRestoreWriteBit(t *testing.T) {
 	if fi.Mode().Perm() != 0o444 {
 		t.Errorf("reclaiming a stale SHARED row must leave file mode unchanged; want 444, got %o", fi.Mode().Perm())
 	}
+}
+
+// TestBreakLocks_MultiHolderShared is the loto-w77f regression: a target held
+// shared by two agents must lose BOTH holders on a forced break, with one
+// lock_broken event per holder naming the right subject. Before the fix
+// loadLocksByTargetTx keyed its result by target_canonical alone, collapsing
+// the holders to one arbitrary survivor — the break reported success while a
+// blocker silently remained.
+func TestBreakLocks_MultiHolderShared(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	a := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	a.Mode = domain.ModeShared
+	b := peerOn(a, tcBob, domain.ModeShared)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
+		t.Fatalf("alice shared acquire: %v", err)
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe); err != nil {
+		t.Fatalf("bob shared acquire: %v", err)
+	}
+
+	res, err := s.BreakLocks(ctx, []domain.Target{a.Target}, "carol", BreakForce, "test break", "h", liveProbe)
+	if err != nil {
+		t.Fatalf("BreakLocks: %v", err)
+	}
+	if res[0].Err != nil {
+		t.Fatalf("break should succeed, got Err=%v", res[0].Err)
+	}
+
+	// No holder may survive.
+	for _, r := range mustListLocks(ctx, t, s) {
+		if r.Target.Canonical == a.Target.Canonical {
+			t.Fatalf("holder survived multi-holder break: %+v", r)
+		}
+	}
+
+	// One lock_broken event per holder, each naming the broken owner.
+	events, err := s.EventsForTarget(ctx, a.Target)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	subjects := map[string]int{}
+	for _, e := range events {
+		if e.Kind == EventLockBroken {
+			subjects[e.SubjectUUID]++
+		}
+	}
+	if subjects[tcAlice] != 1 || subjects[tcBob] != 1 {
+		t.Fatalf("want one lock_broken per holder (alice=1 bob=1), got %v in %+v", subjects, events)
+	}
+}
+
+func mustListLocks(ctx context.Context, t *testing.T, s *Store) []domain.LockRecord {
+	t.Helper()
+	rows, err := s.ListLocks(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	return rows
 }

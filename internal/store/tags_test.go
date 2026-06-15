@@ -365,7 +365,13 @@ func TestReleaseLocks_AcksTagsOnReleasedLock(t *testing.T) {
 	}
 }
 
-func TestBreakLocks_DoesNotAckTags(t *testing.T) {
+// TestBreakLocks_GCsOrphanedTags asserts the break path reclaims the tags it
+// orphans, in its own tx, rather than leaving them to accumulate until an
+// operator runs `doctor --repair` (loto-qg0r). Break does NOT ack tags (a
+// broken peer never read its notes — that distinction vs release-ack still
+// holds); it hard-deletes them via gcTagsTx so retention is bounded on the hot
+// path.
+func TestBreakLocks_GCsOrphanedTags(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
@@ -382,13 +388,14 @@ func TestBreakLocks_DoesNotAckTags(t *testing.T) {
 	if err != nil || res[0].Err != nil {
 		t.Fatalf("break: %v / %v", err, res[0].Err)
 	}
-	// Tag should be orphaned: row exists, acked_at NULL (no implicit ack).
-	var acked sql.NullInt64
-	if err := s.db.QueryRowContext(ctx, `SELECT acked_at FROM tags WHERE id = ?`, id).Scan(&acked); err != nil {
-		t.Fatalf("tag row missing: %v", err)
+	// The orphaned tag must be reclaimed by the break tx (no row left behind,
+	// no doctor --repair required).
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tags WHERE id = ?`, id).Scan(&n); err != nil {
+		t.Fatalf("count tags: %v", err)
 	}
-	if acked.Valid {
-		t.Fatalf("force-break should NOT ack tags (orphan semantics, edge #6), got acked_at=%d", acked.Int64)
+	if n != 0 {
+		t.Fatalf("break must gc the orphaned tag in its own tx; tag %s still present", id)
 	}
 }
 
