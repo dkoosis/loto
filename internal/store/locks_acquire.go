@@ -72,6 +72,14 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 		return nil, &MultiConflictError{Blockers: blockers}
 	}
 
+	// Same-owner exclusive→shared re-acquire downgrades the existing row in place
+	// (insertOrRefreshLock upserts mode=shared). The original exclusive acquire
+	// stripped owner-write; the shared upsert never restores it and stripAll skips
+	// shared rows, so without this the owner's own file stays read-only forever
+	// (loto-h760). Collect these paths from the pre-acquire snapshot and restore
+	// the bit post-commit, mirroring DowngradeLock's restore semantics.
+	downgraded := collectSameOwnerDowngrades(all, sorted)
+
 	stripped, chmodFailErr := s.stripAndHandleFailure(tx, sorted, now)
 	if chmodFailErr != nil {
 		return nil, chmodFailErr
@@ -123,8 +131,36 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 	// Failure paths above roll the tx back, which reinstates the reclaimed stale
 	// rows — so the file correctly stays stripped there. Only after a successful
 	// commit are the stale rows truly gone and the restore due.
-	s.restoreThenReleaseFlock(flock, reclaimed, stripped, sorted[0].OwnerUUID, now)
+	s.restoreThenReleaseFlock(flock, append(reclaimed, downgraded...), stripped, sorted[0].OwnerUUID, now)
 	return sorted, nil
+}
+
+// collectSameOwnerDowngrades returns the canonical paths where an existing
+// same-owner EXCLUSIVE row is being re-acquired as SHARED. insertOrRefreshLock
+// flips the row to shared in place, but nothing restores the owner-write bit the
+// original exclusive acquire stripped (stripAll skips shared incoming rows, and
+// the same-owner row is never a reclaim/break candidate). Restoring these paths
+// post-commit mirrors DowngradeLock (loto-h760). Scoped strictly to same-owner
+// downgrades — other-owner rows are untouched.
+func collectSameOwnerDowngrades(all []domain.LockRecord, sorted []domain.LockRecord) []string {
+	var downgraded []string
+	for i := range sorted {
+		if sorted[i].EffectiveMode() != domain.ModeShared {
+			continue // incoming is exclusive — stripAll/normal flow handles it
+		}
+		for j := range all {
+			ex := &all[j]
+			if ex.OwnerUUID != sorted[i].OwnerUUID ||
+				!domain.SameCanonical(ex.Target, sorted[i].Target) {
+				continue
+			}
+			if ex.EffectiveMode() == domain.ModeExclusive {
+				downgraded = append(downgraded, sorted[i].Target.Canonical)
+			}
+			break // composite PK (target, owner) → at most one match
+		}
+	}
+	return downgraded
 }
 
 // restoreThenReleaseFlock runs the bounded chmod restore under the still-held
