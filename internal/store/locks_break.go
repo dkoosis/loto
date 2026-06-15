@@ -78,11 +78,25 @@ func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, byAgent
 	if err := gcTagsTx(ctx, tx, now); err != nil {
 		return nil, err
 	}
+	// Trim events in the same tx (mirrors AcquireLocks→rotateEventsTx). A
+	// break-heavy workload (repeated `unlock --force` sweeps) that never
+	// acquires would otherwise grow the events table unbounded (loto-bvdk).
+	if err := rotateEventsTx(ctx, tx, now); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 
-	s.restoreAndAuditBreaks(results, byAgent, now)
+	// Run the bounded chmod restore under the still-held flock (loto-4qt),
+	// release the flock, THEN emit the detached audit off the critical section.
+	// Holding the op-flock across the detached audit's own write tx would extend
+	// the hold for up to busy_timeout under contention and stall peers on the
+	// chmod-failure path (loto-3qev) — mirrors AcquireLocks' split. The deferred
+	// release (above) is the idempotent backstop.
+	failEvents, failIdx := restoreBreaks(results, byAgent, now)
+	flock.release()
+	s.auditBreakFailures(results, failEvents, failIdx)
 	return results, nil
 }
 
@@ -148,7 +162,13 @@ func authorizeHolders(holders []domain.LockRecord, ec domain.EvalContext, force 
 	return nil
 }
 
-func (s *Store) restoreAndAuditBreaks(results []BreakResult, byAgent string, now time.Time) {
+// restoreBreaks runs the bounded chmod restore for every successfully-broken
+// EXCLUSIVE target, recording per-target RestoreErr, and returns the
+// mode_restore_failed events plus the parallel result indices. It is the
+// chmod-only half: the CALLER runs it under the held op-flock (loto-4qt) and
+// emits the returned events via auditBreakFailures AFTER releasing the flock,
+// so the detached audit's write tx can't extend the flock hold (loto-3qev).
+func restoreBreaks(results []BreakResult, byAgent string, now time.Time) ([]domain.Event, []int) {
 	var failEvents []domain.Event
 	var failIdx []int
 	for i := range results {
@@ -164,6 +184,13 @@ func (s *Store) restoreAndAuditBreaks(results []BreakResult, byAgent string, now
 			failIdx = append(failIdx, i)
 		}
 	}
+	return failEvents, failIdx
+}
+
+// auditBreakFailures emits the mode_restore_failed events off the flock critical
+// section (loto-3qev); on audit-write failure it fans the error out to each
+// affected result so the audit hole is observable (gh#107).
+func (s *Store) auditBreakFailures(results []BreakResult, failEvents []domain.Event, failIdx []int) {
 	if len(failEvents) > 0 {
 		if auditErr := s.appendAuditDetached(failEvents); auditErr != nil {
 			// Fan audit-write failure out to each affected result (gh#107).

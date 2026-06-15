@@ -83,6 +83,12 @@ func (s *Store) DowngradeLock(ctx context.Context, target domain.Target, owner s
 	}); err != nil {
 		return err
 	}
+	// Trim events in the same tx (mirrors AcquireLocks→rotateEventsTx). A
+	// downgrade-heavy workload (read-mode churn) that rarely acquires would
+	// otherwise grow the events table unbounded (loto-bvdk).
+	if err := rotateEventsTx(ctx, tx, now); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}

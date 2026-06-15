@@ -184,3 +184,97 @@ func TestRotateEvents_CapByAge(t *testing.T) {
 		}
 	}
 }
+
+// loto-bvdk: rotation must also fire on the release/break/downgrade append
+// paths, not just acquire/doctor. Each subtest seeds >cap events AFTER the
+// lock exists (so no acquire rotates them away), then drives the op under
+// test and asserts ListEvents trimmed to the cap — proving the op itself
+// rotated. Without the fix these tables grow unbounded on acquire-rare,
+// mutate-frequent workloads.
+func TestRotateEvents_FiresOnReleaseBreakDowngrade(t *testing.T) {
+	ctx := context.Background()
+	live := func(string, int, int64) bool { return true }
+
+	// seedExcess inserts n filler events directly (AppendEvent does NOT rotate),
+	// pushing the table over the cap without going through a rotating op.
+	seedExcess := func(t *testing.T, s *Store, n int) {
+		t.Helper()
+		base := time.Now().Add(-time.Hour)
+		for i := range n {
+			if _, err := s.AppendEvent(ctx, domain.Event{
+				Target:    domain.Target{Canonical: tcXGo},
+				Kind:      EventLockAcquired,
+				ActorUUID: tcAlice,
+				Reason:    "filler",
+				CreatedAt: base.Add(time.Duration(i) * time.Millisecond),
+			}); err != nil {
+				t.Fatalf("seed AppendEvent[%d]: %v", i, err)
+			}
+		}
+	}
+
+	assertTrimmed := func(t *testing.T, s *Store) {
+		t.Helper()
+		got, err := s.ListEvents(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != eventsRetentionMax {
+			t.Errorf("events not rotated by op under test: got %d, want %d", len(got), eventsRetentionMax)
+		}
+	}
+
+	t.Run("release", func(t *testing.T) {
+		s := mustOpen(t)
+		l := mkFileLock(t, "a.go", tcAlice, time.Hour)
+		if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		// Overfill AFTER acquire so the acquire's own rotation can't mask the gap.
+		seedExcess(t, s, eventsRetentionMax+50)
+		if _, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice); err != nil {
+			t.Fatalf("release: %v", err)
+		}
+		assertTrimmed(t, s)
+	})
+
+	t.Run("release_by_session", func(t *testing.T) {
+		s := mustOpen(t)
+		l := mkFileLock(t, "a.go", tcAlice, time.Hour)
+		if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		seedExcess(t, s, eventsRetentionMax+50)
+		if _, err := s.ReleaseBySession(ctx, tcAlice, ""); err != nil {
+			t.Fatalf("release-by-session: %v", err)
+		}
+		assertTrimmed(t, s)
+	})
+
+	t.Run("break", func(t *testing.T) {
+		s := mustOpen(t)
+		l := mkFileLock(t, "a.go", tcAlice, time.Hour)
+		if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		seedExcess(t, s, eventsRetentionMax+50)
+		// tcBob force-breaks tcAlice's lock.
+		if _, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "x", "h", live); err != nil {
+			t.Fatalf("break: %v", err)
+		}
+		assertTrimmed(t, s)
+	})
+
+	t.Run("downgrade", func(t *testing.T) {
+		s := mustOpen(t)
+		l := mkFileLock(t, "a.go", tcAlice, time.Hour) // acquired exclusive by default
+		if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		seedExcess(t, s, eventsRetentionMax+50)
+		if err := s.DowngradeLock(ctx, l.Target, tcAlice); err != nil {
+			t.Fatalf("downgrade: %v", err)
+		}
+		assertTrimmed(t, s)
+	})
+}
