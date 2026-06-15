@@ -35,6 +35,7 @@ func TestOpFlockReleasedBeforeDetachedAudit(t *testing.T) {
 		{
 			name: "DoctorRepair",
 			run: func(t *testing.T, s *Store, ctx context.Context, target domain.Target, live domain.PidLiveProbe) {
+				t.Helper()
 				if err := s.DoctorRepair(ctx, "h", tcBob, live); err != nil {
 					t.Fatalf("DoctorRepair: %v", err)
 				}
@@ -43,6 +44,7 @@ func TestOpFlockReleasedBeforeDetachedAudit(t *testing.T) {
 		{
 			name: "BreakLocks",
 			run: func(t *testing.T, s *Store, ctx context.Context, target domain.Target, live domain.PidLiveProbe) {
+				t.Helper()
 				if _, err := s.BreakLocks(ctx, []domain.Target{target}, tcBob, BreakForce, "r", "h", live); err != nil {
 					t.Fatalf("BreakLocks: %v", err)
 				}
@@ -51,6 +53,7 @@ func TestOpFlockReleasedBeforeDetachedAudit(t *testing.T) {
 		{
 			name: "ReleaseLocks",
 			run: func(t *testing.T, s *Store, ctx context.Context, target domain.Target, live domain.PidLiveProbe) {
+				t.Helper()
 				if _, err := s.ReleaseLocks(ctx, []domain.Target{target}, tcAlice); err != nil {
 					t.Fatalf("ReleaseLocks: %v", err)
 				}
@@ -59,6 +62,7 @@ func TestOpFlockReleasedBeforeDetachedAudit(t *testing.T) {
 		{
 			name: "ReleaseBySession",
 			run: func(t *testing.T, s *Store, ctx context.Context, target domain.Target, live domain.PidLiveProbe) {
+				t.Helper()
 				if _, err := s.ReleaseBySession(ctx, tcAlice, tcAlice); err != nil {
 					t.Fatalf("ReleaseBySession: %v", err)
 				}

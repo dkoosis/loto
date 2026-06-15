@@ -39,34 +39,7 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, byAge
 	results, owned := classifyReleases(targets, owners, byAgent)
 
 	if len(owned) > 0 {
-		// Ack tags BEFORE deleting the host locks: the host-lock match must
-		// still resolve to set acked_at; if we DELETE first the tags would
-		// orphan instead, losing the audit ack (edge #6 distinguishes
-		// release-ack from break-orphan).
-		if err := ackTagsForReleaseTx(ctx, tx, owned, byAgent); err != nil {
-			return nil, err
-		}
-		if err := deleteOwnedTx(ctx, tx, owned, byAgent); err != nil {
-			return nil, err
-		}
-		// Emit lock_released events in the same tx (atomic with the row deletes).
-		now := time.Now()
-		evs := make([]domain.Event, len(owned))
-		for i, canonical := range owned {
-			evs[i] = domain.Event{
-				Target:    domain.Target{Canonical: canonical},
-				Kind:      EventLockReleased,
-				ActorUUID: byAgent,
-				CreatedAt: now,
-			}
-		}
-		if err := appendEventsTx(ctx, tx, evs); err != nil {
-			return nil, err
-		}
-		// Trim events in the same tx (mirrors AcquireLocks→rotateEventsTx). A
-		// release-heavy workload that rarely acquires would otherwise grow the
-		// events table unbounded (loto-bvdk).
-		if err := rotateEventsTx(ctx, tx, now); err != nil {
+		if err := s.applyOwnedReleasesTx(ctx, tx, owned, byAgent); err != nil {
 			return nil, err
 		}
 	}
@@ -81,6 +54,39 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, byAge
 	// detached audit so its write tx can't extend the flock hold (loto-3qev).
 	s.restoreReleasesThenAudit(flock, results, byAgent)
 	return results, nil
+}
+
+// applyOwnedReleasesTx acks tags, deletes the owned host-lock rows, emits the
+// lock_released events, and trims the events table — all in the caller's tx so
+// the row deletes and audit stay atomic.
+func (s *Store) applyOwnedReleasesTx(ctx context.Context, tx *sql.Tx, owned []string, byAgent string) error {
+	// Ack tags BEFORE deleting the host locks: the host-lock match must still
+	// resolve to set acked_at; if we DELETE first the tags would orphan instead,
+	// losing the audit ack (edge #6 distinguishes release-ack from break-orphan).
+	if err := ackTagsForReleaseTx(ctx, tx, owned, byAgent); err != nil {
+		return err
+	}
+	if err := deleteOwnedTx(ctx, tx, owned, byAgent); err != nil {
+		return err
+	}
+	// Emit lock_released events in the same tx (atomic with the row deletes).
+	now := time.Now()
+	evs := make([]domain.Event, len(owned))
+	for i, canonical := range owned {
+		evs[i] = domain.Event{
+			Target:    domain.Target{Canonical: canonical},
+			Kind:      EventLockReleased,
+			ActorUUID: byAgent,
+			CreatedAt: now,
+		}
+	}
+	if err := appendEventsTx(ctx, tx, evs); err != nil {
+		return err
+	}
+	// Trim events in the same tx (mirrors AcquireLocks→rotateEventsTx). A
+	// release-heavy workload that rarely acquires would otherwise grow the
+	// events table unbounded (loto-bvdk).
+	return rotateEventsTx(ctx, tx, now)
 }
 
 // classifyReleases walks input targets in order, classifying each against the
