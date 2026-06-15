@@ -432,14 +432,22 @@ func mustListLocks(ctx context.Context, t *testing.T, s *Store) []domain.LockRec
 	return rows
 }
 
-// TestAcquire_SuccessPathReleasesFlockBeforeRestore is the loto-9uy5
-// regression: on the SUCCESS path the op-flock must be released BEFORE the
-// post-commit reclaim-restore (and its detached audit), so a slow or contended
-// restore can't extend the op-flock hold and stall every other loto invocation
-// on the repo. We block inside the restore via the fchmod seam and assert a
-// concurrent op-flock acquire still succeeds promptly. Before the fix the flock
-// was held across the restore and the probe times out.
-func TestAcquire_SuccessPathReleasesFlockBeforeRestore(t *testing.T) {
+// TestAcquire_HoldsFlockDuringRestoreChmod encodes the loto-v8ch correctness
+// contract, which SUPERSEDES the prior loto-9uy5 posture (a P3 perf concern with
+// no correctness loss). The chmod half of the post-commit reclaim-restore MUST
+// run while the op-flock is held: otherwise a peer can take the flock mid-restore
+// and either observe a torn row+file view (DB says reclaimed, file still
+// read-only) or acquire exclusive + re-strip, after which the lagging restore
+// re-adds owner-write under the peer's lease and defeats its exclusivity. This is
+// the same silent-clobber Break/Doctor hold the flock to prevent (loto-4qt).
+//
+// loto-9uy5's legitimate anti-stall goal — keep the detached AUDIT's write tx off
+// the flock — is preserved structurally: AcquireLocks emits the
+// mode_restore_failed events AFTER flock.release(), so only the bounded fchmod
+// runs under the flock, never the audit's beginTx. This test pins the chmod-held
+// half; the audit-off-flock half is enforced by source ordering (restore returns
+// events; caller releases the flock before appendAuditDetached).
+func TestAcquire_HoldsFlockDuringRestoreChmod(t *testing.T) {
 	// Short probe timeout: a still-held flock fails fast instead of hanging.
 	t.Setenv("LOTO_FLOCK_TIMEOUT", "500ms")
 	s := mustOpen(t)
@@ -459,7 +467,7 @@ func TestAcquire_SuccessPathReleasesFlockBeforeRestore(t *testing.T) {
 	defer func() { fchmodFn = orig }()
 	fchmodFn = func(f *os.File, mode os.FileMode) error {
 		// The reclaim-restore re-adds owner-write on a.go: block there so the
-		// op-flock-hold window (if any) stays open while we probe it.
+		// op-flock-hold window stays open while we probe it.
 		if f.Name() == stale.Target.Canonical && mode.Perm()&0o200 != 0 {
 			close(restoreStarted)
 			<-proceed
@@ -475,21 +483,28 @@ func TestAcquire_SuccessPathReleasesFlockBeforeRestore(t *testing.T) {
 		done <- err
 	}()
 
-	<-restoreStarted // Bob committed; the restore is now blocked.
+	<-restoreStarted // Bob committed; the restore chmod is now blocked.
 
-	// The op-flock must already be free. A separate open contends even within
-	// this process (flock is per-open-description), so a still-held flock makes
-	// this time out at 500ms.
+	// The op-flock MUST still be held across the chmod restore. A separate open
+	// contends even within this process (flock is per-open-description), so a
+	// still-held flock makes this probe time out at 500ms — the expected result.
 	probe, err := acquireOpFlock(ctx, s.opFlockPath(), nil)
-	if err != nil {
+	if err == nil {
+		probe.release()
 		close(proceed)
 		<-done
-		t.Fatalf("op-flock still held across post-commit restore (loto-9uy5): %v", err)
+		t.Fatalf("op-flock NOT held across restore chmod — torn-view window open (loto-v8ch)")
 	}
-	probe.release()
 
 	close(proceed)
 	if err := <-done; err != nil {
 		t.Fatalf("bob shared acquire: %v", err)
 	}
+
+	// After the acquire fully returns (flock released), the op-flock is free.
+	after, err := acquireOpFlock(ctx, s.opFlockPath(), nil)
+	if err != nil {
+		t.Fatalf("op-flock still held after acquire returned: %v", err)
+	}
+	after.release()
 }
