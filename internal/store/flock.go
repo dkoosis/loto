@@ -30,12 +30,16 @@ type opFlock struct {
 	f *os.File
 }
 
+// release unlocks and closes the op-flock. Idempotent: callers may release
+// early on a success path AND rely on a deferred release as the failure-path
+// backstop without double-unlocking a closed fd (loto-9uy5).
 func (h *opFlock) release() {
 	if h == nil || h.f == nil {
 		return
 	}
 	_ = syscall.Flock(int(h.f.Fd()), syscall.LOCK_UN)
 	_ = h.f.Close()
+	h.f = nil
 }
 
 // acquireOpFlock takes a project-wide exclusive flock on path with a bounded
@@ -46,7 +50,7 @@ func (h *opFlock) release() {
 // stderrW is passed in (rather than read from a package global) so concurrent
 // callers under `go test -race` cannot data-race on a shared writer.
 func acquireOpFlock(ctx context.Context, path string, stderrW io.Writer) (*opFlock, error) {
-	limit := flockLimitFromEnv()
+	limit := flockLimitFromEnv(stderrW)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open op-flock: %w", err)
@@ -104,13 +108,25 @@ func jitter(d time.Duration) time.Duration {
 	return d + delta
 }
 
-func flockLimitFromEnv() time.Duration {
-	if s := os.Getenv("LOTO_FLOCK_TIMEOUT"); s != "" {
-		if d, err := time.ParseDuration(s); err == nil && d > 0 {
-			return d
-		}
+// flockLimitFromEnv resolves the op-flock wait limit from LOTO_FLOCK_TIMEOUT,
+// falling back to flockDefaultLimit. A set-but-unparseable value (or a
+// non-positive one) is an operator config error that previously fell back to
+// 30s in silence — the long wait then read as a hang with no clue (loto-d4is).
+// Warn to warnW (nil suppresses) so the cause is visible. Accepts any Go
+// duration string, e.g. "5s", "2m".
+func flockLimitFromEnv(warnW io.Writer) time.Duration {
+	raw := os.Getenv("LOTO_FLOCK_TIMEOUT")
+	if raw == "" {
+		return flockDefaultLimit
 	}
-	return flockDefaultLimit
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		if warnW != nil {
+			fmt.Fprintf(warnW, "∇ LOTO_FLOCK_TIMEOUT=%q invalid — using default %s\n", raw, flockDefaultLimit)
+		}
+		return flockDefaultLimit
+	}
+	return d
 }
 
 func maybeEmitWaitNotice(stderrW io.Writer, start time.Time, noticed *sync.Once) {
