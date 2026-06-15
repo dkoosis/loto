@@ -160,6 +160,13 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 		return err
 	}
 	s.restoreReclaimedAndAudit(reclaimed, byAgent, now)
+	// Release the op-flock BEFORE VACUUM so peers aren't stalled for the
+	// whole-file rewrite (seconds on a large event history). VACUUM is
+	// post-commit, runs on a fresh pool conn with SQLite's own locking, and
+	// needs no op-flock — the reclaim + chmod restore that DO need it are
+	// already done. The deferred release (above) is the idempotent backstop
+	// (loto-9uy5, loto-3bl0).
+	flock.release()
 	if err := vacuumFn(ctx, s.db); err != nil {
 		fmt.Fprintf(s.stderr, "loto: VACUUM after repair: %v (best-effort, repair succeeded)\n", err)
 	}
