@@ -39,6 +39,13 @@ DELETE FROM events WHERE id IN (
 // leaves files in orphan-mode produces zero audit (gh#122).
 const auditDetachedTimeout = 2 * time.Second
 
+// auditDetachedHook fires at the start of every appendAuditDetached call, after
+// the empty-input short-circuit. Default no-op; tests replace it to observe or
+// widen the detached-audit window — e.g. loto-3qev asserts the op-flock is
+// already released by the time this write tx runs in doctor/break/release. Same
+// test-seam pattern as vacuumFn/commitTxFn.
+var auditDetachedHook = func() {}
+
 // appendAuditDetached appends evs on a fresh background context bounded
 // by auditDetachedTimeout so audit writes survive parent-ctx cancellation.
 // On failure (tx contention, SQLITE_BUSY, disk-full), the error is logged to
@@ -50,6 +57,7 @@ func (s *Store) appendAuditDetached(evs []domain.Event) error {
 	if len(evs) == 0 {
 		return nil
 	}
+	auditDetachedHook()
 	ctx, cancel := context.WithTimeout(context.Background(), auditDetachedTimeout)
 	defer cancel()
 	err := s.AppendEvents(ctx, evs)

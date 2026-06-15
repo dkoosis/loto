@@ -169,7 +169,7 @@ func TestRestoreWrite_RefusesHardlinkRace(t *testing.T) {
 }
 
 // Regression for loto-pduc: a restore-side hardlink race must surface through
-// the caller plumbing — restoreAndAuditReleases flips the result to
+// the caller plumbing — restoreReleases+auditReleaseFailures flip the result to
 // StateRestoreFailed and emits a mode_restore_failed audit event. This proves
 // the errMultiLinked guard reaches the audit trail end-to-end (acceptance
 // criterion), not just the fd-level refusal.
@@ -188,7 +188,8 @@ func TestRestoreAndAuditReleases_HardlinkRaceEmitsModeRestoreFailed(t *testing.T
 	results := []ReleaseResult{
 		{Target: domain.Target{Canonical: p}, State: StateUnlocked},
 	}
-	s.restoreAndAuditReleases(results, tcAlice)
+	failEvents, failIdx := restoreReleases(results, tcAlice)
+	s.auditReleaseFailures(results, failEvents, failIdx)
 
 	if results[0].State != StateRestoreFailed {
 		t.Fatalf("want StateRestoreFailed on Nlink>1, got %v", results[0].State)

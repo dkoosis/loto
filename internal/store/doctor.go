@@ -159,14 +159,20 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.restoreReclaimedAndAudit(reclaimed, byAgent, now)
-	// Release the op-flock BEFORE VACUUM so peers aren't stalled for the
-	// whole-file rewrite (seconds on a large event history). VACUUM is
-	// post-commit, runs on a fresh pool conn with SQLite's own locking, and
-	// needs no op-flock — the reclaim + chmod restore that DO need it are
-	// already done. The deferred release (above) is the idempotent backstop
-	// (loto-9uy5, loto-3bl0).
+	// Run the bounded chmod restore under the still-held flock (loto-4qt), then
+	// release the flock, THEN emit the detached audit off the critical section.
+	// Holding the op-flock across the detached audit's own write tx would extend
+	// the hold for up to busy_timeout under cross-process contention and stall
+	// peers on the chmod-failure path (loto-3qev) — mirrors AcquireLocks'
+	// restoreThenReleaseFlock split. The deferred release (above) is the
+	// idempotent backstop. VACUUM also runs after release (loto-3bl0): it's
+	// post-commit, uses a fresh pool conn with SQLite's own locking, and needs
+	// no op-flock.
+	failEvents := restoreReclaimed(reclaimed, byAgent, now)
 	flock.release()
+	if len(failEvents) > 0 {
+		_ = s.appendAuditDetached(failEvents)
+	}
 	if err := vacuumFn(ctx, s.db); err != nil {
 		fmt.Fprintf(s.stderr, "loto: VACUUM after repair: %v (best-effort, repair succeeded)\n", err)
 	}
@@ -193,23 +199,27 @@ func reclaimStaleLocks(ctx context.Context, tx *sql.Tx, all []domain.LockRecord,
 	return reclaimed, nil
 }
 
-// restoreReclaimedAndAudit re-adds owner-write to every reclaimed target after
-// DoctorRepair's tx commits. Callers pre-filter via shouldRestoreOwnerWrite:
-// only exclusive-mode reclaims land here (shared never stripped, loto-ihh5). Restore-failure audits go through the detached
-// helper (not the caller ctx) so a cancellation landing here — Ctrl-C right
-// after commit — can't scale busy_timeout to ~1ms and silently drop the
-// mode_restore_failed trail (loto-1qed). Matches the acquire/release/break
-// restore paths.
-func (s *Store) restoreReclaimedAndAudit(reclaimed []string, byAgent string, now time.Time) {
+// restoreReclaimed re-adds owner-write to every reclaimed target after
+// DoctorRepair's tx commits and returns the mode_restore_failed events for any
+// chmod that failed. Callers pre-filter via shouldRestoreOwnerWrite: only
+// exclusive-mode reclaims land here (shared never stripped, loto-ihh5).
+//
+// This is the chmod-only half — the CALLER runs it under the held op-flock
+// (loto-4qt) and emits the returned events AFTER releasing the flock, so the
+// detached audit's write tx can't extend the flock hold (loto-3qev). Returning
+// the events instead of writing them here is what keeps the audit off the flock
+// critical section; the detached audit (s.appendAuditDetached) still uses its
+// own bounded ctx so a cancellation can't scale busy_timeout to ~1ms and drop
+// the mode_restore_failed trail (loto-1qed). Mirrors AcquireLocks'
+// restoreReclaimedSkippingRestripped.
+func restoreReclaimed(reclaimed []string, byAgent string, now time.Time) []domain.Event {
 	var failEvents []domain.Event
 	for _, p := range reclaimed {
 		if rerr := restoreWrite(p); rerr != nil {
 			failEvents = append(failEvents, modeRestoreFailedEvent(p, byAgent, now, rerr))
 		}
 	}
-	if len(failEvents) > 0 {
-		_ = s.appendAuditDetached(failEvents)
-	}
+	return failEvents
 }
 
 // tagsRetentionAge: acked tags older than this are hard-deleted by doctor
