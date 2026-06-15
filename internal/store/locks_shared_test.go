@@ -431,3 +431,65 @@ func mustListLocks(ctx context.Context, t *testing.T, s *Store) []domain.LockRec
 	}
 	return rows
 }
+
+// TestAcquire_SuccessPathReleasesFlockBeforeRestore is the loto-9uy5
+// regression: on the SUCCESS path the op-flock must be released BEFORE the
+// post-commit reclaim-restore (and its detached audit), so a slow or contended
+// restore can't extend the op-flock hold and stall every other loto invocation
+// on the repo. We block inside the restore via the fchmod seam and assert a
+// concurrent op-flock acquire still succeeds promptly. Before the fix the flock
+// was held across the restore and the probe times out.
+func TestAcquire_SuccessPathReleasesFlockBeforeRestore(t *testing.T) {
+	// Short probe timeout: a still-held flock fails fast instead of hanging.
+	t.Setenv("LOTO_FLOCK_TIMEOUT", "500ms")
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	stale := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	stale.Mode = domain.ModeExclusive
+	stale.PID = 4242
+	stale.ProcStart = 9999
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{stale}, liveProbe); err != nil {
+		t.Fatalf("seed stale exclusive: %v", err)
+	}
+
+	restoreStarted := make(chan struct{})
+	proceed := make(chan struct{})
+	orig := fchmodFn
+	defer func() { fchmodFn = orig }()
+	fchmodFn = func(f *os.File, mode os.FileMode) error {
+		// The reclaim-restore re-adds owner-write on a.go: block there so the
+		// op-flock-hold window (if any) stays open while we probe it.
+		if f.Name() == stale.Target.Canonical && mode.Perm()&0o200 != 0 {
+			close(restoreStarted)
+			<-proceed
+		}
+		return orig(f, mode)
+	}
+
+	bob := peerOn(stale, tcBob, domain.ModeShared)
+	bob.PID = 5555
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.AcquireLocks(ctx, []domain.LockRecord{bob}, deadProbe)
+		done <- err
+	}()
+
+	<-restoreStarted // Bob committed; the restore is now blocked.
+
+	// The op-flock must already be free. A separate open contends even within
+	// this process (flock is per-open-description), so a still-held flock makes
+	// this time out at 500ms.
+	probe, err := acquireOpFlock(ctx, s.opFlockPath(), nil)
+	if err != nil {
+		close(proceed)
+		<-done
+		t.Fatalf("op-flock still held across post-commit restore (loto-9uy5): %v", err)
+	}
+	probe.release()
+
+	close(proceed)
+	if err := <-done; err != nil {
+		t.Fatalf("bob shared acquire: %v", err)
+	}
+}

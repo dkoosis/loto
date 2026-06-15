@@ -25,12 +25,10 @@ func acquireRecoveryLock(ctx context.Context, dbPath string) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("open recover lock: %w", err)
 	}
-	limit := flockDefaultLimit
-	if s := os.Getenv("LOTO_FLOCK_TIMEOUT"); s != "" {
-		if d, perr := time.ParseDuration(s); perr == nil && d > 0 {
-			limit = d
-		}
-	}
+	// Shares LOTO_FLOCK_TIMEOUT parsing with acquireOpFlock. No stderr handle
+	// on this open-time path, so a malformed value falls back silently here;
+	// the operator-facing warning fires on the op-flock path (loto-d4is).
+	limit := flockLimitFromEnv(nil)
 	deadline := time.Now().Add(limit)
 	for {
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)

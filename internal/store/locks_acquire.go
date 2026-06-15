@@ -23,6 +23,18 @@ func sortedByCanonical(recs []domain.LockRecord) []domain.LockRecord {
 	return sorted
 }
 
+// AcquireLocks acquires a batch of locks in one transaction under the project
+// op-flock.
+//
+// PRECONDITION: every record in recs must carry the SAME OwnerUUID. The reclaim
+// / restore / rollback audit breadcrumbs (acquire_rollback_started,
+// mode_restore_failed) attribute the whole batch to sorted[0].OwnerUUID, so a
+// mixed-owner batch would name the wrong actor on those events (loto-13pk). The
+// loto CLI always builds single-owner batches (one agent per invocation via
+// buildLockRecords from rt.Agent.UUID), so the precondition holds today; a
+// future batch-import/migration caller that submits mixed owners must thread
+// the per-record owner through stripped/reclaimed before relying on these
+// audit events.
 func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
 	if len(recs) == 0 {
 		return nil, nil
@@ -85,6 +97,15 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 		s.restoreAllAndAudit(ctx, stripped, sorted[0].OwnerUUID, now)
 		return nil, err
 	}
+	// Release the op-flock now — the parent tx is committed, so the post-commit
+	// restore + its detached audit need neither the op-flock nor the parent tx.
+	// Holding it across the detached audit's own write tx lets a contended audit
+	// (another process mid-write) extend the hold up to busy_timeout, stalling
+	// every other loto invocation on this repo behind us. Mirrors the loto-rmyg
+	// failure-path cleanup() on the success path (loto-9uy5). The deferred
+	// release() is the idempotent backstop.
+	flock.release()
+
 	// Failure paths above roll the tx back, which reinstates the reclaimed
 	// stale rows — so the file correctly stays stripped there. Only after a
 	// successful commit are the stale rows truly gone and the restore due.
