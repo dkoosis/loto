@@ -2,8 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
+
+	"loto/internal/identity"
 )
 
 // must0 runs Run with the given argv and fails the test if exit != 0.
@@ -254,5 +257,48 @@ func TestCmdTag_UsagePrintsOnShortArgs(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), "usage:") {
 		t.Fatalf("expected usage line; err=%q", errBuf.String())
+	}
+}
+
+// TestCmdTag_DeliversToAllSharedHolders is the loto-2nc5 regression: a target
+// held shared by two agents has two blockers, so `loto tag` must leave the note
+// on BOTH, deterministically — not bind it to one arbitrary holder. Before the
+// fix runTag used LockAt (arbitrary single row); a note landed on one reader
+// and the other never saw it.
+func TestCmdTag_DeliversToAllSharedHolders(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	must0(t, []string{tcCmdLock, tcTargetA, "-t", tcIntentRead, tcFlagShared})
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	must0(t, []string{tcCmdLock, tcTargetA, "-t", tcIntentRead, tcFlagShared})
+
+	// Carol (a third agent) tags the shared target.
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "carol-tagger")
+	os.Unsetenv("LOTO_AGENT_ID")
+	var out, errBuf bytes.Buffer
+	if code := Run([]string{tcCmdTag, tcTargetA, "loto-2nc5:", "please", "release"}, &out, &errBuf); code != 0 {
+		t.Fatalf("tag exit=%d err=%q", code, errBuf.String())
+	}
+	// Both holders received the note: delivered=2 with two distinct ids.
+	if !strings.Contains(out.String(), "delivered=2") {
+		t.Fatalf("tag must reach both shared holders; out=%q", out.String())
+	}
+	ids := strings.Count(out.String(), "t-")
+	if ids != 2 {
+		t.Fatalf("want two tag ids (one per holder), out=%q", out.String())
+	}
+
+	// Each holder sees the note via the trailing tag footer on `status`.
+	for _, h := range []*identity.Agent{alice, bob} {
+		t.Setenv("LOTO_AGENT_ID", h.UUID)
+		var o, e bytes.Buffer
+		if code := Run([]string{tcCmdStatus}, &o, &e); code != 0 {
+			t.Fatalf("status for %s exit=%d err=%q", h.UUID, code, e.String())
+		}
+		if !strings.Contains(o.String(), "please release") {
+			t.Fatalf("holder %s must see the delivered note; status out=%q", h.UUID, o.String())
+		}
 	}
 }

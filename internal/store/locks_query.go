@@ -48,14 +48,16 @@ func (s *Store) LockForOwnerAt(ctx context.Context, t domain.Target, owner strin
 	return &l, rows.Err()
 }
 
-// LockAt returns one lock at target, or (nil,nil) if none. Under the composite
-// PK a shared target may have several holders; LockAt returns an ARBITRARY one.
-// Callers needing a specific holder must use LockForOwnerAt; callers needing all
-// holders must filter ListLocks. The sole remaining caller (tag delivery) only
-// needs "is anyone holding this, and who can I attach the tag to" — any holder
-// is acceptable there (loto-k5el.2 T5.5).
+// LockAt returns the longest-standing holder of target, or (nil,nil) if none.
+// Under the composite PK a shared target may have several holders; the ORDER BY
+// makes the choice deterministic (oldest created_at, then owner_uuid) rather
+// than the arbitrary row SQLite returned before (loto-2nc5). Production tag
+// delivery now fans out to every holder via LocksAt; LockAt remains for callers
+// that legitimately want a single representative holder.
 func (s *Store) LockAt(ctx context.Context, t domain.Target) (*domain.LockRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+lockCols+` FROM locks WHERE target_canonical = ?`, t.Canonical)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+lockCols+` FROM locks WHERE target_canonical = ? ORDER BY created_at ASC, owner_uuid ASC LIMIT 1`,
+		t.Canonical)
 	if err != nil {
 		return nil, err
 	}
@@ -70,8 +72,29 @@ func (s *Store) LockAt(ctx context.Context, t domain.Target) (*domain.LockRecord
 	if err != nil {
 		return nil, err
 	}
-	if err := rows.Err(); err != nil {
+	return &l, rows.Err()
+}
+
+// LocksAt returns EVERY holder of target in deterministic order (oldest lock
+// first), or an empty slice if none. Under the composite PK a shared target may
+// carry several coexisting holders. Tag delivery uses this to leave the note on
+// all current holders — a note "on this file" must reach every blocker, not an
+// arbitrary one (loto-2nc5).
+func (s *Store) LocksAt(ctx context.Context, t domain.Target) ([]domain.LockRecord, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+lockCols+` FROM locks WHERE target_canonical = ? ORDER BY created_at ASC, owner_uuid ASC`,
+		t.Canonical)
+	if err != nil {
 		return nil, err
 	}
-	return &l, nil
+	defer rows.Close()
+	var out []domain.LockRecord
+	for rows.Next() {
+		l, err := scanLock(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
 }

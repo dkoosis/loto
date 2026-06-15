@@ -69,6 +69,15 @@ func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, byAgent
 			return nil, err
 		}
 	}
+	// Reclaim the tags orphaned by the deletes above in the SAME tx. Break
+	// removes host-lock rows without acking their tags (a broken peer never
+	// "reads" its notes), so without this the orphans would linger until an
+	// operator ran `doctor --repair` — unbounded retention on a path the hot
+	// loop never triggers (loto-qg0r). gcTagsTx is the same disk-reclamation
+	// pass doctor uses; running it here mirrors AcquireLocks→rotateEventsTx.
+	if err := gcTagsTx(ctx, tx, now); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -83,7 +92,7 @@ func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, byAgent
 // owner inside the same tx.
 func classifyBreaks(
 	targets []domain.Target,
-	existing map[string]domain.LockRecord,
+	existing map[string][]domain.LockRecord,
 	byAgent string,
 	force bool,
 	kind string,
@@ -94,27 +103,49 @@ func classifyBreaks(
 	deleteByOwner = map[string][]string{}
 	for i, t := range targets {
 		results[i].Target = t
-		l, ok := existing[t.Canonical]
-		if !ok {
+		holders := existing[t.Canonical]
+		if len(holders) == 0 {
 			results[i].Err = ErrNoLockAtTarget
 			continue
 		}
-		if err := ec.AuthorizeBreak(l, force); err != nil {
+		// A target carries either one exclusive holder or N shared holders
+		// (exclusive walls; shared coexist — NORTH_STAR I1/I2). Authorize the
+		// whole set atomically: under stale-reclaim a single live co-holder
+		// protects the target, so reject it entirely rather than break some
+		// holders and leave others (loto-w77f).
+		if err := authorizeHolders(holders, ec, force); err != nil {
 			results[i].Err = err
 			continue
 		}
-		results[i].Mode = l.Mode
-		events = append(events, domain.Event{
-			Target:      t,
-			Kind:        kind,
-			ActorUUID:   byAgent,
-			SubjectUUID: l.OwnerUUID,
-			Reason:      reason,
-			CreatedAt:   ec.Now,
-		})
-		deleteByOwner[l.OwnerUUID] = append(deleteByOwner[l.OwnerUUID], t.Canonical)
+		// All holders share one mode (the all-shared-or-one-exclusive
+		// invariant), so holders[0].Mode drives the restore decision.
+		results[i].Mode = holders[0].Mode
+		for j := range holders {
+			owner := holders[j].OwnerUUID
+			events = append(events, domain.Event{
+				Target:      t,
+				Kind:        kind,
+				ActorUUID:   byAgent,
+				SubjectUUID: owner,
+				Reason:      reason,
+				CreatedAt:   ec.Now,
+			})
+			deleteByOwner[owner] = append(deleteByOwner[owner], t.Canonical)
+		}
 	}
 	return results, events, deleteByOwner
+}
+
+// authorizeHolders returns the first AuthorizeBreak failure across a target's
+// holders, or nil if every holder may be broken. Under BreakForce all holders
+// pass; under stale-reclaim one live holder vetoes the whole target.
+func authorizeHolders(holders []domain.LockRecord, ec domain.EvalContext, force bool) error {
+	for i := range holders {
+		if err := ec.AuthorizeBreak(holders[i], force); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) restoreAndAuditBreaks(results []BreakResult, byAgent string, now time.Time) {
@@ -143,21 +174,27 @@ func (s *Store) restoreAndAuditBreaks(results []BreakResult, byAgent string, now
 	}
 }
 
-func loadLocksByTargetTx(ctx context.Context, tx *sql.Tx, targets []domain.Target) (map[string]domain.LockRecord, error) {
+// loadLocksByTargetTx groups every holder per target. A target under the
+// composite PK (target_canonical, owner_uuid) may carry several coexisting
+// shared holders; keying the result by canonical ALONE collapsed them to the
+// last-scanned row, so a multi-holder break removed one arbitrary holder and
+// reported success while the others silently survived (loto-w77f). ORDER BY
+// makes the per-holder event/delete stream deterministic.
+func loadLocksByTargetTx(ctx context.Context, tx *sql.Tx, targets []domain.Target) (map[string][]domain.LockRecord, error) {
 	placeholders, args := inClause(targets)
-	rows, err := tx.QueryContext(ctx, `SELECT `+lockCols+` FROM locks WHERE target_canonical IN (`+placeholders+`)`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+	rows, err := tx.QueryContext(ctx, `SELECT `+lockCols+` FROM locks WHERE target_canonical IN (`+placeholders+`) ORDER BY created_at ASC, owner_uuid ASC`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := make(map[string]domain.LockRecord, len(targets))
+	out := make(map[string][]domain.LockRecord, len(targets))
 	for rows.Next() {
 		l, err := scanLock(rows)
 		if err != nil {
 			return nil, err
 		}
-		out[l.Target.Canonical] = l
+		out[l.Target.Canonical] = append(out[l.Target.Canonical], l)
 	}
 	return out, rows.Err()
 }
