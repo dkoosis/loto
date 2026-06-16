@@ -4,12 +4,12 @@ updated: 2026-06-15
 ## lane: MeldRabbit
 branch: main
 
-→ Review/undraft/merge PR #188 (6-bead store strip/restore/op-flock fix); then `bd ready` (empty now — next is loto-7sf3, DEFERRED, dk un-defers).
+→ Review/undraft/merge PR #188 (6-bead store strip/restore/op-flock fix); then `bd ready` (next = loto-7sf3, DEFERRED).
 
 ✓ done
-- `/team backlog` drained 7 bug-audit store beads → PR #188; loto-mzew closed won't-fix; loto-fs84 filed (shared-handle flaw).
+- `/team backlog` → PR #188; loto-mzew closed won't-fix; loto-fs84 filed.
 
 ‡ traps
-- `/team` subagents share primary loto handle → no same-file serialization, `commit -am`/`unlock --all` sweep peers. Partition waves by file (zero overlap) until loto-fs84 lands.
+- `/team` subagents share primary loto handle → no same-file serialization; partition waves by file until loto-fs84 lands.
 
-~ rapport: clipped, decisive — handed off the backlog and trusted the loop end to end.
+~ rapport: clipped, decisive — trusted the loop end to end.
