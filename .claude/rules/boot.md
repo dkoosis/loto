@@ -4,12 +4,9 @@ updated: 2026-06-15
 ## lane: MeldRabbit
 branch: main
 
-→ Review/undraft/merge PR #188 (6-bead store strip/restore/op-flock fix); then `bd ready` (next = loto-7sf3, DEFERRED).
+→ `bd ready` — only ready bead is loto-fs84 (P1): /team subagents share primary loto handle, gate can't serialize same-file edits. Fix the harness; then waves needn't be file-partitioned.
 
 ✓ done
-- `/team backlog` → PR #188; loto-mzew closed won't-fix; loto-fs84 filed.
+- PR #188 merged (squash 9a8e68e, macOS -race green; linux runner offline); 6 store beads closed; stale branches + dead CI runs pruned.
 
-‡ traps
-- `/team` subagents share primary loto handle → no same-file serialization; partition waves by file until loto-fs84 lands.
-
-~ rapport: clipped, decisive — trusted the loop end to end.
+~ rapport: clipped, decisive — hands the loop and walks; wants flaws named, not worked around.
