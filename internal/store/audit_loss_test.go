@@ -57,7 +57,8 @@ func TestRestoreAndAuditReleases_AuditFailureSurfacesPerResult(t *testing.T) {
 	results := []ReleaseResult{
 		{Target: domain.Target{Canonical: p}, State: StateUnlocked},
 	}
-	s.restoreAndAuditReleases(results, tcAlice)
+	failEvents, failIdx := restoreReleases(results, tcAlice)
+	s.auditReleaseFailures(results, failEvents, failIdx)
 
 	if results[0].State != StateRestoreFailed {
 		t.Fatalf("want StateRestoreFailed, got %v", results[0].State)
@@ -100,7 +101,8 @@ func TestRestoreAndAuditBreaks_AuditFailureSurfacesPerResult(t *testing.T) {
 	results := []BreakResult{
 		{Target: domain.Target{Canonical: p}, Err: nil},
 	}
-	s.restoreAndAuditBreaks(results, tcBob, time.Now())
+	failEvents, failIdx := restoreBreaks(results, tcBob, time.Now())
+	s.auditBreakFailures(results, failEvents, failIdx)
 
 	if results[0].RestoreErr == nil {
 		t.Fatal("RestoreErr nil — restoreWrite should have failed via fchmodFn")

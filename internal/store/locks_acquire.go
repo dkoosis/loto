@@ -72,6 +72,14 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 		return nil, &MultiConflictError{Blockers: blockers}
 	}
 
+	// Same-owner exclusive→shared re-acquire downgrades the existing row in place
+	// (insertOrRefreshLock upserts mode=shared). The original exclusive acquire
+	// stripped owner-write; the shared upsert never restores it and stripAll skips
+	// shared rows, so without this the owner's own file stays read-only forever
+	// (loto-h760). Collect these paths from the pre-acquire snapshot and restore
+	// the bit post-commit, mirroring DowngradeLock's restore semantics.
+	downgraded := collectSameOwnerDowngrades(all, sorted)
+
 	stripped, chmodFailErr := s.stripAndHandleFailure(tx, sorted, now)
 	if chmodFailErr != nil {
 		return nil, chmodFailErr
@@ -97,20 +105,76 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 		s.restoreAllAndAudit(ctx, stripped, sorted[0].OwnerUUID, now)
 		return nil, err
 	}
-	// Release the op-flock now — the parent tx is committed, so the post-commit
-	// restore + its detached audit need neither the op-flock nor the parent tx.
-	// Holding it across the detached audit's own write tx lets a contended audit
-	// (another process mid-write) extend the hold up to busy_timeout, stalling
-	// every other loto invocation on this repo behind us. Mirrors the loto-rmyg
-	// failure-path cleanup() on the success path (loto-9uy5). The deferred
-	// release() is the idempotent backstop.
-	flock.release()
 
-	// Failure paths above roll the tx back, which reinstates the reclaimed
-	// stale rows — so the file correctly stays stripped there. Only after a
-	// successful commit are the stale rows truly gone and the restore due.
-	s.restoreReclaimedSkippingRestripped(reclaimed, stripped, sorted[0].OwnerUUID, now)
+	// Post-commit FS restore. Two opposing constraints meet here:
+	//
+	//   - loto-v8ch/loto-4qt (correctness, P1): the chmod restore MUST run while
+	//     the op-flock is held. The DB now says the reclaimed stale rows are gone;
+	//     if a peer takes the flock mid-restore it can read the consistent DB and
+	//     either see a target still chmod read-only (torn row+file view), or — the
+	//     worse interleaving — acquire exclusive and re-strip, after which our
+	//     restoreWrite re-adds owner-write under the peer's lease and silently
+	//     defeats its exclusivity (the restripped skip-set covers only OUR strips,
+	//     not the peer's). This is the same silent-clobber Break/Doctor hold the
+	//     flock to prevent.
+	//
+	//   - loto-9uy5 (perf, P3, no correctness loss): the detached AUDIT write must
+	//     NOT run under the flock. Its beginTx opens a fresh write tx that, under
+	//     cross-process contention, can block up to busy_timeout (~2s) and extend
+	//     the flock hold, stalling every other loto invocation on this repo.
+	//
+	// Resolution: do the chmod restore HERE, under the held flock (bounded, fast —
+	// just fchmod). It returns the fail-events; we release the flock, THEN emit the
+	// audit off the critical section. Correctness (v8ch) and the anti-stall goal
+	// (9uy5) are both satisfied — the audit, not the chmod, was 9uy5's stall source.
+	//
+	// Failure paths above roll the tx back, which reinstates the reclaimed stale
+	// rows — so the file correctly stays stripped there. Only after a successful
+	// commit are the stale rows truly gone and the restore due.
+	s.restoreThenReleaseFlock(flock, append(reclaimed, downgraded...), stripped, sorted[0].OwnerUUID, now)
 	return sorted, nil
+}
+
+// collectSameOwnerDowngrades returns the canonical paths where an existing
+// same-owner EXCLUSIVE row is being re-acquired as SHARED. insertOrRefreshLock
+// flips the row to shared in place, but nothing restores the owner-write bit the
+// original exclusive acquire stripped (stripAll skips shared incoming rows, and
+// the same-owner row is never a reclaim/break candidate). Restoring these paths
+// post-commit mirrors DowngradeLock (loto-h760). Scoped strictly to same-owner
+// downgrades — other-owner rows are untouched.
+func collectSameOwnerDowngrades(all []domain.LockRecord, sorted []domain.LockRecord) []string {
+	var downgraded []string
+	for i := range sorted {
+		if sorted[i].EffectiveMode() != domain.ModeShared {
+			continue // incoming is exclusive — stripAll/normal flow handles it
+		}
+		for j := range all {
+			ex := &all[j]
+			if ex.OwnerUUID != sorted[i].OwnerUUID ||
+				!domain.SameCanonical(ex.Target, sorted[i].Target) {
+				continue
+			}
+			if ex.EffectiveMode() == domain.ModeExclusive {
+				downgraded = append(downgraded, sorted[i].Target.Canonical)
+			}
+			break // composite PK (target, owner) → at most one match
+		}
+	}
+	return downgraded
+}
+
+// restoreThenReleaseFlock runs the bounded chmod restore under the still-held
+// op-flock, releases the flock, then emits any mode_restore_failed audit off the
+// critical section. Splitting it this way satisfies both loto-v8ch (chmod under
+// the flock) and loto-9uy5 (audit write tx not under the flock); see the call
+// site for the full rationale. The deferred flock.release() in AcquireLocks is
+// the idempotent backstop on the failure paths above.
+func (s *Store) restoreThenReleaseFlock(flock *opFlock, reclaimed, stripped []string, byAgent string, now time.Time) {
+	failEvents := restoreReclaimedSkippingRestripped(reclaimed, stripped, byAgent, now)
+	flock.release()
+	if len(failEvents) > 0 {
+		_ = s.appendAuditDetached(failEvents)
+	}
 }
 
 // restoreReclaimedSkippingRestripped re-adds owner-write to paths whose stale
@@ -118,12 +182,16 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 // the bit and is gone; nothing else would ever restore it, loto-22ka) — except
 // paths this acquire itself re-stripped: an exclusive acquirer on the same
 // target keeps the bit off. Runs post-commit; mirrors DoctorRepair's
-// restoreReclaimedAndAudit (doctor.go). Restore failures are audited via the
-// detached helper so a cancelled caller ctx can't drop the
-// mode_restore_failed trail.
-func (s *Store) restoreReclaimedSkippingRestripped(reclaimed, stripped []string, byAgent string, now time.Time) {
+// restoreReclaimedAndAudit (doctor.go).
+//
+// This is the chmod-only half — the CALLER runs it under the held op-flock
+// (loto-v8ch) and emits the returned mode_restore_failed events AFTER releasing
+// the flock, so the detached audit's write tx can't extend the flock hold
+// (loto-9uy5). Returning the events instead of writing them here is what keeps
+// the audit off the flock critical section.
+func restoreReclaimedSkippingRestripped(reclaimed, stripped []string, byAgent string, now time.Time) []domain.Event {
 	if len(reclaimed) == 0 {
-		return
+		return nil
 	}
 	restripped := make(map[string]bool, len(stripped))
 	for _, p := range stripped {
@@ -138,9 +206,7 @@ func (s *Store) restoreReclaimedSkippingRestripped(reclaimed, stripped []string,
 			failEvents = append(failEvents, modeRestoreFailedEvent(p, byAgent, now, rerr))
 		}
 	}
-	if len(failEvents) > 0 {
-		_ = s.appendAuditDetached(failEvents)
-	}
+	return failEvents
 }
 
 // restoreAllAndAudit restores write bits on every stripped path. Emits

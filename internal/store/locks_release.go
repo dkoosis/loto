@@ -39,28 +39,7 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, byAge
 	results, owned := classifyReleases(targets, owners, byAgent)
 
 	if len(owned) > 0 {
-		// Ack tags BEFORE deleting the host locks: the host-lock match must
-		// still resolve to set acked_at; if we DELETE first the tags would
-		// orphan instead, losing the audit ack (edge #6 distinguishes
-		// release-ack from break-orphan).
-		if err := ackTagsForReleaseTx(ctx, tx, owned, byAgent); err != nil {
-			return nil, err
-		}
-		if err := deleteOwnedTx(ctx, tx, owned, byAgent); err != nil {
-			return nil, err
-		}
-		// Emit lock_released events in the same tx (atomic with the row deletes).
-		now := time.Now()
-		evs := make([]domain.Event, len(owned))
-		for i, canonical := range owned {
-			evs[i] = domain.Event{
-				Target:    domain.Target{Canonical: canonical},
-				Kind:      EventLockReleased,
-				ActorUUID: byAgent,
-				CreatedAt: now,
-			}
-		}
-		if err := appendEventsTx(ctx, tx, evs); err != nil {
+		if err := s.applyOwnedReleasesTx(ctx, tx, owned, byAgent); err != nil {
 			return nil, err
 		}
 	}
@@ -70,9 +49,44 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, byAge
 
 	// Chmod restore is outside the tx — locks ARE released. Failures surface
 	// per-target AND batch into one audit event call (NORTH_STAR.md: every path
-	// that removes a `locks` row also tries restore + audits failure).
-	s.restoreAndAuditReleases(results, byAgent)
+	// that removes a `locks` row also tries restore + audits failure). The
+	// bounded chmod runs under the still-held flock; we release BEFORE the
+	// detached audit so its write tx can't extend the flock hold (loto-3qev).
+	s.restoreReleasesThenAudit(flock, results, byAgent)
 	return results, nil
+}
+
+// applyOwnedReleasesTx acks tags, deletes the owned host-lock rows, emits the
+// lock_released events, and trims the events table — all in the caller's tx so
+// the row deletes and audit stay atomic.
+func (s *Store) applyOwnedReleasesTx(ctx context.Context, tx *sql.Tx, owned []string, byAgent string) error {
+	// Ack tags BEFORE deleting the host locks: the host-lock match must still
+	// resolve to set acked_at; if we DELETE first the tags would orphan instead,
+	// losing the audit ack (edge #6 distinguishes release-ack from break-orphan).
+	if err := ackTagsForReleaseTx(ctx, tx, owned, byAgent); err != nil {
+		return err
+	}
+	if err := deleteOwnedTx(ctx, tx, owned, byAgent); err != nil {
+		return err
+	}
+	// Emit lock_released events in the same tx (atomic with the row deletes).
+	now := time.Now()
+	evs := make([]domain.Event, len(owned))
+	for i, canonical := range owned {
+		evs[i] = domain.Event{
+			Target:    domain.Target{Canonical: canonical},
+			Kind:      EventLockReleased,
+			ActorUUID: byAgent,
+			CreatedAt: now,
+		}
+	}
+	if err := appendEventsTx(ctx, tx, evs); err != nil {
+		return err
+	}
+	// Trim events in the same tx (mirrors AcquireLocks→rotateEventsTx). A
+	// release-heavy workload that rarely acquires would otherwise grow the
+	// events table unbounded (loto-bvdk).
+	return rotateEventsTx(ctx, tx, now)
 }
 
 // classifyReleases walks input targets in order, classifying each against the
@@ -98,7 +112,24 @@ func classifyReleases(targets []domain.Target, owners map[string]ownerMode, byAg
 	return results, owned
 }
 
-func (s *Store) restoreAndAuditReleases(results []ReleaseResult, byAgent string) {
+// restoreReleasesThenAudit runs the bounded chmod restore under the still-held
+// op-flock, releases the flock, then emits any mode_restore_failed audit off the
+// critical section (loto-3qev). Mirrors AcquireLocks' restoreThenReleaseFlock:
+// holding the flock across the detached audit's own write tx would extend the
+// hold for up to busy_timeout under contention and stall peers on the
+// chmod-failure path. The deferred flock.release() at the call site is the
+// idempotent backstop.
+func (s *Store) restoreReleasesThenAudit(flock *opFlock, results []ReleaseResult, byAgent string) {
+	failEvents, failIdx := restoreReleases(results, byAgent)
+	flock.release()
+	s.auditReleaseFailures(results, failEvents, failIdx)
+}
+
+// restoreReleases runs the chmod restore for every released EXCLUSIVE target,
+// recording per-target StateRestoreFailed/RestoreErr, and returns the
+// mode_restore_failed events plus the parallel result indices. Chmod-only half
+// of restoreReleasesThenAudit — runs under the held flock (loto-3qev).
+func restoreReleases(results []ReleaseResult, byAgent string) ([]domain.Event, []int) {
 	now := time.Now()
 	var failEvents []domain.Event
 	var failIdx []int
@@ -116,6 +147,13 @@ func (s *Store) restoreAndAuditReleases(results []ReleaseResult, byAgent string)
 			failIdx = append(failIdx, i)
 		}
 	}
+	return failEvents, failIdx
+}
+
+// auditReleaseFailures emits the mode_restore_failed events off the flock
+// critical section (loto-3qev); on audit-write failure it fans the error out to
+// each affected result so the audit hole is observable (gh#107).
+func (s *Store) auditReleaseFailures(results []ReleaseResult, failEvents []domain.Event, failIdx []int) {
 	if len(failEvents) > 0 {
 		if auditErr := s.appendAuditDetached(failEvents); auditErr != nil {
 			// Fan audit-write failure out to each affected result so callers
@@ -244,6 +282,11 @@ func (s *Store) ReleaseBySession(ctx context.Context, byAgent, sessionUUID strin
 	if err := appendEventsTx(ctx, tx, evs); err != nil {
 		return nil, err
 	}
+	// Trim events in the same tx (mirrors AcquireLocks→rotateEventsTx) so a
+	// release-heavy workload can't grow the events table unbounded (loto-bvdk).
+	if err := rotateEventsTx(ctx, tx, now); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -257,7 +300,7 @@ func (s *Store) ReleaseBySession(ctx context.Context, byAgent, sessionUUID strin
 			Mode:   c.Mode,
 		}
 	}
-	s.restoreAndAuditReleases(results, byAgent)
+	s.restoreReleasesThenAudit(flock, results, byAgent)
 	return results, nil
 }
 
