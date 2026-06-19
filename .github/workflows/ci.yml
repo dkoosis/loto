@@ -34,13 +34,17 @@ jobs:
     #     linux re-run is pure redundancy).
     #   - PR labeled `ci:macos` → linux + macOS.
     #   - everything else (normal PR / push) → linux-only.
-    # macOS runs on GitHub-hosted arm64 (Apple Silicon, = self-hosted mac-loto
-    # arch); escapes the serial self-hosted runner queue. ~10x linux billing
-    # rate on private repos, but a ~4-min run is cents.
+    # Both legs run on GitHub-hosted runners. The self-hosted Linux box
+    # ([self-hosted,Linux,loto]) was retired — it went offline and wedged the
+    # `test (linux)` gate (0 runners online → no PR could get a green check).
+    # ubuntu-latest is a fresh hosted checkout every run, so a runner-local
+    # phantom can't recur. macOS runs on GitHub-hosted arm64 (Apple Silicon,
+    # = old mac-loto arch). ~10x linux billing rate on private repos, but a
+    # ~4-min run is cents.
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('[{"name":"macos","runs-on":"macos-latest"}]') || (contains(github.event.pull_request.labels.*.name, 'ci:macos') && fromJSON('[{"name":"linux","runs-on":["self-hosted","Linux","loto"]},{"name":"macos","runs-on":"macos-latest"}]') || fromJSON('[{"name":"linux","runs-on":["self-hosted","Linux","loto"]}]')) }}
+        include: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('[{"name":"macos","runs-on":"macos-latest"}]') || (contains(github.event.pull_request.labels.*.name, 'ci:macos') && fromJSON('[{"name":"linux","runs-on":"ubuntu-latest"},{"name":"macos","runs-on":"macos-latest"}]') || fromJSON('[{"name":"linux","runs-on":"ubuntu-latest"}]')) }}
 
     steps:
       - uses: actions/checkout@v4
