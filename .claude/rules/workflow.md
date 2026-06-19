@@ -14,6 +14,8 @@
 
 ‡ **Batch small fixes → one PR. Default: auto-batch.** ≥2 small/independent fixes in flight → ONE branch, ONE PR, one commit per fix — roll them up without asking. CI fires once at the PR (+ once on merge), NOT once per fix; a PR-per-one-liner serializes the whole queue behind the serial runners' build time. Each fix stays its own commit (traceable); PR body lists them. ✗ mix a risky change in with trivial ones (drags the whole PR's review bar up).
 
+‡ **PR ↔ issues.** Every PR body carries a `Closes:` trailer naming the beads it lands (`Closes: loto-abc, loto-def`; no bead → `Closes: none`). Squash-merge keeps the trailer in main's commit. **On merge, close them with the landing ref:** `bd close <ids> --reason "merged #<PR> (<sha>)"`. ✗ merge-then-forget — a bead whose code landed but stays open is a leak.
+
 - docs(boot) / docs-only commits → direct to main is fine. test-only (non-store/identity) → direct fine.
 - phantom-lint: golangci can flag findings in `.claude/worktrees/agent-*` copies — verify against real `internal/` source; `golangci-lint cache clean` if stale.
 
