@@ -1,25 +1,46 @@
 name: CI
 
+# Cost shape (private repo — macOS bills at 10x Linux minutes):
+#   pull_request        : linux only           — fast, cheap gate on every PR
+#   push -> main        : linux only           — cheap gate on merge
+#   schedule / dispatch : macOS only           — the darwin backstop runs weekly
+#                         (and on demand), NOT on every merge. dk develops on
+#                         macOS locally, so routine darwin coverage is his
+#                         machine; this weekly run + the high-bar `ci:macos`
+#                         label catch darwin-divergent breakage in PRs he won't
+#                         run himself first.
+#   PR labeled ci:macos : linux + macOS        — on-demand darwin proof for a PR
+#                         touching OS-divergent surface (high bar — see
+#                         .claude/rules/ci-on-demand.md).
 on:
+  # `labeled` so adding `ci:macos` to an already-open PR re-fires CI and the
+  # matrix picks up the darwin leg (default PR types don't include labeling).
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
-  pull_request:
+  # Weekly darwin backstop (Mon 07:00 UTC ≈ 02–03 ET) + manual trigger.
+  schedule:
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
 
 jobs:
   test:
     name: test (${{ matrix.name }})
     runs-on: ${{ matrix.runs-on }}
+    # macOS is the 10x-billed leg, so it runs only where it earns its keep:
+    #   - schedule / workflow_dispatch → macOS-ONLY (weekly darwin backstop;
+    #     every PR + push-to-main already runs the full linux gate, so a weekly
+    #     linux re-run is pure redundancy).
+    #   - PR labeled `ci:macos` → linux + macOS.
+    #   - everything else (normal PR / push) → linux-only.
+    # macOS runs on GitHub-hosted arm64 (Apple Silicon, = self-hosted mac-loto
+    # arch); escapes the serial self-hosted runner queue. ~10x linux billing
+    # rate on private repos, but a ~4-min run is cents.
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: linux
-            runs-on: [self-hosted, Linux, loto]
-          - name: macos
-            # GitHub-hosted arm64 (Apple Silicon, = self-hosted mac-loto arch);
-            # escapes the serial self-hosted runner queue. ~10x linux billing
-            # rate on private repos, but a ~4-min run is cents.
-            runs-on: macos-latest
+        include: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('[{"name":"macos","runs-on":"macos-latest"}]') || (contains(github.event.pull_request.labels.*.name, 'ci:macos') && fromJSON('[{"name":"linux","runs-on":["self-hosted","Linux","loto"]},{"name":"macos","runs-on":"macos-latest"}]') || fromJSON('[{"name":"linux","runs-on":["self-hosted","Linux","loto"]}]')) }}
 
     steps:
       - uses: actions/checkout@v4

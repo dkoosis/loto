@@ -1,47 +1,63 @@
 name: codex-review
 
-# Codex reviews PRs and posts findings as a single PR comment.
+# Codex reviews a PR ONLY when someone comments `@codex review` on it — normally
+# Claude opting the PR in when the diff has room for improvement (see
+# .claude/rules/ci-on-demand.md). On-demand, not every PR: keeps the OpenAI spend
+# and runner minutes off trivial/mechanical changes.
 # Linux-only (no macOS 10x billing). Requires repo secret OPENAI_API_KEY.
 # Review prompt: .github/codex/prompts/review.md
 #
-# Advisory only — does NOT gate merge (not a required status check).
-#
-# Gate (see the `if:` on the codex job): review runs only when the PR is NOT a
-# draft, targets `main`, AND is "meaty" — either carries the `codex-review`
-# label or changes >= 50 lines. Tune the threshold inline below.
+# This is advisory — it does NOT gate merge (not a required status check).
+# The `CI` workflow remains the merge gate.
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
+  issue_comment:
+    types: [created]
 
+# Top-level: least privilege. Per-job permissions widen only where needed.
 permissions:
   contents: read
 
 jobs:
   codex:
+    # Fire only on a PR comment carrying the trigger phrase. github.event.issue
+    # is a PR iff .pull_request is set. Private repo → commenters are already
+    # collaborators, so no extra author gating is needed.
+    if: ${{ github.event.issue.pull_request && contains(github.event.comment.body, '@codex review') }}
     runs-on: ubuntu-latest
-    if: >-
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.base.ref == 'main' &&
-      (
-        contains(github.event.pull_request.labels.*.name, 'codex-review') ||
-        (github.event.pull_request.additions + github.event.pull_request.deletions) >= 50
-      )
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       final_message: ${{ steps.run_codex.outputs.final-message }}
     steps:
+      # issue_comment carries no PR head/base context — resolve the base ref from
+      # the PR number before checkout/fetch can reference it.
+      - name: Resolve PR base ref
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          base_ref="$(gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER" --jq '.base.ref')"
+          echo "base_ref=$base_ref" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v5
         with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          ref: refs/pull/${{ github.event.issue.number }}/merge
           persist-credentials: false
 
       - name: Pre-fetch base and head refs
+        # checkout above runs with persist-credentials: false, so it leaves no
+        # credential in .git/config. Authenticate this fetch with the run-scoped
+        # GITHUB_TOKEN — basic auth (base64 of x-access-token:<token>), the same
+        # scheme actions/checkout uses; GitHub's git endpoint rejects a bearer
+        # header here. The header is passed per-command via -c, so nothing is
+        # persisted to disk for the downstream Codex step to read.
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          PR_NUMBER: ${{ github.event.issue.number }}
         run: |
           AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
           git -c http.extraheader="$AUTH_HEADER" \
@@ -73,7 +89,7 @@ jobs:
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
+              issue_number: context.issue.number,
               body: process.env.CODEX_FINAL_MESSAGE,
             });
         env:
