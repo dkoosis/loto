@@ -25,7 +25,7 @@ func TestDoctorListsStaleLocks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := s.DoctorAuditWith(ctx, l.Host, dead, SidecarCheck{})
+	report, err := s.DoctorAudit(ctx, l.Host, dead, SidecarCheck{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func TestDoctorSidecarMissingDirIsNoOp(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAuditWith(ctx, l.Host, alive, SidecarCheck{
+	report, err := s.DoctorAudit(ctx, l.Host, alive, SidecarCheck{
 		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
 		RepoTop:    tcRepoTop,
 	})
@@ -270,7 +270,7 @@ func TestDoctorSidecarDisabledWhenDirEmpty(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAuditWith(ctx, l.Host, alive, SidecarCheck{})
+	report, err := s.DoctorAudit(ctx, l.Host, alive, SidecarCheck{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func TestDoctorSidecarCwdMismatch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "1.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAuditWith(ctx, l.Host, alive, SidecarCheck{
+	report, err := s.DoctorAudit(ctx, l.Host, alive, SidecarCheck{
 		SidecarDir: dir,
 		RepoTop:    "/Users/me/repo",
 	})
@@ -321,7 +321,7 @@ func TestDoctorSidecarHealthyWhenCwdMatches(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "1.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAuditWith(ctx, l.Host, alive, SidecarCheck{
+	report, err := s.DoctorAudit(ctx, l.Host, alive, SidecarCheck{
 		SidecarDir: dir,
 		RepoTop:    repoTop,
 	})
@@ -341,7 +341,7 @@ func TestDoctorSidecarSkippedForStaleLocks(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAuditWith(ctx, l.Host, dead, SidecarCheck{
+	report, err := s.DoctorAudit(ctx, l.Host, dead, SidecarCheck{
 		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
 		RepoTop:    tcRepoTop,
 	})
@@ -370,7 +370,7 @@ func TestDoctorSidecarSkippedForNoDurablePid(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAuditWith(ctx, l.Host, alive, SidecarCheck{
+	report, err := s.DoctorAudit(ctx, l.Host, alive, SidecarCheck{
 		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
 		RepoTop:    tcRepoTop,
 	})
