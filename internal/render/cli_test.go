@@ -134,8 +134,11 @@ func TestEmitReleaseResults_MixedOutcomes(t *testing.T) {
 	if !strings.Contains(got, "state=no-lock") || !strings.Contains(got, "state=not-owner") {
 		t.Errorf("missing distinct states: %s", got)
 	}
-	if !strings.Contains(got, "holder=BlueOak") {
-		t.Errorf("missing holder: %s", got)
+	if !strings.Contains(got, "owner=BlueOak") {
+		t.Errorf("not-owner row must name the lock owner with owner= field: %s", got)
+	}
+	if strings.Contains(got, "holder=") {
+		t.Errorf("holder= field renamed to owner=, must not appear: %s", got)
 	}
 }
 
@@ -275,6 +278,12 @@ func TestEmitTagFooter_KeyValueAndCount(t *testing.T) {
 	got := buf.String()
 	if !strings.HasPrefix(got, "ℹ tags count=2 ") {
 		t.Errorf("triage first: %s", got)
+	}
+	if !strings.Contains(got, "owner=alice") {
+		t.Errorf("footer must name the lock owner with owner= field: %s", got)
+	}
+	if strings.Contains(got, "holder=") {
+		t.Errorf("holder= field renamed to owner=, must not appear: %s", got)
 	}
 	if strings.Index(got, "ETA?") > strings.Index(got, "why?") {
 		t.Errorf("caller-provided order must be preserved (caller sorts), got:\n%s", got)
