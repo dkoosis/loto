@@ -102,7 +102,7 @@ func classifyReleases(targets []domain.Target, owners map[string]ownerMode, byAg
 			results[i].State = StateNoLock
 		case o.Owner != byAgent:
 			results[i].State = StateNotOwner
-			results[i].Holder = o.Owner
+			results[i].Owner = o.Owner
 		default:
 			results[i].State = StateUnlocked
 			results[i].Mode = o.Mode

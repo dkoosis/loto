@@ -127,13 +127,13 @@ func EmitConflictWithTags(w io.Writer, ce *store.MultiConflictError, tagsByTarge
 // tags. Empty input emits nothing — the caller's primary output must stand
 // alone when there's no message to surface. Sort order is the caller's
 // responsibility (store ListAlive* already orders by created_at ASC, id ASC).
-func EmitTagFooter(w io.Writer, tags []store.Tag, holderUUID string) {
+func EmitTagFooter(w io.Writer, tags []store.Tag, ownerUUID string) {
 	if len(tags) == 0 {
 		return
 	}
 	cwd := getCwd()
 	holders := &holderMemo{}
-	fmt.Fprintf(w, "ℹ tags count=%d owner=%s\n", len(tags), holders.tag(holderUUID))
+	fmt.Fprintf(w, "ℹ tags count=%d owner=%s\n", len(tags), holders.tag(ownerUUID))
 	for _, t := range tags {
 		emitTagRow(w, t, "", cwd, holders)
 	}
@@ -244,7 +244,7 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 		case store.StateNoLock:
 			fmt.Fprintf(w, "ℹ target=%s state=no-lock\n", path)
 		case store.StateNotOwner:
-			fmt.Fprintf(w, "✗ target=%s state=not-owner owner=%s\n", path, r.Holder)
+			fmt.Fprintf(w, "✗ target=%s state=not-owner owner=%s\n", path, r.Owner)
 		case store.StateRestoreFailed:
 			writeRestoreFailed(w, "target", path, r.RestoreErr, r.AuditErr)
 		}
