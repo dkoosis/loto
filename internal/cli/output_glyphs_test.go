@@ -9,14 +9,16 @@ import (
 )
 
 // TestNoBannedGlyphsInSource enforces design.md's closed glyph set: ✓ pass,
-// ✗ fail, ℹ neutral/info row, ⚠ non-fatal advisory row. Only ✔ is banned — a
-// lookalike for ✓ that must never appear (use ✓). The rule is per-source
+// ✗ fail, ℹ neutral/info row, ⚠ non-fatal advisory row. Banned are the
+// lookalikes ✔ (use ✓) and ✘ (use ✗) — visually near-identical to the allowed
+// pair, so a Claude consumer can't tell them apart. The rule is per-source
 // because every output path eventually reaches a Claude consumer and the glyph
-// vocabulary must stay closed. render is in scope: it is the package doing all
-// structured CLI output, so the guard must cover it (loto-4xxs).
+// vocabulary must stay closed. Roots are the whole internal/ and cmd/ trees so
+// a new package can't silently escape coverage the way render once did
+// (loto-4xxs).
 func TestNoBannedGlyphsInSource(t *testing.T) {
-	banned := []string{"✔"}
-	roots := []string{".", "../render", "../store", "../identity", "../domain", "../../cmd/loto"}
+	banned := []string{"✔", "✘"}
+	roots := []string{"..", "../../cmd"}
 
 	for _, root := range roots {
 		absRoot, err := filepath.Abs(root)
