@@ -923,3 +923,35 @@ func TestEnsureSubagentIDFailsOpen(t *testing.T) {
 		t.Fatalf("fallthrough must reach the LOTO_HANDLE path; got handle %q", a.Handle)
 	}
 }
+
+// TestEnsureSubagentIDRespectsCtxCancel asserts that a cancelled ctx during
+// subagent-id resolution propagates context.Canceled instead of falling
+// through to mint a new agent or write under the cancelled caller. Fail-open
+// is for resolution failures, not for ignoring cancellation.
+func TestEnsureSubagentIDRespectsCtxCancel(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+	t.Setenv("LOTO_AGENT_ID", "")
+	t.Setenv("LOTO_SUBAGENT_ID", "a3b8547117dfa76ef")
+
+	// Pre-claim the cache with a 0-byte file so ensureForSession can't
+	// loadSessionAgent, claims ErrExist, and enters awaitOrRecoverSession —
+	// the ctx-aware retry loop.
+	if err := os.MkdirAll(filepath.Join(dir, ".loto", "session"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(dir, ".loto", "session", "subagent-a3b8547117dfa76ef.json")
+	f, err := os.OpenFile(cachePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel
+
+	if _, err := Ensure(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+}

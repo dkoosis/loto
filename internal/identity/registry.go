@@ -122,6 +122,49 @@ func subagentCacheKey(agentID string) string {
 	return "subagent-" + agentID
 }
 
+// resolveSubagent resolves a stamped LOTO_SUBAGENT_ID to a stable per-sibling
+// identity. handled=true means Ensure must return (a, err) — either a
+// successful resolution or a propagated ctx cancellation; handled=false means
+// fall open to normal resolution.
+//
+// A /team subagent inherits the parent's LOTO_AGENT_ID, collapsing every
+// sibling onto one owner_uuid; loto then reads a sibling's lock as a
+// re-entrant TTL refresh and never serializes the collision (loto-fs84,
+// loto-wbkn). The PreToolUse hook stamps the per-subagent CC agent_id —
+// distinct per sibling, null at root — into LOTO_SUBAGENT_ID. That handle is
+// not canonical-uuid-shaped and owns no on-disk record, so it cannot ride the
+// strict LOTO_AGENT_ID path; mint+cache a stable identity keyed by it instead
+// (the same machinery sessions use), giving siblings distinct owners that the
+// existing conflict logic serializes.
+//
+// Fail-open by contract: the agent_id field is undocumented and may vanish on
+// a CC upgrade, and the stamp is only a backstop to dispatch write-set
+// partitioning — never load-bearing. An absent, malformed, or uncacheable id
+// falls open (handled=false) rather than erroring.
+func resolveSubagent(ctx context.Context) (*Agent, bool, error) {
+	sub := os.Getenv("LOTO_SUBAGENT_ID")
+	if sub == "" {
+		return nil, false, nil
+	}
+	key := subagentCacheKey(sub)
+	// Pre-validate so a traversal-shaped id fails open here instead of
+	// minting a candidate agent that claimSessionCache then orphans.
+	if _, err := sessionCachePath(key); err != nil {
+		return nil, false, nil //nolint:nilerr // traversal-shaped key fails open, not as an error
+	}
+	a, err := ensureForSession(ctx, key)
+	if err == nil {
+		return a, true, nil
+	}
+	// Fail-open is for resolution failures, NOT caller cancellation: if the
+	// ctx is done, propagate it rather than falling open to a path that may
+	// mint a new agent or write to disk under a cancelled caller.
+	if ctx.Err() != nil {
+		return nil, true, ctx.Err()
+	}
+	return nil, false, nil
+}
+
 // Ensure resolves the current agent identity by the contract documented in
 // the package doc. The governing principle: identity ambiguity is allowed
 // for display, never for authority — an explicit but unresolvable
@@ -137,30 +180,10 @@ func Ensure(ctx context.Context) (*Agent, error) {
 	// agents pinned by live locks were reaped before the runtime could
 	// register them as pinned. Leave GC scheduling to GCAgents.
 
-	// A /team subagent inherits the parent's LOTO_AGENT_ID, collapsing every
-	// sibling onto one owner_uuid; loto then reads a sibling's lock as a
-	// re-entrant TTL refresh and never serializes the collision (loto-fs84,
-	// loto-wbkn). The PreToolUse hook stamps the per-subagent CC agent_id —
-	// distinct per sibling, null at root — into LOTO_SUBAGENT_ID. That handle
-	// is not canonical-uuid-shaped and owns no on-disk record, so it cannot
-	// ride the strict LOTO_AGENT_ID path; mint+cache a stable identity keyed by
-	// it instead (the same machinery sessions use), giving siblings distinct
-	// owners that the existing conflict logic serializes. It is checked first
-	// so a subagent diverges from the inherited LOTO_AGENT_ID.
-	//
-	// Fail-open by contract: the agent_id field is undocumented and may vanish
-	// on a CC upgrade, and the stamp is only a backstop to dispatch write-set
-	// partitioning — never load-bearing. An absent, malformed, or uncacheable
-	// id falls through to the normal resolution path rather than erroring.
-	if sub := os.Getenv("LOTO_SUBAGENT_ID"); sub != "" {
-		key := subagentCacheKey(sub)
-		// Pre-validate so a traversal-shaped id fails open here instead of
-		// minting a candidate agent that claimSessionCache then orphans.
-		if _, err := sessionCachePath(key); err == nil {
-			if a, err := ensureForSession(ctx, key); err == nil {
-				return a, nil
-			}
-		}
+	// A stamped subagent id resolves first, so a /team sibling diverges from the
+	// LOTO_AGENT_ID it inherits from its parent (see resolveSubagent).
+	if a, handled, err := resolveSubagent(ctx); handled {
+		return a, err
 	}
 
 	u, set := os.LookupEnv("LOTO_AGENT_ID")

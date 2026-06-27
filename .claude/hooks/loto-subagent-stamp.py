@@ -38,21 +38,25 @@ import sys
 
 
 def main() -> int:
+    # The whole body is guarded: STAMP never denies an edit, so ANY failure —
+    # unparseable stdin, a non-dict payload/tool_input (.get would raise
+    # AttributeError), or a subprocess error — must fail open with exit 0.
     try:
         payload = json.load(sys.stdin)
-    except Exception:
-        return 0  # unparseable stdin → fail open
+        if not isinstance(payload, dict):
+            return 0
 
-    agent_id = payload.get("agent_id") or ""
-    tool_input = payload.get("tool_input") or {}
-    file_path = tool_input.get("file_path") or ""
+        agent_id = payload.get("agent_id") or ""
+        tool_input = payload.get("tool_input") or {}
+        if not isinstance(tool_input, dict):
+            return 0
+        file_path = tool_input.get("file_path") or ""
 
-    # Root session (agent_id null) or a non-file edit → nothing to stamp.
-    if not agent_id or not file_path:
-        return 0
+        # Root session (agent_id null) or a non-file edit → nothing to stamp.
+        if not agent_id or not file_path:
+            return 0
 
-    env = dict(os.environ, LOTO_SUBAGENT_ID=agent_id)
-    try:
+        env = dict(os.environ, LOTO_SUBAGENT_ID=agent_id)
         subprocess.run(
             ["loto", "lock", file_path, "-t", "subagent edit stamp"],
             env=env,
@@ -61,7 +65,7 @@ def main() -> int:
             timeout=10,
         )
     except Exception:
-        pass  # STAMP never denies an edit; any failure is swallowed.
+        pass  # any failure is swallowed — the stamp must never block an edit.
     return 0
 
 
