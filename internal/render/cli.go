@@ -133,7 +133,7 @@ func EmitTagFooter(w io.Writer, tags []store.Tag, holderUUID string) {
 	}
 	cwd := getCwd()
 	holders := &holderMemo{}
-	fmt.Fprintf(w, "ℹ tags count=%d holder=%s\n", len(tags), holders.tag(holderUUID))
+	fmt.Fprintf(w, "ℹ tags count=%d owner=%s\n", len(tags), holders.tag(holderUUID))
 	for _, t := range tags {
 		emitTagRow(w, t, "", cwd, holders)
 	}
@@ -244,7 +244,7 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 		case store.StateNoLock:
 			fmt.Fprintf(w, "ℹ target=%s state=no-lock\n", path)
 		case store.StateNotOwner:
-			fmt.Fprintf(w, "✗ target=%s state=not-owner holder=%s\n", path, r.Holder)
+			fmt.Fprintf(w, "✗ target=%s state=not-owner owner=%s\n", path, r.Holder)
 		case store.StateRestoreFailed:
 			writeRestoreFailed(w, "target", path, r.RestoreErr, r.AuditErr)
 		}
