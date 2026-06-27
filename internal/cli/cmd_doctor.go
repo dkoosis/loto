@@ -72,7 +72,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	live := rt.liveProbe()
 
 	repoTop, _ := repoTopForCwd(ctx)
-	report, err := rt.Store.DoctorAuditWith(rt.Ctx, rt.Host, live, store.SidecarCheck{
+	report, err := rt.Store.DoctorAudit(rt.Ctx, rt.Host, live, store.SidecarCheck{
 		SidecarDir: store.DefaultSidecarDir(),
 		RepoTop:    repoTop,
 	})

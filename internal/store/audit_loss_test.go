@@ -31,7 +31,7 @@ const opFchmod = "fchmod" // goconst: shared across fchmodFn stubs below
 func TestRestoreAndAuditReleases_AuditFailureSurfacesPerResult(t *testing.T) {
 	s := mustOpen(t)
 	var stderr bytes.Buffer
-	s.SetStderr(&stderr)
+	s.setStderr(&stderr)
 
 	// Build a fake StateUnlocked result for a path whose chmod restore will
 	// fail, then close the DB so the audit insert fails.
@@ -77,7 +77,7 @@ func TestRestoreAndAuditReleases_AuditFailureSurfacesPerResult(t *testing.T) {
 func TestRestoreAndAuditBreaks_AuditFailureSurfacesPerResult(t *testing.T) {
 	s := mustOpen(t)
 	var stderr bytes.Buffer
-	s.SetStderr(&stderr)
+	s.setStderr(&stderr)
 
 	dir := t.TempDir()
 	p := filepath.Join(dir, "y.go")
