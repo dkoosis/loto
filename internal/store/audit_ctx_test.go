@@ -90,7 +90,7 @@ func TestAcquireLocks_CommitFailureBreadcrumbLandsWithoutSelfContention(t *testi
 func TestDoctorRepair_RestoreAuditSurvivesCancelledCtx(t *testing.T) {
 	s := mustOpen(t)
 	var stderr bytes.Buffer
-	s.SetStderr(&stderr)
+	s.setStderr(&stderr)
 
 	dead := func(string, int, int64) bool { return false }
 	l := mkFileLock(t, "dr.go", tcAlice, time.Hour)

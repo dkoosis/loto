@@ -345,11 +345,11 @@ func schemaCurrent(ctx context.Context, db *sql.DB) bool {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// SetStderr overrides the writer used for diagnostic messages (audit-write
+// setStderr overrides the writer used for diagnostic messages (audit-write
 // failures, op-flock contention notices). Defaults to os.Stderr. Intended for
 // tests that need to observe these messages; production code should keep the
 // default.
-func (s *Store) SetStderr(w io.Writer) { s.stderr = w }
+func (s *Store) setStderr(w io.Writer) { s.stderr = w }
 
 // beginTx starts an immediate-mode tx on a dedicated pooled conn whose
 // busy_timeout PRAGMA is scaled to the caller's ctx deadline. Returned
