@@ -200,6 +200,7 @@ func loadLocksTx(ctx context.Context, tx *sql.Tx) ([]domain.LockRecord, error) {
 func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	var l domain.LockRecord
 	var canonical string
+	var owner string // sqlite text column → domain.AgentUUID at the store boundary
 	var createdNs, expiresNs int64
 	// proc_start is nullable: legacy rows (added via in-place ALTER) hold NULL.
 	// Map NULL → 0 (UNKNOWN) at the store boundary so domain logic never sees
@@ -209,9 +210,10 @@ func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	// keeps scan robust against any NULL legacy row; "" → EffectiveMode treats
 	// it as exclusive.
 	var mode sql.NullString
-	if err := r.Scan(&canonical, &l.OwnerUUID, &l.SessionUUID, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &mode); err != nil {
+	if err := r.Scan(&canonical, &owner, &l.SessionUUID, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &mode); err != nil {
 		return l, err
 	}
+	l.OwnerUUID = domain.AgentUUID(owner)
 	l.Target = domain.Target{Canonical: canonical}
 	l.CreatedAt = time.Unix(0, createdNs).UTC()
 	l.ExpiresAt = time.Unix(0, expiresNs).UTC()
@@ -229,13 +231,13 @@ func reclaimStaleTx(ctx context.Context, tx *sql.Tx, stale domain.LockRecord, by
 		Target:      stale.Target,
 		Kind:        EventLockReclaimedStale,
 		ActorUUID:   byAgent,
-		SubjectUUID: stale.OwnerUUID,
+		SubjectUUID: string(stale.OwnerUUID),
 		Reason:      "reclaimed stale lock",
 		CreatedAt:   now,
 	}); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ?`, stale.Target.Canonical, stale.OwnerUUID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ?`, stale.Target.Canonical, string(stale.OwnerUUID)); err != nil {
 		return err
 	}
 	return nil

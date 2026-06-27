@@ -146,7 +146,7 @@ func mkFileLock(t *testing.T, name, agent string, expIn time.Duration) domain.Lo
 	now := time.Now()
 	return domain.LockRecord{
 		Target:      domain.Target{Canonical: p},
-		OwnerUUID:   agent,
+		OwnerUUID:   domain.AgentUUID(agent),
 		SessionUUID: agent,
 		Intent:      tcTest,
 		CreatedAt:   now,
@@ -443,7 +443,7 @@ func TestAcquireLocks_MultiFile_AtomicSuccess(t *testing.T) {
 	mk := func(p, owner string) domain.LockRecord {
 		return domain.LockRecord{
 			Target:      domain.Target{Canonical: p},
-			OwnerUUID:   owner,
+			OwnerUUID:   domain.AgentUUID(owner),
 			SessionUUID: owner,
 			CreatedAt:   now,
 			ExpiresAt:   now.Add(time.Hour),
@@ -484,7 +484,7 @@ func TestAcquireLocks_MultiFile_ConflictAbortsNoChmod(t *testing.T) {
 	mk := func(p, owner string) domain.LockRecord {
 		return domain.LockRecord{
 			Target:      domain.Target{Canonical: p},
-			OwnerUUID:   owner,
+			OwnerUUID:   domain.AgentUUID(owner),
 			SessionUUID: owner,
 			CreatedAt:   now,
 			ExpiresAt:   now.Add(time.Hour),

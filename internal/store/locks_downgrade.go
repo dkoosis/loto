@@ -38,7 +38,8 @@ type DowngradeResult struct {
 // (loto-1jxc): a prior downgrade whose post-commit restore failed, or a crash
 // between commit and restore, leaves the file read-only on a shared row;
 // re-running downgrade heals it without a write tx.
-func (s *Store) DowngradeLocks(ctx context.Context, targets []domain.Target, owner string) ([]DowngradeResult, error) {
+func (s *Store) DowngradeLocks(ctx context.Context, targets []domain.Target, ownerID domain.AgentUUID) ([]DowngradeResult, error) {
+	owner := string(ownerID) // internal store helpers thread the owner as a plain string
 	if len(targets) == 0 {
 		return []DowngradeResult{}, nil
 	}
@@ -178,7 +179,7 @@ func restoreDowngrades(results []DowngradeResult, owner string, now time.Time) (
 // error-returning contract: ErrNoLockAtTarget when no lock is held, a
 // *ChmodFailureError when the row reached shared but the post-commit write-bit
 // restore failed (loto-k5el.2).
-func (s *Store) DowngradeLock(ctx context.Context, target domain.Target, owner string) error {
+func (s *Store) DowngradeLock(ctx context.Context, target domain.Target, owner domain.AgentUUID) error {
 	results, err := s.DowngradeLocks(ctx, []domain.Target{target}, owner)
 	if err != nil {
 		return err

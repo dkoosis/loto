@@ -24,7 +24,8 @@ const (
 // BreakLocks force/stale-reclaims a batch of locks in one transaction. Per-target
 // errors do not abort the batch — see BreakResult.Err. Returned error is non-nil
 // only on internal/SQL failures. Results are returned in input order.
-func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, byAgent string, mode BreakMode, reason string, thisHost string, live domain.PidLiveProbe) ([]BreakResult, error) {
+func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, agent domain.AgentUUID, mode BreakMode, reason string, thisHost string, live domain.PidLiveProbe) ([]BreakResult, error) {
+	byAgent := string(agent) // internal store helpers thread the owner as a plain string
 	if len(targets) == 0 {
 		return []BreakResult{}, nil
 	}
@@ -135,7 +136,7 @@ func classifyBreaks(
 		// invariant), so holders[0].Mode drives the restore decision.
 		results[i].Mode = holders[0].Mode
 		for j := range holders {
-			owner := holders[j].OwnerUUID
+			owner := string(holders[j].OwnerUUID) // map key + Event.SubjectUUID stay plain strings
 			events = append(events, domain.Event{
 				Target:      t,
 				Kind:        kind,

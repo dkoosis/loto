@@ -64,7 +64,7 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 func filterLocksByOwner(all []domain.LockRecord, ownerUUID string) []domain.LockRecord {
 	filtered := all[:0]
 	for i := range all {
-		if all[i].OwnerUUID == ownerUUID {
+		if string(all[i].OwnerUUID) == ownerUUID {
 			filtered = append(filtered, all[i])
 		}
 	}

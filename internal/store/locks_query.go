@@ -27,10 +27,10 @@ func (s *Store) ListLocks(ctx context.Context) ([]domain.LockRecord, error) {
 // if none. Replaces LockAt for the multi-holder world: under the composite PK
 // LockAt's bare WHERE target_canonical=? can match several rows (a shared
 // target with several holders) and returns an arbitrary one (loto-k5el.2).
-func (s *Store) LockForOwnerAt(ctx context.Context, t domain.Target, owner string) (*domain.LockRecord, error) {
+func (s *Store) LockForOwnerAt(ctx context.Context, t domain.Target, owner domain.AgentUUID) (*domain.LockRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+lockCols+` FROM locks WHERE target_canonical = ? AND owner_uuid = ?`,
-		t.Canonical, owner)
+		t.Canonical, string(owner))
 	if err != nil {
 		return nil, err
 	}

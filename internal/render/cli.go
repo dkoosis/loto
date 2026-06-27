@@ -115,7 +115,7 @@ func EmitConflictWithTags(w io.Writer, ce *store.MultiConflictError, tagsByTarge
 	for i := range blockers {
 		b := &blockers[i]
 		fmt.Fprintf(w, "⚠ target=%s blocker=%s intent=%q expires_at=%s\n",
-			relToCwd(b.Target.Canonical, cwd), holders.tag(b.OwnerUUID), b.Intent,
+			relToCwd(b.Target.Canonical, cwd), holders.tag(string(b.OwnerUUID)), b.Intent,
 			b.ExpiresAt.UTC().Format(time.RFC3339))
 		for _, t := range tagsByTarget[b.Target.Canonical] {
 			emitTagRow(w, t, "  ", cwd, holders)

@@ -67,7 +67,7 @@ func unlockTargets(rt *runtime, args []string, repoTop string, stdout, stderr io
 	if code != 0 {
 		return code
 	}
-	results, err := rt.Store.ReleaseLocks(rt.Ctx, targets, rt.Agent.UUID)
+	results, err := rt.Store.ReleaseLocks(rt.Ctx, targets, domain.AgentUUID(rt.Agent.UUID))
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
@@ -84,7 +84,7 @@ func breakTargets(rt *runtime, args []string, intent, repoTop string, stdout, st
 	if code != 0 {
 		return code
 	}
-	results, err := rt.Store.BreakLocks(rt.Ctx, targets, rt.Agent.UUID, store.BreakForce, intent, rt.Host, rt.liveProbe())
+	results, err := rt.Store.BreakLocks(rt.Ctx, targets, domain.AgentUUID(rt.Agent.UUID), store.BreakForce, intent, rt.Host, rt.liveProbe())
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
@@ -126,7 +126,7 @@ func unlockAll(rt *runtime, stdout, stderr io.Writer) int {
 	if rt.SessionPinned {
 		sessionFilter = rt.SessionUUID
 	}
-	results, err := rt.Store.ReleaseBySession(rt.Ctx, rt.Agent.UUID, sessionFilter)
+	results, err := rt.Store.ReleaseBySession(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), sessionFilter)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

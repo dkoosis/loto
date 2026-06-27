@@ -140,7 +140,7 @@ func scanOrphansAndHint(rt *runtime, repoTop string, f orphanFlags, stdout io.Wr
 }
 
 func doRepair(rt *runtime, live domain.PidLiveProbe, restoreOrphan bool, orphans []string, stdout, stderr io.Writer) int {
-	if err := rt.Store.DoctorRepair(rt.Ctx, rt.Host, rt.Agent.UUID, live); err != nil {
+	if err := rt.Store.DoctorRepair(rt.Ctx, rt.Host, domain.AgentUUID(rt.Agent.UUID), live); err != nil {
 		fmt.Fprintf(stderr, "✗ repair: %v\n", err)
 		return 3
 	}

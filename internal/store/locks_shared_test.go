@@ -18,7 +18,7 @@ func liveProbe(string, int, int64) bool { return true }
 // so two records contend on one file. Mode is set explicitly by the caller.
 func peerOn(base domain.LockRecord, owner, mode string) domain.LockRecord {
 	p := base
-	p.OwnerUUID, p.SessionUUID = owner, owner
+	p.OwnerUUID, p.SessionUUID = domain.AgentUUID(owner), owner
 	p.Mode = mode
 	return p
 }
@@ -92,7 +92,7 @@ func TestLockForOwnerAt_MultiHolderUnambiguous(t *testing.T) {
 	holders := map[string]bool{}
 	for _, r := range rows {
 		if r.Target.Canonical == a.Target.Canonical {
-			holders[r.OwnerUUID] = true
+			holders[string(r.OwnerUUID)] = true
 		}
 	}
 	if !holders[tcAlice] || !holders[tcBob] {

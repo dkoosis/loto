@@ -122,7 +122,7 @@ func (r *runtime) Close() error { return r.Store.Close() }
 // Tags whose host lock disappeared mid-command (release, break) are filtered by
 // the JOIN inside ListAliveForHolder.
 func (r *runtime) DeferredTagFooter(w io.Writer) {
-	tags, err := r.Store.ListAliveForHolder(r.Ctx, r.Agent.UUID)
+	tags, err := r.Store.ListAliveForHolder(r.Ctx, domain.AgentUUID(r.Agent.UUID))
 	if err != nil || len(tags) == 0 {
 		return
 	}
@@ -182,7 +182,10 @@ func lockOwnerUUIDs(ctx context.Context, s *store.Store) map[string]struct{} {
 	out := make(map[string]struct{}, len(locks))
 	for i := range locks {
 		if locks[i].OwnerUUID != "" {
-			out[locks[i].OwnerUUID] = struct{}{}
+			// GCAgents takes a plain map[string]struct{}: the identity package
+			// is pinned to internal/identity → ∅ and cannot reference
+			// domain.AgentUUID, so the owner crosses back to a string here.
+			out[string(locks[i].OwnerUUID)] = struct{}{}
 		}
 	}
 	return out

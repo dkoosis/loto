@@ -140,7 +140,7 @@ func mkFileLockSession(t *testing.T, name, agent, session string, expIn time.Dur
 	now := time.Now()
 	return domain.LockRecord{
 		Target:      domain.Target{Canonical: p},
-		OwnerUUID:   agent,
+		OwnerUUID:   domain.AgentUUID(agent),
 		SessionUUID: session,
 		Intent:      tcTest,
 		CreatedAt:   now,

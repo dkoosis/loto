@@ -49,7 +49,7 @@ func TestConcurrentOverlappingAcquire(t *testing.T) {
 			start.Wait()
 			rec := domain.LockRecord{
 				Target:      tgt,
-				OwnerUUID:   makeUUID(i),
+				OwnerUUID:   domain.AgentUUID(makeUUID(i)),
 				SessionUUID: makeUUID(i),
 				Intent:      "race",
 				CreatedAt:   now,

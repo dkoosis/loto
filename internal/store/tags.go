@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"time"
+
+	"loto/internal/domain"
 )
 
 // Tag is the persisted form of a `loto tag` annotation. Lifetime is parasitic
@@ -113,7 +115,8 @@ func (s *Store) InsertTag(ctx context.Context, t NewTag) (string, error) {
 // ownerUUID and whose tagger is someone else (no self-echo). Deterministic
 // order: created_at ASC, id ASC. Orphaned tags (host lock deleted) are filtered
 // by the JOIN.
-func (s *Store) ListAliveForHolder(ctx context.Context, ownerUUID string) ([]Tag, error) {
+func (s *Store) ListAliveForHolder(ctx context.Context, ownerUUID domain.AgentUUID) ([]Tag, error) {
+	owner := string(ownerUUID) // sqlite query arg crosses the untyped edge
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT t.id, t.target_canonical, t.lock_owner_uuid, t.lock_created_at,
 		       t.tagger_uuid, t.text, t.created_at, t.acked_at
@@ -125,7 +128,7 @@ func (s *Store) ListAliveForHolder(ctx context.Context, ownerUUID string) ([]Tag
 		WHERE l.owner_uuid = ?
 		  AND t.tagger_uuid <> ?
 		  AND t.acked_at IS NULL
-		ORDER BY t.created_at ASC, t.id ASC`, ownerUUID, ownerUUID)
+		ORDER BY t.created_at ASC, t.id ASC`, owner, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +216,8 @@ var ackClassifyHook = func() {}
 // Ack marks one tag acked by byUUID. Idempotent: already-acked, orphaned, or
 // unknown IDs return nil (no-op). Returns ErrTagNotMine when the tag exists
 // but is addressed to a different holder.
-func (s *Store) Ack(ctx context.Context, tagID, byUUID string) error {
+func (s *Store) Ack(ctx context.Context, tagID string, byUUID domain.AgentUUID) error {
+	by := string(byUUID) // sqlite query arg + owner comparison cross the untyped edge
 	// The UPDATE and its 0-row classifying SELECT run in one immediate-mode tx
 	// so the SELECT reads the same snapshot the UPDATE matched against. A
 	// concurrent ReleaseLocks/gc (ackTagsForReleaseTx, gcTagsTx) takes the
@@ -230,7 +234,7 @@ func (s *Store) Ack(ctx context.Context, tagID, byUUID string) error {
 	res, err := tx.ExecContext(ctx, `
 		UPDATE tags SET acked_at = ?
 		WHERE id = ? AND lock_owner_uuid = ? AND acked_at IS NULL`,
-		now, tagID, byUUID)
+		now, tagID, by)
 	if err != nil {
 		return err
 	}
@@ -255,7 +259,7 @@ func (s *Store) Ack(ctx context.Context, tagID, byUUID string) error {
 	if err != nil {
 		return err
 	}
-	if owner.String != byUUID {
+	if owner.String != by {
 		return ErrTagNotMine
 	}
 	return nil // already acked (edge #10)
