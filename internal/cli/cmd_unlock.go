@@ -122,7 +122,7 @@ func unlockAll(rt *runtime, stdout, stderr io.Writer) int {
 	// ReleaseBySession is atomic: one SQL query finds+deletes matching rows
 	// in a single tx, closing the TOCTOU gap where the old list+filter+release
 	// dance could miss locks created between ListLocks and ReleaseLocks.
-	sessionFilter := ""
+	var sessionFilter domain.SessionUUID
 	if rt.SessionPinned {
 		sessionFilter = rt.SessionUUID
 	}

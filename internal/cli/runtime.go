@@ -39,9 +39,9 @@ type runtime struct {
 	Ctx           context.Context //nolint:containedctx // handle on the per-invocation ctx; threading it through every store/identity call from cmd_*.go would be uniform noise without changing semantics
 	Host          string
 	StateDir      string
-	SessionUUID   string // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID
-	SessionPinned bool   // true iff LOTO_SESSION_ID was in env; gates session-scoped semantics
-	AgentPinned   bool   // true iff LOTO_AGENT_ID, a non-empty LOTO_SUBAGENT_ID, or CLAUDE_CODE_SESSION_ID was in env; false → Ensure minted a throwaway UUID
+	SessionUUID   domain.SessionUUID // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID
+	SessionPinned bool               // true iff LOTO_SESSION_ID was in env; gates session-scoped semantics
+	AgentPinned   bool               // true iff LOTO_AGENT_ID, a non-empty LOTO_SUBAGENT_ID, or CLAUDE_CODE_SESSION_ID was in env; false → Ensure minted a throwaway UUID
 }
 
 // sessionUUID resolves the per-session id. The SessionStart hook exports
@@ -102,7 +102,7 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 		Ctx:           ctx,
 		Host:          host,
 		StateDir:      dir,
-		SessionUUID:   sid,
+		SessionUUID:   domain.SessionUUID(sid),
 		SessionPinned: pinned,
 		AgentPinned:   agentPinned,
 	}, nil

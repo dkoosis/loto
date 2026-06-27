@@ -18,7 +18,7 @@ func liveProbe(string, int, int64) bool { return true }
 // so two records contend on one file. Mode is set explicitly by the caller.
 func peerOn(base domain.LockRecord, owner, mode string) domain.LockRecord {
 	p := base
-	p.OwnerUUID, p.SessionUUID = domain.AgentUUID(owner), owner
+	p.OwnerUUID, p.SessionUUID = domain.AgentUUID(owner), domain.SessionUUID(owner)
 	p.Mode = mode
 	return p
 }

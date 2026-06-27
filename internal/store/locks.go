@@ -200,7 +200,8 @@ func loadLocksTx(ctx context.Context, tx *sql.Tx) ([]domain.LockRecord, error) {
 func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	var l domain.LockRecord
 	var canonical string
-	var owner string // sqlite text column → domain.AgentUUID at the store boundary
+	var owner string   // sqlite text column → domain.AgentUUID at the store boundary
+	var session string // sqlite text column → domain.SessionUUID at the store boundary
 	var createdNs, expiresNs int64
 	// proc_start is nullable: legacy rows (added via in-place ALTER) hold NULL.
 	// Map NULL → 0 (UNKNOWN) at the store boundary so domain logic never sees
@@ -210,10 +211,11 @@ func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	// keeps scan robust against any NULL legacy row; "" → EffectiveMode treats
 	// it as exclusive.
 	var mode sql.NullString
-	if err := r.Scan(&canonical, &owner, &l.SessionUUID, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &mode); err != nil {
+	if err := r.Scan(&canonical, &owner, &session, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &mode); err != nil {
 		return l, err
 	}
 	l.OwnerUUID = domain.AgentUUID(owner)
+	l.SessionUUID = domain.SessionUUID(session)
 	l.Target = domain.Target{Canonical: canonical}
 	l.CreatedAt = time.Unix(0, createdNs).UTC()
 	l.ExpiresAt = time.Unix(0, expiresNs).UTC()
