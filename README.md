@@ -131,6 +131,34 @@ The project slug is derived from `git remote get-url origin` (normalized).
 Each Claude session gets a persistent handle stored at
 `~/.loto/agents/<uuid>.json`. Set `LOTO_AGENT_ID` to re-attach.
 
+## what "lock-out / tag-out" means
+
+loto is named for the OSHA-grade safety practice, and the name carries a
+contract. Physical LOTO has four invariants:
+
+1. **The lock belongs to a worker** — the individual whose hand is in the
+   machine. Not the crew, not the shift. A person.
+2. **The hasp model.** Every worker who is exposed applies their *own* lock to
+   the same isolation point; the machine can't re-energize until the last one
+   comes off.
+3. **Only the worker who applied a lock may remove it** — the key stays in
+   their pocket. No one clears your lock for you.
+4. **A lock means stop, enforced physically.** You cannot energize the breaker
+   with a padlock through it. The lock isn't a note asking for cooperation.
+
+These are the bar the software is measured against — and where loto diverges
+from them is exactly where it can bite:
+
+| Physical invariant | loto today |
+|---|---|
+| Lock belongs to a *worker* | identity is per-**session** (invariant 5 below); subagents of one session collapse to one "worker" |
+| Hasp — each exposed worker locks | one owner per session, no hasp; same owner re-locks its own path without conflict |
+| Only the applier removes it | honored per-owner — but `unlock --all` under a shared session sweeps siblings' locks |
+| Lock means stop, physically | chmod-strip approximates it; advisory at root, and CC hooks fire on Bash only (agent_shell edits bypass the gate) |
+
+The gap between the metaphor and the code is the standing design backlog, not
+an accident of naming.
+
 ## design invariants
 
 1. **flock + filesystem are truth, with one bounded exception.** Never
