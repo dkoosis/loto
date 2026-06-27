@@ -41,7 +41,7 @@ type runtime struct {
 	StateDir      string
 	SessionUUID   string // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID
 	SessionPinned bool   // true iff LOTO_SESSION_ID was in env; gates session-scoped semantics
-	AgentPinned   bool   // true iff LOTO_AGENT_ID or CLAUDE_CODE_SESSION_ID was in env; false → Ensure minted a throwaway UUID
+	AgentPinned   bool   // true iff LOTO_AGENT_ID, a non-empty LOTO_SUBAGENT_ID, or CLAUDE_CODE_SESSION_ID was in env; false → Ensure minted a throwaway UUID
 }
 
 // sessionUUID resolves the per-session id. The SessionStart hook exports
@@ -65,7 +65,11 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 	// produces a false-success that silently leaves real locks in place
 	// (loto-pody). AgentPinned mirrors the SessionPinned pattern for sessions.
 	_, agentIDSet := os.LookupEnv("LOTO_AGENT_ID")
-	agentPinned := agentIDSet || os.Getenv("CLAUDE_CODE_SESSION_ID") != ""
+	// LOTO_SUBAGENT_ID must be NON-EMPTY to pin: identity.Ensure ignores an empty
+	// value and falls through to minting a throwaway agent, so treating an empty
+	// "set" var as pinned would mis-scope an --all release (loto-pody).
+	subagentPinned := os.Getenv("LOTO_SUBAGENT_ID") != ""
+	agentPinned := agentIDSet || subagentPinned || os.Getenv("CLAUDE_CODE_SESSION_ID") != ""
 
 	a, err := identity.Ensure(ctx)
 	if err != nil {
