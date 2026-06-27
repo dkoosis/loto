@@ -162,3 +162,66 @@ func TestDowngrade_AlreadyShared_NoWriteTx(t *testing.T) {
 		t.Fatalf("already-shared downgrade must not open a write tx, got %v", err)
 	}
 }
+
+// TestDowngradeLocks_Batch_MixedTargets exercises the batched path (loto-r2wc):
+// one exclusive, one already-shared (with a stale-stripped bit), and one
+// no-lock target in a single call. Results come back in input order; the
+// exclusive flips and restores, the shared reconciles its bit, the no-lock
+// target reports ErrNoLockAtTarget — none aborting the others.
+func TestDowngradeLocks_Batch_MixedTargets(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	excl := mkFileLock(t, "excl.go", tcAlice, time.Hour)
+	excl.Mode = domain.ModeExclusive
+	shared := mkFileLock(t, "shared.go", tcAlice, time.Hour)
+	shared.Mode = domain.ModeShared
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{excl, shared}, liveProbe); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	nolock := mkFileLock(t, "nolock.go", tcAlice, time.Hour) // file exists, no lock held
+
+	// Stale-stripped bit on the already-shared target (loto-1jxc): row shared,
+	// file read-only — the reconcile must heal it.
+	if err := os.Chmod(shared.Target.Canonical, 0o400); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	targets := []domain.Target{excl.Target, shared.Target, nolock.Target}
+	results, err := s.DowngradeLocks(ctx, targets, tcAlice)
+	if err != nil {
+		t.Fatalf("DowngradeLocks: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("want 3 results, got %d", len(results))
+	}
+	for i, want := range targets {
+		if results[i].Target.Canonical != want.Canonical {
+			t.Errorf("result[%d] target=%s want %s", i, results[i].Target.Canonical, want.Canonical)
+		}
+	}
+
+	// [0] exclusive → shared, write bit restored.
+	if results[0].Err != nil || results[0].RestoreErr != nil {
+		t.Errorf("excl: unexpected err=%v restoreErr=%v", results[0].Err, results[0].RestoreErr)
+	}
+	if l, _ := s.LockForOwnerAt(ctx, excl.Target, tcAlice); l == nil || l.EffectiveMode() != domain.ModeShared {
+		t.Errorf("excl not shared after downgrade: %v", l)
+	}
+	if fi, _ := os.Stat(excl.Target.Canonical); fi.Mode().Perm()&0o200 == 0 {
+		t.Errorf("excl write bit not restored; perm=%v", fi.Mode().Perm())
+	}
+
+	// [1] already-shared → stays shared, stale-stripped bit reconciled.
+	if results[1].Err != nil || results[1].RestoreErr != nil {
+		t.Errorf("shared: unexpected err=%v restoreErr=%v", results[1].Err, results[1].RestoreErr)
+	}
+	if fi, _ := os.Stat(shared.Target.Canonical); fi.Mode().Perm()&0o200 == 0 {
+		t.Errorf("shared write bit not reconciled; perm=%v", fi.Mode().Perm())
+	}
+
+	// [2] no lock held → ErrNoLockAtTarget.
+	if !errors.Is(results[2].Err, ErrNoLockAtTarget) {
+		t.Errorf("nolock: want ErrNoLockAtTarget, got %v", results[2].Err)
+	}
+}

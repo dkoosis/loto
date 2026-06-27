@@ -44,24 +44,30 @@ func cmdDowngrade(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	}
 	defer rt.Close()
 
+	// Batch all targets through one op-flock + one write tx (loto-r2wc): a
+	// multi-target downgrade no longer pays N op-flock acquire/release cycles
+	// and N fsyncs serialized against every live peer process.
+	results, err := rt.Store.DowngradeLocks(rt.Ctx, targets, rt.Agent.UUID)
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return 3
+	}
 	exit := 0
-	for _, t := range targets {
-		switch err := rt.Store.DowngradeLock(rt.Ctx, t, rt.Agent.UUID); {
-		case err == nil:
-			fmt.Fprintf(stdout, "✓ downgraded target=%s mode=shared\n", relPath(t.Canonical))
-		case errors.Is(err, store.ErrNoLockAtTarget):
-			fmt.Fprintf(stdout, "✗ target=%s reason=no-lock-held\n", relPath(t.Canonical))
+	for i := range results {
+		r := &results[i]
+		switch {
+		case r.Err == nil && r.RestoreErr == nil:
+			fmt.Fprintf(stdout, "✓ downgraded target=%s mode=shared\n", relPath(r.Target.Canonical))
+		case errors.Is(r.Err, store.ErrNoLockAtTarget):
+			fmt.Fprintf(stdout, "✗ target=%s reason=no-lock-held\n", relPath(r.Target.Canonical))
 			exit = 1
+		case r.RestoreErr != nil:
+			// Mode flipped to shared in the DB, but the write-bit restore
+			// failed — surface as ✗ (closed glyph vocabulary, design.md).
+			fmt.Fprintf(stdout, "✗ target=%s mode=shared reason=write-bit-restore-failed\n", relPath(r.Target.Canonical))
+			exit = 3
 		default:
-			var cfe *store.ChmodFailureError
-			if errors.As(err, &cfe) {
-				// Mode flipped to shared in the DB, but the write-bit restore
-				// failed — surface as ✗ (closed glyph vocabulary, design.md).
-				fmt.Fprintf(stdout, "✗ target=%s mode=shared reason=write-bit-restore-failed\n", relPath(t.Canonical))
-				exit = 3
-				continue
-			}
-			fmt.Fprintf(stderr, "✗ %v\n", err)
+			fmt.Fprintf(stderr, "✗ %v\n", r.Err)
 			exit = 3
 		}
 	}
