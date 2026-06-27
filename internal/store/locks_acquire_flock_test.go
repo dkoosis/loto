@@ -67,13 +67,15 @@ func TestAcquireLocks_HoldsFlockAcrossRestore(t *testing.T) {
 	peerRec.SessionUUID = peer
 	peerRec.ExpiresAt = time.Now().Add(time.Hour)
 
-	// Slow the restore (owner-write add) so the torn-view window is wide enough
-	// to be deterministic: if the flock is released before restore (the bug), the
-	// already-waiting peer wins the flock and strips while this sleep is still in
-	// flight, then the lagging restore re-adds owner-write → target ends WRITABLE.
-	// With the flock correctly held across restore, the peer can't even start
-	// until restore finishes, so the sleep is harmless. The delay only fires for
-	// the add-write chmod on our target (perm has 0o200 set).
+	// Slow the restore (owner-write add) to bias the BUG's race the way that
+	// surfaces it: in buggy code (flock released before restore) the already-
+	// parked peer wins the flock and strips while this delay is in flight, then
+	// the lagging restore re-adds owner-write → target ends WRITABLE. This is a
+	// deliberate window-widener for bug detection, not a readiness primitive
+	// (the readiness wait below is now a deterministic handoff, loto-b20a). With
+	// the flock correctly held across restore, the peer can't proceed until
+	// restore finishes, so the delay is harmless. Fires only for the add-write
+	// chmod on our target (perm has 0o200 set).
 	origChmod := fchmodFn
 	defer func() { fchmodFn = origChmod }()
 	fchmodFn = func(f *os.File, mode os.FileMode) error {
@@ -82,6 +84,17 @@ func TestAcquireLocks_HoldsFlockAcrossRestore(t *testing.T) {
 		}
 		return origChmod(f, mode)
 	}
+
+	// peerBlocked closes the instant the peer's acquireOpFlock first observes the
+	// flock held (EWOULDBLOCK) — i.e. the peer is provably parked on the flock we
+	// still hold. Replaces a 50ms readiness sleep that, if too short on a loaded
+	// runner, let alice release-and-restore before the peer ever contended,
+	// silently false-passing the very torn-view race under test (loto-b20a/v8ch).
+	peerBlocked := make(chan struct{})
+	var blockOnce sync.Once
+	origContended := flockContendedFn
+	defer func() { flockContendedFn = origContended }()
+	flockContendedFn = func() { blockOnce.Do(func() { close(peerBlocked) }) }
 
 	var wg sync.WaitGroup
 	var peerErr error
@@ -100,10 +113,11 @@ func TestAcquireLocks_HoldsFlockAcrossRestore(t *testing.T) {
 			wg.Go(func() {
 				_, peerErr = s.AcquireLocks(ctx, []domain.LockRecord{peerRec}, live)
 			})
-			// Give the peer goroutine a beat to reach acquireOpFlock and block on
-			// the flock we still hold. If the flock were released before restore,
-			// the peer would slip in and strip here, racing alice's restore.
-			time.Sleep(50 * time.Millisecond)
+			// Wait until the peer is provably parked on the flock we still hold —
+			// deterministic handoff, no timing guess. alice cannot release/restore
+			// until the peer has contended, so the peer is positioned to win the
+			// flock the moment (correct: never; buggy: at the early release).
+			<-peerBlocked
 		}
 		return err
 	}
