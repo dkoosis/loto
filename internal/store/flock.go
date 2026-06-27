@@ -18,6 +18,14 @@ import (
 // op-flock within LOTO_FLOCK_TIMEOUT (default 30s).
 var ErrFlockTimeout = errors.New("loto: op-flock acquire timed out")
 
+// flockContendedFn, when non-nil, is invoked each time acquireOpFlock observes
+// the op-flock already held (EWOULDBLOCK) and is about to back off. Nil in
+// production (one cheap nil-check per contended poll). A test-only seam — same
+// shape as fchmodFn/commitTxFn — letting a test block until "the peer is parked
+// on the flock" deterministically instead of guessing with a readiness sleep
+// (loto-b20a). See TestAcquireLocks_HoldsFlockAcrossRestore.
+var flockContendedFn func()
+
 const (
 	flockPollInitial  = 25 * time.Millisecond
 	flockPollMax      = 250 * time.Millisecond
@@ -76,6 +84,12 @@ func acquireOpFlock(ctx context.Context, path string, stderrW io.Writer) (*opFlo
 		if time.Now().After(deadline) {
 			f.Close()
 			return nil, ErrFlockTimeout
+		}
+		// Contended (flock held by someone else); we're about to back off. The
+		// test seam fires here so a peer-blocked-on-flock state is observable
+		// without a timing guess (loto-b20a).
+		if flockContendedFn != nil {
+			flockContendedFn()
 		}
 		select {
 		case <-ctx.Done():
