@@ -116,8 +116,14 @@ func TestAcquireLocks_HoldsFlockAcrossRestore(t *testing.T) {
 			// Wait until the peer is provably parked on the flock we still hold —
 			// deterministic handoff, no timing guess. alice cannot release/restore
 			// until the peer has contended, so the peer is positioned to win the
-			// flock the moment (correct: never; buggy: at the early release).
-			<-peerBlocked
+			// flock the moment (correct: never; buggy: at the early release). The
+			// timeout fails fast instead of hanging the suite to the go-test
+			// deadline if a regression stops the peer from ever blocking.
+			select {
+			case <-peerBlocked:
+			case <-time.After(5 * time.Second):
+				t.Fatal("peer never blocked on the op-flock — deterministic handoff broke")
+			}
 		}
 		return err
 	}

@@ -27,7 +27,9 @@ type DowngradeResult struct {
 // DowngradeResult.Err); the returned error is non-nil only on internal/SQL
 // failures. Mirrors BreakLocks/ReleaseLocks: one op-flock, one tx, post-commit
 // chmod restore under the still-held flock (loto-4qt), detached audit off the
-// critical section (loto-3qev).
+// critical section (loto-3qev). Callers pass distinct targets — the CLI dedups
+// via validateLockTargets (cmd_lock.go) — so, like the sibling batch methods,
+// this does not guard against duplicate input.
 //
 // Fast path (loto-kw5k): every target's mode is probed with a plain read BEFORE
 // any write tx. When no target needs a mode flip (all already shared, or no lock
