@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 
+	"loto/internal/domain"
 	"loto/internal/store"
 )
 
@@ -31,7 +32,7 @@ func cmdAck(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	defer rt.Close()
 
-	if err := rt.Store.Ack(rt.Ctx, tagID, rt.Agent.UUID); err != nil {
+	if err := rt.Store.Ack(rt.Ctx, tagID, domain.AgentUUID(rt.Agent.UUID)); err != nil {
 		if errors.Is(err, store.ErrTagNotMine) {
 			fmt.Fprintln(stderr, "✗ not addressed to you")
 			return 3

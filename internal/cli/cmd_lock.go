@@ -198,7 +198,7 @@ func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now t
 	for _, t := range targets {
 		recs = append(recs, domain.LockRecord{
 			Target:      t,
-			OwnerUUID:   rt.Agent.UUID,
+			OwnerUUID:   domain.AgentUUID(rt.Agent.UUID),
 			SessionUUID: rt.SessionUUID,
 			Intent:      intent,
 			CreatedAt:   now,

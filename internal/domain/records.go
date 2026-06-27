@@ -2,9 +2,20 @@ package domain
 
 import "time"
 
+// AgentUUID is the stable per-agent identity that owns locks and tags. It is a
+// distinct named type (not a bare string) so that transposing it with an
+// adjacent untyped string argument — e.g. a session UUID, a target path, an
+// intent — is a compile error rather than a silent runtime bug (loto-inf4,
+// stage 1 of loto-34n3). Values cross untyped edges (env vars, CLI flags,
+// sqlite columns) via explicit AgentUUID(s)/string(x) conversions. The
+// identity package cannot reference this type — the arch layering pins
+// internal/identity → ∅ — so an identity-sourced UUID is converted to
+// AgentUUID at the cli boundary.
+type AgentUUID string
+
 type LockRecord struct {
 	Target      Target
-	OwnerUUID   string
+	OwnerUUID   AgentUUID
 	SessionUUID string
 	Intent      string
 	CreatedAt   time.Time

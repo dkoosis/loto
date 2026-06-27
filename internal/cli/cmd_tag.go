@@ -96,7 +96,7 @@ func runTag(rt *runtime, canonical, text string, stdout, stderr io.Writer) int {
 	for i := range holders {
 		id, err := rt.Store.InsertTag(rt.Ctx, store.NewTag{
 			TargetCanonical: canonical,
-			LockOwnerUUID:   holders[i].OwnerUUID,
+			LockOwnerUUID:   string(holders[i].OwnerUUID),
 			LockCreatedAt:   holders[i].CreatedAt.UnixNano(),
 			TaggerUUID:      rt.Agent.UUID,
 			Text:            text,

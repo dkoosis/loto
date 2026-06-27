@@ -14,7 +14,8 @@ import (
 // sort for stable output. The returned error is non-nil only on internal/SQL
 // failures; per-target outcomes (no-lock, not-owner, restore-failed) are
 // reported via ReleaseResult.State.
-func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, byAgent string) ([]ReleaseResult, error) {
+func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, agent domain.AgentUUID) ([]ReleaseResult, error) {
+	byAgent := string(agent) // internal store helpers thread the owner as a plain string
 	if len(targets) == 0 {
 		return []ReleaseResult{}, nil
 	}
@@ -235,7 +236,8 @@ func deleteOwnedTx(ctx context.Context, tx *sql.Tx, canonicals []string, byAgent
 // list+filter+release dance in unlockAll: a single SQL query finds matching
 // rows and deletes them in one transaction, closing the TOCTOU gap where the
 // old path could miss locks created between ListLocks and ReleaseLocks.
-func (s *Store) ReleaseBySession(ctx context.Context, byAgent, sessionUUID string) ([]ReleaseResult, error) {
+func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, sessionUUID string) ([]ReleaseResult, error) {
+	byAgent := string(agent) // internal store helpers thread the owner as a plain string
 	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
 	if err != nil {
 		return nil, err

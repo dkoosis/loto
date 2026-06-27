@@ -124,7 +124,8 @@ func checkSidecar(l domain.LockRecord, sc SidecarCheck) (SidecarFinding, bool) {
 	return SidecarFinding{}, false
 }
 
-func (s *Store) DoctorRepair(ctx context.Context, thisHost, byAgent string, live domain.PidLiveProbe) error {
+func (s *Store) DoctorRepair(ctx context.Context, thisHost string, agent domain.AgentUUID, live domain.PidLiveProbe) error {
+	byAgent := string(agent) // internal store helpers thread the owner as a plain string
 	// Hold the op-flock across the tx AND the post-commit chmod restores
 	// so concurrent AcquireLocks can't race the filesystem half of the
 	// reclaim (loto-4qt).

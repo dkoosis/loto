@@ -8,7 +8,7 @@ import (
 func mk(owner, mode string) LockRecord {
 	return LockRecord{
 		Target:    Target{Canonical: "/a.go"},
-		OwnerUUID: owner,
+		OwnerUUID: AgentUUID(owner),
 		Mode:      mode,
 		ExpiresAt: time.Now().Add(time.Hour), // not stale
 		PID:       0,                         // PID<=0 → never instant-stale

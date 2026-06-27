@@ -145,13 +145,13 @@ func appendCheckConflictsForTarget(rows []checkConflict, seen map[string]bool, t
 	// conflicts, which is the intended check semantics (loto-k5el.2 T8). A stale
 	// holder is filtered inside Conflicts (AcquireLocks would reclaim it; the
 	// gate must not demand `unlock --force` for a reclaimable lock, loto-9t0q).
-	probe := domain.LockRecord{Target: t, OwnerUUID: myUUID, Mode: domain.ModeShared}
+	probe := domain.LockRecord{Target: t, OwnerUUID: domain.AgentUUID(myUUID), Mode: domain.ModeShared}
 	for i := range all {
 		l := &all[i]
 		if !ec.Conflicts(probe, *l) {
 			continue
 		}
-		key := t.Canonical + "|" + l.Target.Canonical + "|" + l.OwnerUUID
+		key := t.Canonical + "|" + l.Target.Canonical + "|" + string(l.OwnerUUID)
 		if seen[key] {
 			continue
 		}

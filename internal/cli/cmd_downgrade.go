@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 
+	"loto/internal/domain"
 	"loto/internal/render"
 	"loto/internal/store"
 )
@@ -47,7 +48,7 @@ func cmdDowngrade(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	// Batch all targets through one op-flock + one write tx (loto-r2wc): a
 	// multi-target downgrade no longer pays N op-flock acquire/release cycles
 	// and N fsyncs serialized against every live peer process.
-	results, err := rt.Store.DowngradeLocks(rt.Ctx, targets, rt.Agent.UUID)
+	results, err := rt.Store.DowngradeLocks(rt.Ctx, targets, domain.AgentUUID(rt.Agent.UUID))
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

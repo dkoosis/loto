@@ -92,17 +92,17 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 	// (loto-rmyg). cleanup() is idempotent, so the deferred call is harmless.
 	if err := s.insertAllLocks(ctx, tx, sorted, now); err != nil {
 		cleanup()
-		s.restoreAllAndAudit(ctx, stripped, sorted[0].OwnerUUID, now)
+		s.restoreAllAndAudit(ctx, stripped, string(sorted[0].OwnerUUID), now)
 		return nil, err
 	}
 	if err := rotateEventsTx(ctx, tx, now); err != nil {
 		cleanup()
-		s.restoreAllAndAudit(ctx, stripped, sorted[0].OwnerUUID, now)
+		s.restoreAllAndAudit(ctx, stripped, string(sorted[0].OwnerUUID), now)
 		return nil, err
 	}
 	if err := commitTxFn(tx); err != nil {
 		cleanup()
-		s.restoreAllAndAudit(ctx, stripped, sorted[0].OwnerUUID, now)
+		s.restoreAllAndAudit(ctx, stripped, string(sorted[0].OwnerUUID), now)
 		return nil, err
 	}
 
@@ -131,7 +131,7 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 	// Failure paths above roll the tx back, which reinstates the reclaimed stale
 	// rows — so the file correctly stays stripped there. Only after a successful
 	// commit are the stale rows truly gone and the restore due.
-	s.restoreThenReleaseFlock(flock, append(reclaimed, downgraded...), stripped, sorted[0].OwnerUUID, now)
+	s.restoreThenReleaseFlock(flock, append(reclaimed, downgraded...), stripped, string(sorted[0].OwnerUUID), now)
 	return sorted, nil
 }
 
@@ -259,7 +259,7 @@ func (s *Store) stripAndHandleFailure(tx *sql.Tx, sorted []domain.LockRecord, no
 	// path which logs to s.stderr so the loss is observable.
 	evs := make([]domain.Event, 0, len(restoreErrs))
 	for _, re := range restoreErrs {
-		evs = append(evs, modeRestoreFailedEvent(re.path, sorted[0].OwnerUUID, now, re.err))
+		evs = append(evs, modeRestoreFailedEvent(re.path, string(sorted[0].OwnerUUID), now, re.err))
 	}
 	auditCtx, cancel := context.WithTimeout(context.Background(), auditDetachedTimeout)
 	defer cancel()
@@ -287,7 +287,7 @@ func (s *Store) insertAllLocks(ctx context.Context, tx *sql.Tx, sorted []domain.
 		evs[i] = domain.Event{
 			Target:    sorted[i].Target,
 			Kind:      EventLockAcquired,
-			ActorUUID: sorted[i].OwnerUUID,
+			ActorUUID: string(sorted[i].OwnerUUID),
 			Reason:    sorted[i].Intent,
 			CreatedAt: now,
 		}
@@ -338,7 +338,7 @@ func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord
 			return nil, nil, err
 		}
 		for j := range bs {
-			key := bs[j].OwnerUUID + "|" + bs[j].Target.Canonical
+			key := string(bs[j].OwnerUUID) + "|" + bs[j].Target.Canonical
 			if !seen[key] {
 				seen[key] = true
 				blockers = append(blockers, bs[j])
@@ -411,7 +411,7 @@ func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domai
 			continue
 		}
 		if ec.IsStale(*ex) {
-			if err := reclaimStaleTx(ctx, tx, *ex, l.OwnerUUID, ec.Now); err != nil {
+			if err := reclaimStaleTx(ctx, tx, *ex, string(l.OwnerUUID), ec.Now); err != nil {
 				return nil, nil, err
 			}
 			if shouldRestoreOwnerWrite(ex.Mode) {
@@ -456,7 +456,7 @@ ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
   proc_start=excluded.proc_start,
   branch=excluded.branch,
   mode=excluded.mode`,
-		l.Target.Canonical, l.OwnerUUID, l.SessionUUID,
+		l.Target.Canonical, string(l.OwnerUUID), l.SessionUUID,
 		l.Intent, l.CreatedAt.UnixNano(), l.ExpiresAt.UnixNano(),
 		l.Host, l.PID, procStart, l.Branch, l.EffectiveMode(),
 	)
