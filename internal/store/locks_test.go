@@ -297,8 +297,8 @@ func TestReleaseLocks_BatchedMixedStates(t *testing.T) {
 	if res[0].State != StateUnlocked {
 		t.Errorf("res[0]: want StateUnlocked, got %v", res[0].State)
 	}
-	if res[1].State != StateNotOwner || res[1].Holder != tcBob {
-		t.Errorf("res[1]: want StateNotOwner holder=bob, got state=%v holder=%v", res[1].State, res[1].Holder)
+	if res[1].State != StateNotOwner || res[1].Owner != tcBob {
+		t.Errorf("res[1]: want StateNotOwner owner=bob, got state=%v owner=%v", res[1].State, res[1].Owner)
 	}
 	if res[2].State != StateNoLock {
 		t.Errorf("res[2]: want StateNoLock, got %v", res[2].State)
@@ -827,8 +827,8 @@ func TestReleaseLocks_DistinguishesMissingFromNotOwner(t *testing.T) {
 			t.Errorf("results[%d].State = %v, want %v", i, r.State, want[i])
 		}
 	}
-	if results[2].Holder != tcBob {
-		t.Errorf("results[2].Holder = %q, want %q", results[2].Holder, tcBob)
+	if results[2].Owner != tcBob {
+		t.Errorf("results[2].Owner = %q, want %q", results[2].Owner, tcBob)
 	}
 	stA, _ := os.Stat(a.Target.Canonical)
 	if stA.Mode().Perm()&0o200 == 0 {

@@ -122,7 +122,7 @@ func TestEmitReleaseResults_MixedOutcomes(t *testing.T) {
 	exit := EmitReleaseResults(&buf, []store.ReleaseResult{
 		{Target: domain.Target{Canonical: aGo}, State: store.StateUnlocked},
 		{Target: domain.Target{Canonical: bGo}, State: store.StateNoLock},
-		{Target: domain.Target{Canonical: cGo}, State: store.StateNotOwner, Holder: "BlueOak"},
+		{Target: domain.Target{Canonical: cGo}, State: store.StateNotOwner, Owner: "BlueOak"},
 	})
 	if exit != 1 {
 		t.Errorf("any not-owner → exit 1, got %d", exit)
