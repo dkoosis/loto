@@ -78,9 +78,9 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord) {
 	}
 	fmt.Fprintf(stdout, "✓ locks count=%d\n", len(all))
 	ec := domain.EvalContext{Now: time.Now(), ThisHost: rt.Host, Live: rt.liveProbe()}
-	canonicals := make([]string, len(all))
+	canonicals := make([]domain.Canonical, len(all))
 	for i := range all {
-		canonicals[i] = all[i].Target.Canonical
+		canonicals[i] = domain.Canonical(all[i].Target.Canonical)
 	}
 	tagsByTarget, _ := rt.Store.ListAliveByTargets(rt.Ctx, canonicals)
 	for i := range all {
@@ -128,7 +128,7 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 			relPath(l.Target.Canonical), l.OwnerUUID, l.EffectiveMode(), l.Intent,
 			fmtTTL(ec.RemainingTTL(*l)), ec.Classify(*l))
 	}
-	if tags, err := rt.Store.ListAliveForTarget(rt.Ctx, t.Canonical); err == nil {
+	if tags, err := rt.Store.ListAliveForTarget(rt.Ctx, domain.Canonical(t.Canonical)); err == nil {
 		render.EmitTagRows(w, tags)
 	}
 	return 0
