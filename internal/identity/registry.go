@@ -113,6 +113,15 @@ func sessionCachePath(sid string) (string, error) {
 	return filepath.Join(sessionDir(), sid+".json"), nil
 }
 
+// subagentCacheKey namespaces a stamped CC agent_id into the session cache.
+// The prefix keeps a subagent identity from colliding with a real session of
+// the same string and marks the file's origin; sessionCachePath still rejects
+// any traversal in the combined key, so a hostile agent_id fails closed into
+// Ensure's fail-open fallthrough rather than escaping sessionDir().
+func subagentCacheKey(agentID string) string {
+	return "subagent-" + agentID
+}
+
 // Ensure resolves the current agent identity by the contract documented in
 // the package doc. The governing principle: identity ambiguity is allowed
 // for display, never for authority — an explicit but unresolvable
@@ -127,6 +136,32 @@ func Ensure(ctx context.Context) (*Agent, error) {
 	// That ordering was the root cause of gh#125 (loto-ffg) — stale-by-time
 	// agents pinned by live locks were reaped before the runtime could
 	// register them as pinned. Leave GC scheduling to GCAgents.
+
+	// A /team subagent inherits the parent's LOTO_AGENT_ID, collapsing every
+	// sibling onto one owner_uuid; loto then reads a sibling's lock as a
+	// re-entrant TTL refresh and never serializes the collision (loto-fs84,
+	// loto-wbkn). The PreToolUse hook stamps the per-subagent CC agent_id —
+	// distinct per sibling, null at root — into LOTO_SUBAGENT_ID. That handle
+	// is not canonical-uuid-shaped and owns no on-disk record, so it cannot
+	// ride the strict LOTO_AGENT_ID path; mint+cache a stable identity keyed by
+	// it instead (the same machinery sessions use), giving siblings distinct
+	// owners that the existing conflict logic serializes. It is checked first
+	// so a subagent diverges from the inherited LOTO_AGENT_ID.
+	//
+	// Fail-open by contract: the agent_id field is undocumented and may vanish
+	// on a CC upgrade, and the stamp is only a backstop to dispatch write-set
+	// partitioning — never load-bearing. An absent, malformed, or uncacheable
+	// id falls through to the normal resolution path rather than erroring.
+	if sub := os.Getenv("LOTO_SUBAGENT_ID"); sub != "" {
+		key := subagentCacheKey(sub)
+		// Pre-validate so a traversal-shaped id fails open here instead of
+		// minting a candidate agent that claimSessionCache then orphans.
+		if _, err := sessionCachePath(key); err == nil {
+			if a, err := ensureForSession(ctx, key); err == nil {
+				return a, nil
+			}
+		}
+	}
 
 	u, set := os.LookupEnv("LOTO_AGENT_ID")
 	if set {

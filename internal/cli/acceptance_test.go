@@ -78,6 +78,43 @@ func TestAcceptance_BasicMultiAgentFlow(t *testing.T) {
 	}
 }
 
+// TestAcceptance_SubagentStampSerializesSiblings is the loto-wbkn end-to-end:
+// two /team siblings inherit ONE parent LOTO_AGENT_ID, but the PreToolUse hook
+// stamps each with a distinct LOTO_SUBAGENT_ID. Without the stamp both collapse
+// onto the parent's owner_uuid and the second lock is read as a re-entrant
+// refresh (silent success — the loto-fs84 bug). With it, the second sibling is
+// blocked (acceptance 1), while a sibling re-locking its own target still
+// succeeds (acceptance 2).
+func TestAcceptance_SubagentStampSerializesSiblings(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t) // mints the shared LOTO_AGENT_ID every sibling inherits
+	// Live PID so the holder's exclusive lock classifies ALIVE and hard-blocks.
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+
+	const sibA, sibB = "a3b8547117dfa76ef", "b1c2d3e4f5a6b7c8"
+
+	t.Setenv("LOTO_SUBAGENT_ID", sibA)
+	if code := Run([]string{tcCmdLock, tcStoreStoreGo, tcFlagIntent, tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("sibling A lock failed")
+	}
+
+	// Sibling B shares parent's LOTO_AGENT_ID but carries a distinct stamp.
+	t.Setenv("LOTO_SUBAGENT_ID", sibB)
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdLock, tcStoreStoreGo, "-t", tcIntentTest}, &out, io.Discard); code != 1 {
+		t.Fatalf("sibling B must be blocked (stamp diverges owners), got %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "✗ blocked") {
+		t.Errorf("expected ✗ blocked: %q", out.String())
+	}
+
+	// Re-entrant: sibling A re-locking its own target still succeeds.
+	t.Setenv("LOTO_SUBAGENT_ID", sibA)
+	if code := Run([]string{tcCmdLock, tcStoreStoreGo, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("sibling A re-lock of its own target must succeed (re-entrant)")
+	}
+}
+
 // TestConcurrentLock_SerializedByOpFlock fires two lock invocations in parallel
 // from a single process; op-flock must let both succeed against disjoint files.
 // Catches lock-DB races introduced by future schema or transaction changes.

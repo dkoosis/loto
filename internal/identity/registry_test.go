@@ -829,3 +829,97 @@ func TestRecoverCorruptSessionCacheRemovesAgedCorrupt(t *testing.T) {
 		t.Fatalf("aged corrupt cache not removed: %v", err)
 	}
 }
+
+// TestEnsureSubagentIDMintsDistinctOwners is the loto-wbkn stamp: two sibling
+// subagents carrying distinct LOTO_SUBAGENT_ID values resolve to distinct owner
+// UUIDs, so the existing lock-conflict logic serializes them instead of reading
+// the second as a re-entrant refresh of the first (acceptance 1; the loto-fs84
+// bug is exactly the collapse into one owner).
+func TestEnsureSubagentIDMintsDistinctOwners(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+
+	t.Setenv("LOTO_SUBAGENT_ID", "a3b8547117dfa76ef")
+	a, err := Ensure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOTO_SUBAGENT_ID", "b1c2d3e4f5a6b7c8")
+	b, err := Ensure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.UUID == b.UUID {
+		t.Fatalf("distinct subagent ids must mint distinct owners; both got %s", a.UUID)
+	}
+}
+
+// TestEnsureSubagentIDIsReentrant covers acceptance 2: a subagent re-locking its
+// own target still succeeds. The same LOTO_SUBAGENT_ID resolves to the same
+// owner UUID across invocations, preserving the same-owner re-entrant refresh.
+func TestEnsureSubagentIDIsReentrant(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+	t.Setenv("LOTO_SUBAGENT_ID", "a3b8547117dfa76ef")
+
+	first, err := Ensure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Ensure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.UUID != second.UUID {
+		t.Fatalf("same subagent id must be stable; got %s then %s", first.UUID, second.UUID)
+	}
+}
+
+// TestEnsureSubagentIDPrecedesAgentID proves a subagent diverges from the
+// LOTO_AGENT_ID it inherits from its parent: LOTO_SUBAGENT_ID resolves first,
+// short-circuiting before the (here unresolvable) inherited LOTO_AGENT_ID would
+// hard-error. Without this precedence every sibling collapses onto the parent's
+// owner — the bug.
+func TestEnsureSubagentIDPrecedesAgentID(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+	// An inherited parent uuid with no on-disk record: reaching the
+	// LOTO_AGENT_ID branch would return errStaleAgentID.
+	const inherited = "11111111-2222-4333-8444-555555555555"
+	t.Setenv("LOTO_AGENT_ID", inherited)
+	t.Setenv("LOTO_SUBAGENT_ID", "a3b8547117dfa76ef")
+
+	a, err := Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("subagent stamp must win over inherited LOTO_AGENT_ID; got %v", err)
+	}
+	if a.UUID == inherited {
+		t.Fatal("owner must be the minted subagent identity, not the inherited agent id")
+	}
+}
+
+// TestEnsureSubagentIDFailsOpen covers acceptance 3: a malformed
+// LOTO_SUBAGENT_ID never errors — it falls through to normal resolution
+// (here LOTO_HANDLE). Fail-open is a hard contract: the undocumented agent_id
+// field may vanish on a CC upgrade, and the stamp must never block a loop.
+func TestEnsureSubagentIDFailsOpen(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+	t.Setenv("LOTO_AGENT_ID", "")
+	t.Setenv("LOTO_HANDLE", "FallbackFerret")
+	t.Setenv("LOTO_SUBAGENT_ID", "../escape")
+
+	a, err := Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("malformed subagent id must fail open, not error; got %v", err)
+	}
+	if a.Handle != "FallbackFerret" {
+		t.Fatalf("fallthrough must reach the LOTO_HANDLE path; got handle %q", a.Handle)
+	}
+}
