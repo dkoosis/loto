@@ -236,7 +236,7 @@ func deleteOwnedTx(ctx context.Context, tx *sql.Tx, canonicals []string, byAgent
 // list+filter+release dance in unlockAll: a single SQL query finds matching
 // rows and deletes them in one transaction, closing the TOCTOU gap where the
 // old path could miss locks created between ListLocks and ReleaseLocks.
-func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, sessionUUID string) ([]ReleaseResult, error) {
+func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, sessionUUID domain.SessionUUID) ([]ReleaseResult, error) {
 	byAgent := string(agent) // internal store helpers thread the owner as a plain string
 	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
 	if err != nil {
@@ -251,7 +251,7 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 	defer cleanup()
 
 	// Find all targets matching agent (+session if pinned).
-	canonicals, err := loadSessionTargetsTx(ctx, tx, byAgent, sessionUUID)
+	canonicals, err := loadSessionTargetsTx(ctx, tx, byAgent, string(sessionUUID))
 	if err != nil {
 		return nil, err
 	}

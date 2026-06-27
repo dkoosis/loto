@@ -456,7 +456,7 @@ ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
   proc_start=excluded.proc_start,
   branch=excluded.branch,
   mode=excluded.mode`,
-		l.Target.Canonical, string(l.OwnerUUID), l.SessionUUID,
+		l.Target.Canonical, string(l.OwnerUUID), string(l.SessionUUID),
 		l.Intent, l.CreatedAt.UnixNano(), l.ExpiresAt.UnixNano(),
 		l.Host, l.PID, procStart, l.Branch, l.EffectiveMode(),
 	)

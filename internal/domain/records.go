@@ -13,10 +13,19 @@ import "time"
 // AgentUUID at the cli boundary.
 type AgentUUID string
 
+// SessionUUID is the per-session identity (one Claude session = one id, shared
+// by every shell-out from that session; sourced from LOTO_SESSION_ID). It is a
+// distinct named type from AgentUUID so the runtime.SessionUUID-vs-Agent.UUID
+// overload — the original swap hazard — and ReleaseBySession(agent, session)
+// can no longer transpose silently (loto-ww4x, stage 2 of loto-34n3). Values
+// cross untyped edges (env var, sqlite session_uuid column) via explicit
+// SessionUUID(s)/string(x) conversions.
+type SessionUUID string
+
 type LockRecord struct {
 	Target      Target
 	OwnerUUID   AgentUUID
-	SessionUUID string
+	SessionUUID SessionUUID
 	Intent      string
 	CreatedAt   time.Time
 	ExpiresAt   time.Time
