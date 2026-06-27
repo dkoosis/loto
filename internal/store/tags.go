@@ -16,16 +16,19 @@ import (
 // when the host lock disappears the tag becomes orphaned and is filtered from
 // alive lists at read time, then hard-deleted by doctor --repair.
 type Tag struct {
-	ID, TargetCanonical, LockOwnerUUID, TaggerUUID, Text string
-	LockCreatedAt, CreatedAt                             int64
-	AckedAt                                              *int64
+	ID                              string
+	TargetCanonical                 domain.Canonical
+	LockOwnerUUID, TaggerUUID, Text string
+	LockCreatedAt, CreatedAt        int64
+	AckedAt                         *int64
 }
 
 // NewTag is the InsertTag input. Caller resolves the host-lock triple
 // (target, owner, created_at) from the live `locks` row before calling.
 type NewTag struct {
-	TargetCanonical, LockOwnerUUID, TaggerUUID, Text string
-	LockCreatedAt                                    int64
+	TargetCanonical                 domain.Canonical
+	LockOwnerUUID, TaggerUUID, Text string
+	LockCreatedAt                   int64
 }
 
 const tagCap = 5
@@ -75,7 +78,7 @@ func (s *Store) InsertTag(ctx context.Context, t NewTag) (string, error) {
 	err = tx.QueryRowContext(ctx, `
 		SELECT 1 FROM locks
 		WHERE target_canonical = ? AND owner_uuid = ? AND created_at = ?`,
-		t.TargetCanonical, t.LockOwnerUUID, t.LockCreatedAt).Scan(&hostExists)
+		string(t.TargetCanonical), t.LockOwnerUUID, t.LockCreatedAt).Scan(&hostExists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNoHostLock
 	}
@@ -88,7 +91,7 @@ func (s *Store) InsertTag(ctx context.Context, t NewTag) (string, error) {
 		SELECT COUNT(*) FROM tags
 		WHERE target_canonical = ? AND lock_owner_uuid = ? AND lock_created_at = ?
 		  AND acked_at IS NULL`,
-		t.TargetCanonical, t.LockOwnerUUID, t.LockCreatedAt).Scan(&n); err != nil {
+		string(t.TargetCanonical), t.LockOwnerUUID, t.LockCreatedAt).Scan(&n); err != nil {
 		return "", err
 	}
 	if n >= tagCap {
@@ -101,7 +104,7 @@ func (s *Store) InsertTag(ctx context.Context, t NewTag) (string, error) {
 		INSERT INTO tags(id, target_canonical, lock_owner_uuid, lock_created_at,
 		                 tagger_uuid, text, created_at)
 		VALUES(?,?,?,?,?,?,?)`,
-		id, t.TargetCanonical, t.LockOwnerUUID, t.LockCreatedAt,
+		id, string(t.TargetCanonical), t.LockOwnerUUID, t.LockCreatedAt,
 		t.TaggerUUID, t.Text, now); err != nil {
 		return "", err
 	}
@@ -140,11 +143,15 @@ func (s *Store) ListAliveForHolder(ctx context.Context, ownerUUID domain.AgentUU
 // many canonical paths, grouped into a map. Callers that surface tags across a
 // list of files (status, lock conflict) should prefer this — it folds an N+1
 // loop into a single round-trip. Empty input returns an empty map.
-func (s *Store) ListAliveByTargets(ctx context.Context, canonicals []string) (map[string][]Tag, error) {
+func (s *Store) ListAliveByTargets(ctx context.Context, canonicals []domain.Canonical) (map[string][]Tag, error) {
 	if len(canonicals) == 0 {
 		return map[string][]Tag{}, nil
 	}
-	placeholders, args := inClauseStrings(canonicals)
+	ss := make([]string, len(canonicals)) // sqlite query args cross the untyped edge
+	for i, c := range canonicals {
+		ss[i] = string(c)
+	}
+	placeholders, args := inClauseStrings(ss)
 	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.target_canonical, t.lock_owner_uuid, t.lock_created_at,`+ //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 		` t.tagger_uuid, t.text, t.created_at, t.acked_at`+
 		` FROM tags t JOIN locks l`+
@@ -163,7 +170,8 @@ func (s *Store) ListAliveByTargets(ctx context.Context, canonicals []string) (ma
 	}
 	out := make(map[string][]Tag, len(canonicals))
 	for _, t := range all {
-		out[t.TargetCanonical] = append(out[t.TargetCanonical], t)
+		k := string(t.TargetCanonical) // map keyed by plain path to match Target.Canonical callers
+		out[k] = append(out[k], t)
 	}
 	return out, nil
 }
@@ -171,7 +179,7 @@ func (s *Store) ListAliveByTargets(ctx context.Context, canonicals []string) (ma
 // ListAliveForTarget returns pending tags bound to the live lock on
 // targetCanonical (if any). No self-tag filter — non-holder surfaces (status,
 // lock conflict) show everyone's tags. Empty result when no live lock.
-func (s *Store) ListAliveForTarget(ctx context.Context, targetCanonical string) ([]Tag, error) {
+func (s *Store) ListAliveForTarget(ctx context.Context, targetCanonical domain.Canonical) ([]Tag, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT t.id, t.target_canonical, t.lock_owner_uuid, t.lock_created_at,
 		       t.tagger_uuid, t.text, t.created_at, t.acked_at
@@ -182,7 +190,7 @@ func (s *Store) ListAliveForTarget(ctx context.Context, targetCanonical string) 
 		 AND l.created_at       = t.lock_created_at
 		WHERE t.target_canonical = ?
 		  AND t.acked_at IS NULL
-		ORDER BY t.created_at ASC, t.id ASC`, targetCanonical)
+		ORDER BY t.created_at ASC, t.id ASC`, string(targetCanonical))
 	if err != nil {
 		return nil, err
 	}
@@ -194,11 +202,13 @@ func scanTags(rows *sql.Rows) ([]Tag, error) {
 	var out []Tag
 	for rows.Next() {
 		var t Tag
+		var canonical string // sqlite text column → domain.Canonical at the store boundary
 		var acked sql.NullInt64
-		if err := rows.Scan(&t.ID, &t.TargetCanonical, &t.LockOwnerUUID, &t.LockCreatedAt,
+		if err := rows.Scan(&t.ID, &canonical, &t.LockOwnerUUID, &t.LockCreatedAt,
 			&t.TaggerUUID, &t.Text, &t.CreatedAt, &acked); err != nil {
 			return nil, err
 		}
+		t.TargetCanonical = domain.Canonical(canonical)
 		if acked.Valid {
 			v := acked.Int64
 			t.AckedAt = &v

@@ -22,6 +22,18 @@ type AgentUUID string
 // SessionUUID(s)/string(x) conversions.
 type SessionUUID string
 
+// Canonical is a canonicalized, repo-relative target path — the cleaned form
+// minted by Canonicalize and carried in Target.Canonical. It is the path member
+// of the swap-safe identity family (loto-ip6c, stage 3 of loto-34n3): a distinct
+// named type so a path can't silently transpose with an adjacent bare-string
+// field — e.g. NewTag{TargetCanonical, TaggerUUID} can no longer be filled in the
+// wrong order and still compile. Scoped to the tag surface (Tag/NewTag plus
+// ListAliveForTarget/ListAliveByTargets) where the path sits beside other
+// strings; Target.Canonical stays a bare string (the persisted-form home and an
+// untyped edge), so values cross via explicit Canonical(s)/string(x) conversions
+// at that boundary, the sqlite target_canonical column, and CLI callers.
+type Canonical string
+
 type LockRecord struct {
 	Target      Target
 	OwnerUUID   AgentUUID

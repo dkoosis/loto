@@ -47,7 +47,7 @@ func TestInsertTag_VisibleToHolder(t *testing.T) {
 	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
 
 	id, err := s.InsertTag(ctx, NewTag{
-		TargetCanonical: lock.Target.Canonical,
+		TargetCanonical: domain.Canonical(lock.Target.Canonical),
 		LockOwnerUUID:   tcAlice,
 		LockCreatedAt:   lockNs,
 		TaggerUUID:      tcBob,
@@ -72,7 +72,7 @@ func TestInsertTag_CapEnforcedTransactionally(t *testing.T) {
 
 	for i := range tagCap {
 		if _, err := s.InsertTag(ctx, NewTag{
-			TargetCanonical: lock.Target.Canonical,
+			TargetCanonical: domain.Canonical(lock.Target.Canonical),
 			LockOwnerUUID:   tcAlice,
 			LockCreatedAt:   lockNs,
 			TaggerUUID:      tcBob,
@@ -82,7 +82,7 @@ func TestInsertTag_CapEnforcedTransactionally(t *testing.T) {
 		}
 	}
 	_, err := s.InsertTag(ctx, NewTag{
-		TargetCanonical: lock.Target.Canonical,
+		TargetCanonical: domain.Canonical(lock.Target.Canonical),
 		LockOwnerUUID:   tcAlice,
 		LockCreatedAt:   lockNs,
 		TaggerUUID:      tcBob,
@@ -100,7 +100,7 @@ func TestInsertTag_TextTooLong_Rejects(t *testing.T) {
 
 	oversized := strings.Repeat("x", tagTextMaxBytes+1)
 	_, err := s.InsertTag(ctx, NewTag{
-		TargetCanonical: lock.Target.Canonical,
+		TargetCanonical: domain.Canonical(lock.Target.Canonical),
 		LockOwnerUUID:   tcAlice,
 		LockCreatedAt:   lockNs,
 		TaggerUUID:      tcBob,
@@ -123,7 +123,7 @@ func TestInsertTag_TextAtCap_Accepted(t *testing.T) {
 
 	atCap := strings.Repeat("x", tagTextMaxBytes)
 	if _, err := s.InsertTag(ctx, NewTag{
-		TargetCanonical: lock.Target.Canonical,
+		TargetCanonical: domain.Canonical(lock.Target.Canonical),
 		LockOwnerUUID:   tcAlice,
 		LockCreatedAt:   lockNs,
 		TaggerUUID:      tcBob,
@@ -155,7 +155,7 @@ func TestInsertTag_SelfTag_NoHolderEcho_ButTargetVisible(t *testing.T) {
 
 	// Alice tags her own lock (edge #2).
 	if _, err := s.InsertTag(ctx, NewTag{
-		TargetCanonical: lock.Target.Canonical,
+		TargetCanonical: domain.Canonical(lock.Target.Canonical),
 		LockOwnerUUID:   tcAlice,
 		LockCreatedAt:   lockNs,
 		TaggerUUID:      tcAlice,
@@ -172,7 +172,7 @@ func TestInsertTag_SelfTag_NoHolderEcho_ButTargetVisible(t *testing.T) {
 		t.Fatalf("self-tag must not appear in holder echo, got %+v", holderTags)
 	}
 	// status/conflict path shows it (no self-filter).
-	targetTags, err := s.ListAliveForTarget(ctx, lock.Target.Canonical)
+	targetTags, err := s.ListAliveForTarget(ctx, domain.Canonical(lock.Target.Canonical))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestAck_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
 	id, err := s.InsertTag(ctx, NewTag{
-		TargetCanonical: lock.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
+		TargetCanonical: domain.Canonical(lock.Target.Canonical), LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
 		TaggerUUID: tcBob, Text: tcPing,
 	})
 	if err != nil {
@@ -213,7 +213,7 @@ func TestAck_NotMine_Rejects(t *testing.T) {
 	ctx := context.Background()
 	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
 	id, err := s.InsertTag(ctx, NewTag{
-		TargetCanonical: lock.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
+		TargetCanonical: domain.Canonical(lock.Target.Canonical), LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
 		TaggerUUID: tcBob, Text: tcPing,
 	})
 	if err != nil {
@@ -239,7 +239,7 @@ func TestAck_ClassifyIsTransactional_RaceWithReclaim(t *testing.T) {
 	ctx := context.Background()
 	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
 	id, err := s.InsertTag(ctx, NewTag{
-		TargetCanonical: lock.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
+		TargetCanonical: domain.Canonical(lock.Target.Canonical), LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
 		TaggerUUID: tcBob, Text: tcPing,
 	})
 	if err != nil {
@@ -310,7 +310,7 @@ func TestOrphanFilter_OnLockDeletion(t *testing.T) {
 	ctx := context.Background()
 	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
 	if _, err := s.InsertTag(ctx, NewTag{
-		TargetCanonical: lock.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
+		TargetCanonical: domain.Canonical(lock.Target.Canonical), LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
 		TaggerUUID: tcBob, Text: "doomed",
 	}); err != nil {
 		t.Fatal(err)
@@ -326,7 +326,7 @@ func TestOrphanFilter_OnLockDeletion(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("orphan must be filtered, got %+v", got)
 	}
-	gotTarget, err := s.ListAliveForTarget(ctx, lock.Target.Canonical)
+	gotTarget, err := s.ListAliveForTarget(ctx, domain.Canonical(lock.Target.Canonical))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +340,7 @@ func TestReleaseLocks_AcksTagsOnReleasedLock(t *testing.T) {
 	ctx := context.Background()
 	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
 	id, err := s.InsertTag(ctx, NewTag{
-		TargetCanonical: lock.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
+		TargetCanonical: domain.Canonical(lock.Target.Canonical), LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
 		TaggerUUID: tcBob, Text: tcPing,
 	})
 	if err != nil {
@@ -376,7 +376,7 @@ func TestBreakLocks_GCsOrphanedTags(t *testing.T) {
 	ctx := context.Background()
 	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
 	id, err := s.InsertTag(ctx, NewTag{
-		TargetCanonical: lock.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
+		TargetCanonical: domain.Canonical(lock.Target.Canonical), LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
 		TaggerUUID: tcBob, Text: tcPing,
 	})
 	if err != nil {
@@ -404,8 +404,8 @@ func TestReleaseLocks_MultiTarget_AcksEachLocksTags(t *testing.T) {
 	ctx := context.Background()
 	la, lockANs := acquireForTest(t, s, tcAGo, tcAlice)
 	lb, lockBNs := acquireForTest(t, s, "b.go", tcAlice)
-	idA, _ := s.InsertTag(ctx, NewTag{TargetCanonical: la.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockANs, TaggerUUID: tcBob, Text: "a"})
-	idB, _ := s.InsertTag(ctx, NewTag{TargetCanonical: lb.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockBNs, TaggerUUID: tcBob, Text: "b"})
+	idA, _ := s.InsertTag(ctx, NewTag{TargetCanonical: domain.Canonical(la.Target.Canonical), LockOwnerUUID: tcAlice, LockCreatedAt: lockANs, TaggerUUID: tcBob, Text: "a"})
+	idB, _ := s.InsertTag(ctx, NewTag{TargetCanonical: domain.Canonical(lb.Target.Canonical), LockOwnerUUID: tcAlice, LockCreatedAt: lockBNs, TaggerUUID: tcBob, Text: "b"})
 	if _, err := s.ReleaseLocks(ctx, []domain.Target{la.Target, lb.Target}, tcAlice); err != nil {
 		t.Fatalf("multi release: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestDoctorRepair_GCsOrphanedTags(t *testing.T) {
 	ctx := context.Background()
 	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
 	if _, err := s.InsertTag(ctx, NewTag{
-		TargetCanonical: lock.Target.Canonical, LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
+		TargetCanonical: domain.Canonical(lock.Target.Canonical), LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
 		TaggerUUID: tcBob, Text: "doomed",
 	}); err != nil {
 		t.Fatal(err)

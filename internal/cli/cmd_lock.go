@@ -166,7 +166,7 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 // swallowed silently — surfacing tags is best-effort and must not mask the
 // underlying conflict report.
 func fetchTagsForBlockers(rt *runtime, blockers []domain.LockRecord) map[string][]store.Tag {
-	canonicals := make([]string, 0, len(blockers))
+	canonicals := make([]domain.Canonical, 0, len(blockers))
 	seen := make(map[string]bool, len(blockers))
 	for i := range blockers {
 		c := blockers[i].Target.Canonical
@@ -174,7 +174,7 @@ func fetchTagsForBlockers(rt *runtime, blockers []domain.LockRecord) map[string]
 			continue
 		}
 		seen[c] = true
-		canonicals = append(canonicals, c)
+		canonicals = append(canonicals, domain.Canonical(c))
 	}
 	out, err := rt.Store.ListAliveByTargets(rt.Ctx, canonicals)
 	if err != nil {

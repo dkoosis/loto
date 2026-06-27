@@ -95,7 +95,7 @@ func runTag(rt *runtime, canonical, text string, stdout, stderr io.Writer) int {
 	var firstErr error
 	for i := range holders {
 		id, err := rt.Store.InsertTag(rt.Ctx, store.NewTag{
-			TargetCanonical: canonical,
+			TargetCanonical: domain.Canonical(canonical),
 			LockOwnerUUID:   string(holders[i].OwnerUUID),
 			LockCreatedAt:   holders[i].CreatedAt.UnixNano(),
 			TaggerUUID:      rt.Agent.UUID,

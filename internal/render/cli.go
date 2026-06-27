@@ -156,7 +156,7 @@ func EmitTagRows(w io.Writer, tags []store.Tag) {
 func emitTagRow(w io.Writer, t store.Tag, indent, cwd string, holders *holderMemo) {
 	at := time.Unix(0, t.CreatedAt).UTC().Format(time.RFC3339)
 	fmt.Fprintf(w, "ℹ %stag id=%s at=%s from=%s target=%s text=%q\n",
-		indent, t.ID, at, holders.tag(t.TaggerUUID), relToCwd(t.TargetCanonical, cwd), t.Text)
+		indent, t.ID, at, holders.tag(t.TaggerUUID), relToCwd(string(t.TargetCanonical), cwd), t.Text)
 }
 
 func EmitChmodFailure(w io.Writer, cfe *store.ChmodFailureError) {
