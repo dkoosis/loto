@@ -120,9 +120,9 @@ func (r *runtime) Close() error { return r.Store.Close() }
 // pinned machine surface for trixi's PreToolUse hook.
 //
 // Tags whose host lock disappeared mid-command (release, break) are filtered by
-// the JOIN inside ListAliveForHolder.
+// the JOIN inside ListAliveForOwner.
 func (r *runtime) DeferredTagFooter(w io.Writer) {
-	tags, err := r.Store.ListAliveForHolder(r.Ctx, domain.AgentUUID(r.Agent.UUID))
+	tags, err := r.Store.ListAliveForOwner(r.Ctx, domain.AgentUUID(r.Agent.UUID))
 	if err != nil || len(tags) == 0 {
 		return
 	}

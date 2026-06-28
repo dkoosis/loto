@@ -56,12 +56,12 @@ func TestInsertTag_VisibleToHolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InsertTag: %v", err)
 	}
-	got, err := s.ListAliveForHolder(ctx, tcAlice)
+	got, err := s.ListAliveForOwner(ctx, tcAlice)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 || got[0].ID != id || got[0].Text != "why?" {
-		t.Fatalf("ListAliveForHolder: %+v", got)
+		t.Fatalf("ListAliveForOwner: %+v", got)
 	}
 }
 
@@ -164,7 +164,7 @@ func TestInsertTag_SelfTag_NoHolderEcho_ButTargetVisible(t *testing.T) {
 		t.Fatalf("InsertTag self: %v", err)
 	}
 	// Holder echo path suppresses it.
-	holderTags, err := s.ListAliveForHolder(ctx, tcAlice)
+	holderTags, err := s.ListAliveForOwner(ctx, tcAlice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func TestOrphanFilter_OnLockDeletion(t *testing.T) {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ?`, lock.Target.Canonical); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.ListAliveForHolder(ctx, tcAlice)
+	got, err := s.ListAliveForOwner(ctx, tcAlice)
 	if err != nil {
 		t.Fatal(err)
 	}

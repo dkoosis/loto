@@ -114,11 +114,11 @@ func (s *Store) InsertTag(ctx context.Context, t NewTag) (string, error) {
 	return id, nil
 }
 
-// ListAliveForHolder returns pending tags whose host lock is currently held by
+// ListAliveForOwner returns pending tags whose host lock is currently held by
 // ownerUUID and whose tagger is someone else (no self-echo). Deterministic
 // order: created_at ASC, id ASC. Orphaned tags (host lock deleted) are filtered
 // by the JOIN.
-func (s *Store) ListAliveForHolder(ctx context.Context, ownerUUID domain.AgentUUID) ([]Tag, error) {
+func (s *Store) ListAliveForOwner(ctx context.Context, ownerUUID domain.AgentUUID) ([]Tag, error) {
 	owner := string(ownerUUID) // sqlite query arg crosses the untyped edge
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT t.id, t.target_canonical, t.lock_owner_uuid, t.lock_created_at,
