@@ -129,7 +129,7 @@ func runVerifyCmd(ctx context.Context, dir string, cmd []string) (string, bool, 
 	// Treating it as Passed=false would mislabel an infra timeout as failing tests;
 	// surface it as an infra error so the lane retries/escalates instead.
 	if ctx.Err() != nil {
-		return buf.String(), false, fmt.Errorf("%w: %v", errVerifyAborted, ctx.Err())
+		return buf.String(), false, fmt.Errorf("%w: %w", errVerifyAborted, ctx.Err())
 	}
 	exitErr := new(exec.ExitError)
 	if errors.As(err, &exitErr) {
