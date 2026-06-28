@@ -25,7 +25,7 @@ func commitAllInRepo(t *testing.T, repo, msg string) string {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
-	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd := exec.Command("git", "rev-parse", tcHEAD)
 	cmd.Dir = repo
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -66,7 +66,7 @@ func TestLane_CommitsHeldWriteSet_CarriesClosesTrailer(t *testing.T) {
 	}
 
 	var out, errB bytes.Buffer
-	code := Run([]string{"lane", tcTargetA, "--ref", "impl-1", "--base", base, "-m", "store: tweak", "--closes", "loto-abc"}, &out, &errB)
+	code := Run([]string{tcCmdLane, tcTargetA, tcFlagRef, tcRefImpl1, tcFlagBase, base, "-m", "store: tweak", tcFlagCloses, tcClosesAbc}, &out, &errB)
 	if code != 0 {
 		t.Fatalf("lane exit %d; out=%q err=%q", code, out.String(), errB.String())
 	}
@@ -76,7 +76,7 @@ func TestLane_CommitsHeldWriteSet_CarriesClosesTrailer(t *testing.T) {
 	if !strings.Contains(out.String(), "files=1") {
 		t.Errorf("missing files count: %q", out.String())
 	}
-	msg := laneRefMessage(t, repo, "impl-1")
+	msg := laneRefMessage(t, repo, tcRefImpl1)
 	if !strings.Contains(msg, "Closes: loto-abc") {
 		t.Errorf("commit message missing Closes trailer:\n%q", msg)
 	}
@@ -92,7 +92,7 @@ func TestLane_NormalizesMultiCloses(t *testing.T) {
 		t.Fatalf("lock %s failed", tcTargetA)
 	}
 	var out, errB bytes.Buffer
-	code := Run([]string{"lane", tcTargetA, "--ref", "impl-2", "--base", base, "-m", "msg", "--closes", "loto-abc, loto-def loto-abc"}, &out, &errB)
+	code := Run([]string{tcCmdLane, tcTargetA, tcFlagRef, "impl-2", tcFlagBase, base, "-m", tcMsg, tcFlagCloses, "loto-abc, loto-def loto-abc"}, &out, &errB)
 	if code != 0 {
 		t.Fatalf("lane exit %d; err=%q", code, errB.String())
 	}
@@ -118,7 +118,7 @@ func TestLane_RefusesWriteSetMissingLock(t *testing.T) {
 	}
 
 	var out, errB bytes.Buffer
-	code := Run([]string{"lane", tcTargetA, tcTargetB, "--ref", "impl-1", "--base", base, "-m", "msg", "--closes", "loto-abc"}, &out, &errB)
+	code := Run([]string{tcCmdLane, tcTargetA, tcTargetB, tcFlagRef, tcRefImpl1, tcFlagBase, base, "-m", tcMsg, tcFlagCloses, tcClosesAbc}, &out, &errB)
 	if code != 1 {
 		t.Fatalf("want exit 1, got %d; out=%q err=%q", code, out.String(), errB.String())
 	}
@@ -128,7 +128,7 @@ func TestLane_RefusesWriteSetMissingLock(t *testing.T) {
 	if !strings.Contains(out.String(), "target="+tcTargetB) || !strings.Contains(out.String(), "reason=no-lock-held") {
 		t.Errorf("missing %s no-lock-held row: %q", tcTargetB, out.String())
 	}
-	if laneRefExists(t, repo, "impl-1") {
+	if laneRefExists(t, repo, tcRefImpl1) {
 		t.Errorf("lane ref must not exist after a refused commit")
 	}
 }
@@ -159,7 +159,7 @@ func TestLane_PostAssertCatchesLostLock(t *testing.T) {
 	defer func() { laneAfterPreAssert = nil }()
 
 	var out, errB bytes.Buffer
-	code := Run([]string{"lane", tcTargetA, "--ref", "impl-1", "--base", base, "-m", "msg", "--closes", "loto-abc"}, &out, &errB)
+	code := Run([]string{tcCmdLane, tcTargetA, tcFlagRef, tcRefImpl1, tcFlagBase, base, "-m", tcMsg, tcFlagCloses, tcClosesAbc}, &out, &errB)
 	if code != 1 {
 		t.Fatalf("want exit 1 (tainted), got %d; out=%q err=%q", code, out.String(), errB.String())
 	}
@@ -181,7 +181,7 @@ func TestLane_RejectsSharedLock(t *testing.T) {
 		t.Fatalf("shared lock %s failed", tcTargetA)
 	}
 	var out, errB bytes.Buffer
-	code := Run([]string{"lane", tcTargetA, "--ref", "impl-1", "--base", base, "-m", "msg", "--closes", "loto-abc"}, &out, &errB)
+	code := Run([]string{tcCmdLane, tcTargetA, tcFlagRef, tcRefImpl1, tcFlagBase, base, "-m", tcMsg, tcFlagCloses, tcClosesAbc}, &out, &errB)
 	if code != 1 {
 		t.Fatalf("want exit 1, got %d; out=%q err=%q", code, out.String(), errB.String())
 	}
@@ -195,7 +195,7 @@ func TestLane_MissingRef_UsageError(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 	var out, errB bytes.Buffer
-	code := Run([]string{"lane", tcTargetA, "--base", "HEAD", "-m", "msg", "--closes", "none"}, &out, &errB)
+	code := Run([]string{tcCmdLane, tcTargetA, tcFlagBase, tcHEAD, "-m", tcMsg, tcFlagCloses, tcClosesNone}, &out, &errB)
 	if code != 2 {
 		t.Fatalf("want exit 2, got %d; out=%q err=%q", code, out.String(), errB.String())
 	}
@@ -206,7 +206,7 @@ func TestLane_EmptyWriteSet_UsageError(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 	var out, errB bytes.Buffer
-	code := Run([]string{"lane", "--ref", "impl-1", "--base", "HEAD", "-m", "msg", "--closes", "none"}, &out, &errB)
+	code := Run([]string{tcCmdLane, tcFlagRef, tcRefImpl1, tcFlagBase, tcHEAD, "-m", tcMsg, tcFlagCloses, tcClosesNone}, &out, &errB)
 	if code != 2 {
 		t.Fatalf("want exit 2, got %d; out=%q err=%q", code, out.String(), errB.String())
 	}

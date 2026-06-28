@@ -12,7 +12,7 @@ func TestVerify_PassingCommand(t *testing.T) {
 	repo := withTempProject(t)
 	commitAllInRepo(t, repo, "init")
 	var out, errB bytes.Buffer
-	code := Run([]string{"verify", "HEAD", "--", "sh", "-c", "exit 0"}, &out, &errB)
+	code := Run([]string{tcCmdVerify, tcHEAD, "--", "sh", "-c", "exit 0"}, &out, &errB)
 	if code != 0 {
 		t.Fatalf("want exit 0, got %d; out=%q err=%q", code, out.String(), errB.String())
 	}
@@ -27,7 +27,7 @@ func TestVerify_FailingCommand(t *testing.T) {
 	repo := withTempProject(t)
 	commitAllInRepo(t, repo, "init")
 	var out, errB bytes.Buffer
-	code := Run([]string{"verify", "HEAD", "--", "sh", "-c", "exit 3"}, &out, &errB)
+	code := Run([]string{tcCmdVerify, tcHEAD, "--", "sh", "-c", "exit 3"}, &out, &errB)
 	if code != 1 {
 		t.Fatalf("want exit 1, got %d; out=%q err=%q", code, out.String(), errB.String())
 	}
@@ -42,7 +42,7 @@ func TestVerify_SurfacesCommandOutput(t *testing.T) {
 	repo := withTempProject(t)
 	commitAllInRepo(t, repo, "init")
 	var out, errB bytes.Buffer
-	code := Run([]string{"verify", "HEAD", "--", "sh", "-c", "echo HELLO_FROM_CMD"}, &out, &errB)
+	code := Run([]string{tcCmdVerify, tcHEAD, "--", "sh", "-c", "echo HELLO_FROM_CMD"}, &out, &errB)
 	if code != 0 {
 		t.Fatalf("want exit 0, got %d; err=%q", code, errB.String())
 	}
@@ -57,7 +57,7 @@ func TestVerify_NoCommand_UsageError(t *testing.T) {
 	repo := withTempProject(t)
 	commitAllInRepo(t, repo, "init")
 	var out, errB bytes.Buffer
-	code := Run([]string{"verify", "HEAD"}, &out, &errB)
+	code := Run([]string{tcCmdVerify, tcHEAD}, &out, &errB)
 	if code != 2 {
 		t.Fatalf("want exit 2, got %d; out=%q err=%q", code, out.String(), errB.String())
 	}
