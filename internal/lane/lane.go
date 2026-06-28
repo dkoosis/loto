@@ -323,32 +323,43 @@ func validateWriteSet(repoTop string, paths []string) error {
 		return fmt.Errorf("%w: must list at least one path", errInvalidWriteSet)
 	}
 	for _, p := range paths {
-		switch {
-		case p == "":
-			return fmt.Errorf("%w: empty path", errInvalidWriteSet)
-		case strings.ContainsRune(p, '\x00'):
-			return fmt.Errorf("%w: path %q contains NUL", errInvalidWriteSet, p)
-		case strings.HasPrefix(p, ":"):
-			return fmt.Errorf("%w: path %q uses pathspec magic (leading ':')", errInvalidWriteSet, p)
-		case strings.ContainsAny(p, "*?[]"):
-			return fmt.Errorf("%w: path %q contains a glob metacharacter", errInvalidWriteSet, p)
-		case filepath.IsAbs(p):
-			return fmt.Errorf("%w: path %q must be repo-relative, not absolute", errInvalidWriteSet, p)
-		case p == ".." || strings.HasPrefix(p, "../") || strings.Contains(p, "/../") || strings.HasSuffix(p, "/.."):
-			return fmt.Errorf("%w: path %q escapes the repo", errInvalidWriteSet, p)
-		case strings.HasSuffix(p, "/"):
-			return fmt.Errorf("%w: path %q is a directory (trailing '/'); list files explicitly", errInvalidWriteSet, p)
-		case path.Clean(p) != p:
-			// Non-canonical: a '.' segment ('pkg/.', './pkg') or a redundant slash
-			// ('pkg//a.go'). Git normalizes these in the pathspec ('pkg/.' sweeps
-			// pkg/*), but buildLaneTree's prefix discriminator compares against the
-			// raw entry and would miss the sweep. Reject rather than normalize —
-			// the write-set must name files in canonical form (codex #202 P1).
-			return fmt.Errorf("%w: path %q is not canonical (%q); list files in clean form", errInvalidWriteSet, p, path.Clean(p))
+		if err := lexicalWriteSetCheck(p); err != nil {
+			return err
 		}
 		if info, err := os.Stat(filepath.Join(repoTop, filepath.FromSlash(p))); err == nil && info.IsDir() {
 			return fmt.Errorf("%w: path %q is a directory; list files explicitly", errInvalidWriteSet, p)
 		}
+	}
+	return nil
+}
+
+// lexicalWriteSetCheck rejects a write-set entry on its spelling alone — no disk
+// access. Split from validateWriteSet's on-disk stat both to keep each function's
+// cyclomatic complexity in budget and to make the pathspec-shape rules testable
+// without a repo.
+func lexicalWriteSetCheck(p string) error {
+	switch {
+	case p == "":
+		return fmt.Errorf("%w: empty path", errInvalidWriteSet)
+	case strings.ContainsRune(p, '\x00'):
+		return fmt.Errorf("%w: path %q contains NUL", errInvalidWriteSet, p)
+	case strings.HasPrefix(p, ":"):
+		return fmt.Errorf("%w: path %q uses pathspec magic (leading ':')", errInvalidWriteSet, p)
+	case strings.ContainsAny(p, "*?[]"):
+		return fmt.Errorf("%w: path %q contains a glob metacharacter", errInvalidWriteSet, p)
+	case filepath.IsAbs(p):
+		return fmt.Errorf("%w: path %q must be repo-relative, not absolute", errInvalidWriteSet, p)
+	case p == ".." || strings.HasPrefix(p, "../") || strings.Contains(p, "/../") || strings.HasSuffix(p, "/.."):
+		return fmt.Errorf("%w: path %q escapes the repo", errInvalidWriteSet, p)
+	case strings.HasSuffix(p, "/"):
+		return fmt.Errorf("%w: path %q is a directory (trailing '/'); list files explicitly", errInvalidWriteSet, p)
+	case path.Clean(p) != p:
+		// Non-canonical: a '.' segment ('pkg/.', './pkg') or a redundant slash
+		// ('pkg//a.go'). Git normalizes these in the pathspec ('pkg/.' sweeps
+		// pkg/*), but buildLaneTree's prefix discriminator compares against the
+		// raw entry and would miss the sweep. Reject rather than normalize —
+		// the write-set must name files in canonical form (codex #202 P1).
+		return fmt.Errorf("%w: path %q is not canonical (%q); list files in clean form", errInvalidWriteSet, p, path.Clean(p))
 	}
 	return nil
 }
