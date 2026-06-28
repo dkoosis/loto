@@ -47,8 +47,11 @@ deps:
       - render
       - lane
   # internal/lane is pure git plumbing — stdlib only, no internal deps.
+  # anyVendorDeps (not an empty mayDependOn) is how go-arch-lint v3 wants a
+  # no-internal-deps component declared — same as domain/identity below. It
+  # still forbids every internal component edge (no mayDependOn ref present).
   lane:
-    mayDependOn: []
+    anyVendorDeps: true
   render:
     mayDependOn:
       - domain

@@ -88,7 +88,7 @@ vet: ## Run go vet (fo-rendered)
 
 arch: ## Enforce layering (.go-arch-lint.yml)
 	@if ! command -v go-arch-lint >/dev/null 2>&1; then \
-		echo "go-arch-lint not installed; 'go install github.com/fe3dback/go-arch-lint/v3@latest'"; \
+		echo "go-arch-lint not installed; 'go install github.com/fe3dback/go-arch-lint@v1.15.0'"; \
 		exit 1; \
 	fi
 	@go-arch-lint check --json 2>/dev/null | fo wrap archlint | fo --format llm
