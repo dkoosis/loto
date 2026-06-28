@@ -62,3 +62,15 @@ jobs:
 
       - name: build
         run: go build ./...
+
+      # Layering gate (loto-vlid). go-arch-lint enforces .go-arch-lint.yml; CI
+      # previously ran no layering check, so a back-edge merged clean whenever
+      # local `make check` was skipped. Linux-only: import-graph analysis is
+      # OS-independent and every PR + push-to-main runs the linux leg. Pinned to
+      # match the local toolchain. Runs go-arch-lint directly (not `make arch`,
+      # which also needs the `fo` formatter) — exits non-zero on any violation.
+      - name: arch (layering)
+        if: matrix.name == 'linux'
+        run: |
+          go install github.com/fe3dback/go-arch-lint@v1.15.0
+          "$(go env GOPATH)/bin/go-arch-lint" check
