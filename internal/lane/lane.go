@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -304,8 +305,9 @@ func isRefRune(r rune) bool {
 // PATHSPEC list (--pathspec-from-file), so anything wider than an exact file
 // re-opens the fs84 sweep this package exists to prevent. Rejected: empty,
 // NUL-bearing, pathspec magic (leading ':'), a glob metacharacter (* ? [ ]),
-// absolute, '..'-escaping, a trailing '/', or an entry that stats as a directory
-// on disk.
+// absolute, '..'-escaping, a trailing '/', a non-canonical path (a '.' segment or
+// redundant '/', which git normalizes into a sweep), or an entry that stats as a
+// directory on disk.
 //
 // The directory checks are load-bearing, not belt-and-suspenders: buildLaneTree
 // wraps each pathspec in :(literal), which neutralizes wildcards and magic but
@@ -336,6 +338,13 @@ func validateWriteSet(repoTop string, paths []string) error {
 			return fmt.Errorf("%w: path %q escapes the repo", errInvalidWriteSet, p)
 		case strings.HasSuffix(p, "/"):
 			return fmt.Errorf("%w: path %q is a directory (trailing '/'); list files explicitly", errInvalidWriteSet, p)
+		case path.Clean(p) != p:
+			// Non-canonical: a '.' segment ('pkg/.', './pkg') or a redundant slash
+			// ('pkg//a.go'). Git normalizes these in the pathspec ('pkg/.' sweeps
+			// pkg/*), but buildLaneTree's prefix discriminator compares against the
+			// raw entry and would miss the sweep. Reject rather than normalize —
+			// the write-set must name files in canonical form (codex #202 P1).
+			return fmt.Errorf("%w: path %q is not canonical (%q); list files in clean form", errInvalidWriteSet, p, path.Clean(p))
 		}
 		if info, err := os.Stat(filepath.Join(repoTop, filepath.FromSlash(p))); err == nil && info.IsDir() {
 			return fmt.Errorf("%w: path %q is a directory; list files explicitly", errInvalidWriteSet, p)

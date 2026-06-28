@@ -299,6 +299,10 @@ func TestValidateWriteSetRejects(t *testing.T) {
 		{"magic exclude", ":(exclude)mul.go"},
 		{"magic leading colon", ":mul.go"},
 		{"magic from-top", ":/mul.go"},
+		{"dot segment trailing", "internal/."},
+		{"dot segment leading", "./mul.go"},
+		{"dot segment mid", "internal/./x.go"},
+		{"redundant slash", "internal//x.go"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -436,6 +440,32 @@ func TestCommitRejectsFileShadowingTrackedDirectory(t *testing.T) {
 
 	if _, err := Commit(context.Background(), laneOpts(repoTop, base, "A", "pkg")); !errors.Is(err, errInvalidWriteSet) {
 		t.Errorf("Commit(WriteSet:[pkg]) for a file shadowing a tracked dir = %v, want errInvalidWriteSet", err)
+	}
+	if ref, _ := exec.Command("git", "-C", repoTop, "rev-parse", "--verify", "--quiet", "refs/heads/loto/A").Output(); strings.TrimSpace(string(ref)) != "" {
+		t.Errorf("rejected sweep still wrote a lane ref")
+	}
+}
+
+// TestCommitRejectsDotSegmentDirectorySweep is the codex #202 P1 guard. A
+// removed tracked directory named with a '.' segment ('pkg/.') slips past the
+// pre-canonical-form validateWriteSet ('..' was rejected, '.' was not) and git
+// normalizes ':(literal)pkg/.' so `git add -A` sweeps every pkg/* deletion —
+// while a raw-prefix probe comparing against the un-normalized 'pkg/.' misses it.
+// Empirically reproduced (D pkg/a.go, D pkg/b.go). The canonical-form check
+// rejects the entry before any staging.
+func TestCommitRejectsDotSegmentDirectorySweep(t *testing.T) {
+	repoTop, _ := newBaseRepo(t)
+	writeFile(t, repoTop, "pkg/a.go", "package pkg\n")
+	writeFile(t, repoTop, "pkg/b.go", "package pkg\n")
+	gitT(t, repoTop, "add", "-A")
+	gitT(t, repoTop, "commit", "-qm", "add pkg")
+	base := gitT(t, repoTop, "rev-parse", "HEAD")
+	if err := os.RemoveAll(filepath.Join(repoTop, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Commit(context.Background(), laneOpts(repoTop, base, "A", "pkg/.")); !errors.Is(err, errInvalidWriteSet) {
+		t.Errorf("Commit(WriteSet:[pkg/.]) for a removed tracked dir = %v, want errInvalidWriteSet", err)
 	}
 	if ref, _ := exec.Command("git", "-C", repoTop, "rev-parse", "--verify", "--quiet", "refs/heads/loto/A").Output(); strings.TrimSpace(string(ref)) != "" {
 		t.Errorf("rejected sweep still wrote a lane ref")
