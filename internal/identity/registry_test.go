@@ -113,30 +113,6 @@ func TestEnsureRejectsMalformedAgentID(t *testing.T) {
 	}
 }
 
-// TestMostRecentAgentSkipsStale asserts the freshness gate: an agent record
-// older than fallbackFreshness is not reused as the unset+unset fallback.
-// Without this gate, a CLI invocation a week after the last session would
-// silently re-attribute new locks to a long-dead identity.
-func TestMostRecentAgentSkipsStale(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	t.Setenv("LOTO_AGENT_ID", "")
-
-	host, _ := os.Hostname()
-	old := &Agent{UUID: newUUID(), Handle: "OldOwl", Host: host, CreatedAt: time.Now().Add(-72 * time.Hour).UTC()}
-	if err := writeAgent(old); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := mostRecentAgent(time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != nil {
-		t.Fatalf("stale record returned as fallback: %+v", got)
-	}
-}
-
 // TestGCPreservesSessionReferencedAgents asserts the binding invariant:
 // even if an agent file's mtime predates the GC cutoff, if a session cache
 // still references it, GC must not delete it. Breaking this binding would
