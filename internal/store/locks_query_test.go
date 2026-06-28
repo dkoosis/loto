@@ -38,8 +38,8 @@ func TestLocksForOwnerAt_BatchedMatchesPointQueries(t *testing.T) {
 	// alice's a,b present; bob's c and unheld d absent.
 	want := map[string]bool{a.Target.Canonical: true, b.Target.Canonical: true}
 	for canon := range want {
-		l := got[canon]
-		if l == nil {
+		l, ok := got[canon]
+		if !ok {
 			t.Errorf("target %s: want alice's lock, got absent", canon)
 			continue
 		}
@@ -47,10 +47,10 @@ func TestLocksForOwnerAt_BatchedMatchesPointQueries(t *testing.T) {
 			t.Errorf("target %s: owner=%s, want alice", canon, l.OwnerUUID)
 		}
 	}
-	if l := got[c.Target.Canonical]; l != nil {
+	if l, ok := got[c.Target.Canonical]; ok {
 		t.Errorf("target c held by bob must be absent for alice, got %+v", l)
 	}
-	if l := got[d.Target.Canonical]; l != nil {
+	if l, ok := got[d.Target.Canonical]; ok {
 		t.Errorf("unheld target d must be absent, got %+v", l)
 	}
 	if len(got) != len(want) {

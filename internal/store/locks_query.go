@@ -55,8 +55,8 @@ func (s *Store) LockForOwnerAt(ctx context.Context, t domain.Target, owner domai
 // composite PK (target_canonical, owner_uuid) each (target, owner) pair yields at
 // most one row, so the map is unambiguous; this collapses a lane assert's 2N
 // point queries to one (loto-89n3).
-func (s *Store) LocksForOwnerAt(ctx context.Context, targets []domain.Target, owner domain.AgentUUID) (map[string]*domain.LockRecord, error) {
-	out := make(map[string]*domain.LockRecord, len(targets))
+func (s *Store) LocksForOwnerAt(ctx context.Context, targets []domain.Target, owner domain.AgentUUID) (map[string]domain.LockRecord, error) {
+	out := make(map[string]domain.LockRecord, len(targets))
 	if len(targets) == 0 {
 		return out, nil
 	}
@@ -74,8 +74,7 @@ func (s *Store) LocksForOwnerAt(ctx context.Context, targets []domain.Target, ow
 		if err != nil {
 			return nil, err
 		}
-		rec := l
-		out[rec.Target.Canonical] = &rec
+		out[l.Target.Canonical] = l
 	}
 	return out, rows.Err()
 }

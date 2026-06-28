@@ -205,6 +205,10 @@ func (g gitRunner) rejectTrackedDirWriteSet(ctx context.Context, idxEnv, writeSe
 	if err != nil {
 		return fmt.Errorf("lane: probe write-set dirs: %w", err)
 	}
+	out = strings.TrimSuffix(out, "\x00") // -z terminates each entry; drop the trailing NUL
+	if out == "" {
+		return nil // no tracked entries under any write-set dir
+	}
 	tracked := strings.Split(out, "\x00")
 	for _, p := range writeSet {
 		prefix := p + "/"
