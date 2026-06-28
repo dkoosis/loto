@@ -48,6 +48,38 @@ func (s *Store) LockForOwnerAt(ctx context.Context, t domain.Target, owner domai
 	return &l, rows.Err()
 }
 
+// LocksForOwnerAt is the batched LockForOwnerAt: one owner-scoped query over the
+// whole target set, returning owner's lock at each target keyed by canonical
+// path. A target the owner does not hold is absent from the map — the caller
+// reads a missing entry exactly as LockForOwnerAt's (nil,nil) "no row". Under the
+// composite PK (target_canonical, owner_uuid) each (target, owner) pair yields at
+// most one row, so the map is unambiguous; this collapses a lane assert's 2N
+// point queries to one (loto-89n3).
+func (s *Store) LocksForOwnerAt(ctx context.Context, targets []domain.Target, owner domain.AgentUUID) (map[string]*domain.LockRecord, error) {
+	out := make(map[string]*domain.LockRecord, len(targets))
+	if len(targets) == 0 {
+		return out, nil
+	}
+	placeholders, args := inClause(targets)
+	args = append([]any{string(owner)}, args...)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+lockCols+` FROM locks WHERE owner_uuid = ? AND target_canonical IN (`+placeholders+`)`, //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+		args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		l, err := scanLock(rows)
+		if err != nil {
+			return nil, err
+		}
+		rec := l
+		out[rec.Target.Canonical] = &rec
+	}
+	return out, rows.Err()
+}
+
 // LockAt returns the longest-standing holder of target, or (nil,nil) if none.
 // Under the composite PK a shared target may have several holders; the ORDER BY
 // makes the choice deterministic (oldest created_at, then owner_uuid) rather

@@ -166,14 +166,16 @@ func runLaneCommit(rt *runtime, repoTop, ref, base, msg, closes string, targets 
 // value — it is not evidence about lock ownership, so the caller treats it as
 // infra (exit 3) rather than a blocked path.
 func assertLocksHeld(rt *runtime, ec domain.EvalContext, targets []domain.Target, owner domain.AgentUUID) (map[string]time.Time, []laneBlock, error) {
+	locks, err := rt.Store.LocksForOwnerAt(rt.Ctx, targets, owner)
+	if err != nil {
+		return nil, nil, fmt.Errorf("lock query: %w", err)
+	}
 	held := make(map[string]time.Time, len(targets))
 	var blocked []laneBlock
 	for i := range targets {
 		t := targets[i]
-		l, err := rt.Store.LockForOwnerAt(rt.Ctx, t, owner)
+		l := locks[t.Canonical]
 		switch {
-		case err != nil:
-			return nil, nil, fmt.Errorf("lock query %s: %w", t.Canonical, err)
 		case l == nil:
 			blocked = append(blocked, laneBlock{t.Canonical, "no-lock-held"})
 		case ec.IsStale(*l):
@@ -195,13 +197,15 @@ func assertLocksHeld(rt *runtime, ec domain.EvalContext, targets []domain.Target
 // as the second value: the re-check could not run, which is infra — distinct
 // from a confirmed taint, so the caller must not advise discarding the commit.
 func reassertLocksHeld(rt *runtime, ec domain.EvalContext, targets []domain.Target, owner domain.AgentUUID, before map[string]time.Time) ([]laneBlock, error) {
+	locks, err := rt.Store.LocksForOwnerAt(rt.Ctx, targets, owner)
+	if err != nil {
+		return nil, fmt.Errorf("lock recheck: %w", err)
+	}
 	var tainted []laneBlock
 	for i := range targets {
 		t := targets[i]
-		l, err := rt.Store.LockForOwnerAt(rt.Ctx, t, owner)
+		l := locks[t.Canonical]
 		switch {
-		case err != nil:
-			return nil, fmt.Errorf("lock recheck %s: %w", t.Canonical, err)
 		case l == nil:
 			tainted = append(tainted, laneBlock{t.Canonical, "lock-lost"})
 		case ec.IsStale(*l):
