@@ -174,12 +174,12 @@ func restoreDowngrades(results []DowngradeResult, owner string, now time.Time) (
 	return failEvents, failIdx
 }
 
-// DowngradeLock flips the single exclusive lock held by owner on target to
+// downgradeLock flips the single exclusive lock held by owner on target to
 // shared. Thin n=1 wrapper over DowngradeLocks preserving the original
 // error-returning contract: ErrNoLockAtTarget when no lock is held, a
 // *ChmodFailureError when the row reached shared but the post-commit write-bit
 // restore failed (loto-k5el.2).
-func (s *Store) DowngradeLock(ctx context.Context, target domain.Target, owner domain.AgentUUID) error {
+func (s *Store) downgradeLock(ctx context.Context, target domain.Target, owner domain.AgentUUID) error { //nolint:unparam // owner scopes the downgrade contract; test-only wrapper currently exercised with a single owner
 	results, err := s.DowngradeLocks(ctx, []domain.Target{target}, owner)
 	if err != nil {
 		return err

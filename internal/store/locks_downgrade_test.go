@@ -22,7 +22,7 @@ func TestDowngrade_ExclusiveToShared_RestoresWriteBit(t *testing.T) {
 	if fi, _ := os.Stat(rec.Target.Canonical); fi.Mode().Perm()&0o200 != 0 {
 		t.Fatalf("expected stripped before downgrade")
 	}
-	if err := s.DowngradeLock(ctx, rec.Target, tcAlice); err != nil {
+	if err := s.downgradeLock(ctx, rec.Target, tcAlice); err != nil {
 		t.Fatalf("downgrade: %v", err)
 	}
 	l, _ := s.LockForOwnerAt(ctx, rec.Target, tcAlice)
@@ -38,7 +38,7 @@ func TestDowngrade_NoLock_Errors(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	rec := mkFileLock(t, "a.go", tcAlice, time.Hour) // file exists, no lock
-	err := s.DowngradeLock(ctx, rec.Target, tcAlice)
+	err := s.downgradeLock(ctx, rec.Target, tcAlice)
 	if !errors.Is(err, ErrNoLockAtTarget) {
 		t.Fatalf("want ErrNoLockAtTarget, got %v", err)
 	}
@@ -52,7 +52,7 @@ func TestDowngrade_AlreadyShared_NoOp(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
-	if err := s.DowngradeLock(ctx, rec.Target, tcAlice); err != nil {
+	if err := s.downgradeLock(ctx, rec.Target, tcAlice); err != nil {
 		t.Fatalf("downgrade of already-shared should be a no-op, got %v", err)
 	}
 }
@@ -75,7 +75,7 @@ func TestDowngrade_AlreadyShared_ReconcilesStaleStrippedWriteBit(t *testing.T) {
 	if err := os.Chmod(rec.Target.Canonical, 0o400); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
-	if err := s.DowngradeLock(ctx, rec.Target, tcAlice); err != nil {
+	if err := s.downgradeLock(ctx, rec.Target, tcAlice); err != nil {
 		t.Fatalf("downgrade: %v", err)
 	}
 	l, _ := s.LockForOwnerAt(ctx, rec.Target, tcAlice)
@@ -117,7 +117,7 @@ func TestDowngrade_AlreadyShared_ReconcileUsesNoWriteTx(t *testing.T) {
 
 	dlCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	if err := s.DowngradeLock(dlCtx, rec.Target, tcAlice); err != nil {
+	if err := s.downgradeLock(dlCtx, rec.Target, tcAlice); err != nil {
 		t.Fatalf("reconcile on already-shared must not open a write tx, got %v", err)
 	}
 	if fi, _ := os.Stat(rec.Target.Canonical); fi.Mode().Perm()&0o200 == 0 {
@@ -158,7 +158,7 @@ func TestDowngrade_AlreadyShared_NoWriteTx(t *testing.T) {
 	// the full ctx-scaled busy_timeout, then surface SQLITE_BUSY.
 	dlCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	if err := s.DowngradeLock(dlCtx, rec.Target, tcAlice); err != nil {
+	if err := s.downgradeLock(dlCtx, rec.Target, tcAlice); err != nil {
 		t.Fatalf("already-shared downgrade must not open a write tx, got %v", err)
 	}
 }

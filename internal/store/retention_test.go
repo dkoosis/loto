@@ -272,7 +272,7 @@ func TestRotateEvents_FiresOnReleaseBreakDowngrade(t *testing.T) {
 			t.Fatalf("acquire: %v", err)
 		}
 		seedExcess(t, s, eventsRetentionMax+50)
-		if err := s.DowngradeLock(ctx, l.Target, tcAlice); err != nil {
+		if err := s.downgradeLock(ctx, l.Target, tcAlice); err != nil {
 			t.Fatalf("downgrade: %v", err)
 		}
 		assertTrimmed(t, s)
