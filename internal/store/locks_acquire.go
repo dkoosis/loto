@@ -77,7 +77,7 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 	// stripped owner-write; the shared upsert never restores it and stripAll skips
 	// shared rows, so without this the owner's own file stays read-only forever
 	// (loto-h760). Collect these paths from the pre-acquire snapshot and restore
-	// the bit post-commit, mirroring DowngradeLock's restore semantics.
+	// the bit post-commit, mirroring downgradeLock's restore semantics.
 	downgraded := collectSameOwnerDowngrades(all, sorted)
 
 	stripped, chmodFailErr := s.stripAndHandleFailure(tx, sorted, now)
@@ -140,7 +140,7 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 // flips the row to shared in place, but nothing restores the owner-write bit the
 // original exclusive acquire stripped (stripAll skips shared incoming rows, and
 // the same-owner row is never a reclaim/break candidate). Restoring these paths
-// post-commit mirrors DowngradeLock (loto-h760). Scoped strictly to same-owner
+// post-commit mirrors downgradeLock (loto-h760). Scoped strictly to same-owner
 // downgrades — other-owner rows are untouched.
 func collectSameOwnerDowngrades(all []domain.LockRecord, sorted []domain.LockRecord) []string {
 	var downgraded []string
