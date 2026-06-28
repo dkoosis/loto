@@ -186,6 +186,13 @@ func loadLocksTx(ctx context.Context, tx *sql.Tx) ([]domain.LockRecord, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanLocksRows(rows)
+}
+
+// scanLocksRows drains a lock-column result set into a slice, propagating the
+// first scan or iteration error. Shared by the full-table and target-scoped
+// queries so the row-accumulation loop lives in one place.
+func scanLocksRows(rows *sql.Rows) ([]domain.LockRecord, error) {
 	var out []domain.LockRecord
 	for rows.Next() {
 		l, err := scanLock(rows)

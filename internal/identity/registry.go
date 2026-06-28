@@ -37,12 +37,6 @@ var (
 	errStaleAgentID   = errors.New("stale LOTO_AGENT_ID")
 )
 
-// fallbackFreshness bounds how recently mostRecentAgent's pick must have
-// been created to be usable as an interactive fallback. Older records are
-// almost certainly from a long-finished session; reusing them would silently
-// re-attribute new locks to a dead identity.
-const fallbackFreshness = 24 * time.Hour
-
 // agentsGCMaxAge bounds how long an unused agent record may linger in
 // ~/.loto/agents/ before Ensure prunes it. Anything older than this is
 // overwhelmingly likely to be dead (crashed session, ephemeral pre-fix run).
@@ -168,8 +162,8 @@ func resolveSubagent(ctx context.Context) (*Agent, bool, error) {
 // Ensure resolves the current agent identity by the contract documented in
 // the package doc. The governing principle: identity ambiguity is allowed
 // for display, never for authority — an explicit but unresolvable
-// LOTO_AGENT_ID is a hard error, and the heuristic mostRecentAgent fallback
-// is only consulted when fresh.
+// LOTO_AGENT_ID is a hard error, and an unset identity mints a fresh agent
+// rather than adopting a recent on-disk record (gh#121).
 func Ensure(ctx context.Context) (*Agent, error) {
 	// GC runs out of band via GCAgents (driven by the CLI runtime after the
 	// store is open, so it can pass the set of lock-owner UUIDs to pin).
@@ -448,45 +442,6 @@ func claimSessionCache(sid string, a *Agent) error {
 	// re-reads the file that exists.
 	_ = syncDir(sessionDir())
 	return nil
-}
-
-// mostRecentAgent returns the newest local agent created within
-// fallbackFreshness of now, or nil if no such record exists. Stale entries
-// are deliberately excluded — a 30-day-old record represents a long-finished
-// session, and reusing it would silently re-attribute new locks to a dead
-// identity.
-func mostRecentAgent(now time.Time) (*Agent, error) {
-	entries, err := os.ReadDir(registryDir())
-	if err != nil {
-		return nil, err
-	}
-	host, _ := os.Hostname()
-	cutoff := now.Add(-fallbackFreshness)
-	var best *Agent
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		body, err := os.ReadFile(filepath.Join(registryDir(), e.Name()))
-		if err != nil {
-			continue
-		}
-		var a Agent
-		if err := json.Unmarshal(body, &a); err != nil {
-			continue
-		}
-		if a.Host != host {
-			continue
-		}
-		if a.CreatedAt.Before(cutoff) {
-			continue
-		}
-		if best == nil || a.CreatedAt.After(best.CreatedAt) {
-			cp := a
-			best = &cp
-		}
-	}
-	return best, nil
 }
 
 func newAgent() (*Agent, error) {
