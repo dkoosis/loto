@@ -2,11 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"loto/internal/domain"
 )
@@ -209,5 +211,61 @@ func TestLane_EmptyWriteSet_UsageError(t *testing.T) {
 	code := Run([]string{tcCmdLane, tcFlagRef, tcRefImpl1, tcFlagBase, tcHEAD, "-m", tcMsg, tcFlagCloses, tcClosesNone}, &out, &errB)
 	if code != 2 {
 		t.Fatalf("want exit 2, got %d; out=%q err=%q", code, out.String(), errB.String())
+	}
+}
+
+// TestAssertLocksHeld_StoreErrorIsInfra proves a store/ctx read error during the
+// pre-assert propagates as an infra error, NOT a "blocked" lock-state verdict — a
+// SQLite busy/cancel error is not evidence the caller fails to hold the lock.
+func TestAssertLocksHeld_StoreErrorIsInfra(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	rt, err := openRuntime(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	rt.Ctx = canceled
+
+	tgt, err := domain.Canonicalize(tcTargetA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, blocked, err := assertLocksHeld(rt, domain.EvalContext{}, []domain.Target{tgt}, domain.AgentUUID(rt.Agent.UUID))
+	if err == nil {
+		t.Fatal("want infra error from a cancelled store ctx, got nil")
+	}
+	if blocked != nil {
+		t.Errorf("a store/ctx error must not surface as a blocked verdict: %v", blocked)
+	}
+}
+
+// TestReassertLocksHeld_StoreErrorIsInfra proves the post-assert returns infra on
+// a store/ctx error rather than reporting the lane tainted — the dangerous case,
+// since a taint verdict advises deleting a possibly-valid commit.
+func TestReassertLocksHeld_StoreErrorIsInfra(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	rt, err := openRuntime(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	rt.Ctx = canceled
+
+	tgt, err := domain.Canonicalize(tcTargetA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tainted, err := reassertLocksHeld(rt, domain.EvalContext{}, []domain.Target{tgt}, domain.AgentUUID(rt.Agent.UUID), map[string]time.Time{})
+	if err == nil {
+		t.Fatal("want infra error from a cancelled store ctx, got nil")
+	}
+	if tainted != nil {
+		t.Errorf("a store/ctx error must not surface as a taint verdict: %v", tainted)
 	}
 }
