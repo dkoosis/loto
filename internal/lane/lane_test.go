@@ -299,6 +299,10 @@ func TestValidateWriteSetRejects(t *testing.T) {
 		{"magic exclude", ":(exclude)mul.go"},
 		{"magic leading colon", ":mul.go"},
 		{"magic from-top", ":/mul.go"},
+		{"dot segment trailing", "internal/."},
+		{"dot segment leading", "./mul.go"},
+		{"dot segment mid", "internal/./x.go"},
+		{"redundant slash", "internal//x.go"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -363,5 +367,138 @@ func TestCommitDeletionCommitsAsDeletionUnderLiteral(t *testing.T) {
 	status := gitT(t, repoTop, "diff", "--name-status", base, a)
 	if !strings.Contains(status, "D\tmul.go") {
 		t.Errorf("mul.go should record as a deletion (D) vs base under :(literal); got:\n%s", status)
+	}
+}
+
+// TestCommitRejectsRemovedTrackedDirectory is the loto-6uzn regression guard.
+// The zt0l directory guard only os.Stat's the worktree, so a write-set entry
+// naming a tracked directory REMOVED from disk ('rm -rf pkg') returns ENOENT and
+// passes validateWriteSet — then buildLaneTree's :(literal)pkg prefix-expands
+// against the parent-seeded index and stages a deletion for EVERY file under
+// pkg/ (the fs84 sweep, the symmetric index/HEAD case codex caught on #201). The
+// fixed behavior rejects that entry with errInvalidWriteSet before staging. The
+// control half proves the fix does not over-reject: a removed single FILE in the
+// same shape still stages as one legitimate deletion.
+func TestCommitRejectsRemovedTrackedDirectory(t *testing.T) {
+	repoTop, _ := newBaseRepo(t)
+	// Commit a tracked directory, then remove it from disk entirely.
+	writeFile(t, repoTop, "pkg/a.go", "package pkg\n")
+	writeFile(t, repoTop, "pkg/b.go", "package pkg\n")
+	gitT(t, repoTop, "add", "-A")
+	gitT(t, repoTop, "commit", "-qm", "add pkg")
+	base := gitT(t, repoTop, "rev-parse", "HEAD")
+	if err := os.RemoveAll(filepath.Join(repoTop, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The sweep vector: the write-set names the removed tracked directory. It must
+	// be rejected, not silently staged as two deletions of pkg/a.go + pkg/b.go.
+	if _, err := Commit(context.Background(), laneOpts(repoTop, base, "A", "pkg")); !errors.Is(err, errInvalidWriteSet) {
+		t.Errorf("Commit(WriteSet:[pkg]) for a removed tracked dir = %v, want errInvalidWriteSet", err)
+	}
+	if ref, _ := exec.Command("git", "-C", repoTop, "rev-parse", "--verify", "--quiet", "refs/heads/loto/A").Output(); strings.TrimSpace(string(ref)) != "" {
+		t.Errorf("rejected sweep still wrote a lane ref")
+	}
+
+	// Control: a removed single FILE still commits as exactly one deletion — the
+	// fix must distinguish a tracked dir (reject) from a tracked file (allow).
+	if err := os.Remove(filepath.Join(repoTop, "mul.go")); err != nil {
+		t.Fatal(err)
+	}
+	f := mustCommit(t, laneOpts(repoTop, base, "F", "mul.go"))
+	status := gitT(t, repoTop, "diff", "--name-status", base, f)
+	if !strings.Contains(status, "D\tmul.go") {
+		t.Errorf("removed file should still record as a deletion (D); got:\n%s", status)
+	}
+	// The deletion must touch only mul.go — pkg/ survives untouched (no sweep).
+	if other := gitT(t, repoTop, "show", f+":pkg/a.go"); !strings.Contains(other, "package pkg") {
+		t.Errorf("the file-deletion lane wrongly dropped untouched pkg/a.go:\n%s", other)
+	}
+}
+
+// TestCommitRejectsFileShadowingTrackedDirectory is the codex follow-up to
+// loto-6uzn: the sibling of the removed-directory vector. A lane replaces a
+// tracked directory with a regular file at the same path ('rm -rf pkg; echo x >
+// pkg') and names it in the write-set. os.Stat now SUCCEEDS (pkg is a file), so a
+// presence-gated probe would skip the index check — yet :(literal)pkg still
+// prefix-expands against the parent-seeded index, staging the new file PLUS a
+// deletion for every pkg/* file. Empirically confirmed: A pkg, D pkg/a.go, D
+// pkg/b.go. The probe must run regardless of on-disk presence; this guards that.
+func TestCommitRejectsFileShadowingTrackedDirectory(t *testing.T) {
+	repoTop, _ := newBaseRepo(t)
+	writeFile(t, repoTop, "pkg/a.go", "package pkg\n")
+	writeFile(t, repoTop, "pkg/b.go", "package pkg\n")
+	gitT(t, repoTop, "add", "-A")
+	gitT(t, repoTop, "commit", "-qm", "add pkg")
+	base := gitT(t, repoTop, "rev-parse", "HEAD")
+
+	// Replace the tracked directory with a regular file at the same path.
+	if err := os.RemoveAll(filepath.Join(repoTop, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, repoTop, "pkg", "x\n")
+
+	if _, err := Commit(context.Background(), laneOpts(repoTop, base, "A", "pkg")); !errors.Is(err, errInvalidWriteSet) {
+		t.Errorf("Commit(WriteSet:[pkg]) for a file shadowing a tracked dir = %v, want errInvalidWriteSet", err)
+	}
+	if ref, _ := exec.Command("git", "-C", repoTop, "rev-parse", "--verify", "--quiet", "refs/heads/loto/A").Output(); strings.TrimSpace(string(ref)) != "" {
+		t.Errorf("rejected sweep still wrote a lane ref")
+	}
+}
+
+// TestCommitRejectsDotSegmentDirectorySweep is the codex #202 P1 guard. A
+// removed tracked directory named with a '.' segment ('pkg/.') slips past the
+// pre-canonical-form validateWriteSet ('..' was rejected, '.' was not) and git
+// normalizes ':(literal)pkg/.' so `git add -A` sweeps every pkg/* deletion —
+// while a raw-prefix probe comparing against the un-normalized 'pkg/.' misses it.
+// Empirically reproduced (D pkg/a.go, D pkg/b.go). The canonical-form check
+// rejects the entry before any staging.
+func TestCommitRejectsDotSegmentDirectorySweep(t *testing.T) {
+	repoTop, _ := newBaseRepo(t)
+	writeFile(t, repoTop, "pkg/a.go", "package pkg\n")
+	writeFile(t, repoTop, "pkg/b.go", "package pkg\n")
+	gitT(t, repoTop, "add", "-A")
+	gitT(t, repoTop, "commit", "-qm", "add pkg")
+	base := gitT(t, repoTop, "rev-parse", "HEAD")
+	if err := os.RemoveAll(filepath.Join(repoTop, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Commit(context.Background(), laneOpts(repoTop, base, "A", "pkg/.")); !errors.Is(err, errInvalidWriteSet) {
+		t.Errorf("Commit(WriteSet:[pkg/.]) for a removed tracked dir = %v, want errInvalidWriteSet", err)
+	}
+	if ref, _ := exec.Command("git", "-C", repoTop, "rev-parse", "--verify", "--quiet", "refs/heads/loto/A").Output(); strings.TrimSpace(string(ref)) != "" {
+		t.Errorf("rejected sweep still wrote a lane ref")
+	}
+}
+
+// TestCommitAllowsSubmoduleRemoval is the codex #202 P2 guard: the tracked-dir
+// probe must not over-reject a legitimate submodule removal. A gitlink (index
+// mode 160000) at path `pkg` matches `ls-files :(literal)pkg/` (its entry path
+// equals the dir pathspec), yet `git add -A :(literal)pkg` stages only a single
+// `D pkg` — no directory sweep. Empirically confirmed. So naming a removed
+// submodule in a write-set is legitimate and must be ALLOWED; only a tracked
+// entry STRICTLY UNDER pkg/ is the sweep vector. The gitlink is built directly
+// via update-index --cacheinfo to stay hermetic (no submodule protocol flags).
+func TestCommitAllowsSubmoduleRemoval(t *testing.T) {
+	repoTop, base := newBaseRepo(t)
+	// Record a gitlink at `pkg` pointing at any valid commit (base itself works).
+	gitT(t, repoTop, "update-index", "--add", "--cacheinfo", "160000,"+base+",pkg")
+	gitT(t, repoTop, "commit", "-qm", "add submodule pkg")
+	subBase := gitT(t, repoTop, "rev-parse", "HEAD")
+	// Remove the (never-checked-out) submodule path from disk, name it in the
+	// write-set alongside the usual .gitmodules edit shape.
+	if err := os.RemoveAll(filepath.Join(repoTop, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+
+	sha := mustCommit(t, laneOpts(repoTop, subBase, "S", "pkg"))
+	status := gitT(t, repoTop, "diff", "--name-status", subBase, sha)
+	if !strings.Contains(status, "D\tpkg") {
+		t.Errorf("submodule removal should record as a single deletion (D pkg); got:\n%s", status)
+	}
+	// Untouched siblings survive — the removal touched only the gitlink.
+	if other := gitT(t, repoTop, "show", sha+":add.go"); !strings.Contains(other, "func Add") {
+		t.Errorf("submodule-removal lane wrongly dropped untouched add.go:\n%s", other)
 	}
 }

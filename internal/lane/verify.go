@@ -22,6 +22,15 @@ const verifyTimeout = 15 * time.Minute
 // convention: static error, not an ad-hoc string).
 var errVerifyInput = errors.New("lane: invalid Verify input")
 
+// errVerifyAborted is the stable target for a verify that could not RUN to a
+// verdict because the ctx expired (caller deadline/cancel, or the internal
+// verifyTimeout wedge guard). Distinct from errVerifyInput on purpose: a ctx
+// abort is an infrastructure timeout, not bad input and not a failing test, so
+// lane choreography must remediate it as infra (retry/escalate), never as
+// "your tests fail". A ctx-killed command surfaces from exec as an
+// *exec.ExitError ("signal: killed"); this sentinel reclassifies that case.
+var errVerifyAborted = errors.New("lane: verify aborted before a verdict")
+
 // VerifyResult is the outcome of one hermetic verify run.
 type VerifyResult struct {
 	// Passed is true iff the command exited zero.
@@ -113,6 +122,14 @@ func runVerifyCmd(ctx context.Context, dir string, cmd []string) (string, bool, 
 	err := c.Run()
 	if err == nil {
 		return buf.String(), true, nil
+	}
+	// Check ctx expiry BEFORE classifying *exec.ExitError as a RED verdict. A ctx
+	// deadline/cancel (caller's, or the verifyTimeout wedge guard) kills the running
+	// command, and exec reports that kill as an *exec.ExitError ("signal: killed").
+	// Treating it as Passed=false would mislabel an infra timeout as failing tests;
+	// surface it as an infra error so the lane retries/escalates instead.
+	if ctx.Err() != nil {
+		return buf.String(), false, fmt.Errorf("%w: %w", errVerifyAborted, ctx.Err())
 	}
 	exitErr := new(exec.ExitError)
 	if errors.As(err, &exitErr) {

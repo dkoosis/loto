@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -135,11 +136,17 @@ func (g gitRunner) buildLaneTree(ctx context.Context, ref, parent string, writeS
 		return "", fmt.Errorf("lane: seed index from %s: %w", parent, err)
 	}
 
+	if err := g.rejectTrackedDirWriteSet(ctx, idxEnv, writeSet); err != nil {
+		return "", err
+	}
+
 	// Stage EXACTLY the write-set, NUL-delimited, each wrapped in :(literal) so a
 	// wildcard or magic prefix that slipped past validateWriteSet is treated as a
 	// literal path, never a pattern. -A captures additions and deletions for the
 	// listed paths. NOTE: :(literal) does NOT stop a directory pathspec from
-	// prefix-expanding — validateWriteSet rejects directories so none reach here.
+	// prefix-expanding — validateWriteSet rejects on-disk directories and
+	// rejectTrackedDirWriteSet rejects any path tracked as a directory in the
+	// parent (removed or file-shadowed), so none reach here.
 	literal := make([]string, len(writeSet))
 	for i, p := range writeSet {
 		literal[i] = ":(literal)" + p
@@ -157,6 +164,45 @@ func (g gitRunner) buildLaneTree(ctx context.Context, ref, parent string, writeS
 		return "", fmt.Errorf("lane: write-tree: %w", err)
 	}
 	return strings.TrimSpace(tree), nil
+}
+
+// rejectTrackedDirWriteSet closes the index/HEAD half of the directory-sweep
+// vector that validateWriteSet's os.Stat cannot see. A write-set entry naming a
+// directory that is tracked in the PARENT lets :(literal)<path> prefix-expand
+// against the parent-seeded index in buildLaneTree's `git add -A`, staging a
+// deletion for every file under <path>/ — the fs84 sweep (the symmetric
+// index/HEAD case codex caught on #201). Two on-disk shapes reach here past
+// validateWriteSet (which only rejects on-disk directories):
+//   - removed entirely ('rm -rf pkg') — stats ENOENT;
+//   - replaced by a regular file ('rm -rf pkg; echo x > pkg') — stats as a file.
+//
+// Both bypass the worktree check yet still sweep pkg/* deletions, so the probe
+// must run regardless of on-disk presence. Probe each path against the
+// already-seeded lane index (idxEnv): `git ls-files -z :(literal)<path>/`.
+//
+// The trailing slash matches one of two things: tracked files strictly UNDER
+// <path>/ (a real directory — the sweep vector), or, surprisingly, a gitlink at
+// exactly <path> (a submodule; its index entry path matches the dir pathspec).
+// Only the former prefix-expands under `git add -A`; a gitlink stages as a single
+// `D <path>` deletion, no sweep — so removing a submodule named in a write-set is
+// legitimate and must be allowed (codex #202 P2). Discriminate by path: reject
+// iff a matched entry lives strictly under <path>/. A bare match equal to <path>
+// (the gitlink) is fine, and a tracked FILE at <path> yields zero rows because the
+// trailing slash forces a directory match. -z avoids core.quotePath mangling.
+func (g gitRunner) rejectTrackedDirWriteSet(ctx context.Context, idxEnv, writeSet []string) error {
+	for _, p := range writeSet {
+		out, err := g.run(ctx, gitCall{env: idxEnv, args: []string{"ls-files", "-z", "--", ":(literal)" + p + "/"}})
+		if err != nil {
+			return fmt.Errorf("lane: probe path %q: %w", p, err)
+		}
+		prefix := p + "/"
+		for f := range strings.SplitSeq(out, "\x00") {
+			if strings.HasPrefix(f, prefix) {
+				return fmt.Errorf("%w: path %q is a directory tracked in the parent; list files explicitly", errInvalidWriteSet, p)
+			}
+		}
+	}
+	return nil
 }
 
 // resolveParent returns the lane's parent commit: the existing lane tip if
@@ -259,38 +305,61 @@ func isRefRune(r rune) bool {
 // PATHSPEC list (--pathspec-from-file), so anything wider than an exact file
 // re-opens the fs84 sweep this package exists to prevent. Rejected: empty,
 // NUL-bearing, pathspec magic (leading ':'), a glob metacharacter (* ? [ ]),
-// absolute, '..'-escaping, a trailing '/', or an entry that stats as a directory
-// on disk.
+// absolute, '..'-escaping, a trailing '/', a non-canonical path (a '.' segment or
+// redundant '/', which git normalizes into a sweep), or an entry that stats as a
+// directory on disk.
 //
 // The directory checks are load-bearing, not belt-and-suspenders: buildLaneTree
 // wraps each pathspec in :(literal), which neutralizes wildcards and magic but
 // does NOT stop a directory pathspec from prefix-matching every file under it. A
 // bare existing directory must be rejected here. A path absent from disk is
-// allowed — that is a deletion the lane legitimately records under `git add -A`.
+// allowed here — a removed FILE is a deletion the lane legitimately records under
+// `git add -A`. A path tracked as a DIRECTORY in the parent is the same sweep
+// vector yet invisible to this worktree-only check when removed (ENOENT) or
+// shadowed by a regular file; buildLaneTree's rejectTrackedDirWriteSet catches it
+// against the parent-seeded index, where os.Stat cannot.
 func validateWriteSet(repoTop string, paths []string) error {
 	if len(paths) == 0 {
 		return fmt.Errorf("%w: must list at least one path", errInvalidWriteSet)
 	}
 	for _, p := range paths {
-		switch {
-		case p == "":
-			return fmt.Errorf("%w: empty path", errInvalidWriteSet)
-		case strings.ContainsRune(p, '\x00'):
-			return fmt.Errorf("%w: path %q contains NUL", errInvalidWriteSet, p)
-		case strings.HasPrefix(p, ":"):
-			return fmt.Errorf("%w: path %q uses pathspec magic (leading ':')", errInvalidWriteSet, p)
-		case strings.ContainsAny(p, "*?[]"):
-			return fmt.Errorf("%w: path %q contains a glob metacharacter", errInvalidWriteSet, p)
-		case filepath.IsAbs(p):
-			return fmt.Errorf("%w: path %q must be repo-relative, not absolute", errInvalidWriteSet, p)
-		case p == ".." || strings.HasPrefix(p, "../") || strings.Contains(p, "/../") || strings.HasSuffix(p, "/.."):
-			return fmt.Errorf("%w: path %q escapes the repo", errInvalidWriteSet, p)
-		case strings.HasSuffix(p, "/"):
-			return fmt.Errorf("%w: path %q is a directory (trailing '/'); list files explicitly", errInvalidWriteSet, p)
+		if err := lexicalWriteSetCheck(p); err != nil {
+			return err
 		}
 		if info, err := os.Stat(filepath.Join(repoTop, filepath.FromSlash(p))); err == nil && info.IsDir() {
 			return fmt.Errorf("%w: path %q is a directory; list files explicitly", errInvalidWriteSet, p)
 		}
+	}
+	return nil
+}
+
+// lexicalWriteSetCheck rejects a write-set entry on its spelling alone — no disk
+// access. Split from validateWriteSet's on-disk stat both to keep each function's
+// cyclomatic complexity in budget and to make the pathspec-shape rules testable
+// without a repo.
+func lexicalWriteSetCheck(p string) error {
+	switch {
+	case p == "":
+		return fmt.Errorf("%w: empty path", errInvalidWriteSet)
+	case strings.ContainsRune(p, '\x00'):
+		return fmt.Errorf("%w: path %q contains NUL", errInvalidWriteSet, p)
+	case strings.HasPrefix(p, ":"):
+		return fmt.Errorf("%w: path %q uses pathspec magic (leading ':')", errInvalidWriteSet, p)
+	case strings.ContainsAny(p, "*?[]"):
+		return fmt.Errorf("%w: path %q contains a glob metacharacter", errInvalidWriteSet, p)
+	case filepath.IsAbs(p):
+		return fmt.Errorf("%w: path %q must be repo-relative, not absolute", errInvalidWriteSet, p)
+	case p == ".." || strings.HasPrefix(p, "../") || strings.Contains(p, "/../") || strings.HasSuffix(p, "/.."):
+		return fmt.Errorf("%w: path %q escapes the repo", errInvalidWriteSet, p)
+	case strings.HasSuffix(p, "/"):
+		return fmt.Errorf("%w: path %q is a directory (trailing '/'); list files explicitly", errInvalidWriteSet, p)
+	case path.Clean(p) != p:
+		// Non-canonical: a '.' segment ('pkg/.', './pkg') or a redundant slash
+		// ('pkg//a.go'). Git normalizes these in the pathspec ('pkg/.' sweeps
+		// pkg/*), but buildLaneTree's prefix discriminator compares against the
+		// raw entry and would miss the sweep. Reject rather than normalize —
+		// the write-set must name files in canonical form (codex #202 P1).
+		return fmt.Errorf("%w: path %q is not canonical (%q); list files in clean form", errInvalidWriteSet, p, path.Clean(p))
 	}
 	return nil
 }
