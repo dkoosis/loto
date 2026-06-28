@@ -192,19 +192,70 @@ func TestAck_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Precondition: the tag is alive for its owner before any ack.
+	if alive, err := s.ListAliveForOwner(ctx, tcAlice); err != nil {
+		t.Fatal(err)
+	} else if len(alive) != 1 {
+		t.Fatalf("precondition: want 1 alive tag before ack, got %d", len(alive))
+	}
+
 	if err := s.Ack(ctx, id, tcAlice); err != nil {
 		t.Fatalf("first ack: %v", err)
 	}
+	// The first ack must dismiss the tag: acked_at set, gone from the alive set.
+	// A no-op Ack leaves acked_at NULL → the tag stays alive → this fails.
+	if alive, err := s.ListAliveForOwner(ctx, tcAlice); err != nil {
+		t.Fatal(err)
+	} else if len(alive) != 0 {
+		t.Fatalf("first ack must dismiss tag, still alive: %+v", alive)
+	}
+	first := tagAckedAt(t, s, id)
+
 	if err := s.Ack(ctx, id, tcAlice); err != nil {
 		t.Fatalf("second ack must be no-op: %v", err)
+	}
+	// Idempotent: still dismissed and the ack timestamp is NOT re-stamped (the
+	// second UPDATE matches 0 rows because acked_at IS NULL no longer holds).
+	if alive, err := s.ListAliveForOwner(ctx, tcAlice); err != nil {
+		t.Fatal(err)
+	} else if len(alive) != 0 {
+		t.Fatalf("tag must stay dismissed after second ack, got: %+v", alive)
+	}
+	if second := tagAckedAt(t, s, id); second != first {
+		t.Fatalf("second ack re-stamped acked_at (not idempotent): first=%d second=%d", first, second)
 	}
 }
 
 func TestAck_Orphan_NoOp(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
+	// Establish real state so "no-op" is observable: one live tag owned by Alice.
+	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
+	id, err := s.InsertTag(ctx, NewTag{
+		TargetCanonical: domain.Canonical(lock.Target.Canonical), LockOwnerUUID: tcAlice, LockCreatedAt: lockNs,
+		TaggerUUID: tcBob, Text: tcPing,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := rawTagRowCount(t, s)
+
 	if err := s.Ack(ctx, "t-deadbeef", tcAlice); err != nil {
 		t.Fatalf("ack unknown id must be no-op, got %v", err)
+	}
+
+	// Acking an unknown id must touch nothing: row count unchanged and the real
+	// tag stays alive (not collaterally acked). A broken Ack that mutated state
+	// for an unknown id — re-stamping or acking the wrong row — fails one of these.
+	if after := rawTagRowCount(t, s); after != before {
+		t.Fatalf("orphan ack changed tag count: before=%d after=%d", before, after)
+	}
+	alive, err := s.ListAliveForOwner(ctx, tcAlice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alive) != 1 || alive[0].ID != id {
+		t.Fatalf("orphan ack must leave the existing tag untouched, got %+v", alive)
 	}
 }
 
@@ -453,6 +504,20 @@ func rawTagRowCount(t *testing.T, s *Store) int {
 		t.Fatalf("count tags: %v", err)
 	}
 	return n
+}
+
+// tagAckedAt returns a tag's acked_at, failing if the row is missing or acked_at
+// is still NULL — i.e. the tag was never dismissed.
+func tagAckedAt(t *testing.T, s *Store, id string) int64 {
+	t.Helper()
+	var acked sql.NullInt64
+	if err := s.db.QueryRow(`SELECT acked_at FROM tags WHERE id = ?`, id).Scan(&acked); err != nil {
+		t.Fatalf("read acked_at for %s: %v", id, err)
+	}
+	if !acked.Valid {
+		t.Fatalf("tag %s acked_at is NULL, expected a dismissed tag", id)
+	}
+	return acked.Int64
 }
 
 func errEqualsTo(got, want error) bool {
