@@ -21,9 +21,8 @@ const (
 )
 
 type ccSidecar struct {
-	PID    int    `json:"pid"`
-	CWD    string `json:"cwd"`
-	Status string `json:"status"`
+	PID int    `json:"pid"`
+	CWD string `json:"cwd"`
 }
 
 // SidecarFinding annotates a held lock with a stronger zombie signal derived
