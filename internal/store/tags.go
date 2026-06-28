@@ -2,9 +2,7 @@ package store
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"time"
 
@@ -47,15 +45,7 @@ var (
 	ErrTagTextTooLong = errors.New("loto: tag text exceeds 4096-byte cap")
 )
 
-func newTagID() string {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// Matches newEventID: crypto/rand failing is catastrophic; refuse to
-		// mint predictable IDs.
-		panic("crypto/rand: " + err.Error())
-	}
-	return "t-" + hex.EncodeToString(b[:])
-}
+func newTagID() string { return newID("t-") }
 
 // InsertTag adds a tag bound to the host lock identified by
 // (TargetCanonical, LockOwnerUUID, LockCreatedAt). The host-lock existence
