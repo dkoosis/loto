@@ -365,3 +365,49 @@ func TestCommitDeletionCommitsAsDeletionUnderLiteral(t *testing.T) {
 		t.Errorf("mul.go should record as a deletion (D) vs base under :(literal); got:\n%s", status)
 	}
 }
+
+// TestCommitRejectsRemovedTrackedDirectory is the loto-6uzn regression guard.
+// The zt0l directory guard only os.Stat's the worktree, so a write-set entry
+// naming a tracked directory REMOVED from disk ('rm -rf pkg') returns ENOENT and
+// passes validateWriteSet — then buildLaneTree's :(literal)pkg prefix-expands
+// against the parent-seeded index and stages a deletion for EVERY file under
+// pkg/ (the fs84 sweep, the symmetric index/HEAD case codex caught on #201). The
+// fixed behavior rejects that entry with errInvalidWriteSet before staging. The
+// control half proves the fix does not over-reject: a removed single FILE in the
+// same shape still stages as one legitimate deletion.
+func TestCommitRejectsRemovedTrackedDirectory(t *testing.T) {
+	repoTop, _ := newBaseRepo(t)
+	// Commit a tracked directory, then remove it from disk entirely.
+	writeFile(t, repoTop, "pkg/a.go", "package pkg\n")
+	writeFile(t, repoTop, "pkg/b.go", "package pkg\n")
+	gitT(t, repoTop, "add", "-A")
+	gitT(t, repoTop, "commit", "-qm", "add pkg")
+	base := gitT(t, repoTop, "rev-parse", "HEAD")
+	if err := os.RemoveAll(filepath.Join(repoTop, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The sweep vector: the write-set names the removed tracked directory. It must
+	// be rejected, not silently staged as two deletions of pkg/a.go + pkg/b.go.
+	if _, err := Commit(context.Background(), laneOpts(repoTop, base, "A", "pkg")); !errors.Is(err, errInvalidWriteSet) {
+		t.Errorf("Commit(WriteSet:[pkg]) for a removed tracked dir = %v, want errInvalidWriteSet", err)
+	}
+	if ref, _ := exec.Command("git", "-C", repoTop, "rev-parse", "--verify", "--quiet", "refs/heads/loto/A").Output(); strings.TrimSpace(string(ref)) != "" {
+		t.Errorf("rejected sweep still wrote a lane ref")
+	}
+
+	// Control: a removed single FILE still commits as exactly one deletion — the
+	// fix must distinguish a tracked dir (reject) from a tracked file (allow).
+	if err := os.Remove(filepath.Join(repoTop, "mul.go")); err != nil {
+		t.Fatal(err)
+	}
+	f := mustCommit(t, laneOpts(repoTop, base, "F", "mul.go"))
+	status := gitT(t, repoTop, "diff", "--name-status", base, f)
+	if !strings.Contains(status, "D\tmul.go") {
+		t.Errorf("removed file should still record as a deletion (D); got:\n%s", status)
+	}
+	// The deletion must touch only mul.go — pkg/ survives untouched (no sweep).
+	if other := gitT(t, repoTop, "show", f+":pkg/a.go"); !strings.Contains(other, "package pkg") {
+		t.Errorf("the file-deletion lane wrongly dropped untouched pkg/a.go:\n%s", other)
+	}
+}

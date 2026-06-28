@@ -135,11 +135,16 @@ func (g gitRunner) buildLaneTree(ctx context.Context, ref, parent string, writeS
 		return "", fmt.Errorf("lane: seed index from %s: %w", parent, err)
 	}
 
+	if err := g.rejectRemovedTrackedDirs(ctx, idxEnv, writeSet); err != nil {
+		return "", err
+	}
+
 	// Stage EXACTLY the write-set, NUL-delimited, each wrapped in :(literal) so a
 	// wildcard or magic prefix that slipped past validateWriteSet is treated as a
 	// literal path, never a pattern. -A captures additions and deletions for the
 	// listed paths. NOTE: :(literal) does NOT stop a directory pathspec from
-	// prefix-expanding — validateWriteSet rejects directories so none reach here.
+	// prefix-expanding — validateWriteSet rejects on-disk directories and
+	// rejectRemovedTrackedDirs rejects removed-but-tracked ones, so none reach here.
 	literal := make([]string, len(writeSet))
 	for i, p := range writeSet {
 		literal[i] = ":(literal)" + p
@@ -157,6 +162,34 @@ func (g gitRunner) buildLaneTree(ctx context.Context, ref, parent string, writeS
 		return "", fmt.Errorf("lane: write-tree: %w", err)
 	}
 	return strings.TrimSpace(tree), nil
+}
+
+// rejectRemovedTrackedDirs closes the index/HEAD half of the directory-sweep
+// vector that validateWriteSet's os.Stat cannot see. A write-set entry naming a
+// tracked directory that has been removed from disk ('rm -rf pkg') stats as
+// ENOENT, so validateWriteSet (worktree-only) lets it through — but :(literal)pkg
+// still prefix-expands against the parent-seeded index in buildLaneTree's `git
+// add -A` and would stage a deletion for every file under pkg/ (the fs84 sweep,
+// the symmetric case codex caught on #201). Probe each path against the
+// already-seeded lane index (idxEnv): `git ls-files :(literal)<path>/` — the
+// trailing slash forces a directory-prefix match, so a tracked FILE (a legitimate
+// deletion) yields zero rows and is allowed, while a tracked directory yields its
+// files and is rejected. Paths present on disk are skipped; validateWriteSet
+// already rejects on-disk directories, and a present file is fine to stage.
+func (g gitRunner) rejectRemovedTrackedDirs(ctx context.Context, idxEnv, writeSet []string) error {
+	for _, p := range writeSet {
+		if _, err := os.Stat(filepath.Join(g.repoTop, filepath.FromSlash(p))); !errors.Is(err, os.ErrNotExist) {
+			continue // present on disk (or unstatable) — not an absent-dir sweep
+		}
+		out, err := g.run(ctx, gitCall{env: idxEnv, args: []string{"ls-files", "--", ":(literal)" + p + "/"}})
+		if err != nil {
+			return fmt.Errorf("lane: probe removed path %q: %w", p, err)
+		}
+		if strings.TrimSpace(out) != "" {
+			return fmt.Errorf("%w: path %q is a removed tracked directory; list files explicitly", errInvalidWriteSet, p)
+		}
+	}
+	return nil
 }
 
 // resolveParent returns the lane's parent commit: the existing lane tip if
@@ -266,7 +299,10 @@ func isRefRune(r rune) bool {
 // wraps each pathspec in :(literal), which neutralizes wildcards and magic but
 // does NOT stop a directory pathspec from prefix-matching every file under it. A
 // bare existing directory must be rejected here. A path absent from disk is
-// allowed — that is a deletion the lane legitimately records under `git add -A`.
+// allowed here — a removed FILE is a deletion the lane legitimately records under
+// `git add -A`. A removed-but-tracked DIRECTORY is the same sweep vector yet
+// invisible to os.Stat (ENOENT); buildLaneTree's rejectRemovedTrackedDirs catches
+// it against the parent-seeded index, where this worktree-only check cannot.
 func validateWriteSet(repoTop string, paths []string) error {
 	if len(paths) == 0 {
 		return fmt.Errorf("%w: must list at least one path", errInvalidWriteSet)
