@@ -102,21 +102,15 @@ func fmtTTL(d time.Duration) string {
 }
 
 func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
-	all, err := rt.Store.ListLocks(rt.Ctx)
+	// LocksAt scopes the query to this target (WHERE target_canonical = ?) in
+	// deterministic order — same row set the old full-table ListLocks + Go-side
+	// SameCanonical filter produced, without pulling every lock into memory.
+	overlapping, err := rt.Store.LocksAt(rt.Ctx, t)
 	if err != nil {
 		fmt.Fprintf(w, "✗ %v\n", err)
 		return 3
 	}
 	ec := domain.EvalContext{Now: time.Now(), ThisHost: rt.Host, Live: rt.liveProbe()}
-	var overlapping []domain.LockRecord
-	for i := range all {
-		if domain.SameCanonical(all[i].Target, t) {
-			overlapping = append(overlapping, all[i])
-		}
-	}
-	sort.Slice(overlapping, func(i, j int) bool {
-		return overlapping[i].Target.Canonical < overlapping[j].Target.Canonical
-	})
 	if len(overlapping) == 0 {
 		fmt.Fprintf(w, "✓ free target=%s\n", relPath(t.Canonical))
 		return 0
