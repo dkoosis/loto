@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // cmdTrue is the no-op probe command shared by the input/failure cases.
@@ -145,6 +146,38 @@ func TestVerifyReportsCommandFailure(t *testing.T) {
 	}
 	if !strings.Contains(res.Output, "stdout-line") || !strings.Contains(res.Output, "stderr-line") {
 		t.Errorf("combined stdout+stderr not both captured:\n%s", res.Output)
+	}
+}
+
+// TestRunVerifyCmdCtxExpiryIsInfraError pins the loto-px54 fix: when the ctx
+// deadline/cancel kills a RUNNING verify command, exec returns an *exec.ExitError
+// ("signal: killed"). That is an infrastructure abort, not a test verdict, so it
+// must surface as a non-nil error (errors.Is errVerifyAborted), never Passed=false.
+// A short ctx against a long sleep makes the kill deterministic (600x margin).
+func TestRunVerifyCmdCtxExpiryIsInfraError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	_, passed, err := runVerifyCmd(ctx, t.TempDir(), []string{"sleep", "30"})
+	if !errors.Is(err, errVerifyAborted) {
+		t.Errorf("ctx-killed verify err = %v, want errVerifyAborted", err)
+	}
+	if passed {
+		t.Error("Passed=true for a ctx-killed command; an aborted run has no verdict")
+	}
+}
+
+// TestRunVerifyCmdNonZeroExitIsResult is the companion to the abort case: a
+// genuine non-zero exit with the ctx still live is an ordinary RED verdict —
+// Passed=false, err=nil — not an infra error. Guards against the fix swallowing
+// real failures.
+func TestRunVerifyCmdNonZeroExitIsResult(t *testing.T) {
+	_, passed, err := runVerifyCmd(context.Background(), t.TempDir(), []string{"false"})
+	if err != nil {
+		t.Errorf("non-zero exit must be a verify result, not an infra error: %v", err)
+	}
+	if passed {
+		t.Error("Passed=true for `false` (exit 1)")
 	}
 }
 
