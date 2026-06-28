@@ -441,3 +441,34 @@ func TestCommitRejectsFileShadowingTrackedDirectory(t *testing.T) {
 		t.Errorf("rejected sweep still wrote a lane ref")
 	}
 }
+
+// TestCommitAllowsSubmoduleRemoval is the codex #202 P2 guard: the tracked-dir
+// probe must not over-reject a legitimate submodule removal. A gitlink (index
+// mode 160000) at path `pkg` matches `ls-files :(literal)pkg/` (its entry path
+// equals the dir pathspec), yet `git add -A :(literal)pkg` stages only a single
+// `D pkg` — no directory sweep. Empirically confirmed. So naming a removed
+// submodule in a write-set is legitimate and must be ALLOWED; only a tracked
+// entry STRICTLY UNDER pkg/ is the sweep vector. The gitlink is built directly
+// via update-index --cacheinfo to stay hermetic (no submodule protocol flags).
+func TestCommitAllowsSubmoduleRemoval(t *testing.T) {
+	repoTop, base := newBaseRepo(t)
+	// Record a gitlink at `pkg` pointing at any valid commit (base itself works).
+	gitT(t, repoTop, "update-index", "--add", "--cacheinfo", "160000,"+base+",pkg")
+	gitT(t, repoTop, "commit", "-qm", "add submodule pkg")
+	subBase := gitT(t, repoTop, "rev-parse", "HEAD")
+	// Remove the (never-checked-out) submodule path from disk, name it in the
+	// write-set alongside the usual .gitmodules edit shape.
+	if err := os.RemoveAll(filepath.Join(repoTop, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+
+	sha := mustCommit(t, laneOpts(repoTop, subBase, "S", "pkg"))
+	status := gitT(t, repoTop, "diff", "--name-status", subBase, sha)
+	if !strings.Contains(status, "D\tpkg") {
+		t.Errorf("submodule removal should record as a single deletion (D pkg); got:\n%s", status)
+	}
+	// Untouched siblings survive — the removal touched only the gitlink.
+	if other := gitT(t, repoTop, "show", sha+":add.go"); !strings.Contains(other, "func Add") {
+		t.Errorf("submodule-removal lane wrongly dropped untouched add.go:\n%s", other)
+	}
+}

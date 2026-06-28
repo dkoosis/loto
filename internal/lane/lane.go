@@ -177,18 +177,28 @@ func (g gitRunner) buildLaneTree(ctx context.Context, ref, parent string, writeS
 //
 // Both bypass the worktree check yet still sweep pkg/* deletions, so the probe
 // must run regardless of on-disk presence. Probe each path against the
-// already-seeded lane index (idxEnv): `git ls-files :(literal)<path>/` — the
-// trailing slash forces a directory-prefix match, so a tracked FILE (a legitimate
-// edit or deletion) yields zero rows and is allowed, while a path tracked as a
-// directory in the parent yields its files and is rejected before any staging.
+// already-seeded lane index (idxEnv): `git ls-files -z :(literal)<path>/`.
+//
+// The trailing slash matches one of two things: tracked files strictly UNDER
+// <path>/ (a real directory — the sweep vector), or, surprisingly, a gitlink at
+// exactly <path> (a submodule; its index entry path matches the dir pathspec).
+// Only the former prefix-expands under `git add -A`; a gitlink stages as a single
+// `D <path>` deletion, no sweep — so removing a submodule named in a write-set is
+// legitimate and must be allowed (codex #202 P2). Discriminate by path: reject
+// iff a matched entry lives strictly under <path>/. A bare match equal to <path>
+// (the gitlink) is fine, and a tracked FILE at <path> yields zero rows because the
+// trailing slash forces a directory match. -z avoids core.quotePath mangling.
 func (g gitRunner) rejectTrackedDirWriteSet(ctx context.Context, idxEnv, writeSet []string) error {
 	for _, p := range writeSet {
-		out, err := g.run(ctx, gitCall{env: idxEnv, args: []string{"ls-files", "--", ":(literal)" + p + "/"}})
+		out, err := g.run(ctx, gitCall{env: idxEnv, args: []string{"ls-files", "-z", "--", ":(literal)" + p + "/"}})
 		if err != nil {
 			return fmt.Errorf("lane: probe path %q: %w", p, err)
 		}
-		if strings.TrimSpace(out) != "" {
-			return fmt.Errorf("%w: path %q is a directory tracked in the parent; list files explicitly", errInvalidWriteSet, p)
+		prefix := p + "/"
+		for f := range strings.SplitSeq(out, "\x00") {
+			if strings.HasPrefix(f, prefix) {
+				return fmt.Errorf("%w: path %q is a directory tracked in the parent; list files explicitly", errInvalidWriteSet, p)
+			}
 		}
 	}
 	return nil
