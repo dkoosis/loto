@@ -9,6 +9,9 @@ import (
 	"testing"
 )
 
+// cmdTrue is the no-op probe command shared by the input/failure cases.
+const cmdTrue = "true"
+
 // verify_test.go is the executable spec for Verify: a lane's broad-repo checks
 // run in a throwaway, detached worktree cut off the lane ref — never against the
 // shared dirty disk — with absolute worktree/git-dir paths scrubbed from the
@@ -61,7 +64,7 @@ func TestVerifyScrubsWorktreeAndGitDirPaths(t *testing.T) {
 	if strings.Contains(res.Output, "/worktrees/") {
 		t.Errorf("output leaked a .git/.../worktrees/ admin path:\n%s", res.Output)
 	}
-	for _, line := range strings.Split(strings.TrimSpace(res.Output), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(res.Output), "\n") {
 		if strings.HasPrefix(line, "/") {
 			t.Errorf("output leaked an absolute path %q\nfull output:\n%s", line, res.Output)
 		}
@@ -103,7 +106,7 @@ func TestVerifyDoesNotPruneSiblingWorktrees(t *testing.T) {
 
 	// ...recorded by git under a canonicalized path; capture exactly what it stored.
 	sibRecorded := ""
-	for _, ln := range strings.Split(gitT(t, repoTop, "worktree", "list", "--porcelain"), "\n") {
+	for ln := range strings.SplitSeq(gitT(t, repoTop, "worktree", "list", "--porcelain"), "\n") {
 		if strings.HasPrefix(ln, "worktree ") && strings.HasSuffix(ln, "peer-wt") {
 			sibRecorded = strings.TrimPrefix(ln, "worktree ")
 		}
@@ -153,8 +156,8 @@ func TestVerifyValidatesInput(t *testing.T) {
 		commit  string
 		cmd     []string
 	}{
-		{"empty repoTop", "", base, []string{"true"}},
-		{"empty commit", repoTop, "", []string{"true"}},
+		{"empty repoTop", "", base, []string{cmdTrue}},
+		{"empty commit", repoTop, "", []string{cmdTrue}},
 		{"nil cmd", repoTop, base, nil},
 		{"empty cmd[0]", repoTop, base, []string{""}},
 	}
@@ -170,7 +173,7 @@ func TestVerifyValidatesInput(t *testing.T) {
 func TestVerifyErrorsOnBadCommit(t *testing.T) {
 	repoTop, _ := newBaseRepo(t)
 	if _, err := Verify(context.Background(), repoTop,
-		"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", []string{"true"}); err == nil {
+		"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", []string{cmdTrue}); err == nil {
 		t.Error("expected an error cutting a worktree off a nonexistent commit")
 	}
 }
