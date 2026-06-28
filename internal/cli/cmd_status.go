@@ -110,11 +110,13 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 		fmt.Fprintf(w, "✗ %v\n", err)
 		return 3
 	}
-	ec := domain.EvalContext{Now: time.Now(), ThisHost: rt.Host, Live: rt.liveProbe()}
 	if len(overlapping) == 0 {
 		fmt.Fprintf(w, "✓ free target=%s\n", relPath(t.Canonical))
 		return 0
 	}
+	// ec is only consumed by the per-holder rows below; build it after the
+	// no-overlap early return so the happy path skips the closure + time.Now.
+	ec := domain.EvalContext{Now: time.Now(), ThisHost: rt.Host, Live: rt.liveProbe()}
 	fmt.Fprintf(w, "✗ overlap count=%d target=%s\n", len(overlapping), relPath(t.Canonical))
 	for i := range overlapping {
 		l := &overlapping[i]
