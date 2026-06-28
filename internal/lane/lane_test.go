@@ -3,6 +3,7 @@ package lane
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -273,5 +274,94 @@ func TestCommitBadBaseErrors(t *testing.T) {
 	opts := laneOpts(repoTop, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "A", "add.go")
 	if _, err := Commit(context.Background(), opts); err == nil {
 		t.Error("expected error for nonexistent base, got nil")
+	}
+}
+
+// --- write-set hardening (loto-zt0l) ----------------------------------------
+
+// TestValidateWriteSetRejects covers the fs84 sweep vectors a literal-path
+// write-set must refuse: a directory (bare or trailing-slash), a glob, and
+// pathspec magic. Each must surface errInvalidWriteSet so a peer's dirty edits
+// can never enter the lane tree via a widened pathspec.
+func TestValidateWriteSetRejects(t *testing.T) {
+	repoTop, _ := newBaseRepo(t)
+	writeFile(t, repoTop, "internal/x.go", "package internal\n") // a real on-disk dir
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"existing directory", "internal"},
+		{"trailing slash dir", "internal/"},
+		{"trailing slash file", "add.go/"},
+		{"glob star", "*.go"},
+		{"glob question", "mu?.go"},
+		{"glob bracket", "m[au]l.go"},
+		{"magic exclude", ":(exclude)mul.go"},
+		{"magic leading colon", ":mul.go"},
+		{"magic from-top", ":/mul.go"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateWriteSet(repoTop, []string{tc.path})
+			if !errors.Is(err, errInvalidWriteSet) {
+				t.Errorf("validateWriteSet(%q) = %v, want errInvalidWriteSet", tc.path, err)
+			}
+		})
+	}
+}
+
+// TestValidateWriteSetAcceptsLiteralFiles confirms the hardening does not reject
+// legitimate inputs: an existing file, a nested existing file, and a path absent
+// from disk (a deletion the lane records under `git add -A`).
+func TestValidateWriteSetAcceptsLiteralFiles(t *testing.T) {
+	repoTop, _ := newBaseRepo(t)
+	writeFile(t, repoTop, "internal/x.go", "package internal\n")
+	for _, p := range []string{"add.go", "mul.go", "internal/x.go", "removed-on-disk.go"} {
+		if err := validateWriteSet(repoTop, []string{p}); err != nil {
+			t.Errorf("validateWriteSet(%q) rejected a legit literal path: %v", p, err)
+		}
+	}
+}
+
+// TestLiteralPathspecDoesNotStopDirExpansion documents WHY validateWriteSet must
+// reject directories explicitly: even wrapped in :(literal), a directory pathspec
+// still prefix-matches every file under it. buildLaneTree is exercised directly,
+// bypassing validateWriteSet, to prove the raw git behavior the validator guards
+// against — :(literal) alone is not enough.
+func TestLiteralPathspecDoesNotStopDirExpansion(t *testing.T) {
+	repoTop, base := newBaseRepo(t)
+	writeFile(t, repoTop, "pkg/a.go", "package pkg\n")
+	writeFile(t, repoTop, "pkg/b.go", "package pkg\n")
+
+	g := gitRunner{repoTop: repoTop}
+	ctx := context.Background()
+	parent, err := g.resolveParent(ctx, "X", base)
+	if err != nil {
+		t.Fatalf("resolveParent: %v", err)
+	}
+	tree, err := g.buildLaneTree(ctx, "X", parent, []string{"pkg"})
+	if err != nil {
+		t.Fatalf("buildLaneTree: %v", err)
+	}
+	out := gitT(t, repoTop, "ls-tree", "-r", "--name-only", tree)
+	if !strings.Contains(out, "pkg/a.go") || !strings.Contains(out, "pkg/b.go") {
+		t.Fatalf(":(literal) on a directory should still prefix-expand to its files; tree:\n%s", out)
+	}
+}
+
+// TestCommitDeletionCommitsAsDeletionUnderLiteral is the regression guard for the
+// :(literal) wrapping: a write-set path removed from disk must still record as a
+// deletion (status D) against the parent, not silently persist at its base blob.
+func TestCommitDeletionCommitsAsDeletionUnderLiteral(t *testing.T) {
+	repoTop, base := newBaseRepo(t)
+	if err := os.Remove(filepath.Join(repoTop, "mul.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	a := mustCommit(t, laneOpts(repoTop, base, "A", "mul.go"))
+
+	status := gitT(t, repoTop, "diff", "--name-status", base, a)
+	if !strings.Contains(status, "D\tmul.go") {
+		t.Errorf("mul.go should record as a deletion (D) vs base under :(literal); got:\n%s", status)
 	}
 }

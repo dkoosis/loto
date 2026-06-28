@@ -135,11 +135,18 @@ func (g gitRunner) buildLaneTree(ctx context.Context, ref, parent string, writeS
 		return "", fmt.Errorf("lane: seed index from %s: %w", parent, err)
 	}
 
-	// Stage EXACTLY the write-set, NUL-delimited. -A captures additions and
-	// deletions for the listed paths; the pathspec list is never a dir or glob.
+	// Stage EXACTLY the write-set, NUL-delimited, each wrapped in :(literal) so a
+	// wildcard or magic prefix that slipped past validateWriteSet is treated as a
+	// literal path, never a pattern. -A captures additions and deletions for the
+	// listed paths. NOTE: :(literal) does NOT stop a directory pathspec from
+	// prefix-expanding — validateWriteSet rejects directories so none reach here.
+	literal := make([]string, len(writeSet))
+	for i, p := range writeSet {
+		literal[i] = ":(literal)" + p
+	}
 	if _, err := g.run(ctx, gitCall{
 		env:   idxEnv,
-		stdin: strings.Join(writeSet, "\x00") + "\x00",
+		stdin: strings.Join(literal, "\x00") + "\x00",
 		args:  []string{"add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"},
 	}); err != nil {
 		return "", fmt.Errorf("lane: stage write-set: %w", err)
@@ -215,7 +222,7 @@ func (o Opts) validate() error {
 	if err := validateRef(o.Ref); err != nil {
 		return err
 	}
-	return validateWriteSet(o.WriteSet)
+	return validateWriteSet(o.RepoTop, o.WriteSet)
 }
 
 // validateRef rejects lane names that would break the ref path or smuggle a
@@ -247,10 +254,20 @@ func isRefRune(r rune) bool {
 	}
 }
 
-// validateWriteSet requires at least one path and rejects entries that are
-// empty, NUL-bearing, absolute, or escape the repo with '..' — they are passed
-// straight to git as a NUL-delimited pathspec list.
-func validateWriteSet(paths []string) error {
+// validateWriteSet requires at least one path and rejects any entry that is not
+// a single literal repo-relative file. git reads the write-set as a NUL-delimited
+// PATHSPEC list (--pathspec-from-file), so anything wider than an exact file
+// re-opens the fs84 sweep this package exists to prevent. Rejected: empty,
+// NUL-bearing, pathspec magic (leading ':'), a glob metacharacter (* ? [ ]),
+// absolute, '..'-escaping, a trailing '/', or an entry that stats as a directory
+// on disk.
+//
+// The directory checks are load-bearing, not belt-and-suspenders: buildLaneTree
+// wraps each pathspec in :(literal), which neutralizes wildcards and magic but
+// does NOT stop a directory pathspec from prefix-matching every file under it. A
+// bare existing directory must be rejected here. A path absent from disk is
+// allowed — that is a deletion the lane legitimately records under `git add -A`.
+func validateWriteSet(repoTop string, paths []string) error {
 	if len(paths) == 0 {
 		return fmt.Errorf("%w: must list at least one path", errInvalidWriteSet)
 	}
@@ -260,10 +277,19 @@ func validateWriteSet(paths []string) error {
 			return fmt.Errorf("%w: empty path", errInvalidWriteSet)
 		case strings.ContainsRune(p, '\x00'):
 			return fmt.Errorf("%w: path %q contains NUL", errInvalidWriteSet, p)
+		case strings.HasPrefix(p, ":"):
+			return fmt.Errorf("%w: path %q uses pathspec magic (leading ':')", errInvalidWriteSet, p)
+		case strings.ContainsAny(p, "*?[]"):
+			return fmt.Errorf("%w: path %q contains a glob metacharacter", errInvalidWriteSet, p)
 		case filepath.IsAbs(p):
 			return fmt.Errorf("%w: path %q must be repo-relative, not absolute", errInvalidWriteSet, p)
 		case p == ".." || strings.HasPrefix(p, "../") || strings.Contains(p, "/../") || strings.HasSuffix(p, "/.."):
 			return fmt.Errorf("%w: path %q escapes the repo", errInvalidWriteSet, p)
+		case strings.HasSuffix(p, "/"):
+			return fmt.Errorf("%w: path %q is a directory (trailing '/'); list files explicitly", errInvalidWriteSet, p)
+		}
+		if info, err := os.Stat(filepath.Join(repoTop, filepath.FromSlash(p))); err == nil && info.IsDir() {
+			return fmt.Errorf("%w: path %q is a directory; list files explicitly", errInvalidWriteSet, p)
 		}
 	}
 	return nil
