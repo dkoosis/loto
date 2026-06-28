@@ -12,15 +12,7 @@ func (s *Store) ListLocks(ctx context.Context) ([]domain.LockRecord, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []domain.LockRecord
-	for rows.Next() {
-		l, err := scanLock(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, l)
-	}
-	return out, rows.Err()
+	return scanLocksRows(rows)
 }
 
 // LockForOwnerAt returns the single lock at target held by owner, or (nil,nil)
@@ -119,13 +111,5 @@ func (s *Store) LocksAt(ctx context.Context, t domain.Target) ([]domain.LockReco
 		return nil, err
 	}
 	defer rows.Close()
-	var out []domain.LockRecord
-	for rows.Next() {
-		l, err := scanLock(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, l)
-	}
-	return out, rows.Err()
+	return scanLocksRows(rows)
 }
