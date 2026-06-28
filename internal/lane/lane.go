@@ -135,7 +135,7 @@ func (g gitRunner) buildLaneTree(ctx context.Context, ref, parent string, writeS
 		return "", fmt.Errorf("lane: seed index from %s: %w", parent, err)
 	}
 
-	if err := g.rejectRemovedTrackedDirs(ctx, idxEnv, writeSet); err != nil {
+	if err := g.rejectTrackedDirWriteSet(ctx, idxEnv, writeSet); err != nil {
 		return "", err
 	}
 
@@ -144,7 +144,8 @@ func (g gitRunner) buildLaneTree(ctx context.Context, ref, parent string, writeS
 	// literal path, never a pattern. -A captures additions and deletions for the
 	// listed paths. NOTE: :(literal) does NOT stop a directory pathspec from
 	// prefix-expanding — validateWriteSet rejects on-disk directories and
-	// rejectRemovedTrackedDirs rejects removed-but-tracked ones, so none reach here.
+	// rejectTrackedDirWriteSet rejects any path tracked as a directory in the
+	// parent (removed or file-shadowed), so none reach here.
 	literal := make([]string, len(writeSet))
 	for i, p := range writeSet {
 		literal[i] = ":(literal)" + p
@@ -164,29 +165,30 @@ func (g gitRunner) buildLaneTree(ctx context.Context, ref, parent string, writeS
 	return strings.TrimSpace(tree), nil
 }
 
-// rejectRemovedTrackedDirs closes the index/HEAD half of the directory-sweep
+// rejectTrackedDirWriteSet closes the index/HEAD half of the directory-sweep
 // vector that validateWriteSet's os.Stat cannot see. A write-set entry naming a
-// tracked directory that has been removed from disk ('rm -rf pkg') stats as
-// ENOENT, so validateWriteSet (worktree-only) lets it through — but :(literal)pkg
-// still prefix-expands against the parent-seeded index in buildLaneTree's `git
-// add -A` and would stage a deletion for every file under pkg/ (the fs84 sweep,
-// the symmetric case codex caught on #201). Probe each path against the
+// directory that is tracked in the PARENT lets :(literal)<path> prefix-expand
+// against the parent-seeded index in buildLaneTree's `git add -A`, staging a
+// deletion for every file under <path>/ — the fs84 sweep (the symmetric
+// index/HEAD case codex caught on #201). Two on-disk shapes reach here past
+// validateWriteSet (which only rejects on-disk directories):
+//   - removed entirely ('rm -rf pkg') — stats ENOENT;
+//   - replaced by a regular file ('rm -rf pkg; echo x > pkg') — stats as a file.
+//
+// Both bypass the worktree check yet still sweep pkg/* deletions, so the probe
+// must run regardless of on-disk presence. Probe each path against the
 // already-seeded lane index (idxEnv): `git ls-files :(literal)<path>/` — the
 // trailing slash forces a directory-prefix match, so a tracked FILE (a legitimate
-// deletion) yields zero rows and is allowed, while a tracked directory yields its
-// files and is rejected. Paths present on disk are skipped; validateWriteSet
-// already rejects on-disk directories, and a present file is fine to stage.
-func (g gitRunner) rejectRemovedTrackedDirs(ctx context.Context, idxEnv, writeSet []string) error {
+// edit or deletion) yields zero rows and is allowed, while a path tracked as a
+// directory in the parent yields its files and is rejected before any staging.
+func (g gitRunner) rejectTrackedDirWriteSet(ctx context.Context, idxEnv, writeSet []string) error {
 	for _, p := range writeSet {
-		if _, err := os.Stat(filepath.Join(g.repoTop, filepath.FromSlash(p))); !errors.Is(err, os.ErrNotExist) {
-			continue // present on disk (or unstatable) — not an absent-dir sweep
-		}
 		out, err := g.run(ctx, gitCall{env: idxEnv, args: []string{"ls-files", "--", ":(literal)" + p + "/"}})
 		if err != nil {
-			return fmt.Errorf("lane: probe removed path %q: %w", p, err)
+			return fmt.Errorf("lane: probe path %q: %w", p, err)
 		}
 		if strings.TrimSpace(out) != "" {
-			return fmt.Errorf("%w: path %q is a removed tracked directory; list files explicitly", errInvalidWriteSet, p)
+			return fmt.Errorf("%w: path %q is a directory tracked in the parent; list files explicitly", errInvalidWriteSet, p)
 		}
 	}
 	return nil
@@ -300,9 +302,10 @@ func isRefRune(r rune) bool {
 // does NOT stop a directory pathspec from prefix-matching every file under it. A
 // bare existing directory must be rejected here. A path absent from disk is
 // allowed here — a removed FILE is a deletion the lane legitimately records under
-// `git add -A`. A removed-but-tracked DIRECTORY is the same sweep vector yet
-// invisible to os.Stat (ENOENT); buildLaneTree's rejectRemovedTrackedDirs catches
-// it against the parent-seeded index, where this worktree-only check cannot.
+// `git add -A`. A path tracked as a DIRECTORY in the parent is the same sweep
+// vector yet invisible to this worktree-only check when removed (ENOENT) or
+// shadowed by a regular file; buildLaneTree's rejectTrackedDirWriteSet catches it
+// against the parent-seeded index, where os.Stat cannot.
 func validateWriteSet(repoTop string, paths []string) error {
 	if len(paths) == 0 {
 		return fmt.Errorf("%w: must list at least one path", errInvalidWriteSet)

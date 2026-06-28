@@ -411,3 +411,33 @@ func TestCommitRejectsRemovedTrackedDirectory(t *testing.T) {
 		t.Errorf("the file-deletion lane wrongly dropped untouched pkg/a.go:\n%s", other)
 	}
 }
+
+// TestCommitRejectsFileShadowingTrackedDirectory is the codex follow-up to
+// loto-6uzn: the sibling of the removed-directory vector. A lane replaces a
+// tracked directory with a regular file at the same path ('rm -rf pkg; echo x >
+// pkg') and names it in the write-set. os.Stat now SUCCEEDS (pkg is a file), so a
+// presence-gated probe would skip the index check — yet :(literal)pkg still
+// prefix-expands against the parent-seeded index, staging the new file PLUS a
+// deletion for every pkg/* file. Empirically confirmed: A pkg, D pkg/a.go, D
+// pkg/b.go. The probe must run regardless of on-disk presence; this guards that.
+func TestCommitRejectsFileShadowingTrackedDirectory(t *testing.T) {
+	repoTop, _ := newBaseRepo(t)
+	writeFile(t, repoTop, "pkg/a.go", "package pkg\n")
+	writeFile(t, repoTop, "pkg/b.go", "package pkg\n")
+	gitT(t, repoTop, "add", "-A")
+	gitT(t, repoTop, "commit", "-qm", "add pkg")
+	base := gitT(t, repoTop, "rev-parse", "HEAD")
+
+	// Replace the tracked directory with a regular file at the same path.
+	if err := os.RemoveAll(filepath.Join(repoTop, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, repoTop, "pkg", "x\n")
+
+	if _, err := Commit(context.Background(), laneOpts(repoTop, base, "A", "pkg")); !errors.Is(err, errInvalidWriteSet) {
+		t.Errorf("Commit(WriteSet:[pkg]) for a file shadowing a tracked dir = %v, want errInvalidWriteSet", err)
+	}
+	if ref, _ := exec.Command("git", "-C", repoTop, "rev-parse", "--verify", "--quiet", "refs/heads/loto/A").Output(); strings.TrimSpace(string(ref)) != "" {
+		t.Errorf("rejected sweep still wrote a lane ref")
+	}
+}
