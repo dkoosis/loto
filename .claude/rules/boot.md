@@ -1,5 +1,5 @@
 # Boot
-updated: 2026-06-27
+updated: 2026-06-28
 
 ## lane: MeldRabbit
 branch: main
@@ -35,3 +35,16 @@ branch: main
 ‡ PreToolUse stamp can't serialize: exclusive self-EACCESes, shared can't deny. Enforcement = deferred check-only gate.
 
 ~ drove the fork, decided in one word. Why before the call, loop after.
+
+## lane: EastCobra
+branch: main
+
+→ backlog EMPTY (0 open/ready/blocked). Next substantive work = wire `loto lane`/`verify` into the /team fleet harness (9sro spine done; .4 cross-lane integration deferred ❄). No file to run — pick that up or `bd ready` for fresh work.
+
+✓ done
+- Closed loto-9sro (parent): spine .1/.2/.3 merged; Codex P2 on #203 fixed inline (store/ctx err → infra exit 3) + tests.
+- Merged #204 (loto-dtq5): lane/verify now listed in printHelp as annotated engine verbs. Tree clean on main, queue empty.
+
+‡ fleet impl agent skips golangci — primary's make check eats the lint at wave end (8 goconst on #203).
+
+~ trust-the-loop when fenced.
