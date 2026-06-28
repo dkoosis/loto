@@ -32,6 +32,8 @@ components:
     in: internal/domain/**
   render:
     in: internal/render/**
+  lane:
+    in: internal/lane/**
 
 deps:
   main:
@@ -43,6 +45,10 @@ deps:
       - store
       - identity
       - render
+      - lane
+  # internal/lane is pure git plumbing — stdlib only, no internal deps.
+  lane:
+    mayDependOn: []
   render:
     mayDependOn:
       - domain
