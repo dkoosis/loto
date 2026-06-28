@@ -1,0 +1,19 @@
+usage: loto lane <file> [<file>...] --ref <name> --base <commit-ish> -m "<msg>" --closes "<ids>"
+
+Commit an exact write-set to refs/heads/loto/<ref> by git plumbing — no checkout,
+no HEAD move. Refuses unless THIS identity holds an exclusive loto lock on every
+listed file, held across staging. The commit message gains a Closes: trailer.
+
+examples:
+  loto lane internal/store/store.go --ref impl-1 --base main -m "store: fix X" --closes loto-abc
+  loto lane a.go b.go --ref impl-1 --base main -m "two files" --closes "loto-abc, loto-def"
+  -base string
+    	base commit-ish the lane forks from (required)
+  -closes string
+    	Closes: trailer ids, e.g. "loto-abc, loto-def" or "none" (required)
+  -m string
+    	commit message (required)
+  -message string
+    	commit message (required)
+  -ref string
+    	lane name → refs/heads/loto/<ref> (required)
