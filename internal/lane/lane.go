@@ -190,13 +190,25 @@ func (g gitRunner) buildLaneTree(ctx context.Context, ref, parent string, writeS
 // (the gitlink) is fine, and a tracked FILE at <path> yields zero rows because the
 // trailing slash forces a directory match. -z avoids core.quotePath mangling.
 func (g gitRunner) rejectTrackedDirWriteSet(ctx context.Context, idxEnv, writeSet []string) error {
+	// One ls-files over every write-set path's directory pathspec, instead of one
+	// child per entry. The combined output is the union of every pathspec's matches
+	// against the seeded index, and the verdict below is a pure prefix relation on
+	// the entry path — so scanning the whole output per path is identical to a
+	// per-path probe: any tracked entry strictly under <p>/ necessarily matches
+	// <p>/'s own pathspec, and a bare gitlink at <p> never carries the <p>/ prefix.
+	args := make([]string, 0, len(writeSet)+3)
+	args = append(args, "ls-files", "-z", "--")
 	for _, p := range writeSet {
-		out, err := g.run(ctx, gitCall{env: idxEnv, args: []string{"ls-files", "-z", "--", ":(literal)" + p + "/"}})
-		if err != nil {
-			return fmt.Errorf("lane: probe path %q: %w", p, err)
-		}
+		args = append(args, ":(literal)"+p+"/")
+	}
+	out, err := g.run(ctx, gitCall{env: idxEnv, args: args})
+	if err != nil {
+		return fmt.Errorf("lane: probe write-set dirs: %w", err)
+	}
+	tracked := strings.Split(out, "\x00")
+	for _, p := range writeSet {
 		prefix := p + "/"
-		for f := range strings.SplitSeq(out, "\x00") {
+		for _, f := range tracked {
 			if strings.HasPrefix(f, prefix) {
 				return fmt.Errorf("%w: path %q is a directory tracked in the parent; list files explicitly", errInvalidWriteSet, p)
 			}
