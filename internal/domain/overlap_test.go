@@ -1,6 +1,57 @@
 package domain
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+func TestPrefixOverlaps(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+		name string
+	}{
+		{"internal/store", "internal/store", true, "exact-eq"},
+		{"internal/store", "internal/store/sub", true, "ancestor"},
+		{"internal/store/sub", "internal/store", true, "descendant"},
+		{"internal/store", "internal/storefront", false, "sibling-string-prefix"},
+		{"internal/storefront", "internal/store", false, "sibling-string-prefix-rev"},
+		{"internal/store", "internal/render", false, "disjoint"},
+		{"pkg/a", "pkg/a/deep", true, "deep-ancestor"},
+		{"a", "a/b/c", true, "multi-segment-ancestor"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := PrefixOverlaps(c.a, c.b); got != c.want {
+				t.Errorf("PrefixOverlaps(%q,%q) = %v; want %v", c.a, c.b, got, c.want)
+			}
+			if got := PrefixOverlaps(c.b, c.a); got != c.want {
+				t.Errorf("PrefixOverlaps(%q,%q) symmetry = %v; want %v", c.b, c.a, got, c.want)
+			}
+		})
+	}
+}
+
+func TestClaimRecordExpired(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name      string
+		expiresAt time.Time
+		want      bool
+	}{
+		{"future", now.Add(time.Hour), false},
+		{"past", now.Add(-time.Hour), true},
+		{"exactly-now", now, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := ClaimRecord{PathPrefix: "internal/store", ExpiresAt: c.expiresAt}
+			if got := r.Expired(now); got != c.want {
+				t.Errorf("Expired(now) with expires_at=%v = %v; want %v", c.expiresAt, got, c.want)
+			}
+		})
+	}
+}
 
 func TestSameCanonical(t *testing.T) {
 	cases := []struct {

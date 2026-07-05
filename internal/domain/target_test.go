@@ -59,6 +59,48 @@ func TestCanonicalizeRejectsGlob(t *testing.T) {
 	}
 }
 
+func TestCanonicalizePrefix(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"internal/store", "internal/store"},
+		{"internal/store/", "internal/store"},
+		{"./internal/store", "internal/store"},
+		{"a//b", "a/b"},
+	}
+	for _, c := range cases {
+		got, err := CanonicalizePrefix(c.in)
+		if err != nil {
+			t.Fatalf("CanonicalizePrefix(%q) err: %v", c.in, err)
+		}
+		if got.Canonical != c.want {
+			t.Errorf("CanonicalizePrefix(%q) = %+v; want canonical=%q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestCanonicalizePrefixRejections(t *testing.T) {
+	cases := []struct {
+		in      string
+		wantErr error
+	}{
+		{"", ErrEmptyTarget},
+		{"a/*/b", ErrTargetIsGlob},
+		{"a\x00b", ErrTargetHasNUL},
+		{`a\b`, ErrTargetBackslash},
+		{"../escape", ErrRepoEscape},
+		{"/abs/path", ErrRepoEscape},
+		{".", ErrTargetIsRepoRoot},
+		{"./", ErrTargetIsRepoRoot},
+	}
+	for _, c := range cases {
+		_, err := CanonicalizePrefix(c.in)
+		if !errors.Is(err, c.wantErr) {
+			t.Errorf("CanonicalizePrefix(%q) err=%v; want %v", c.in, err, c.wantErr)
+		}
+	}
+}
+
 func TestCanonicalizeRejectsTrailingSlash(t *testing.T) {
 	for _, in := range []string{"foo/", "a/b/"} {
 		_, err := Canonicalize(in)

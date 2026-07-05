@@ -74,6 +74,28 @@ func (l LockRecord) EffectiveMode() string {
 	return ModeExclusive // empty or any non-"shared" value → exclusive
 }
 
+// ClaimRecord is a coarse path-prefix territory reservation: "this package is
+// mine this session", distinct from the per-file, per-edit LockRecord
+// (loto-7af9). Claims are TTL-only leases — no PID/liveness fields, no mode;
+// Expired is the sole staleness authority. PathPrefix is a canonical
+// repo-relative directory prefix minted by CanonicalizePrefix.
+type ClaimRecord struct {
+	PathPrefix  string
+	OwnerUUID   AgentUUID
+	SessionUUID SessionUUID
+	Intent      string
+	CreatedAt   time.Time
+	ExpiresAt   time.Time
+	Host        string
+}
+
+// Expired reports whether the claim's TTL lease has lapsed at now. Claims
+// strip no write bits and carry no PID, so unlike lock staleness there is no
+// liveness refinement — the lease boundary is the whole story.
+func (c ClaimRecord) Expired(now time.Time) bool {
+	return !now.Before(c.ExpiresAt)
+}
+
 // Event is an append-only audit row. SubjectUUID is the affected agent (for
 // lock_broken / lock_reclaimed_stale); empty otherwise.
 type Event struct {
