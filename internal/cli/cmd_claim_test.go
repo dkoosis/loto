@@ -30,6 +30,8 @@ func TestClaimCmdUsageErrors(t *testing.T) {
 		{"glob", []string{tcCmdClaim, "internal/*", "-t", tcIntentTest}},
 		{"repo-root", []string{tcCmdClaim, ".", "-t", tcIntentTest}},
 		{"unclaim-no-args", []string{tcCmdUnclaim}},
+		{"zero-ttl", []string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest, "--ttl", "0"}},
+		{"negative-ttl", []string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest, "--ttl", "-1h"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

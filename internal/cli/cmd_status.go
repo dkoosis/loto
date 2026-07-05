@@ -17,7 +17,7 @@ func init() { register("status", cmdStatus) } //nolint:gochecknoinits // command
 func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	mine := fs.Bool("mine", false, "show only locks owned by my uuid")
+	mine := fs.Bool("mine", false, "show only locks and claims owned by my uuid")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}

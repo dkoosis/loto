@@ -51,6 +51,10 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintln(stderr, "✗ -t required: loto claim <path-prefix> -t \"why\"")
 		return 2
 	}
+	if *ttl <= 0 {
+		fmt.Fprintf(stderr, "✗ --ttl must be positive, got %s\n", *ttl)
+		return 2
+	}
 	prefix, repoTop, code := claimVerbPrefix(ctx, flags, "usage: loto claim <path-prefix> -t \"why\" [--ttl 2h]", stderr)
 	if code != 0 {
 		return code
