@@ -1,0 +1,16 @@
+usage: loto claim <path-prefix> -t "why" [--ttl 4h]
+
+Atomically reserve a repo-relative directory prefix as session territory:
+"this package is mine this session" — coarser than a per-file lock. Refused
+while another agent's live claim overlaps the prefix (equal or ancestor/
+descendant by path segment). Re-claiming your own prefix refreshes the TTL.
+
+examples:
+  loto claim internal/store -t "store refactor"
+  loto claim pkg/newthing -t "scaffolding a new package" --ttl 2h
+  -intent string
+    	intent (required)
+  -t string
+    	intent (required)
+  -ttl duration
+    	claim TTL (session-scale lease) (default 4h0m0s)

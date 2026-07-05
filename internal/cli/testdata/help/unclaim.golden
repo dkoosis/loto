@@ -1,0 +1,7 @@
+usage: loto unclaim <path-prefix>
+
+Release your claim at exactly this prefix. Only the claim's owner can release
+it; another agent's claim reports ✗ not-owner and stays in place.
+
+examples:
+  loto unclaim internal/store
