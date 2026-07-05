@@ -123,6 +123,36 @@ func EmitConflictWithTags(w io.Writer, ce *store.MultiConflictError, tagsByTarge
 	}
 }
 
+// EmitClaimSuccess renders the acquired-claim block (loto-7af9). Single-claim
+// by design — the claim verb takes exactly one prefix — so the count header is
+// constant; it stays count-first for surface consistency with lock/unlock.
+func EmitClaimSuccess(w io.Writer, rec domain.ClaimRecord, ttl time.Duration) {
+	fmt.Fprintf(w, "✓ claimed count=1\n")
+	fmt.Fprintf(w, "✓ prefix=%s ttl=%s expires_at=%s\n",
+		relToCwd(rec.PathPrefix, getCwd()), ttl, rec.ExpiresAt.UTC().Format(time.RFC3339))
+}
+
+// EmitClaimConflict renders the blocked-claim block: count-first, ⚠ per
+// blocker, holder named via holderMemo, sorted prefix then created_at.
+func EmitClaimConflict(w io.Writer, ce *store.ClaimConflictError) {
+	cwd := getCwd()
+	holders := &holderMemo{}
+	blockers := append([]domain.ClaimRecord(nil), ce.Blockers...)
+	sort.Slice(blockers, func(i, j int) bool {
+		if blockers[i].PathPrefix != blockers[j].PathPrefix {
+			return blockers[i].PathPrefix < blockers[j].PathPrefix
+		}
+		return blockers[i].CreatedAt.Before(blockers[j].CreatedAt)
+	})
+	fmt.Fprintf(w, "✗ blocked count=%d\n", len(blockers))
+	for i := range blockers {
+		b := &blockers[i]
+		fmt.Fprintf(w, "⚠ prefix=%s blocker=%s intent=%q expires_at=%s\n",
+			relToCwd(b.PathPrefix, cwd), holders.tag(string(b.OwnerUUID)), b.Intent,
+			b.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+}
+
 // EmitTagFooter renders the holder-facing trailing block of pending external
 // tags. Empty input emits nothing — the caller's primary output must stand
 // alone when there's no message to surface. Sort order is the caller's

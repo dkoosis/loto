@@ -376,3 +376,48 @@ func TestEmitReleaseResults_EmptySlice_EmitsInfoGlyph(t *testing.T) {
 		t.Errorf("empty slice should say 'no locks owned', got: %s", got)
 	}
 }
+
+func TestEmitClaimSuccess(t *testing.T) {
+	var buf bytes.Buffer
+	exp := time.Date(2026, 7, 5, 18, 4, 5, 0, time.UTC)
+	EmitClaimSuccess(&buf, domain.ClaimRecord{
+		PathPrefix: "internal/store",
+		ExpiresAt:  exp,
+	}, 4*time.Hour)
+	got := buf.String()
+	if !strings.HasPrefix(got, "✓ claimed count=1\n") {
+		t.Errorf("count-first header: %q", got)
+	}
+	want := "✓ prefix=internal/store ttl=4h0m0s expires_at=2026-07-05T18:04:05Z\n"
+	if !strings.Contains(got, want) {
+		t.Errorf("row = %q; want %q", got, want)
+	}
+}
+
+func TestEmitClaimConflictNamesHolder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // empty registry → holderTag falls back to UUID
+	now := time.Date(2026, 5, 10, 18, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	EmitClaimConflict(&buf, &store.ClaimConflictError{
+		Blockers: []domain.ClaimRecord{
+			{PathPrefix: "pkg/z", OwnerUUID: "Red", Intent: "y", ExpiresAt: now},
+			{PathPrefix: "pkg/a", OwnerUUID: "Green", Intent: "store refactor", ExpiresAt: now},
+		},
+	})
+	got := buf.String()
+	if !strings.HasPrefix(got, "✗ blocked count=2\n") {
+		t.Errorf("triage first: %q", got)
+	}
+	if strings.Index(got, "prefix=pkg/a") > strings.Index(got, "prefix=pkg/z") {
+		t.Errorf("not sorted by prefix: %q", got)
+	}
+	if !strings.Contains(got, "blocker=Green") {
+		t.Errorf("blocker row must name holder: %q", got)
+	}
+	if !strings.Contains(got, `intent="store refactor"`) {
+		t.Errorf("intent must be quoted: %q", got)
+	}
+	if !strings.Contains(got, "⚠ prefix=") {
+		t.Errorf("per-blocker rows use ⚠: %q", got)
+	}
+}
