@@ -543,3 +543,34 @@ func TestReleaseLocks_DuplicateTargets_SingleEventPerRow(t *testing.T) {
 		t.Errorf("duplicate target must not double the release audit: got %d events", n)
 	}
 }
+
+// TestReleaseLocks_DuplicateTargets_NonConsumingFirstMirrors covers the P2 on
+// this PR: when the first occurrence consumed nothing (live foreign holder →
+// not-owner), the duplicate must mirror that outcome, not claim no-lock — the
+// lock still exists.
+func TestReleaseLocks_DuplicateTargets_NonConsumingFirstMirrors(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	live := mkFileLock(t, "live.go", tcAlice, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{live}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.ReleaseLocks(ctx, []domain.Target{live.Target, live.Target}, tcBob, tcHost, liveProbe)
+	if err != nil {
+		t.Fatalf("ReleaseLocks: %v", err)
+	}
+	if res[0].State != StateNotOwner || res[1].State != StateNotOwner {
+		t.Fatalf("want [NotOwner, NotOwner], got %+v", res)
+	}
+	if res[1].Owner != tcAlice {
+		t.Errorf("duplicate row must carry the vetoing owner, got Owner=%q", res[1].Owner)
+	}
+	locks, err := s.ListLocks(ctx)
+	if err != nil {
+		t.Fatalf("ListLocks: %v", err)
+	}
+	if len(locks) != 1 {
+		t.Errorf("live foreign lock must survive, got %d rows", len(locks))
+	}
+}

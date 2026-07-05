@@ -145,18 +145,27 @@ func classifyReleases(targets []domain.Target, existing map[string][]domain.Lock
 	results := make([]ReleaseResult, len(targets))
 	owned := make([]string, 0, len(targets))
 	var reclaims []domain.LockRecord
-	seen := make(map[string]bool, len(targets))
+	firstIdx := make(map[string]int, len(targets))
 	for i, t := range targets {
 		results[i].Target = t
-		if seen[t.Canonical] {
-			// Duplicate input target (`unlock a.go a.go`): the first occurrence
-			// consumed the row(s), so by this entry's turn there is no lock left
-			// — report no-lock rather than re-appending to owned/reclaims, which
-			// doubled the lock_released / lock_reclaimed_stale audit (review P3).
-			results[i].State = StateNoLock
+		if j, dup := firstIdx[t.Canonical]; dup {
+			// Duplicate input target (`unlock a.go a.go`): never re-append to
+			// owned/reclaims — that doubled the lock_released /
+			// lock_reclaimed_stale audit (review P3). When the first occurrence
+			// consumed the row(s) the duplicate is no-lock; when it didn't
+			// (not-owner veto, no-lock) the duplicate mirrors it — a still-held
+			// lock must not be reported as gone (review P2, #212).
+			switch results[j].State { //nolint:exhaustive // default mirrors every non-consuming outcome
+			case StateUnlocked, StateReclaimedStale:
+				results[i].State = StateNoLock
+			default:
+				results[i].State = results[j].State
+				results[i].Owner = results[j].Owner
+				results[i].Mode = results[j].Mode
+			}
 			continue
 		}
-		seen[t.Canonical] = true
+		firstIdx[t.Canonical] = i
 		holders := existing[t.Canonical]
 		switch own := ownHolder(holders, byAgent); {
 		case len(holders) == 0:
