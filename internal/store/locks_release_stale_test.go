@@ -390,3 +390,77 @@ func TestConcurrentReleaseReclaimVsAcquire(t *testing.T) {
 		t.Errorf("acquirer's exclusive lock must leave the file stripped, got %o", st.Mode().Perm())
 	}
 }
+
+// TestReleaseLocks_MixedBatch_AckedTagSurvivesReclaimGC pins the review P2:
+// one batch releases the caller's own tagged live lock AND reclaims a stale
+// foreign holder. The reclaim's tag GC must be targeted at the reclaimed
+// holders' rows only — the blanket gcTagsTx orphan clause would eat the acked
+// tag row applyOwnedReleasesTx just wrote in this same tx (the own host-lock
+// row is already deleted, so the acked tag looks orphaned to it).
+func TestReleaseLocks_MixedBatch_AckedTagSurvivesReclaimGC(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	// Alice's own live lock on own.go, tagged by bob (pending).
+	own := mkFileLock(t, "own.go", tcAlice, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{own}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	ownRow, err := s.LockAt(ctx, own.Target)
+	if err != nil || ownRow == nil {
+		t.Fatalf("LockAt(own): %v / %+v", err, ownRow)
+	}
+	ackedID, err := s.InsertTag(ctx, NewTag{
+		TargetCanonical: domain.Canonical(own.Target.Canonical),
+		LockOwnerUUID:   tcAlice,
+		LockCreatedAt:   ownRow.CreatedAt.UnixNano(),
+		TaggerUUID:      tcBob,
+		Text:            tcPing,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Bob's stale foreign lock on dead.go, tagged by carol (pending).
+	dead := mkFileLock(t, "dead.go", tcBob, -time.Minute)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{dead}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	deadRow, err := s.LockAt(ctx, dead.Target)
+	if err != nil || deadRow == nil {
+		t.Fatalf("LockAt(dead): %v / %+v", err, deadRow)
+	}
+	goneID, err := s.InsertTag(ctx, NewTag{
+		TargetCanonical: domain.Canonical(dead.Target.Canonical),
+		LockOwnerUUID:   tcBob,
+		LockCreatedAt:   deadRow.CreatedAt.UnixNano(),
+		TaggerUUID:      "carol",
+		Text:            tcPing,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.ReleaseLocks(ctx, []domain.Target{own.Target, dead.Target}, tcAlice, tcHost, liveProbe)
+	if err != nil {
+		t.Fatalf("ReleaseLocks: %v", err)
+	}
+	if res[0].State != StateUnlocked || res[1].State != StateReclaimedStale {
+		t.Fatalf("want [Unlocked, ReclaimedStale], got %+v", res)
+	}
+
+	// Alice's acked tag row SURVIVES (audit retention owns its lifetime).
+	var acked sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT acked_at FROM tags WHERE id = ?`, ackedID).Scan(&acked); err != nil {
+		t.Fatalf("acked tag row must survive the same-tx reclaim GC: %v", err)
+	}
+	if !acked.Valid {
+		t.Fatal("own release should have acked the tag")
+	}
+	// The dead holder's pending tag is gone.
+	var one int
+	err = s.db.QueryRowContext(ctx, `SELECT 1 FROM tags WHERE id = ?`, goneID).Scan(&one)
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("dead holder's pending tag should be GC'd, got err=%v", err)
+	}
+}

@@ -68,10 +68,10 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, agent
 // the batched own-row releases (ack + delete + lock_released events) and the
 // per-holder stale reclaims (lock_reclaimed_stale + delete via reclaimStaleTx).
 // Reclaims orphan the dead holders' pending tags (a dead peer never "reads"
-// its notes), so gcTagsTx runs in the same tx, mirroring BreakLocks
-// (loto-qg0r). Event rotation fires when EITHER branch appended (mirrors
-// AcquireLocks→rotateEventsTx): a release/reclaim-heavy workload that rarely
-// acquires would otherwise grow the events table unbounded (loto-bvdk).
+// its notes) — those are GC'd per holder via gcTagsForReclaimTx (loto-qg0r
+// intent, targeted form). Event rotation fires when EITHER branch appended
+// (mirrors AcquireLocks→rotateEventsTx): a release/reclaim-heavy workload that
+// rarely acquires would otherwise grow the events table unbounded (loto-bvdk).
 func (s *Store) applyReleaseChangesTx(ctx context.Context, tx *sql.Tx, owned []string, reclaims []domain.LockRecord, byAgent string, now time.Time) error {
 	if len(owned) > 0 {
 		if err := s.applyOwnedReleasesTx(ctx, tx, owned, byAgent, now); err != nil {
@@ -82,9 +82,7 @@ func (s *Store) applyReleaseChangesTx(ctx context.Context, tx *sql.Tx, owned []s
 		if err := reclaimStaleTx(ctx, tx, reclaims[i], byAgent, now); err != nil {
 			return err
 		}
-	}
-	if len(reclaims) > 0 {
-		if err := gcTagsTx(ctx, tx, now); err != nil {
+		if err := gcTagsForReclaimTx(ctx, tx, reclaims[i]); err != nil {
 			return err
 		}
 	}
@@ -94,6 +92,20 @@ func (s *Store) applyReleaseChangesTx(ctx context.Context, tx *sql.Tx, owned []s
 		}
 	}
 	return nil
+}
+
+// gcTagsForReclaimTx deletes exactly the reclaimed holder's tag rows. The
+// blanket gcTagsTx is WRONG in this tx: its orphan clause deletes any tag
+// whose host lock is gone, and in a mixed batch the own-release branch has
+// just acked its tags AND deleted its host-lock row a few statements earlier
+// — the blanket pass would eat those freshly-acked audit rows before the
+// retention window ever saw them (review P2). Keying on the reclaimed row's
+// (target, owner, created_at) identity hits only the dead holder's tags.
+func gcTagsForReclaimTx(ctx context.Context, tx *sql.Tx, stale domain.LockRecord) error {
+	_, err := tx.ExecContext(ctx,
+		`DELETE FROM tags WHERE target_canonical = ? AND lock_owner_uuid = ? AND lock_created_at = ?`,
+		stale.Target.Canonical, string(stale.OwnerUUID), stale.CreatedAt.UnixNano())
+	return err
 }
 
 // applyOwnedReleasesTx acks tags, deletes the owned host-lock rows, and emits
