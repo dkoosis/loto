@@ -20,6 +20,11 @@ func RunContext(ctx context.Context, argv []string, stdout, stderr io.Writer) in
 		printHelp(stderr)
 		return 2
 	}
+	switch argv[0] {
+	case "help", "-h", "--help":
+		printHelp(stdout)
+		return 0
+	}
 	if c, ok := registry[argv[0]]; ok {
 		return c(ctx, argv[1:], stdout, stderr)
 	}
