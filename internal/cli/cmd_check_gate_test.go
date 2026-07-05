@@ -453,17 +453,29 @@ func TestGateCLI_MultiPathDeniesOnAnyBlocked(t *testing.T) {
 	}
 }
 
-// TestGateCLI_InvalidTargetReturnsExit2: a repo-escaping absolute path is
-// rejected the same way plain check rejects it.
+// TestGateCLI_InvalidTargetReturnsExit2: invalid targets are rejected the
+// same way plain check rejects them, and the invalid block is sorted by
+// path regardless of argv order — "z*.go" (glob) passed BEFORE "/etc/hosts"
+// (repo-escape) must render after it ('/' < 'z'), matching the
+// computeCheckConflicts sort precedent (adherence review P3).
 func TestGateCLI_InvalidTargetReturnsExit2(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 	var out bytes.Buffer
-	code := Run([]string{tcCmdCheck, tcFlagGate, "/etc/hosts"}, &out, &bytes.Buffer{})
+	code := Run([]string{tcCmdCheck, tcFlagGate, "z*.go", "/etc/hosts"}, &out, &bytes.Buffer{})
 	if code != 2 {
 		t.Fatalf("expected exit 2, got %d: %q", code, out.String())
 	}
-	if !strings.Contains(out.String(), "✗ invalid") || !strings.Contains(out.String(), "/etc/hosts") {
-		t.Errorf("expected invalid report citing /etc/hosts: %q", out.String())
+	s := out.String()
+	if !strings.Contains(s, "✗ invalid count=2") {
+		t.Errorf("expected invalid count=2 header: %q", s)
+	}
+	hostsIdx := strings.Index(s, "/etc/hosts")
+	globIdx := strings.Index(s, "z*.go")
+	if hostsIdx == -1 || globIdx == -1 {
+		t.Fatalf("expected both invalid rows: %q", s)
+	}
+	if hostsIdx > globIdx {
+		t.Errorf("invalid rows must sort by path (/etc/hosts before z*.go): %q", s)
 	}
 }

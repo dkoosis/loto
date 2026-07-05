@@ -140,6 +140,10 @@ func runCheckGate(ctx context.Context, paths []string, repoTop string, stdout io
 		targets = append(targets, t)
 	}
 	if len(invalid) > 0 {
+		// Sort by original path (the computeCheckConflicts precedent) so the
+		// block is deterministic across argv orderings (design.md: same input,
+		// byte-identical output).
+		sort.Slice(invalid, func(i, j int) bool { return invalid[i].Path < invalid[j].Path })
 		printCheckInvalid(stdout, invalid)
 		return 2
 	}
