@@ -14,6 +14,7 @@ const (
 	tcPrefixParent  = "internal"
 	tcPrefixNoDisk  = "pkg/notyet"
 	tcClaimNotOwner = "state=not-owner"
+	tcTTL1ms        = "1ms"
 )
 
 func TestClaimCmdUsageErrors(t *testing.T) {
@@ -95,7 +96,7 @@ func TestClaimCmdAcquireUnclaimTTL(t *testing.T) {
 	// TTL e2e: expired claim is reclaimed by a second agent. Generous margin —
 	// ttl≈1ms then wait ≥50ms (flake guard, loto-claim plan P-self #3).
 	out.Reset()
-	if code := Run([]string{tcCmdClaim, "pkg/ttl", "-t", tcIntentTest, tcFlagTTL, "1ms"}, &out, &errBuf); code != 0 {
+	if code := Run([]string{tcCmdClaim, "pkg/ttl", "-t", tcIntentTest, tcFlagTTL, tcTTL1ms}, &out, &errBuf); code != 0 {
 		t.Fatalf("short-ttl claim exit=%d out=%q err=%q", code, out.String(), errBuf.String())
 	}
 	time.Sleep(60 * time.Millisecond)

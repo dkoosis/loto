@@ -5,18 +5,20 @@ import (
 	"time"
 )
 
+const tcStorePrefix = "internal/store"
+
 func TestPrefixOverlaps(t *testing.T) {
 	cases := []struct {
 		a, b string
 		want bool
 		name string
 	}{
-		{"internal/store", "internal/store", true, "exact-eq"},
-		{"internal/store", "internal/store/sub", true, "ancestor"},
-		{"internal/store/sub", "internal/store", true, "descendant"},
-		{"internal/store", "internal/storefront", false, "sibling-string-prefix"},
-		{"internal/storefront", "internal/store", false, "sibling-string-prefix-rev"},
-		{"internal/store", "internal/render", false, "disjoint"},
+		{tcStorePrefix, tcStorePrefix, true, "exact-eq"},
+		{tcStorePrefix, "internal/store/sub", true, "ancestor"},
+		{"internal/store/sub", tcStorePrefix, true, "descendant"},
+		{tcStorePrefix, "internal/storefront", false, "sibling-string-prefix"},
+		{"internal/storefront", tcStorePrefix, false, "sibling-string-prefix-rev"},
+		{tcStorePrefix, "internal/render", false, "disjoint"},
 		{"pkg/a", "pkg/a/deep", true, "deep-ancestor"},
 		{"a", "a/b/c", true, "multi-segment-ancestor"},
 	}
@@ -45,7 +47,7 @@ func TestClaimRecordExpired(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			r := ClaimRecord{PathPrefix: "internal/store", ExpiresAt: c.expiresAt}
+			r := ClaimRecord{PathPrefix: tcStorePrefix, ExpiresAt: c.expiresAt}
 			if got := r.Expired(now); got != c.want {
 				t.Errorf("Expired(now) with expires_at=%v = %v; want %v", c.expiresAt, got, c.want)
 			}

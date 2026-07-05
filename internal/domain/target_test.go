@@ -11,7 +11,7 @@ func TestCanonicalize(t *testing.T) {
 	}{
 		{"./a", "a"},
 		{"a//b", "a/b"},
-		{"internal/store", "internal/store"},
+		{tcStorePrefix, tcStorePrefix},
 	}
 	for _, c := range cases {
 		got, err := Canonicalize(c.in)
@@ -63,9 +63,9 @@ func TestCanonicalizePrefix(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		{"internal/store", "internal/store"},
-		{"internal/store/", "internal/store"},
-		{"./internal/store", "internal/store"},
+		{tcStorePrefix, tcStorePrefix},
+		{"internal/store/", tcStorePrefix},
+		{"./internal/store", tcStorePrefix},
 		{"a//b", "a/b"},
 	}
 	for _, c := range cases {

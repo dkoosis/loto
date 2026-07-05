@@ -58,7 +58,7 @@ func TestClaimPrefixSameOwnerRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	refresh := mkClaim("internal/store", tcAlice, time.Hour)
-	refresh.Intent = "refreshed"
+	refresh.Intent = "claim-refreshed"
 	if err := s.ClaimPrefix(ctx, refresh); err != nil {
 		t.Fatalf("same-owner re-claim must refresh, got: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestClaimPrefixSameOwnerRefresh(t *testing.T) {
 		t.Fatalf("rows=%d; want 1 (upsert): %+v", len(all), all)
 	}
 	got := all[0]
-	if got.Intent != "refreshed" {
+	if got.Intent != "claim-refreshed" {
 		t.Errorf("intent=%q; want refreshed", got.Intent)
 	}
 	if !got.ExpiresAt.After(first.ExpiresAt) {

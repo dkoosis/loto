@@ -116,7 +116,7 @@ func TestStatusClaimsSection(t *testing.T) {
 		t.Errorf("empty claims section needs explicit header: %q", out.String())
 	}
 
-	if code := Run([]string{tcCmdClaim, "internal/store", "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("claim failed")
 	}
 	out.Reset()
@@ -148,7 +148,7 @@ func TestStatusClaimsSection(t *testing.T) {
 func TestStatusClaimsFiltersExpired(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
-	if code := Run([]string{tcCmdClaim, "internal/store", "-t", tcIntentTest, tcFlagTTL, "1ms"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest, tcFlagTTL, tcTTL1ms}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("claim failed")
 	}
 	time.Sleep(60 * time.Millisecond)

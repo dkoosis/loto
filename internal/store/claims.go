@@ -85,29 +85,8 @@ func (s *Store) ClaimPrefix(ctx context.Context, rec domain.ClaimRecord) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	var blockers, expired []domain.ClaimRecord
-	for i := range all {
-		ex := &all[i]
-		if !domain.PrefixOverlaps(ex.PathPrefix, rec.PathPrefix) {
-			continue
-		}
-		if ex.OwnerUUID == rec.OwnerUUID {
-			continue // same-owner overlap never blocks; the exact row upserts below
-		}
-		if ex.Expired(now) {
-			expired = append(expired, *ex)
-			continue
-		}
-		blockers = append(blockers, *ex)
-	}
+	blockers, expired := partitionClaims(all, rec, time.Now())
 	if len(blockers) > 0 {
-		sort.Slice(blockers, func(i, j int) bool {
-			if blockers[i].PathPrefix != blockers[j].PathPrefix {
-				return blockers[i].PathPrefix < blockers[j].PathPrefix
-			}
-			return blockers[i].CreatedAt.Before(blockers[j].CreatedAt)
-		})
 		return &ClaimConflictError{Blockers: blockers}
 	}
 	// Lazy-reclaim: expired overlapping rows die inside the winner's txn — the
@@ -123,6 +102,31 @@ func (s *Store) ClaimPrefix(ctx context.Context, rec domain.ClaimRecord) error {
 		return err
 	}
 	return commitTxFn(tx)
+}
+
+// partitionClaims splits the rows overlapping rec.PathPrefix into live
+// blockers and expired-reclaim candidates. Same-owner rows never land in
+// either bucket — a same-owner overlap never blocks, and the exact row
+// refreshes via upsert. Blockers come back sorted prefix then created_at.
+func partitionClaims(all []domain.ClaimRecord, rec domain.ClaimRecord, now time.Time) (blockers, expired []domain.ClaimRecord) {
+	for i := range all {
+		ex := &all[i]
+		if !domain.PrefixOverlaps(ex.PathPrefix, rec.PathPrefix) || ex.OwnerUUID == rec.OwnerUUID {
+			continue
+		}
+		if ex.Expired(now) {
+			expired = append(expired, *ex)
+			continue
+		}
+		blockers = append(blockers, *ex)
+	}
+	sort.Slice(blockers, func(i, j int) bool {
+		if blockers[i].PathPrefix != blockers[j].PathPrefix {
+			return blockers[i].PathPrefix < blockers[j].PathPrefix
+		}
+		return blockers[i].CreatedAt.Before(blockers[j].CreatedAt)
+	})
+	return blockers, expired
 }
 
 // insertOrRefreshClaim upserts the caller's claim row. ON CONFLICT targets the
