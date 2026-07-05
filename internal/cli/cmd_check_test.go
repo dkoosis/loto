@@ -140,7 +140,7 @@ func TestCheckIgnoresExpiredHolder(t *testing.T) {
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
 	// 1ms TTL: lapses immediately, same shape as a short-claim that timed out.
-	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagTTL, "1ms", "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagTTL, tcTTL1ms, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("alice lock failed")
 	}
 	time.Sleep(20 * time.Millisecond)

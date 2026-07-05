@@ -61,7 +61,7 @@ func TestOpFlockReleasedBeforeDetachedAudit(t *testing.T) {
 			expiry: time.Hour,
 			run: func(t *testing.T, s *Store, ctx context.Context, target domain.Target, live domain.PidLiveProbe) {
 				t.Helper()
-				if _, err := s.ReleaseLocks(ctx, []domain.Target{target}, tcAlice); err != nil {
+				if _, err := s.ReleaseLocks(ctx, []domain.Target{target}, tcAlice, "h", liveProbe); err != nil {
 					t.Fatalf("ReleaseLocks: %v", err)
 				}
 			},

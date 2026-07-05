@@ -698,3 +698,60 @@ func TestDoctorRepair_ReleasesOpFlockBeforeVACUUM(t *testing.T) {
 		t.Error("op-flock still held during VACUUM — peers stall for the whole-file rewrite")
 	}
 }
+
+// TestDoctorRepair_SweepsExpiredClaims covers D3 (loto-ebkc): expired claims
+// accrete unless a same-territory ClaimPrefix happens to overlap them — the
+// repair tx must GC them (gcClaimsTx beside gcTagsTx), leaving live claims
+// untouched.
+func TestDoctorRepair_SweepsExpiredClaims(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	if err := s.ClaimPrefix(ctx, mkClaim("pkg/dead", tcAlice, -time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimPrefix(ctx, mkClaim("pkg/live", tcBob, time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	dead := func(string, int, int64) bool { return false }
+	if err := s.DoctorRepair(ctx, "h", "doctor", dead); err != nil {
+		t.Fatal(err)
+	}
+	all, err := s.ListClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].PathPrefix != "pkg/live" {
+		t.Fatalf("repair must sweep only the expired claim, got %+v", all)
+	}
+}
+
+// TestDoctorAudit_ListsExpiredClaims covers D3's audit half: the report names
+// every expired claim in deterministic (prefix, owner) order; live claims
+// stay out of it.
+func TestDoctorAudit_ListsExpiredClaims(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	// Insert out of order to pin the sort.
+	if err := s.ClaimPrefix(ctx, mkClaim("pkg/zeta", tcBob, -time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimPrefix(ctx, mkClaim("pkg/alpha", tcAlice, -time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimPrefix(ctx, mkClaim("pkg/live", "carol", time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	alive := func(string, int, int64) bool { return true }
+	report, err := s.DoctorAudit(ctx, "h", alive, SidecarCheck{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.ExpiredClaims) != 2 {
+		t.Fatalf("want 2 expired claims, got %+v", report.ExpiredClaims)
+	}
+	if report.ExpiredClaims[0].PathPrefix != "pkg/alpha" || report.ExpiredClaims[1].PathPrefix != "pkg/zeta" {
+		t.Errorf("expired claims must be (prefix, owner)-sorted, got %+v", report.ExpiredClaims)
+	}
+}

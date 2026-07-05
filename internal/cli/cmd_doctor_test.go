@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDoctorHealthyEmpty(t *testing.T) {
@@ -181,5 +182,51 @@ func TestDoctor_RestoreOrphanModeFlagRepairs(t *testing.T) {
 	st, _ := os.Stat(orphan)
 	if st.Mode().Perm()&0o200 == 0 {
 		t.Errorf("expected restored, got %o", st.Mode().Perm())
+	}
+}
+
+// TestDoctor_ExpiredClaims_ListedAndRepaired covers D3's CLI surface
+// (loto-ebkc): doctor lists TTL-lapsed claims as findings, --repair sweeps
+// them (gcClaimsTx), and the next audit is healthy again.
+func TestDoctor_ExpiredClaims_ListedAndRepaired(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	// The claim verb rejects non-positive TTLs: shortest lease + wait out expiry.
+	if code := Run([]string{"claim", "internal/store", "-t", tcIntentTest, tcFlagTTL, tcTTL1ms}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("claim failed")
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdDoctor}, &out, io.Discard); code != 0 {
+		t.Fatalf("doctor exit %d: %s", code, out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "expired_claims=1") {
+		t.Errorf("triage line must count expired claims: %q", got)
+	}
+	if !strings.Contains(got, "expired_claim prefix=internal/store owner=") {
+		t.Errorf("expected expired-claim row: %q", got)
+	}
+
+	// Dry-run names the claims sweep too, not just lock reclaims.
+	out.Reset()
+	if code := Run([]string{tcCmdDoctor, "--dry-run"}, &out, io.Discard); code != 0 {
+		t.Fatalf("doctor --dry-run exit %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "would_gc_claims=1") {
+		t.Errorf("dry-run must report would_gc_claims: %q", out.String())
+	}
+
+	out.Reset()
+	if code := Run([]string{tcCmdDoctor, tcFlagRepair}, &out, io.Discard); code != 0 {
+		t.Fatalf("doctor --repair exit %d: %s", code, out.String())
+	}
+	out.Reset()
+	if code := Run([]string{tcCmdDoctor}, &out, io.Discard); code != 0 {
+		t.Fatalf("doctor after repair exit %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "✓ healthy") {
+		t.Errorf("expired claim must be swept by --repair: %q", out.String())
 	}
 }

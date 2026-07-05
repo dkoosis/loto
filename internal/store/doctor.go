@@ -26,7 +26,10 @@ var vacuumFn = func(ctx context.Context, db *sql.DB) error {
 }
 
 type DoctorReport struct {
-	StaleLocks      []domain.LockRecord
+	StaleLocks []domain.LockRecord
+	// ExpiredClaims are the TTL-lapsed territory reservations that --repair
+	// would sweep (gcClaimsTx), in (prefix, owner) order (loto-ebkc D3).
+	ExpiredClaims   []domain.ClaimRecord
 	SidecarFindings []SidecarFinding
 	IntegrityOK     bool
 	IntegrityDetail string
@@ -62,10 +65,35 @@ func (s *Store) DoctorAudit(ctx context.Context, thisHost string, live domain.Pi
 			}
 		}
 	}
+	if err := s.collectExpiredClaims(ctx, r, ec.Now); err != nil {
+		return nil, err
+	}
 	if err := s.runIntegrityCheck(ctx, r); err != nil {
 		return nil, err
 	}
 	return r, nil
+}
+
+// collectExpiredClaims fills r.ExpiredClaims with every TTL-lapsed claim in
+// deterministic (prefix, owner) order — the audit half of the D3 sweep: what
+// --repair's gcClaimsTx would delete (loto-ebkc).
+func (s *Store) collectExpiredClaims(ctx context.Context, r *DoctorReport, now time.Time) error {
+	claims, err := s.ListClaims(ctx)
+	if err != nil {
+		return err
+	}
+	for i := range claims {
+		if claims[i].Expired(now) {
+			r.ExpiredClaims = append(r.ExpiredClaims, claims[i])
+		}
+	}
+	sort.Slice(r.ExpiredClaims, func(i, j int) bool {
+		if r.ExpiredClaims[i].PathPrefix != r.ExpiredClaims[j].PathPrefix {
+			return r.ExpiredClaims[i].PathPrefix < r.ExpiredClaims[j].PathPrefix
+		}
+		return r.ExpiredClaims[i].OwnerUUID < r.ExpiredClaims[j].OwnerUUID
+	})
+	return nil
 }
 
 func (s *Store) runIntegrityCheck(ctx context.Context, r *DoctorReport) error {
@@ -157,6 +185,9 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost string, agent domain.
 	if err := gcTagsTx(ctx, tx, now); err != nil {
 		return err
 	}
+	if err := gcClaimsTx(ctx, tx, now); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -245,6 +276,17 @@ func gcTagsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	cutoff := now.Add(-tagsRetentionAge).UnixNano()
 	_, err := tx.ExecContext(ctx, `
 		DELETE FROM tags WHERE acked_at IS NOT NULL AND acked_at < ?`, cutoff)
+	return err
+}
+
+// gcClaimsTx hard-deletes expired claims inside DoctorRepair's tx, beside
+// gcTagsTx (loto-ebkc D3). `expires_at <= now` is the exact complement of the
+// live-claim probe's `expires_at > now` (ReleaseClaim/partitionClaims), so a
+// claim is either live or sweepable — never both, never neither. Without this
+// sweep an expired claim accretes until a same-territory ClaimPrefix happens
+// to overlap it. Purely disk reclamation: read paths already filter by Expired.
+func gcClaimsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM claims WHERE expires_at <= ?`, now.UnixNano())
 	return err
 }
 

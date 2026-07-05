@@ -67,7 +67,7 @@ func unlockTargets(rt *runtime, args []string, repoTop string, stdout, stderr io
 	if code != 0 {
 		return code
 	}
-	results, err := rt.Store.ReleaseLocks(rt.Ctx, targets, domain.AgentUUID(rt.Agent.UUID))
+	results, err := rt.Store.ReleaseLocks(rt.Ctx, targets, domain.AgentUUID(rt.Agent.UUID), rt.Host, rt.liveProbe())
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

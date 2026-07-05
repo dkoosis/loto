@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestUnlockAll_NoPinnedIdentity_RefusesFalseSuccess pins the loto-pody
@@ -152,5 +153,66 @@ func TestUnlock_MultiTarget_BestEffortMissingVsNotOwner(t *testing.T) {
 	}
 	if !strings.Contains(got, "state=not-owner") {
 		t.Errorf("missing not-owner: %q", got)
+	}
+}
+
+// TestUnlock_StaleForeignLock_ReclaimedExit0 covers the D1 surface (loto-ebkc):
+// a plain unlock of a target whose only holder is stale (TTL lapsed) reclaims
+// it — exit 0, reclaimed row naming the dead owner, file writable again. The
+// pre-D1 behavior bounced to ✗ not-owner/exit 1, whose only recourse was
+// --force (wrong audit kind: lock_broken instead of lock_reclaimed_stale).
+func TestUnlock_StaleForeignLock_ReclaimedExit0(t *testing.T) {
+	repo := withTempProject(t)
+	alice, bob := twoAgents(t)
+	t.Setenv("LOTO_PID", "") // PID-0 sentinel → TTL-only liveness
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	// D2 rejects non-positive TTLs: take the shortest lease, wait out expiry.
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagTTL, tcTTL1ms}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("alice lock failed")
+	}
+	time.Sleep(20 * time.Millisecond) // lease expired → lock now stale
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcTargetA}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("reclaiming unlock exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	got := out.String()
+	if !strings.HasPrefix(got, "✓ unlocked count=0 reclaimed=1\n") {
+		t.Errorf("triage line must carry reclaimed=1: %q", got)
+	}
+	if !strings.Contains(got, "state=reclaimed-stale owner="+alice.UUID) {
+		t.Errorf("reclaimed row must name the dead owner: %q", got)
+	}
+	st, err := os.Stat(filepath.Join(repo, tcTargetA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm()&0o200 == 0 {
+		t.Errorf("reclaim must restore owner-write, got %o", st.Mode().Perm())
+	}
+}
+
+// TestUnlock_LiveForeignLock_StaysNotOwner pins the D1 regression edge at the
+// CLI: a LIVE foreign lock still bounces a plain unlock to not-owner/exit 1.
+func TestUnlock_LiveForeignLock_StaysNotOwner(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("alice lock failed")
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcTargetA}, &out, &errBuf)
+	if code != 1 {
+		t.Fatalf("unlock of live foreign lock exit %d, want 1; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "state=not-owner owner="+alice.UUID) {
+		t.Errorf("expected not-owner row naming alice: %q", out.String())
 	}
 }

@@ -86,9 +86,11 @@ func (c EvalContext) Classify(l LockRecord) Liveness {
 	return LivenessUnknown
 }
 
-// RemainingTTL is the time until the TTL backstop fires, clamped at 0. A live
-// durable-PID holder is never TTL-reaped (liveness governs), so this is purely
-// informational for ALIVE locks; for UNKNOWN locks it is the self-heal deadline.
+// RemainingTTL is the time until the TTL backstop fires, clamped at 0. Expiry
+// is unconditional in IsStale — TTL lapse makes the lock reclaimable even when
+// the holder pid still probes ALIVE (liveness accelerates staleness, it never
+// extends the lease) — so this is every lock's hard self-heal deadline, not
+// just the UNKNOWN ones'.
 func (c EvalContext) RemainingTTL(l LockRecord) time.Duration {
 	d := l.ExpiresAt.Sub(c.Now)
 	if d < 0 {

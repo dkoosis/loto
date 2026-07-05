@@ -232,7 +232,7 @@ func TestRotateEvents_FiresOnReleaseBreakDowngrade(t *testing.T) {
 		}
 		// Overfill AFTER acquire so the acquire's own rotation can't mask the gap.
 		seedExcess(t, s, eventsRetentionMax+50)
-		if _, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice); err != nil {
+		if _, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, "h", liveProbe); err != nil {
 			t.Fatalf("release: %v", err)
 		}
 		assertTrimmed(t, s)

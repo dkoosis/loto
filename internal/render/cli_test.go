@@ -345,6 +345,55 @@ func TestEmitChmodFailure_FailedQuotedAndCountsErrOnly(t *testing.T) {
 	}
 }
 
+// TestEmitReleaseResults_ReclaimedStale covers the D1 surface (loto-ebkc): a
+// plain unlock that reclaimed all-stale foreign holders reports success —
+// count-first triage with a distinct reclaimed= field, a ✓ per-row line naming
+// the dead owner, exit 0 (reclaim is the desired outcome, not a failure).
+func TestEmitReleaseResults_ReclaimedStale(t *testing.T) {
+	var buf bytes.Buffer
+	exit := EmitReleaseResults(&buf, []store.ReleaseResult{
+		{Target: domain.Target{Canonical: aGo}, State: store.StateReclaimedStale, Owner: "DeadOwl"},
+		{Target: domain.Target{Canonical: bGo}, State: store.StateUnlocked},
+	})
+	if exit != 0 {
+		t.Errorf("reclaimed-stale → exit 0, got %d", exit)
+	}
+	got := buf.String()
+	if !strings.HasPrefix(got, "✓ unlocked count=1 reclaimed=1\n") {
+		t.Errorf("triage line must carry reclaimed= field: %s", got)
+	}
+	if !strings.Contains(got, "✓ target="+aGo+" state=reclaimed-stale owner=DeadOwl") {
+		t.Errorf("reclaimed row must be ✓ with state + dead owner: %s", got)
+	}
+}
+
+// TestEmitReleaseResults_ReclaimRestoreFailed_KeepsAttribution covers the
+// review P3: a reclaim whose chmod restore failed degrades to restore-failed,
+// but must not masquerade as the caller's own unlock — it counts under
+// reclaimed= (Owner discriminates: only reclaimed rows carry a dead owner into
+// restore-failed) and the ⚠ row names that dead owner.
+func TestEmitReleaseResults_ReclaimRestoreFailed_KeepsAttribution(t *testing.T) {
+	var buf bytes.Buffer
+	exit := EmitReleaseResults(&buf, []store.ReleaseResult{
+		{
+			Target:     domain.Target{Canonical: aGo},
+			State:      store.StateRestoreFailed,
+			Owner:      "DeadOwl",
+			RestoreErr: errPermissionDenied,
+		},
+	})
+	if exit != 1 {
+		t.Errorf("restore-failed → exit 1, got %d", exit)
+	}
+	got := buf.String()
+	if !strings.HasPrefix(got, "✓ unlocked count=0 reclaimed=1 restore-failed=1\n") {
+		t.Errorf("failed reclaim must count as reclaimed, not own unlock: %s", got)
+	}
+	if !strings.Contains(got, "owner=DeadOwl") {
+		t.Errorf("restore-failed reclaim row must keep dead-owner attribution: %s", got)
+	}
+}
+
 func TestEmitReleaseResults_EmptyInput_EmitsInfoGlyph(t *testing.T) {
 	var buf bytes.Buffer
 	exit := EmitReleaseResults(&buf, nil)
