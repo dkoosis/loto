@@ -187,6 +187,26 @@ func TestReleaseClaimNotOwner(t *testing.T) {
 	}
 }
 
+// TestReleaseClaimIgnoresExpiredForeignRow pins the pass-2 persistence fix:
+// a prefix held only by an EXPIRED foreign claim reports no-claim (exit 0),
+// not not-owner — the probe must apply the same staleness semantics as
+// partitionClaims and status, or a dead lease blocks an unclaim verdict it
+// has no live right to.
+func TestReleaseClaimIgnoresExpiredForeignRow(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	if err := s.ClaimPrefix(ctx, mkClaim("internal/store", tcAlice, -time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.ReleaseClaim(ctx, "internal/store", tcBob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != ClaimStateNoClaim {
+		t.Fatalf("state=%v; want ClaimStateNoClaim (expired row must not report not-owner): %+v", res.State, res)
+	}
+}
+
 // TestClaimsTableEnsuredOnExistingDB pins the no-version-bump migration: a DB
 // stamped at the current user_version but predating the claims table gets the
 // table via the ensureClaimsTable step in migrationEnsures on the next Open.

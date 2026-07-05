@@ -151,9 +151,11 @@ ON CONFLICT(path_prefix, owner_uuid) DO UPDATE SET
 }
 
 // ReleaseClaim deletes the caller's claim at exactly prefix. Outcomes:
-// Released (row deleted), NoClaim (no row at prefix), NotOwner (rows exist,
-// none the caller's — Owner names the actual holder). One immediate write txn
-// keeps the delete and the outcome probe consistent.
+// Released (row deleted), NoClaim (no live row at prefix), NotOwner (a LIVE
+// foreign row exists — Owner names the actual holder). The not-owner probe
+// filters expired rows, matching partitionClaims/status staleness semantics:
+// a dead lease that accreted at the prefix must not block the verdict. One
+// immediate write txn keeps the delete and the outcome probe consistent.
 func (s *Store) ReleaseClaim(ctx context.Context, prefix string, owner domain.AgentUUID) (ClaimReleaseResult, error) {
 	out := ClaimReleaseResult{PathPrefix: prefix}
 	tx, cleanup, err := s.beginTx(ctx)
@@ -178,8 +180,8 @@ func (s *Store) ReleaseClaim(ctx context.Context, prefix string, owner domain.Ag
 	}
 	var holder string
 	err = tx.QueryRowContext(ctx,
-		`SELECT owner_uuid FROM claims WHERE path_prefix = ? ORDER BY created_at ASC, owner_uuid ASC LIMIT 1`,
-		prefix).Scan(&holder)
+		`SELECT owner_uuid FROM claims WHERE path_prefix = ? AND expires_at > ? ORDER BY created_at ASC, owner_uuid ASC LIMIT 1`,
+		prefix, time.Now().UnixNano()).Scan(&holder)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		out.State = ClaimStateNoClaim
