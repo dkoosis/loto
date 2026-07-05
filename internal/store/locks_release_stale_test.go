@@ -13,6 +13,7 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -462,5 +463,41 @@ func TestReleaseLocks_MixedBatch_AckedTagSurvivesReclaimGC(t *testing.T) {
 	err = s.db.QueryRowContext(ctx, `SELECT 1 FROM tags WHERE id = ?`, goneID).Scan(&one)
 	if !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("dead holder's pending tag should be GC'd, got err=%v", err)
+	}
+}
+
+// TestReleaseLocks_ReclaimRestoreFailure_KeepsOwner pins the store half of the
+// review P3: when a reclaim's chmod restore fails, the result degrades to
+// StateRestoreFailed but MUST keep the dead holder's Owner so render can
+// attribute the failed reclaim instead of reporting a bare own-unlock failure.
+func TestReleaseLocks_ReclaimRestoreFailure_KeepsOwner(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	l := mkFileLock(t, "a.go", tcAlice, -time.Minute)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := fchmodFn
+	defer func() { fchmodFn = orig }()
+	fchmodFn = func(f *os.File, mode os.FileMode) error {
+		if f.Name() == l.Target.Canonical && mode.Perm()&0o200 != 0 {
+			return &os.PathError{Op: tcChmod, Path: f.Name(), Err: syscall.EPERM}
+		}
+		return orig(f, mode)
+	}
+
+	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, tcHost, deadProbe)
+	if err != nil {
+		t.Fatalf("ReleaseLocks: %v", err)
+	}
+	if res[0].State != StateRestoreFailed {
+		t.Fatalf("want StateRestoreFailed, got %+v", res)
+	}
+	if res[0].Owner != tcAlice {
+		t.Errorf("failed reclaim must keep dead-owner attribution, got Owner=%q", res[0].Owner)
+	}
+	if res[0].RestoreErr == nil {
+		t.Error("RestoreErr nil")
 	}
 }
