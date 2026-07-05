@@ -20,7 +20,7 @@ func init() { register("claim", cmdClaim) } //nolint:gochecknoinits // command r
 
 // claimUsageHead is the point-of-use teaching surface for claim (mirrors
 // lockUsageHead). The flag list is appended by PrintDefaults.
-const claimUsageHead = `usage: loto claim <path-prefix> -t "why" [--ttl 4h]
+const claimUsageHead = `usage: loto claim <path-prefix> -t "why" [--ttl 2h]
 
 Atomically reserve a repo-relative directory prefix as session territory:
 "this package is mine this session" — coarser than a per-file lock. Refused
@@ -41,7 +41,7 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprint(stderr, claimUsageHead)
 		flags.PrintDefaults()
 	}
-	ttl := flags.Duration("ttl", 4*time.Hour, "claim TTL (session-scale lease)")
+	ttl := flags.Duration("ttl", 2*time.Hour, "claim TTL (session-scale lease)")
 	intent := flags.String("t", "", "intent (required)")
 	flags.StringVar(intent, "intent", "", "intent (required)")
 	if err := flags.Parse(permuteWith(flags, args)); err != nil {
@@ -51,7 +51,7 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintln(stderr, "✗ -t required: loto claim <path-prefix> -t \"why\"")
 		return 2
 	}
-	prefix, repoTop, code := claimVerbPrefix(ctx, flags, "usage: loto claim <path-prefix> -t \"why\" [--ttl 4h]", stderr)
+	prefix, repoTop, code := claimVerbPrefix(ctx, flags, "usage: loto claim <path-prefix> -t \"why\" [--ttl 2h]", stderr)
 	if code != 0 {
 		return code
 	}
