@@ -128,6 +128,65 @@ func TestClaimPrefixReclaimsExpired(t *testing.T) {
 	}
 }
 
+func TestReleaseClaimOwner(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	if err := s.ClaimPrefix(ctx, mkClaim("internal/store", tcAlice, time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.ReleaseClaim(ctx, "internal/store", tcAlice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != ClaimStateReleased {
+		t.Fatalf("state=%v; want ClaimStateReleased: %+v", res.State, res)
+	}
+	all, err := s.ListClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 0 {
+		t.Fatalf("claim should be gone, got %+v", all)
+	}
+}
+
+func TestReleaseClaimNoClaim(t *testing.T) {
+	s := mustOpen(t)
+	res, err := s.ReleaseClaim(context.Background(), "internal/store", tcAlice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != ClaimStateNoClaim {
+		t.Fatalf("state=%v; want ClaimStateNoClaim: %+v", res.State, res)
+	}
+}
+
+func TestReleaseClaimNotOwner(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	if err := s.ClaimPrefix(ctx, mkClaim("internal/store", tcAlice, time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.ReleaseClaim(ctx, "internal/store", tcBob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != ClaimStateNotOwner {
+		t.Fatalf("state=%v; want ClaimStateNotOwner: %+v", res.State, res)
+	}
+	if res.Owner != tcAlice {
+		t.Errorf("owner=%q; want %q (row names actual owner)", res.Owner, tcAlice)
+	}
+	// Alice's claim must be untouched.
+	all, err := s.ListClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].OwnerUUID != domain.AgentUUID(tcAlice) {
+		t.Fatalf("alice's claim must survive bob's unclaim: %+v", all)
+	}
+}
+
 // TestClaimsTableEnsuredOnExistingDB pins the no-version-bump migration: a DB
 // stamped at the current user_version but predating the claims table gets the
 // table via the ensureClaimsTable step in migrationEnsures on the next Open.
