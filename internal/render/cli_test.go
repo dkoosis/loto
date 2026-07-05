@@ -382,8 +382,9 @@ func TestEmitClaimSuccess(t *testing.T) {
 	exp := time.Date(2026, 7, 5, 18, 4, 5, 0, time.UTC)
 	EmitClaimSuccess(&buf, domain.ClaimRecord{
 		PathPrefix: "internal/store",
+		CreatedAt:  exp.Add(-4 * time.Hour),
 		ExpiresAt:  exp,
-	}, 4*time.Hour)
+	})
 	got := buf.String()
 	if !strings.HasPrefix(got, "✓ claimed count=1\n") {
 		t.Errorf("count-first header: %q", got)

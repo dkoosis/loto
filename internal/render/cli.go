@@ -126,10 +126,13 @@ func EmitConflictWithTags(w io.Writer, ce *store.MultiConflictError, tagsByTarge
 // EmitClaimSuccess renders the acquired-claim block (loto-7af9). Single-claim
 // by design — the claim verb takes exactly one prefix — so the count header is
 // constant; it stays count-first for surface consistency with lock/unlock.
-func EmitClaimSuccess(w io.Writer, rec domain.ClaimRecord, ttl time.Duration) {
+// The ttl shown is the record's own lease span (ExpiresAt−CreatedAt), so the
+// row can never disagree with what was stored.
+func EmitClaimSuccess(w io.Writer, rec domain.ClaimRecord) {
 	fmt.Fprintf(w, "✓ claimed count=1\n")
 	fmt.Fprintf(w, "✓ prefix=%s ttl=%s expires_at=%s\n",
-		relToCwd(rec.PathPrefix, getCwd()), ttl, rec.ExpiresAt.UTC().Format(time.RFC3339))
+		relToCwd(rec.PathPrefix, getCwd()), rec.ExpiresAt.Sub(rec.CreatedAt),
+		rec.ExpiresAt.UTC().Format(time.RFC3339))
 }
 
 // EmitClaimConflict renders the blocked-claim block: count-first, ⚠ per

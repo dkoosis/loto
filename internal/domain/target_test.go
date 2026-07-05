@@ -65,6 +65,7 @@ func TestCanonicalizePrefix(t *testing.T) {
 	}{
 		{tcStorePrefix, tcStorePrefix},
 		{"internal/store/", tcStorePrefix},
+		{"internal/store//", tcStorePrefix},
 		{"./internal/store", tcStorePrefix},
 		{"a//b", "a/b"},
 	}

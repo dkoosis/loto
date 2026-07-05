@@ -80,7 +80,7 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	render.EmitClaimSuccess(stdout, rec, *ttl)
+	render.EmitClaimSuccess(stdout, rec)
 	emitNotOnDiskAdvisory(stdout, repoTop, prefix.Canonical)
 	return 0
 }

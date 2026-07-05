@@ -11,10 +11,12 @@ import (
 	"loto/internal/domain"
 )
 
-// claimsDDL is the claims table shape. schema.sql declares the same DDL for
-// fresh DBs; ensureClaimsTable applies this copy to a stamped DB that predates
-// the table (no user_version bump — additive, preserves live rows). The
-// duplication follows the ensureLocksModeAndPK precedent.
+// claimsDDL is the claims table shape, duplicated from schema.sql per the
+// ensureLocksModeAndPK precedent. In practice ensureClaimsTable's pending
+// probe is what routes a stamped pre-claims DB back into migrate — whose
+// schemaSQL pass creates the table before the ensures run — so the apply
+// branch is a contract-conforming backstop (a pending ensureFn must be able
+// to apply itself), not the usual delivery path. No user_version bump.
 const claimsDDL = `
 CREATE TABLE IF NOT EXISTS claims (
   path_prefix  TEXT NOT NULL,
