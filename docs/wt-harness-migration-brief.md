@@ -8,7 +8,7 @@
 
 trixi accreted a full **dev-harness for running multiple Claude-agent sessions against one git repo**. It was born 2026-05-02 (the day parallel agents started colliding) and compounded by a recursion: *parallel agents create friction → each friction gets a script → scripts need coordination (`loto`) → coordination needs lifecycle (`wt-*`) → lifecycle needs enforcement (make gates + a generated rule + git hooks + tests)*. ~21% of trixi's last 60 days of commits touched this harness; none of it touches a nug, an embedding, or the MCP store.
 
-`loto` (the file-lease lock coordinator) already graduated to its own repo (`github.com/dkoosis/loto`, a single Go binary). The `wt-*` worktree-lifecycle scripts are the **same domain** but never graduated. **Decision (dk, 2026-06-01): graduate the harness to loto** so bead and code live together.
+`loto` (the file-lease lock coordinator) already graduated to its own repo (`github.com/dkoosis/loto`, a single Go binary). The `wt-*` worktree-lifecycle scripts are the **same domain** but never graduated. **Decision (dk, 2026-06-01): graduate the harness to loto** so bead and code live together. **⟶ SUPERSEDED 2026-07-05: the graduation is closed — neither fork lands in loto. See §5.**
 
 These scripts are **barely coupled to trixi internals** — no trixi Go packages, no KG logic. They shell out to generic `git` / `gh` / `bd` / `make check` / `loto` / `gh-poi`. The coupling that *does* exist is to **conventions** (branch prefixes, worktrees-dir naming, `.beads`/`.claude`/`docs` paths, the `make check` green-gate), enumerated in §4.
 
@@ -169,6 +169,24 @@ Moving the scripts without re-pointing these leaves trixi **broken**:
 
 ## 5. The design fork (decide before executing)
 
+> **◯ DECIDED (dk, 2026-07-05): fork CLOSED — neither A nor B.** The graduation
+> as scoped is superseded; loto stays **Layer 1** (locks · claims · gate ·
+> doctor — `gate-design.md` in the loto-identity-lock-model Inquiry). Rationale
+> (`docs/treehouse-prior-art.md` §5): (1) the 2026-06-19 one-tree pivot
+> (loto-9sro lanes) retired worktrees from the fleet harness for cause — a
+> `loto wt` verb set would build into loto-core the model its own NORTH_STAR
+> argues against; (2) the Layer-1 gate stack closes the only observed clobber
+> class, making physical isolation a throughput choice, not a safety one.
+> **Sequencing:** ship the gate stack, re-measure; if a Layer-2 isolation tier
+> still earns a slot, **wrap `treehouse`** (verified-sound pool core) with the
+> archive-before-reset guard, loto-aligned lease TTLs, and pool-dir lint
+> exclusions — do not port the nine scripts. `wt-land`'s land-and-close flow is
+> bead lifecycle, not tree lifecycle: it stays in trixi (or moves to the
+> cc-plugins harness), never into loto. §7's bead migration is likewise on
+> hold except `trixi-5qh5` (harness-layer, tracks independently).
+>
+> The fork text below is retained as the record of what was weighed.
+
 `loto` is a **single Go binary** (`cmd/loto`), no `scripts/` dir. Two ways the harness can live there:
 
 **A. Bash on PATH.** Move the 4–9 bash scripts into `loto/scripts/`, install them on PATH via loto's `install` target. trixi calls bare `wt-land` / `wt-gc` / etc.
@@ -215,7 +233,12 @@ Already migrated: `trixi-r4gm` (loto leases) → lives in loto as `loto-k5el` (+
 
 ## 8. Open questions for migration-claude
 
-1. **Fork A or B** (§5)? Gates the whole plan shape.
+> ◯ 2026-07-05: Q1 is answered — **neither** (§5 decision banner); the
+> migration is closed, so Q2–Q6 are moot unless the post-gate re-measure
+> revives a Layer-2 tier, in which case they re-open against a treehouse
+> wrapper, not a port.
+
+1. **Fork A or B** (§5)? Gates the whole plan shape. **⟶ answered: neither.**
 2. **Does the protocol doc** (`docs/parallel-sessions-protocol.md`) graduate to loto, stay in trixi, or get split? It's the source of the generated `concurrency.md`.
 3. **How does trixi consume the graduated harness** — bare commands on PATH, `loto wt …`, or a thin trixi wrapper? Whatever it is, re-point all of §3.
 4. **Parameterization contract:** which conventions become flags/config (worktrees-root ✓ already, branch-prefix set, gate-command, `team_worktree`/`gh_issue` metadata keys, hook step injection)?
