@@ -273,13 +273,18 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 	// successful unlock with a failed chmod restore — so it counts toward the
 	// unlocked total. The restore failures surface as a distinct first-line field
 	// (and per-row ⚠ lines below) so the Claude consumer sees both facts.
+	// Reclaimed-stale rows likewise deleted rows, but count under their own
+	// reclaimed= field (loto-ebkc): the caller released nothing it owned.
 	successCount := 0
 	restoreFailed := 0
+	reclaimed := 0
 	exit := 0
 	for _, r := range sorted {
 		switch r.State {
 		case store.StateUnlocked:
 			successCount++
+		case store.StateReclaimedStale:
+			reclaimed++
 		case store.StateRestoreFailed:
 			successCount++
 			restoreFailed++
@@ -290,16 +295,21 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 			// no-op: nothing was owned at this target, not a release.
 		}
 	}
-	if restoreFailed > 0 {
-		fmt.Fprintf(w, "✓ unlocked count=%d restore-failed=%d\n", successCount, restoreFailed)
-	} else {
-		fmt.Fprintf(w, "✓ unlocked count=%d\n", successCount)
+	fmt.Fprintf(w, "✓ unlocked count=%d", successCount)
+	if reclaimed > 0 {
+		fmt.Fprintf(w, " reclaimed=%d", reclaimed)
 	}
+	if restoreFailed > 0 {
+		fmt.Fprintf(w, " restore-failed=%d", restoreFailed)
+	}
+	fmt.Fprintln(w)
 	for _, r := range sorted {
 		path := relToCwd(r.Target.Canonical, cwd)
 		switch r.State {
 		case store.StateUnlocked:
 			fmt.Fprintf(w, "✓ target=%s\n", path)
+		case store.StateReclaimedStale:
+			fmt.Fprintf(w, "✓ target=%s state=reclaimed-stale owner=%s\n", path, r.Owner)
 		case store.StateNoLock:
 			fmt.Fprintf(w, "ℹ target=%s state=no-lock\n", path)
 		case store.StateNotOwner:
