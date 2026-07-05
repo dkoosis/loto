@@ -28,16 +28,23 @@ func renderDoctorReport(stdout io.Writer, report *store.DoctorReport) {
 		}
 		return sidecarFindings[i].Reason < sidecarFindings[j].Reason
 	})
-	if len(staleLocks) == 0 && len(sidecarFindings) == 0 && report.IntegrityOK {
+	if len(staleLocks) == 0 && len(report.ExpiredClaims) == 0 && len(sidecarFindings) == 0 && report.IntegrityOK {
 		fmt.Fprintln(stdout, "✓ healthy")
 		return
 	}
-	fmt.Fprintf(stdout, "✗ stale_locks=%d sidecar_findings=%d integrity=%s\n",
-		len(staleLocks), len(sidecarFindings), report.IntegrityDetail)
+	fmt.Fprintf(stdout, "✗ stale_locks=%d expired_claims=%d sidecar_findings=%d integrity=%s\n",
+		len(staleLocks), len(report.ExpiredClaims), len(sidecarFindings), report.IntegrityDetail)
 	for i := range staleLocks {
 		l := &staleLocks[i]
 		fmt.Fprintf(stdout, "✗ stale target=%s owner=%s expires_at=%s host=%s pid=%d\n",
 			relPath(l.Target.Canonical), l.OwnerUUID, l.ExpiresAt.UTC().Format(time.RFC3339), l.Host, l.PID)
+	}
+	// ExpiredClaims arrive (prefix, owner)-sorted from DoctorAudit; prefixes
+	// are stored repo-relative, so no relPath translation.
+	for i := range report.ExpiredClaims {
+		c := &report.ExpiredClaims[i]
+		fmt.Fprintf(stdout, "✗ expired_claim prefix=%s owner=%s expires_at=%s\n",
+			c.PathPrefix, c.OwnerUUID, c.ExpiresAt.UTC().Format(time.RFC3339))
 	}
 	for i := range sidecarFindings {
 		f := &sidecarFindings[i]
