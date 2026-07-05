@@ -26,6 +26,7 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	staged := fs.Bool("staged", false, "read paths from git diff --cached")
+	gate := fs.Bool("gate", false, "read-only deny gate: exit 1 if a foreign live claim or lock/beacon covers any path; never acquires, refreshes, or writes")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
@@ -43,6 +44,18 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	if len(paths) == 0 {
 		fmt.Fprintln(stdout, "✓ no paths")
 		return 0
+	}
+
+	// --gate is a distinct read-only decision surface (loto-vr2,
+	// gate-design.md component 4): it consults claims (plain check never
+	// does), denies on any foreign live lock/beacon regardless of mode, and
+	// fails open on identity/store infra BEFORE opening the store. Branching
+	// here — after path loading, before openRuntime — keeps every line below
+	// this point (the plain-check path) untouched, so plain `loto check`
+	// stays byte-identical (hard rule, plan "Plain loto check ... behavior
+	// must stay byte-identical").
+	if *gate {
+		return runCheckGate(ctx, paths, repoTop, stdout)
 	}
 
 	rt, err := openRuntime(ctx)

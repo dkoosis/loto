@@ -10,13 +10,15 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/render"
 )
 
 const tcFlagGate = "--gate"
 
 // gateDecide unit tests (loto-vr2, gate-design.md component 4). Pure —
-// domain.LockRecord/domain.ClaimRecord fixtures in, []gateDeny out — no
-// store, no CLI, no clock read beyond the EvalContext/now passed in. These
+// domain.LockRecord/domain.ClaimRecord fixtures in, []render.GateDenyRow
+// out — no store, no CLI, no clock read beyond the EvalContext/now passed
+// in. These
 // pin the deliberate divergences from plain check's computeCheckConflicts:
 // any-mode foreign-lock deny, claims consulted at all, and !IsStale (not
 // Classify==Alive) as the liveness threshold.
@@ -32,24 +34,24 @@ func gateEC(now time.Time) domain.EvalContext {
 
 func TestGateDecide_ForeignLiveClaimDenies(t *testing.T) {
 	now := time.Now()
-	target := domain.Target{Canonical: "internal/store/new.go"} // kuv.10 class: not on disk
+	target := domain.Target{Canonical: tcPrefixStore + "/new.go"} // kuv.10 class: not on disk
 	claims := []domain.ClaimRecord{
-		{PathPrefix: "internal/store", OwnerUUID: gateFoeUUID, Intent: "refactor", ExpiresAt: now.Add(time.Hour)},
+		{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "foe-claim", ExpiresAt: now.Add(time.Hour)},
 	}
 	rows := gateDecide([]domain.Target{target}, nil, claims, gateMyUUID, gateEC(now))
 	if len(rows) != 1 {
 		t.Fatalf("want 1 deny row, got %d: %+v", len(rows), rows)
 	}
-	if rows[0].Kind != gateKindClaim || rows[0].HolderUUID != gateFoeUUID || rows[0].Path != target.Canonical {
+	if rows[0].Kind != render.GateKindClaim || rows[0].HolderUUID != gateFoeUUID || rows[0].Path != target.Canonical {
 		t.Errorf("unexpected row: %+v", rows[0])
 	}
 }
 
 func TestGateDecide_OwnClaimAllows(t *testing.T) {
 	now := time.Now()
-	target := domain.Target{Canonical: "internal/store/new.go"}
+	target := domain.Target{Canonical: tcPrefixStore + "/new.go"}
 	claims := []domain.ClaimRecord{
-		{PathPrefix: "internal/store", OwnerUUID: gateMyUUID, Intent: "mine", ExpiresAt: now.Add(time.Hour)},
+		{PathPrefix: tcPrefixStore, OwnerUUID: gateMyUUID, Intent: "mine", ExpiresAt: now.Add(time.Hour)},
 	}
 	rows := gateDecide([]domain.Target{target}, nil, claims, gateMyUUID, gateEC(now))
 	if len(rows) != 0 {
@@ -59,9 +61,9 @@ func TestGateDecide_OwnClaimAllows(t *testing.T) {
 
 func TestGateDecide_ExpiredClaimAllows(t *testing.T) {
 	now := time.Now()
-	target := domain.Target{Canonical: "internal/store/new.go"}
+	target := domain.Target{Canonical: tcPrefixStore + "/new.go"}
 	claims := []domain.ClaimRecord{
-		{PathPrefix: "internal/store", OwnerUUID: gateFoeUUID, Intent: "stale", ExpiresAt: now.Add(-time.Minute)},
+		{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "stale", ExpiresAt: now.Add(-time.Minute)},
 	}
 	rows := gateDecide([]domain.Target{target}, nil, claims, gateMyUUID, gateEC(now))
 	if len(rows) != 0 {
@@ -74,19 +76,19 @@ func TestGateDecide_ForeignSharedBeaconDenies(t *testing.T) {
 	// under the gate (plan point 1) — plain check's shared-vs-shared probe
 	// would pass this.
 	now := time.Now()
-	target := domain.Target{Canonical: "a.go"}
+	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
 		{Target: target, OwnerUUID: gateFoeUUID, Mode: domain.ModeShared, Intent: "beacon", ExpiresAt: now.Add(time.Hour)},
 	}
 	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
-	if len(rows) != 1 || rows[0].Kind != gateKindLock || rows[0].HolderUUID != gateFoeUUID {
+	if len(rows) != 1 || rows[0].Kind != render.GateKindLock || rows[0].HolderUUID != gateFoeUUID {
 		t.Fatalf("want 1 lock-kind deny row, got %+v", rows)
 	}
 }
 
 func TestGateDecide_ForeignStaleLockAllows(t *testing.T) {
 	now := time.Now()
-	target := domain.Target{Canonical: "a.go"}
+	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
 		{Target: target, OwnerUUID: gateFoeUUID, Mode: domain.ModeExclusive, Intent: "old", ExpiresAt: now.Add(-time.Minute)},
 	}
@@ -98,7 +100,7 @@ func TestGateDecide_ForeignStaleLockAllows(t *testing.T) {
 
 func TestGateDecide_OwnLockAllows(t *testing.T) {
 	now := time.Now()
-	target := domain.Target{Canonical: "a.go"}
+	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
 		{Target: target, OwnerUUID: gateMyUUID, Mode: domain.ModeExclusive, Intent: "mine", ExpiresAt: now.Add(time.Hour)},
 	}
@@ -116,7 +118,7 @@ func TestGateDecide_OwnLockAllows(t *testing.T) {
 // warn, never hard-block, on this row.
 func TestGateDecide_PID0ForeignBeaconWithinTTLDenies(t *testing.T) {
 	now := time.Now()
-	target := domain.Target{Canonical: "a.go"}
+	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
 		{Target: target, OwnerUUID: gateFoeUUID, Mode: domain.ModeShared, PID: 0, Intent: "beacon", ExpiresAt: now.Add(time.Hour)},
 	}
@@ -125,7 +127,7 @@ func TestGateDecide_PID0ForeignBeaconWithinTTLDenies(t *testing.T) {
 		t.Fatalf("test fixture invariant broken: want LivenessUnknown, got %v", ec.Classify(locks[0]))
 	}
 	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, ec)
-	if len(rows) != 1 || rows[0].Kind != gateKindLock {
+	if len(rows) != 1 || rows[0].Kind != render.GateKindLock {
 		t.Fatalf("PID-0 beacon within TTL must deny, got %+v", rows)
 	}
 }
@@ -136,25 +138,25 @@ func TestGateDecide_PID0ForeignBeaconWithinTTLDenies(t *testing.T) {
 // is sorted path -> kind -> holder UUID regardless of input order.
 func TestGateDecide_DedupeAndOrder(t *testing.T) {
 	now := time.Now()
-	tB := domain.Target{Canonical: "b.go"}
-	tA := domain.Target{Canonical: "internal/store/a.go"}
+	tB := domain.Target{Canonical: tcTargetB}
+	aPath := tcPrefixStore + "/a.go"
+	tA := domain.Target{Canonical: aPath}
 	locks := []domain.LockRecord{
 		{Target: tB, OwnerUUID: gateFoeUUID, Mode: domain.ModeExclusive, Intent: "lockrow", ExpiresAt: now.Add(time.Hour)},
 	}
 	claims := []domain.ClaimRecord{
-		{PathPrefix: "internal/store", OwnerUUID: gateFoeUUID, Intent: "claimrow", ExpiresAt: now.Add(time.Hour)},
+		{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "claimrow", ExpiresAt: now.Add(time.Hour)},
 	}
 	// tB passed twice (duplicate CLI arg) + tA once, out of sorted order.
 	rows := gateDecide([]domain.Target{tB, tA, tB}, locks, claims, gateMyUUID, gateEC(now))
 	if len(rows) != 2 {
 		t.Fatalf("want 2 deduped rows (one per distinct path), got %d: %+v", len(rows), rows)
 	}
-	// path "b.go" < "internal/store/a.go" is false lexicographically ('b' >
-	// 'i'? no: 'b'=0x62, 'i'=0x69, so "b.go" < "internal/store/a.go" is true).
-	if rows[0].Path != "b.go" || rows[1].Path != "internal/store/a.go" {
+	// tcTargetB ("b.go") sorts before aPath ("internal/store/a.go") — 'b' < 'i'.
+	if rows[0].Path != tcTargetB || rows[1].Path != aPath {
 		t.Fatalf("want path-sorted rows, got %+v", rows)
 	}
-	if rows[0].Kind != gateKindLock || rows[1].Kind != gateKindClaim {
+	if rows[0].Kind != render.GateKindLock || rows[1].Kind != render.GateKindClaim {
 		t.Fatalf("unexpected kinds: %+v", rows)
 	}
 }
@@ -222,7 +224,7 @@ func TestGateCLI_ExpiredClaimAllows(t *testing.T) {
 	alice, bob := twoAgents(t)
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
-	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest, tcFlagTTL, "1ms"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest, tcFlagTTL, tcTTL1ms}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("alice claim failed")
 	}
 	time.Sleep(20 * time.Millisecond)
@@ -310,7 +312,7 @@ func TestGateCLI_StaleForeignLockAllows(t *testing.T) {
 	alice, bob := twoAgents(t)
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
-	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagTTL, "1ms", "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagTTL, tcTTL1ms, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("alice lock failed")
 	}
 	time.Sleep(20 * time.Millisecond)

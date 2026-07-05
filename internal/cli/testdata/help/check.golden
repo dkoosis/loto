@@ -1,3 +1,5 @@
 Usage of check:
+  -gate
+    	read-only deny gate: exit 1 if a foreign live claim or lock/beacon covers any path; never acquires, refreshes, or writes
   -staged
     	read paths from git diff --cached

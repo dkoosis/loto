@@ -22,17 +22,17 @@ func TestEmitGateDeny_ByteExact(t *testing.T) {
 		},
 		{
 			Path: "internal/store/new.go", Kind: GateKindClaim, HolderUUID: "foe-uuid",
-			Intent: "refactor", ExpiresAt: expires, BlockerPath: "internal/store",
+			Intent: "gate-intent", ExpiresAt: expires, BlockerPath: "internal/store",
 		},
 	}
 	var buf bytes.Buffer
 	EmitGateDeny(&buf, rows)
 	want := "✗ blocked count=2\n" +
-		"✗ path=b.go kind=lock holder=foe-uuid intent=\"editing\" expires_at=2026-01-02T03:04:05Z\n" +
+		"✗ path=b.go kind=lock blocker=foe-uuid intent=\"editing\" expires_at=2026-01-02T03:04:05Z\n" +
 		"```bash\n" +
 		"loto unlock --force -t \"unblock\" b.go\n" +
 		"```\n" +
-		"✗ path=internal/store/new.go kind=claim holder=foe-uuid intent=\"refactor\" expires_at=2026-01-02T03:04:05Z\n" +
+		"✗ path=internal/store/new.go kind=claim blocker=foe-uuid prefix=internal/store intent=\"gate-intent\" expires_at=2026-01-02T03:04:05Z\n" +
 		"ℹ options=wait|pick-other-work|message-holder\n"
 	if got := buf.String(); got != want {
 		t.Errorf("EmitGateDeny mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
@@ -45,7 +45,7 @@ func TestEmitGateDeny_SortsPathThenKindThenHolder(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	expires := time.Now().Add(time.Hour)
 	rows := []GateDenyRow{
-		{Path: "z.go", Kind: GateKindLock, HolderUUID: "zzz", ExpiresAt: expires, BlockerPath: "z.go"},
+		{Path: "zzz.go", Kind: GateKindLock, HolderUUID: "zzz", ExpiresAt: expires, BlockerPath: "zzz.go"},
 		{Path: aGo, Kind: GateKindClaim, HolderUUID: "bbb", ExpiresAt: expires, BlockerPath: "."},
 		{Path: aGo, Kind: GateKindClaim, HolderUUID: "aaa", ExpiresAt: expires, BlockerPath: "."},
 	}
@@ -53,9 +53,9 @@ func TestEmitGateDeny_SortsPathThenKindThenHolder(t *testing.T) {
 	EmitGateDeny(&buf, rows)
 	got := buf.String()
 	wantOrder := []string{
-		"path=a.go kind=claim holder=aaa",
-		"path=a.go kind=claim holder=bbb",
-		"path=z.go kind=lock holder=zzz",
+		"path=a.go kind=claim blocker=aaa",
+		"path=a.go kind=claim blocker=bbb",
+		"path=zzz.go kind=lock blocker=zzz",
 	}
 	lastIdx := -1
 	for _, w := range wantOrder {
