@@ -18,6 +18,26 @@ func TestRunBehavior_NoArgsShowsHelpAndExit2(t *testing.T) {
 	}
 }
 
+func TestRunBehavior_HelpVerbsShowUsageNoErrorExit0(t *testing.T) {
+	for _, verb := range []string{"help", "-h", "--help"} {
+		t.Run(verb, func(t *testing.T) {
+			stdout, stderr, code := executeCommand(verb)
+			if code != 0 {
+				t.Fatalf("expected exit code 0, got %d", code)
+			}
+			if strings.Contains(stdout, "unknown command") || strings.Contains(stderr, "unknown command") {
+				t.Fatalf("expected no unknown-command line, got stdout=%q stderr=%q", stdout, stderr)
+			}
+			if stderr != "" {
+				t.Fatalf("expected empty stderr, got %q", stderr)
+			}
+			if !strings.Contains(stdout, "usage: loto <command> [args]") {
+				t.Fatalf("expected usage in stdout, got %q", stdout)
+			}
+		})
+	}
+}
+
 func TestRunBehavior_UnknownCommandShowsErrorAndHelp(t *testing.T) {
 	stdout, stderr, code := executeCommand("nope")
 	if code != 2 {
