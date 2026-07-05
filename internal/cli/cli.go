@@ -39,6 +39,8 @@ func printHelp(w io.Writer) {
 commands:
   lock     Acquire a lock on one or more targets; -t required
   unlock   Release locks; --force to break another's, --all to release all yours
+  claim    Reserve a path-prefix territory for this session; -t required
+  unclaim  Release your claim by path-prefix
   check    Check targets for lock conflicts; --staged reads git staged paths
   status   Show lock state; --mine to filter to yours
   doctor   Detect and optionally repair stale locks

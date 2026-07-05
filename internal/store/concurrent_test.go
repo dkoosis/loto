@@ -81,6 +81,86 @@ func TestConcurrentOverlappingAcquire(t *testing.T) {
 	}
 }
 
+// TestConcurrentOverlappingClaim — loto-7af9 AC: N goroutines race ClaimPrefix
+// on overlapping prefixes (alternating parent pkg/a and child pkg/a/deep,
+// distinct owners) through the same countdown barrier as the acquire test.
+// Exactly one wins; every loser gets *ClaimConflictError; and the table holds
+// no cross-owner duplicate territory afterward — the in-tx overlap predicate,
+// not the PK, is what enforces that. Authoritative under linux -race on CI.
+func TestConcurrentOverlappingClaim(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "loto.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	const N = 16
+	now := time.Now()
+
+	var ready, start sync.WaitGroup
+	ready.Add(N)
+	start.Add(1)
+
+	var wins, conflicts, other atomic.Int32
+	var done sync.WaitGroup
+	done.Add(N)
+
+	for i := range N {
+		go func() {
+			defer done.Done()
+			prefix := "pkg/a"
+			if i%2 == 1 {
+				prefix = "pkg/a/deep"
+			}
+			rec := domain.ClaimRecord{
+				PathPrefix:  prefix,
+				OwnerUUID:   domain.AgentUUID(makeUUID(i)),
+				SessionUUID: domain.SessionUUID(makeUUID(i)),
+				Intent:      "race",
+				CreatedAt:   now,
+				ExpiresAt:   now.Add(time.Hour),
+				Host:        tcTest,
+			}
+			ready.Done()
+			start.Wait()
+			err := s.ClaimPrefix(context.Background(), rec)
+			switch {
+			case err == nil:
+				wins.Add(1)
+			case isClaimConflictErr(err):
+				conflicts.Add(1)
+			default:
+				t.Logf("goroutine %d: unexpected err: %v", i, err)
+				other.Add(1)
+			}
+		}()
+	}
+	ready.Wait()
+	start.Done()
+	done.Wait()
+
+	if wins.Load() != 1 {
+		t.Fatalf("wins=%d (want 1); conflicts=%d other=%d", wins.Load(), conflicts.Load(), other.Load())
+	}
+	if conflicts.Load() != N-1 {
+		t.Errorf("conflicts=%d (want %d); other=%d", conflicts.Load(), N-1, other.Load())
+	}
+	// No cross-owner duplicate territory: exactly the winner's row landed.
+	all, err := s.ListClaims(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("claims rows=%d (want exactly the winner's row): %+v", len(all), all)
+	}
+}
+
+func isClaimConflictErr(err error) bool {
+	var ce *ClaimConflictError
+	return errors.As(err, &ce)
+}
+
 func isConflictErr(err error) bool {
 	var ce *MultiConflictError
 	return errors.As(err, &ce)

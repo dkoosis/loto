@@ -62,3 +62,21 @@ CREATE INDEX IF NOT EXISTS idx_tags_host
 CREATE INDEX IF NOT EXISTS idx_tags_holder_pending
   ON tags(lock_owner_uuid, acked_at);
 
+-- claims: coarse path-prefix territory reservations ("this package is mine
+-- this session"), distinct from per-file locks (loto-7af9). TTL-only leases —
+-- no pid/proc_start/mode. The PK admits cross-owner duplicates by design; the
+-- in-tx overlap predicate in ClaimPrefix is the real guard. Added in-place to
+-- existing DBs via ensureClaimsTable in migrate() (no user_version bump);
+-- declared here so fresh DBs match.
+CREATE TABLE IF NOT EXISTS claims (
+  path_prefix  TEXT NOT NULL,
+  owner_uuid   TEXT NOT NULL,
+  session_uuid TEXT NOT NULL DEFAULT '',
+  intent       TEXT NOT NULL DEFAULT '',
+  created_at   INTEGER NOT NULL,
+  expires_at   INTEGER NOT NULL,
+  host         TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (path_prefix, owner_uuid)
+);
+CREATE INDEX IF NOT EXISTS idx_claims_expires ON claims(expires_at);
+

@@ -48,3 +48,17 @@ func Canonicalize(in string) (Target, error) {
 	}
 	return Target{Canonical: cleaned}, nil
 }
+
+// CanonicalizePrefix canonicalizes a directory-prefix claim target
+// (loto-7af9). Trailing slashes are the natural directory spelling, so all of
+// them are trimmed — a single TrimSuffix would leave "a//" as "a/" and
+// misreport the prefix with the file-verb ErrTargetIsDir. Everything else —
+// NUL/backslash/escape/glob/repo-root rejection — delegates to Canonicalize
+// so one policy source governs both surfaces. "./" trims to "." and stays
+// rejected as repo-root; "/" is kept intact so it reports repo-escape.
+func CanonicalizePrefix(in string) (Target, error) {
+	if in != "" && in != "/" {
+		in = strings.TrimRight(in, "/")
+	}
+	return Canonicalize(in)
+}

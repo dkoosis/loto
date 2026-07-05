@@ -17,7 +17,7 @@ func init() { register("status", cmdStatus) } //nolint:gochecknoinits // command
 func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	mine := fs.Bool("mine", false, "show only locks owned by my uuid")
+	mine := fs.Bool("mine", false, "show only locks and claims owned by my uuid")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
@@ -58,7 +58,49 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return all[i].CreatedAt.Before(all[j].CreatedAt)
 	})
 	printStatusLocks(stdout, rt, all)
+
+	claims, err := rt.Store.ListClaims(rt.Ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return 3
+	}
+	printStatusClaims(stdout, rt, claims, *mine, time.Now())
 	return 0
+}
+
+// printStatusClaims renders the claims section after locks (loto-7af9): live
+// rows only — Expired is display-time authority; the row itself dies lazily in
+// a later overlapping acquire — sorted prefix then created_at, --mine honored.
+// Explicit empty header per design.md: silence looks like a crash.
+func printStatusClaims(stdout io.Writer, rt *runtime, all []domain.ClaimRecord, mine bool, now time.Time) {
+	live := all[:0]
+	for i := range all {
+		if all[i].Expired(now) {
+			continue
+		}
+		if mine && string(all[i].OwnerUUID) != rt.Agent.UUID {
+			continue
+		}
+		live = append(live, all[i])
+	}
+	if len(live) == 0 {
+		fmt.Fprintln(stdout, "✓ no claims")
+		return
+	}
+	sort.Slice(live, func(i, j int) bool {
+		if live[i].PathPrefix != live[j].PathPrefix {
+			return live[i].PathPrefix < live[j].PathPrefix
+		}
+		return live[i].CreatedAt.Before(live[j].CreatedAt)
+	})
+	fmt.Fprintf(stdout, "✓ claims count=%d\n", len(live))
+	for i := range live {
+		c := &live[i]
+		fmt.Fprintf(stdout, "✓ prefix=%s owner=%s intent=%q held_since=%s ttl_remaining=%s host=%s\n",
+			relPath(c.PathPrefix), c.OwnerUUID, c.Intent,
+			c.CreatedAt.UTC().Format(time.RFC3339),
+			fmtTTL(c.ExpiresAt.Sub(now)), c.Host)
+	}
 }
 
 func filterLocksByOwner(all []domain.LockRecord, ownerUUID string) []domain.LockRecord {
