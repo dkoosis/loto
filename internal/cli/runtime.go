@@ -58,18 +58,33 @@ func sessionUUID() (id string, pinned bool) {
 	return identity.NewUUID(), false
 }
 
+// agentIdentityPinned reports whether an explicit identity env var is set —
+// LOTO_AGENT_ID (even ""), a non-empty LOTO_SUBAGENT_ID, or
+// CLAUDE_CODE_SESSION_ID.
+//
+// openRuntime uses this to set AgentPinned, which release --all consults so
+// a throwaway UUID can't scope a false-success release (loto-pody). A
+// set-but-EMPTY LOTO_AGENT_ID counts as pinned here: identity.Ensure treats
+// explicit-empty as the caller opting into a fresh ephemeral identity, and
+// --all must respect that choice. `loto check --gate` deliberately uses its
+// own stricter probe (gateIdentityPinned, cmd_check_gate.go) — for the
+// gate, an ephemeral identity owns nothing and must fail OPEN.
+func agentIdentityPinned() bool {
+	_, agentIDSet := os.LookupEnv("LOTO_AGENT_ID")
+	// LOTO_SUBAGENT_ID must be NON-EMPTY to pin: identity.Ensure ignores an empty
+	// value and falls through to minting a throwaway agent, so treating an empty
+	// "set" var as pinned would mis-scope an --all release (loto-pody).
+	subagentPinned := os.Getenv("LOTO_SUBAGENT_ID") != ""
+	return agentIDSet || subagentPinned || os.Getenv("CLAUDE_CODE_SESSION_ID") != ""
+}
+
 func openRuntime(ctx context.Context) (*runtime, error) {
 	// Capture whether an explicit identity env var was set before Ensure runs.
 	// Ensure mints a fresh throwaway UUID when neither is present; that UUID
 	// owns no locks and must not be used as an --all release scope — doing so
 	// produces a false-success that silently leaves real locks in place
 	// (loto-pody). AgentPinned mirrors the SessionPinned pattern for sessions.
-	_, agentIDSet := os.LookupEnv("LOTO_AGENT_ID")
-	// LOTO_SUBAGENT_ID must be NON-EMPTY to pin: identity.Ensure ignores an empty
-	// value and falls through to minting a throwaway agent, so treating an empty
-	// "set" var as pinned would mis-scope an --all release (loto-pody).
-	subagentPinned := os.Getenv("LOTO_SUBAGENT_ID") != ""
-	agentPinned := agentIDSet || subagentPinned || os.Getenv("CLAUDE_CODE_SESSION_ID") != ""
+	agentPinned := agentIdentityPinned()
 
 	a, err := identity.Ensure(ctx)
 	if err != nil {

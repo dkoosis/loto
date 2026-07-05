@@ -34,3 +34,5 @@ report/
 
 # fleet coordination heartbeats (ephemeral)
 .team/
+# bd worktree
+loto-ebkc/

@@ -26,6 +26,7 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	staged := fs.Bool("staged", false, "read paths from git diff --cached")
+	gate := fs.Bool("gate", false, "read-only deny gate: exit 1 if a foreign live claim or lock/beacon covers any path; never acquires, refreshes, or writes")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
@@ -43,6 +44,18 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	if len(paths) == 0 {
 		fmt.Fprintln(stdout, "✓ no paths")
 		return 0
+	}
+
+	// --gate is a distinct read-only decision surface (loto-vr2,
+	// gate-design.md component 4): it consults claims (plain check never
+	// does), denies on any foreign live lock/beacon regardless of mode, and
+	// fails open on identity/store infra BEFORE opening the store. Branching
+	// here — after path loading, before openRuntime — keeps every line below
+	// this point (the plain-check path) untouched, so plain `loto check`
+	// stays byte-identical (hard rule, plan "Plain loto check ... behavior
+	// must stay byte-identical").
+	if *gate {
+		return runCheckGate(ctx, paths, repoTop, stdout)
 	}
 
 	rt, err := openRuntime(ctx)
@@ -116,16 +129,30 @@ func loadCheckTargets(ctx context.Context, repoTop string, staged bool, posArgs 
 	return paths, 0
 }
 
-func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repoTop string, ec domain.EvalContext) ([]checkConflict, []checkInvalid) {
-	var rows []checkConflict
+// resolveCheckTargets resolves raw CLI paths into targets plus invalid rows
+// (sorted by original path, the deterministic-output rule) — the shared front
+// half of plain check and check --gate, so invalid-target classification
+// can't drift between the two codepaths (review nit, #211).
+func resolveCheckTargets(repoTop string, paths []string) ([]domain.Target, []checkInvalid) {
+	var targets []domain.Target
 	var invalid []checkInvalid
-	seen := map[string]bool{}
 	for _, raw := range paths {
 		t, err := resolveCLITarget(repoTop, raw)
 		if err != nil {
 			invalid = append(invalid, checkInvalid{Path: raw, Reason: classifyCanonicalizeErr(err)})
 			continue
 		}
+		targets = append(targets, t)
+	}
+	sort.Slice(invalid, func(i, j int) bool { return invalid[i].Path < invalid[j].Path })
+	return targets, invalid
+}
+
+func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repoTop string, ec domain.EvalContext) ([]checkConflict, []checkInvalid) {
+	targets, invalid := resolveCheckTargets(repoTop, paths)
+	var rows []checkConflict
+	seen := map[string]bool{}
+	for _, t := range targets {
 		rows = appendCheckConflictsForTarget(rows, seen, t, all, myUUID, ec)
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -134,7 +161,6 @@ func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repo
 		}
 		return rows[i].Blocker.Target.Canonical < rows[j].Blocker.Target.Canonical
 	})
-	sort.Slice(invalid, func(i, j int) bool { return invalid[i].Path < invalid[j].Path })
 	return rows, invalid
 }
 
