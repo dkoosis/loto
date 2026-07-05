@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	aGo = "a.go"
-	bGo = "b.go"
-	cGo = "c.go"
+	aGo  = "a.go"
+	pkgA = "pkg/a"
+	bGo  = "b.go"
+	cGo  = "c.go"
 )
 
 var errPermissionDenied error = permDeniedError{}
@@ -407,19 +408,19 @@ func TestEmitClaimRelease_Outcomes(t *testing.T) {
 	}{
 		{
 			name:     "released",
-			res:      store.ClaimReleaseResult{PathPrefix: "pkg/a", State: store.ClaimStateReleased},
+			res:      store.ClaimReleaseResult{PathPrefix: pkgA, State: store.ClaimStateReleased},
 			wantExit: 0,
 			wantRows: []string{"✓ unclaimed count=1\n", "✓ prefix=pkg/a\n"},
 		},
 		{
 			name:     "no-claim",
-			res:      store.ClaimReleaseResult{PathPrefix: "pkg/a", State: store.ClaimStateNoClaim},
+			res:      store.ClaimReleaseResult{PathPrefix: pkgA, State: store.ClaimStateNoClaim},
 			wantExit: 0,
 			wantRows: []string{"✓ unclaimed count=0\n", "ℹ prefix=pkg/a state=no-claim\n"},
 		},
 		{
 			name:     "not-owner",
-			res:      store.ClaimReleaseResult{PathPrefix: "pkg/a", State: store.ClaimStateNotOwner, Owner: "alice"},
+			res:      store.ClaimReleaseResult{PathPrefix: pkgA, State: store.ClaimStateNotOwner, Owner: "alice"},
 			wantExit: 1,
 			wantRows: []string{"✓ unclaimed count=0\n", "✗ prefix=pkg/a state=not-owner owner=alice\n"},
 		},
@@ -446,7 +447,7 @@ func TestEmitClaimConflictNamesHolder(t *testing.T) {
 	EmitClaimConflict(&buf, &store.ClaimConflictError{
 		Blockers: []domain.ClaimRecord{
 			{PathPrefix: "pkg/z", OwnerUUID: "Red", Intent: "y", ExpiresAt: now},
-			{PathPrefix: "pkg/a", OwnerUUID: "Green", Intent: "store refactor", ExpiresAt: now},
+			{PathPrefix: pkgA, OwnerUUID: "Green", Intent: "store refactor", ExpiresAt: now},
 		},
 	})
 	got := buf.String()
