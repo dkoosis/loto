@@ -1,5 +1,17 @@
 # Boot
-updated: 2026-07-04
+updated: 2026-07-05
+
+## lane: SunnyPorcupine
+branch: main
+
+→ `bd ready` — ebkc+vr2 shipped (gate + TTL landed). Top P2: qoq (claim-aware lock/check) or ei5 (release claims at session end).
+
+✓ done
+- Merged #211 (check --gate) + #212 (TTL/reclaim) with all reviewer fixes (P1 subagent-id fail-open, P2 dup-target no-lock, sort tie-breaks); worktrees/branches/beads cleaned.
+
+‡ `docs/files.zip` untracked (2 loto-probe-*.sh from today) — dk to drop or file into loto-identity-lock-model inquiry.
+
+~ terse triage-mode; wants flaws named + merged, then cleanup without hand-holding.
 
 ## lane: MeldRabbit
 branch: main
