@@ -54,10 +54,10 @@ func gateDecide(targets []domain.Target, locks []domain.LockRecord, claims []dom
 // appendGateDenyForTarget scans locks then claims for foreign live coverage
 // of t, appending a deny row per distinct (kind, blocker) pair. seen dedupes
 // across repeated targets in the input (a duplicate CLI arg) the same way
-// computeCheckConflicts dedupes plain check's rows. A lock's blocker path
-// always equals t.Canonical (locks are per-file); the seen key still carries
-// it for symmetry with the claim branch below, where the blocker path (an
-// ancestor prefix) is the whole point of the dedup granularity.
+// computeCheckConflicts dedupes plain check's rows. The lock key omits the
+// blocker path — it always equals t.Canonical (locks are per-file) — while
+// the claim key includes c.PathPrefix: two foreign claims at different
+// ancestor prefixes of one target are distinct blockers, each owed a row.
 func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t domain.Target, locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ec domain.EvalContext) []render.GateDenyRow {
 	for i := range locks {
 		l := &locks[i]
