@@ -166,6 +166,33 @@ func TestLock_MultiTarget_HappyPath(t *testing.T) {
 	}
 }
 
+// TestLock_NonPositiveTTL_Rejected pins D2 (loto-ebkc): `lock --ttl 0` or a
+// negative TTL used to be accepted, minting an instantly-stale lock whose
+// exclusive write-strip left the file read-only with a lease any peer could
+// immediately reclaim. Mirror the claim verb's guard (cmd_claim.go).
+func TestLock_NonPositiveTTL_Rejected(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	for _, ttl := range []string{"0", "-5m"} {
+		var out, errBuf bytes.Buffer
+		code := Run([]string{tcCmdLock, tcTargetA, tcFlagTTL, ttl, "-t", tcIntentTest}, &out, &errBuf)
+		if code != 2 {
+			t.Fatalf("--ttl %s: exit %d, want 2; out=%q err=%q", ttl, code, out.String(), errBuf.String())
+		}
+		if !strings.Contains(errBuf.String(), "--ttl must be positive") {
+			t.Errorf("--ttl %s: expected positivity diagnostic, got %q", ttl, errBuf.String())
+		}
+	}
+	// No lock row landed and the target file stayed writable.
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdStatus, tcFlagMine}, &out, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("status exit %d", code)
+	}
+	if strings.Contains(out.String(), "target="+tcTargetA) {
+		t.Errorf("no lock should exist after rejected ttl: %q", out.String())
+	}
+}
+
 func TestCmdLock_SharedFlag_AllowsCoexist(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t) // alice

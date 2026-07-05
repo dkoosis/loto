@@ -49,6 +49,13 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "✗ -t required: loto lock <target> [<target>...] -t \"why\"")
 		return 2
 	}
+	// A non-positive TTL mints an instantly-stale lock: the exclusive strip
+	// leaves the file read-only under a lease any peer may reclaim at once.
+	// Reject up front — claim parity (cmd_claim.go).
+	if *ttl <= 0 {
+		fmt.Fprintf(stderr, "✗ --ttl must be positive, got %s\n", *ttl)
+		return 2
+	}
 	if fs.NArg() == 0 {
 		fmt.Fprintln(stderr, "usage: loto lock <target> [<target>...] -t \"why\"")
 		return 2
