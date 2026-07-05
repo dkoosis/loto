@@ -312,6 +312,7 @@ var migrationEnsures = []struct {
 	{"add locks.proc_start", ensureLocksProcStart},
 	{"upgrade locks mode/pk", ensureLocksModeAndPK},
 	{"upgrade events check", ensureEventsCheckCurrent},
+	{"add claims table", ensureClaimsTable},
 }
 
 // schemaCurrent reports whether a re-migrate would be a pure no-op — the gate

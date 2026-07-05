@@ -1,0 +1,156 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"loto/internal/domain"
+)
+
+func mkClaim(prefix, owner string, expIn time.Duration) domain.ClaimRecord {
+	now := time.Now()
+	return domain.ClaimRecord{
+		PathPrefix:  prefix,
+		OwnerUUID:   domain.AgentUUID(owner),
+		SessionUUID: domain.SessionUUID(owner),
+		Intent:      tcTest,
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(expIn),
+		Host:        "h",
+	}
+}
+
+func TestClaimPrefixBlocksOverlap(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	if err := s.ClaimPrefix(ctx, mkClaim("internal/store", tcAlice, time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ name, prefix string }{
+		{"exact", "internal/store"},
+		{"child", "internal/store/sub"},
+		{"parent", "internal"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := s.ClaimPrefix(ctx, mkClaim(c.prefix, tcBob, time.Hour))
+			var cce *ClaimConflictError
+			if !errors.As(err, &cce) {
+				t.Fatalf("ClaimPrefix(%q) err=%v; want *ClaimConflictError", c.prefix, err)
+			}
+			if len(cce.Blockers) != 1 {
+				t.Fatalf("blockers=%d; want 1: %+v", len(cce.Blockers), cce.Blockers)
+			}
+			if cce.Blockers[0].OwnerUUID != domain.AgentUUID(tcAlice) {
+				t.Errorf("blocker owner=%s; want %s", cce.Blockers[0].OwnerUUID, tcAlice)
+			}
+		})
+	}
+}
+
+func TestClaimPrefixSameOwnerRefresh(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	first := mkClaim("internal/store", tcAlice, time.Minute)
+	if err := s.ClaimPrefix(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	refresh := mkClaim("internal/store", tcAlice, time.Hour)
+	refresh.Intent = "refreshed"
+	if err := s.ClaimPrefix(ctx, refresh); err != nil {
+		t.Fatalf("same-owner re-claim must refresh, got: %v", err)
+	}
+	all, err := s.ListClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("rows=%d; want 1 (upsert): %+v", len(all), all)
+	}
+	got := all[0]
+	if got.Intent != "refreshed" {
+		t.Errorf("intent=%q; want refreshed", got.Intent)
+	}
+	if !got.ExpiresAt.After(first.ExpiresAt) {
+		t.Errorf("expires_at not extended: %v !> %v", got.ExpiresAt, first.ExpiresAt)
+	}
+	// created_at is preserved across refresh (mirrors insertOrRefreshLock).
+	if !got.CreatedAt.Equal(first.CreatedAt) {
+		t.Errorf("created_at changed on refresh: %v vs %v", got.CreatedAt, first.CreatedAt)
+	}
+	// Same-owner overlap on a DIFFERENT prefix never blocks either.
+	if err := s.ClaimPrefix(ctx, mkClaim("internal/store/sub", tcAlice, time.Hour)); err != nil {
+		t.Fatalf("same-owner nested claim must not block: %v", err)
+	}
+}
+
+func TestClaimPrefixSiblingsCoexist(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	if err := s.ClaimPrefix(ctx, mkClaim("internal/store", tcAlice, time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimPrefix(ctx, mkClaim("internal/storefront", tcBob, time.Hour)); err != nil {
+		t.Fatalf("string-prefix sibling must not overlap: %v", err)
+	}
+	if err := s.ClaimPrefix(ctx, mkClaim("internal/render", tcBob, time.Hour)); err != nil {
+		t.Fatalf("disjoint sibling must not overlap: %v", err)
+	}
+	all, err := s.ListClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("rows=%d; want 3: %+v", len(all), all)
+	}
+}
+
+func TestClaimPrefixReclaimsExpired(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	if err := s.ClaimPrefix(ctx, mkClaim("pkg/a", tcAlice, -time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimPrefix(ctx, mkClaim("pkg/a/deep", tcBob, time.Hour)); err != nil {
+		t.Fatalf("expired overlapping claim must be reclaimed, got: %v", err)
+	}
+	all, err := s.ListClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("rows=%d; want 1 (expired row deleted in winner's txn): %+v", len(all), all)
+	}
+	if all[0].OwnerUUID != domain.AgentUUID(tcBob) || all[0].PathPrefix != "pkg/a/deep" {
+		t.Errorf("surviving row = %+v; want bob's pkg/a/deep", all[0])
+	}
+}
+
+// TestClaimsTableEnsuredOnExistingDB pins the no-version-bump migration: a DB
+// stamped at the current user_version but predating the claims table gets the
+// table via the ensureClaimsTable step in migrationEnsures on the next Open.
+func TestClaimsTableEnsuredOnExistingDB(t *testing.T) {
+	dir := t.TempDir()
+	p := dir + "/loto.db"
+	s, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a pre-claims DB: drop the table, keep user_version stamped.
+	if _, err := s.db.ExecContext(context.Background(), `DROP TABLE claims; DROP INDEX IF EXISTS idx_claims_expires`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(p)
+	if err != nil {
+		t.Fatalf("re-open on pre-claims DB: %v", err)
+	}
+	defer s2.Close()
+	if err := s2.ClaimPrefix(context.Background(), mkClaim("internal/store", tcAlice, time.Hour)); err != nil {
+		t.Fatalf("claims table not ensured on existing DB: %v", err)
+	}
+}
