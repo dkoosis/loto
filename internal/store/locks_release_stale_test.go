@@ -501,3 +501,45 @@ func TestReleaseLocks_ReclaimRestoreFailure_KeepsOwner(t *testing.T) {
 		t.Error("RestoreErr nil")
 	}
 }
+
+// TestReleaseLocks_DuplicateTargets_SingleEventPerRow covers the review P3
+// dedupe: `unlock a.go a.go` must not double the audit stream. The first
+// occurrence consumes the row(s); the duplicate reports no-lock — exactly one
+// lock_reclaimed_stale on the reclaim path (and exactly one lock_released on
+// the own path, the pre-existing dup this also kills).
+func TestReleaseLocks_DuplicateTargets_SingleEventPerRow(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	// Reclaim path: bob unlocks alice's stale lock twice in one batch.
+	stale := mkFileLock(t, "stale.go", tcAlice, -time.Minute)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{stale}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.ReleaseLocks(ctx, []domain.Target{stale.Target, stale.Target}, tcBob, tcHost, liveProbe)
+	if err != nil {
+		t.Fatalf("ReleaseLocks: %v", err)
+	}
+	if res[0].State != StateReclaimedStale || res[1].State != StateNoLock {
+		t.Fatalf("want [ReclaimedStale, NoLock], got %+v", res)
+	}
+	if n := countEvents(t, s, stale.Target, EventLockReclaimedStale); n != 1 {
+		t.Errorf("duplicate target must not double the reclaim audit: got %d events", n)
+	}
+
+	// Own path: alice releases her own lock twice in one batch.
+	own := mkFileLock(t, "own.go", tcAlice, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{own}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	res, err = s.ReleaseLocks(ctx, []domain.Target{own.Target, own.Target}, tcAlice, tcHost, liveProbe)
+	if err != nil {
+		t.Fatalf("ReleaseLocks: %v", err)
+	}
+	if res[0].State != StateUnlocked || res[1].State != StateNoLock {
+		t.Fatalf("want [Unlocked, NoLock], got %+v", res)
+	}
+	if n := countEvents(t, s, own.Target, EventLockReleased); n != 1 {
+		t.Errorf("duplicate target must not double the release audit: got %d events", n)
+	}
+}

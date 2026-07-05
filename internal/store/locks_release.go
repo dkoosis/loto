@@ -145,8 +145,18 @@ func classifyReleases(targets []domain.Target, existing map[string][]domain.Lock
 	results := make([]ReleaseResult, len(targets))
 	owned := make([]string, 0, len(targets))
 	var reclaims []domain.LockRecord
+	seen := make(map[string]bool, len(targets))
 	for i, t := range targets {
 		results[i].Target = t
+		if seen[t.Canonical] {
+			// Duplicate input target (`unlock a.go a.go`): the first occurrence
+			// consumed the row(s), so by this entry's turn there is no lock left
+			// — report no-lock rather than re-appending to owned/reclaims, which
+			// doubled the lock_released / lock_reclaimed_stale audit (review P3).
+			results[i].State = StateNoLock
+			continue
+		}
+		seen[t.Canonical] = true
 		holders := existing[t.Canonical]
 		switch own := ownHolder(holders, byAgent); {
 		case len(holders) == 0:
