@@ -21,14 +21,14 @@ func TestReleaseLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bobRes, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob)
+	bobRes, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, "h", liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks(bob): %v", err)
 	}
 	if bobRes[0].State != StateNotOwner {
 		t.Fatalf("non-owner release must report StateNotOwner, got %+v", bobRes)
 	}
-	aliceRes, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice)
+	aliceRes, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, "h", liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks(alice): %v", err)
 	}
@@ -287,7 +287,7 @@ func TestReleaseLocks_BatchedMixedStates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{la.Target, lb.Target, never}, tcAlice)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{la.Target, lb.Target, never}, tcAlice, "h", liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -690,7 +690,7 @@ func TestReleaseLock_RestoresWriteMode(t *testing.T) {
 	if st, _ := os.Stat(l.Target.Canonical); st.Mode().Perm()&0o200 != 0 {
 		t.Fatalf("precondition: acquire should strip write, got %o", st.Mode().Perm())
 	}
-	results, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice)
+	results, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, "h", liveProbe)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -727,7 +727,7 @@ func TestReleaseLocks_NoLockVsNotOwner(t *testing.T) {
 	live := func(string, int, int64) bool { return true }
 
 	l := mkFileLock(t, "x.go", tcAlice, time.Hour)
-	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, "h", liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks (no row): %v", err)
 	}
@@ -737,7 +737,7 @@ func TestReleaseLocks_NoLockVsNotOwner(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
 		t.Fatal(err)
 	}
-	res, err = s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob)
+	res, err = s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, "h", liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks (not owner): %v", err)
 	}
@@ -777,7 +777,7 @@ func TestAcquireLocks_LazyGCRestoresMode(t *testing.T) {
 	}
 
 	// Sanity: if Bob releases, mode comes back.
-	results, err := s.ReleaseLocks(ctx, []domain.Target{b.Target}, tcBob)
+	results, err := s.ReleaseLocks(ctx, []domain.Target{b.Target}, tcBob, "h", liveProbe)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -814,7 +814,7 @@ func TestReleaseLocks_DistinguishesMissingFromNotOwner(t *testing.T) {
 		a.Target,
 		{Canonical: bPath},
 		c.Target,
-	}, tcAlice)
+	}, tcAlice, "h", liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -859,7 +859,7 @@ func TestReleaseLocks_RestoreFailureIsReported(t *testing.T) {
 		return orig(f, mode)
 	}
 
-	results, err := s.ReleaseLocks(ctx, []domain.Target{rec.Target}, tcAlice)
+	results, err := s.ReleaseLocks(ctx, []domain.Target{rec.Target}, tcAlice, "h", liveProbe)
 	if err != nil {
 		t.Fatal(err)
 	}

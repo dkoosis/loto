@@ -397,7 +397,7 @@ func TestReleaseLocks_AcksTagsOnReleasedLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ReleaseLocks(ctx, []domain.Target{lock.Target}, tcAlice); err != nil {
+	if _, err := s.ReleaseLocks(ctx, []domain.Target{lock.Target}, tcAlice, "h", liveProbe); err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
 	// Tag row should still exist with acked_at set (audit), not orphaned.
@@ -457,7 +457,7 @@ func TestReleaseLocks_MultiTarget_AcksEachLocksTags(t *testing.T) {
 	lb, lockBNs := acquireForTest(t, s, "b.go", tcAlice)
 	idA, _ := s.InsertTag(ctx, NewTag{TargetCanonical: domain.Canonical(la.Target.Canonical), LockOwnerUUID: tcAlice, LockCreatedAt: lockANs, TaggerUUID: tcBob, Text: "a"})
 	idB, _ := s.InsertTag(ctx, NewTag{TargetCanonical: domain.Canonical(lb.Target.Canonical), LockOwnerUUID: tcAlice, LockCreatedAt: lockBNs, TaggerUUID: tcBob, Text: "b"})
-	if _, err := s.ReleaseLocks(ctx, []domain.Target{la.Target, lb.Target}, tcAlice); err != nil {
+	if _, err := s.ReleaseLocks(ctx, []domain.Target{la.Target, lb.Target}, tcAlice, "h", liveProbe); err != nil {
 		t.Fatalf("multi release: %v", err)
 	}
 	for _, id := range []string{idA, idB} {

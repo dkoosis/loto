@@ -43,7 +43,7 @@ func TestReleaseLocks_EmitsLockReleasedEvent(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice); err != nil {
+	if _, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, "h", liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
@@ -73,7 +73,7 @@ func TestReleaseLocks_NoEventForNonOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Bob tries to release alice's lock — should be rejected.
-	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, "h", liveProbe)
 	if err != nil {
 		t.Fatal(err)
 	}

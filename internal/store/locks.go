@@ -97,13 +97,20 @@ const (
 	StateNotOwner
 	// StateRestoreFailed: row deleted, chmod restore failed.
 	StateRestoreFailed
+	// StateReclaimedStale: caller held no row, and EVERY foreign holder was
+	// stale — all reclaimed (rows deleted, lock_reclaimed_stale audited per
+	// holder, owner-write restored for exclusive). One live foreign holder
+	// vetoes the whole target back to StateNotOwner (loto-ebkc).
+	StateReclaimedStale
 )
 
 // ReleaseResult is the per-target outcome from ReleaseLocks.
 type ReleaseResult struct {
-	Target     domain.Target
-	State      ReleaseOutcome
-	Owner      string // populated when State == StateNotOwner
+	Target domain.Target
+	State  ReleaseOutcome
+	// Owner is the vetoing live holder (StateNotOwner) or the first reclaimed
+	// dead holder in created_at,owner order (StateReclaimedStale).
+	Owner      string
 	Mode       string // mode of the released row; "" → exclusive (loto-k5el.2)
 	RestoreErr error  // populated when State == StateRestoreFailed
 	// AuditErr is populated when the per-target mode_restore_failed audit

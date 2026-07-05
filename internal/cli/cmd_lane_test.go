@@ -154,7 +154,7 @@ func TestLane_PostAssertCatchesLostLock(t *testing.T) {
 			t.Errorf("hook canonicalize: %v", err)
 			return
 		}
-		if _, err := rt.Store.ReleaseLocks(rt.Ctx, []domain.Target{tgt}, domain.AgentUUID(rt.Agent.UUID)); err != nil {
+		if _, err := rt.Store.ReleaseLocks(rt.Ctx, []domain.Target{tgt}, domain.AgentUUID(rt.Agent.UUID), rt.Host, rt.liveProbe()); err != nil {
 			t.Errorf("hook release: %v", err)
 		}
 	}

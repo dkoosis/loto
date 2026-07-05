@@ -12,9 +12,16 @@ import (
 // a single transaction (SELECT … WHERE IN, batched DELETE). Returns one
 // ReleaseResult per input target in input order — render owns the canonical
 // sort for stable output. The returned error is non-nil only on internal/SQL
-// failures; per-target outcomes (no-lock, not-owner, restore-failed) are
-// reported via ReleaseResult.State.
-func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, agent domain.AgentUUID) ([]ReleaseResult, error) {
+// failures; per-target outcomes (no-lock, not-owner, reclaimed-stale,
+// restore-failed) are reported via ReleaseResult.State.
+//
+// Stale-aware (loto-ebkc): when the caller holds no row at a target and EVERY
+// foreign holder is stale under (thisHost, live), the plain unlock reclaims
+// them all — delete + lock_reclaimed_stale audit in the same tx — instead of
+// bouncing to not-owner. One live foreign holder vetoes the whole target
+// (authorizeHolders, loto-w77f parity). The caller's own row always wins
+// first (prefer-own, loto-k5el.2) and never piggybacks a co-holder reclaim.
+func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, agent domain.AgentUUID, thisHost string, live domain.PidLiveProbe) ([]ReleaseResult, error) {
 	byAgent := string(agent) // internal store helpers thread the owner as a plain string
 	if len(targets) == 0 {
 		return []ReleaseResult{}, nil
@@ -32,15 +39,38 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, agent
 	}
 	defer cleanup()
 
-	owners, err := loadOwnersTx(ctx, tx, targets, byAgent)
+	existing, err := loadLocksByTargetTx(ctx, tx, targets)
 	if err != nil {
 		return nil, err
 	}
 
-	results, owned := classifyReleases(targets, owners, byAgent)
+	now := time.Now()
+	ec := domain.EvalContext{Now: now, ThisHost: thisHost, Live: live}
+	results, owned, reclaims := classifyReleases(targets, existing, byAgent, ec)
 
 	if len(owned) > 0 {
-		if err := s.applyOwnedReleasesTx(ctx, tx, owned, byAgent); err != nil {
+		if err := s.applyOwnedReleasesTx(ctx, tx, owned, byAgent, now); err != nil {
+			return nil, err
+		}
+	}
+	for i := range reclaims {
+		if err := reclaimStaleTx(ctx, tx, reclaims[i], byAgent, now); err != nil {
+			return nil, err
+		}
+	}
+	if len(reclaims) > 0 {
+		// Reclaim deletes the dead holders' host-lock rows without acking their
+		// tags (a dead peer never "reads" its notes) — GC the orphans in the
+		// same tx, mirroring BreakLocks (loto-qg0r).
+		if err := gcTagsTx(ctx, tx, now); err != nil {
+			return nil, err
+		}
+	}
+	// Trim events whenever EITHER branch appended (mirrors AcquireLocks→
+	// rotateEventsTx); a release/reclaim-heavy workload that rarely acquires
+	// would otherwise grow the events table unbounded (loto-bvdk).
+	if len(owned) > 0 || len(reclaims) > 0 {
+		if err := rotateEventsTx(ctx, tx, now); err != nil {
 			return nil, err
 		}
 	}
@@ -57,10 +87,11 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, agent
 	return results, nil
 }
 
-// applyOwnedReleasesTx acks tags, deletes the owned host-lock rows, emits the
-// lock_released events, and trims the events table — all in the caller's tx so
-// the row deletes and audit stay atomic.
-func (s *Store) applyOwnedReleasesTx(ctx context.Context, tx *sql.Tx, owned []string, byAgent string) error {
+// applyOwnedReleasesTx acks tags, deletes the owned host-lock rows, and emits
+// the lock_released events — all in the caller's tx so the row deletes and
+// audit stay atomic. Event rotation is hoisted to the caller, which trims once
+// for both the own-release and reclaim branches.
+func (s *Store) applyOwnedReleasesTx(ctx context.Context, tx *sql.Tx, owned []string, byAgent string, now time.Time) error {
 	// Ack tags BEFORE deleting the host locks: the host-lock match must still
 	// resolve to set acked_at; if we DELETE first the tags would orphan instead,
 	// losing the audit ack (edge #6 distinguishes release-ack from break-orphan).
@@ -71,7 +102,6 @@ func (s *Store) applyOwnedReleasesTx(ctx context.Context, tx *sql.Tx, owned []st
 		return err
 	}
 	// Emit lock_released events in the same tx (atomic with the row deletes).
-	now := time.Now()
 	evs := make([]domain.Event, len(owned))
 	for i, canonical := range owned {
 		evs[i] = domain.Event{
@@ -81,36 +111,67 @@ func (s *Store) applyOwnedReleasesTx(ctx context.Context, tx *sql.Tx, owned []st
 			CreatedAt: now,
 		}
 	}
-	if err := appendEventsTx(ctx, tx, evs); err != nil {
-		return err
-	}
-	// Trim events in the same tx (mirrors AcquireLocks→rotateEventsTx). A
-	// release-heavy workload that rarely acquires would otherwise grow the
-	// events table unbounded (loto-bvdk).
-	return rotateEventsTx(ctx, tx, now)
+	return appendEventsTx(ctx, tx, evs)
 }
 
-// classifyReleases walks input targets in order, classifying each against the
-// owners map and collecting the canonical paths to delete in one statement.
-func classifyReleases(targets []domain.Target, owners map[string]ownerMode, byAgent string) ([]ReleaseResult, []string) {
+// classifyReleases walks input targets in order, classifying each against its
+// full holder set: own row → release it (prefer-own; co-holders untouched) ·
+// no rows → no-lock · all foreign holders stale → reclaim every holder ·
+// ≥1 live foreign holder → not-owner (live-holder veto, loto-w77f). Returns
+// the per-target results, the canonicals whose own row gets the batched
+// DELETE, and the stale foreign rows to reclaim individually.
+func classifyReleases(targets []domain.Target, existing map[string][]domain.LockRecord, byAgent string, ec domain.EvalContext) ([]ReleaseResult, []string, []domain.LockRecord) {
 	results := make([]ReleaseResult, len(targets))
 	owned := make([]string, 0, len(targets))
+	var reclaims []domain.LockRecord
 	for i, t := range targets {
 		results[i].Target = t
-		o, ok := owners[t.Canonical]
-		switch {
-		case !ok:
+		holders := existing[t.Canonical]
+		switch own := ownHolder(holders, byAgent); {
+		case len(holders) == 0:
 			results[i].State = StateNoLock
-		case o.Owner != byAgent:
-			results[i].State = StateNotOwner
-			results[i].Owner = o.Owner
-		default:
+		case own != nil:
 			results[i].State = StateUnlocked
-			results[i].Mode = o.Mode
+			results[i].Mode = own.Mode
 			owned = append(owned, t.Canonical)
+		case authorizeHolders(holders, ec, false) == nil:
+			// The stale-reclaim gate is authorizeHolders — the same single-
+			// sourced live-holder veto BreakStale uses (loto-w77f), not a
+			// re-derived predicate. All holders share one mode (all-shared-or-
+			// one-exclusive invariant), so holders[0] drives restore; holders
+			// arrive created_at,owner-ordered, so Owner is deterministic.
+			results[i].State = StateReclaimedStale
+			results[i].Mode = holders[0].Mode
+			results[i].Owner = string(holders[0].OwnerUUID)
+			reclaims = append(reclaims, holders...)
+		default:
+			results[i].State = StateNotOwner
+			results[i].Owner = vetoingHolder(holders, ec)
 		}
 	}
-	return results, owned
+	return results, owned, reclaims
+}
+
+// ownHolder returns the caller's row among a target's holders, or nil.
+func ownHolder(holders []domain.LockRecord, byAgent string) *domain.LockRecord {
+	for i := range holders {
+		if string(holders[i].OwnerUUID) == byAgent {
+			return &holders[i]
+		}
+	}
+	return nil
+}
+
+// vetoingHolder names the first LIVE holder in created_at,owner order — the
+// one whose liveness vetoed the stale-reclaim — so the not-owner report points
+// at an owner that actually blocks, not an arbitrary (possibly dead) one.
+func vetoingHolder(holders []domain.LockRecord, ec domain.EvalContext) string {
+	for i := range holders {
+		if ec.AuthorizeBreak(holders[i], false) != nil {
+			return string(holders[i].OwnerUUID)
+		}
+	}
+	return string(holders[0].OwnerUUID) // unreachable when a veto occurred; deterministic fallback
 }
 
 // restoreReleasesThenAudit runs the bounded chmod restore under the still-held
@@ -126,19 +187,22 @@ func (s *Store) restoreReleasesThenAudit(flock *opFlock, results []ReleaseResult
 	s.auditReleaseFailures(results, failEvents, failIdx)
 }
 
-// restoreReleases runs the chmod restore for every released EXCLUSIVE target,
-// recording per-target StateRestoreFailed/RestoreErr, and returns the
-// mode_restore_failed events plus the parallel result indices. Chmod-only half
-// of restoreReleasesThenAudit — runs under the held flock (loto-3qev).
+// restoreReleases runs the chmod restore for every released or reclaimed
+// EXCLUSIVE target, recording per-target StateRestoreFailed/RestoreErr, and
+// returns the mode_restore_failed events plus the parallel result indices.
+// Reclaimed targets ride the same pass: their rows are gone from the DB just
+// like an own-release, so the file must come back writable under the same
+// flock window. Chmod-only half of restoreReleasesThenAudit — runs under the
+// held flock (loto-3qev).
 func restoreReleases(results []ReleaseResult, byAgent string) ([]domain.Event, []int) {
 	now := time.Now()
 	var failEvents []domain.Event
 	var failIdx []int
 	for i := range results {
-		if results[i].State != StateUnlocked {
+		if results[i].State != StateUnlocked && results[i].State != StateReclaimedStale {
 			continue
 		}
-		if results[i].Mode == domain.ModeShared {
+		if !shouldRestoreOwnerWrite(results[i].Mode) {
 			continue // shared lock never stripped the bit — nothing to restore
 		}
 		if rerr := restoreWrite(results[i].Target.Canonical); rerr != nil {
@@ -164,41 +228,6 @@ func (s *Store) auditReleaseFailures(results []ReleaseResult, failEvents []domai
 			}
 		}
 	}
-}
-
-// ownerMode pairs a lock's owner with its mode for the release path's
-// classify-then-restore decision (loto-k5el.2 T4).
-type ownerMode struct{ Owner, Mode string }
-
-// loadOwnersTx reads owner_uuid + mode for the given targets via a single
-// SELECT. Returned map is keyed by target_canonical; missing keys = no row.
-// Under the composite PK a shared target may have several holders; the map
-// PREFERS byAgent's own row when present, so a holder can always release its
-// own lock on a multi-holder shared target (otherwise an arbitrary other
-// holder could shadow it and the release would misclassify as not-owner,
-// leaving the caller's row undeleted — loto-k5el.2). When byAgent holds no row
-// at a target, an arbitrary other holder is kept to drive the not-owner state.
-func loadOwnersTx(ctx context.Context, tx *sql.Tx, targets []domain.Target, byAgent string) (map[string]ownerMode, error) {
-	placeholders, args := inClause(targets)
-	// placeholders is built from '?' chars only; user data flows via args.
-	rows, err := tx.QueryContext(ctx, `SELECT target_canonical, owner_uuid, mode FROM locks WHERE target_canonical IN (`+placeholders+`)`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
-
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make(map[string]ownerMode, len(targets))
-	for rows.Next() {
-		var canonical, owner, mode string
-		if err := rows.Scan(&canonical, &owner, &mode); err != nil {
-			return nil, err
-		}
-		cur, seen := out[canonical]
-		if !seen || (owner == byAgent && cur.Owner != byAgent) {
-			out[canonical] = ownerMode{Owner: owner, Mode: mode}
-		}
-	}
-	return out, rows.Err()
 }
 
 // ackTagsForReleaseTx marks every pending tag whose host lock is in the

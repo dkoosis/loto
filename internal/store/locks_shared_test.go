@@ -116,7 +116,7 @@ func TestRelease_MultiHolderEachReleasesOwn(t *testing.T) {
 		t.Fatalf("bob: %v", err)
 	}
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, tcAlice)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, tcAlice, "h", liveProbe)
 	if err != nil {
 		t.Fatalf("alice release: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestRelease_SharedDoesNotRestoreWriteBit(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
 		t.Fatalf("shared acquire: %v", err)
 	}
-	if _, err := s.ReleaseLocks(ctx, []domain.Target{rec.Target}, tcAlice); err != nil {
+	if _, err := s.ReleaseLocks(ctx, []domain.Target{rec.Target}, tcAlice, "h", liveProbe); err != nil {
 		t.Fatalf("release: %v", err)
 	}
 	fi, err := os.Stat(rec.Target.Canonical)

@@ -86,10 +86,13 @@ func TestStatusDeadVerdictMatchesReclaim(t *testing.T) {
 	withTempProject(t)
 	t.Setenv("LOTO_PID", "") // PID-0 sentinel → TTL-only liveness
 	pinAgent(t)              // agent A
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagTTL, "-1s"},
+	// D2 (loto-ebkc) rejects non-positive TTLs, so a born-stale fixture is no
+	// longer expressible: take the shortest lease and wait out the expiry.
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagTTL, "1ms"},
 		&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("alice lock failed")
 	}
+	time.Sleep(20 * time.Millisecond) // lease expired → lock now stale
 	var st bytes.Buffer
 	Run([]string{tcCmdStatus}, &st, &bytes.Buffer{})
 	if !strings.Contains(st.String(), "liveness=dead") && !strings.Contains(st.String(), "ttl_remaining=0s") {

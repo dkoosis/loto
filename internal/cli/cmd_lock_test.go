@@ -331,10 +331,13 @@ func TestAcquireReclaimsExpiredHolder_NoDoctor(t *testing.T) {
 	// LOTO_PID), so liveness degrades to TTL and the lock is born stale.
 	t.Setenv("LOTO_PID", "") // force pidUnset → PID-0 sentinel, TTL-only liveness
 	pinAgent(t)              // agent A
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagTTL, "-1s"},
+	// D2 (loto-ebkc) rejects non-positive TTLs, so a born-stale fixture is no
+	// longer expressible: take the shortest lease and wait out the expiry.
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagTTL, "1ms"},
 		&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("alice initial lock failed")
 	}
+	time.Sleep(20 * time.Millisecond) // lease expired → lock now stale
 
 	// Agent B acquires the same target. No doctor run between.
 	pinAgent(t) // agent B (re-pin swaps active identity)
