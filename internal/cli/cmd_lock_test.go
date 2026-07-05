@@ -333,7 +333,7 @@ func TestAcquireReclaimsExpiredHolder_NoDoctor(t *testing.T) {
 	pinAgent(t)              // agent A
 	// D2 (loto-ebkc) rejects non-positive TTLs, so a born-stale fixture is no
 	// longer expressible: take the shortest lease and wait out the expiry.
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagTTL, "1ms"},
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagTTL, tcTTL1ms},
 		&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("alice initial lock failed")
 	}

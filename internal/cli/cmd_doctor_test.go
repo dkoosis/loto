@@ -192,7 +192,7 @@ func TestDoctor_ExpiredClaims_ListedAndRepaired(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 	// The claim verb rejects non-positive TTLs: shortest lease + wait out expiry.
-	if code := Run([]string{"claim", "internal/store", "-t", tcIntentTest, tcFlagTTL, "1ms"}, io.Discard, io.Discard); code != 0 {
+	if code := Run([]string{"claim", "internal/store", "-t", tcIntentTest, tcFlagTTL, tcTTL1ms}, io.Discard, io.Discard); code != 0 {
 		t.Fatal("claim failed")
 	}
 	time.Sleep(20 * time.Millisecond)

@@ -168,7 +168,7 @@ func TestUnlock_StaleForeignLock_ReclaimedExit0(t *testing.T) {
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
 	// D2 rejects non-positive TTLs: take the shortest lease, wait out expiry.
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagTTL, "1ms"}, io.Discard, io.Discard); code != 0 {
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagTTL, tcTTL1ms}, io.Discard, io.Discard); code != 0 {
 		t.Fatal("alice lock failed")
 	}
 	time.Sleep(20 * time.Millisecond) // lease expired → lock now stale

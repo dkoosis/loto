@@ -48,31 +48,8 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, agent
 	ec := domain.EvalContext{Now: now, ThisHost: thisHost, Live: live}
 	results, owned, reclaims := classifyReleases(targets, existing, byAgent, ec)
 
-	if len(owned) > 0 {
-		if err := s.applyOwnedReleasesTx(ctx, tx, owned, byAgent, now); err != nil {
-			return nil, err
-		}
-	}
-	for i := range reclaims {
-		if err := reclaimStaleTx(ctx, tx, reclaims[i], byAgent, now); err != nil {
-			return nil, err
-		}
-	}
-	if len(reclaims) > 0 {
-		// Reclaim deletes the dead holders' host-lock rows without acking their
-		// tags (a dead peer never "reads" its notes) — GC the orphans in the
-		// same tx, mirroring BreakLocks (loto-qg0r).
-		if err := gcTagsTx(ctx, tx, now); err != nil {
-			return nil, err
-		}
-	}
-	// Trim events whenever EITHER branch appended (mirrors AcquireLocks→
-	// rotateEventsTx); a release/reclaim-heavy workload that rarely acquires
-	// would otherwise grow the events table unbounded (loto-bvdk).
-	if len(owned) > 0 || len(reclaims) > 0 {
-		if err := rotateEventsTx(ctx, tx, now); err != nil {
-			return nil, err
-		}
+	if err := s.applyReleaseChangesTx(ctx, tx, owned, reclaims, byAgent, now); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -85,6 +62,38 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, agent
 	// detached audit so its write tx can't extend the flock hold (loto-3qev).
 	s.restoreReleasesThenAudit(flock, results, byAgent)
 	return results, nil
+}
+
+// applyReleaseChangesTx writes both release branches into the caller's tx:
+// the batched own-row releases (ack + delete + lock_released events) and the
+// per-holder stale reclaims (lock_reclaimed_stale + delete via reclaimStaleTx).
+// Reclaims orphan the dead holders' pending tags (a dead peer never "reads"
+// its notes), so gcTagsTx runs in the same tx, mirroring BreakLocks
+// (loto-qg0r). Event rotation fires when EITHER branch appended (mirrors
+// AcquireLocks→rotateEventsTx): a release/reclaim-heavy workload that rarely
+// acquires would otherwise grow the events table unbounded (loto-bvdk).
+func (s *Store) applyReleaseChangesTx(ctx context.Context, tx *sql.Tx, owned []string, reclaims []domain.LockRecord, byAgent string, now time.Time) error {
+	if len(owned) > 0 {
+		if err := s.applyOwnedReleasesTx(ctx, tx, owned, byAgent, now); err != nil {
+			return err
+		}
+	}
+	for i := range reclaims {
+		if err := reclaimStaleTx(ctx, tx, reclaims[i], byAgent, now); err != nil {
+			return err
+		}
+	}
+	if len(reclaims) > 0 {
+		if err := gcTagsTx(ctx, tx, now); err != nil {
+			return err
+		}
+	}
+	if len(owned) > 0 || len(reclaims) > 0 {
+		if err := rotateEventsTx(ctx, tx, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // applyOwnedReleasesTx acks tags, deletes the owned host-lock rows, and emits

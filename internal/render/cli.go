@@ -269,12 +269,33 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 	cwd := getCwd()
 	sorted := append([]store.ReleaseResult(nil), results...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })
-	// A restore-failed release deleted the lock row in-tx (locks_release.go) — a
-	// successful unlock with a failed chmod restore — so it counts toward the
-	// unlocked total. The restore failures surface as a distinct first-line field
-	// (and per-row ⚠ lines below) so the Claude consumer sees both facts.
-	// Reclaimed-stale rows likewise deleted rows, but count under their own
-	// reclaimed= field (loto-ebkc): the caller released nothing it owned.
+	exit := writeReleaseTriageLine(w, sorted)
+	for _, r := range sorted {
+		path := relToCwd(r.Target.Canonical, cwd)
+		switch r.State {
+		case store.StateUnlocked:
+			fmt.Fprintf(w, "✓ target=%s\n", path)
+		case store.StateReclaimedStale:
+			fmt.Fprintf(w, "✓ target=%s state=reclaimed-stale owner=%s\n", path, r.Owner)
+		case store.StateNoLock:
+			fmt.Fprintf(w, "ℹ target=%s state=no-lock\n", path)
+		case store.StateNotOwner:
+			fmt.Fprintf(w, "✗ target=%s state=not-owner owner=%s\n", path, r.Owner)
+		case store.StateRestoreFailed:
+			writeRestoreFailed(w, "target", path, r.RestoreErr, r.AuditErr)
+		}
+	}
+	return exit
+}
+
+// writeReleaseTriageLine emits the count-first triage line and returns the
+// suggested exit code. A restore-failed release deleted the lock row in-tx
+// (locks_release.go) — a successful unlock with a failed chmod restore — so it
+// counts toward the unlocked total, with the failures surfaced as a distinct
+// first-line field (and per-row ⚠ lines). Reclaimed-stale rows likewise
+// deleted rows, but count under their own reclaimed= field (loto-ebkc): the
+// caller released nothing it owned, and a reclaim is a success (exit 0).
+func writeReleaseTriageLine(w io.Writer, sorted []store.ReleaseResult) int {
 	successCount := 0
 	restoreFailed := 0
 	reclaimed := 0
@@ -303,21 +324,6 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 		fmt.Fprintf(w, " restore-failed=%d", restoreFailed)
 	}
 	fmt.Fprintln(w)
-	for _, r := range sorted {
-		path := relToCwd(r.Target.Canonical, cwd)
-		switch r.State {
-		case store.StateUnlocked:
-			fmt.Fprintf(w, "✓ target=%s\n", path)
-		case store.StateReclaimedStale:
-			fmt.Fprintf(w, "✓ target=%s state=reclaimed-stale owner=%s\n", path, r.Owner)
-		case store.StateNoLock:
-			fmt.Fprintf(w, "ℹ target=%s state=no-lock\n", path)
-		case store.StateNotOwner:
-			fmt.Fprintf(w, "✗ target=%s state=not-owner owner=%s\n", path, r.Owner)
-		case store.StateRestoreFailed:
-			writeRestoreFailed(w, "target", path, r.RestoreErr, r.AuditErr)
-		}
-	}
 	return exit
 }
 
