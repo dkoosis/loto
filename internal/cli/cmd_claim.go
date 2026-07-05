@@ -49,17 +49,10 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintln(stderr, "✗ -t required: loto claim <path-prefix> -t \"why\"")
 		return 2
 	}
-	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: loto claim <path-prefix> -t \"why\" [--ttl 4h]")
-		return 2
+	prefix, repoTop, code := claimVerbPrefix(ctx, flags, "usage: loto claim <path-prefix> -t \"why\" [--ttl 4h]", stderr)
+	if code != 0 {
+		return code
 	}
-	repoTop, _ := repoTopForCwd(ctx)
-	prefix, err := resolveCLIPrefix(repoTop, flags.Arg(0))
-	if err != nil {
-		render.EmitInvalid(stderr, []render.InvalidTarget{{Path: flags.Arg(0), Reason: classifyCanonicalizeErr(err)}})
-		return 2
-	}
-
 	rt, err := openRuntime(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
@@ -98,6 +91,24 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // governs path translation.
 func resolveCLIPrefix(repoTop, raw string) (domain.Target, error) {
 	return domain.CanonicalizePrefix(normalizeRepoPath(raw, repoTop))
+}
+
+// claimVerbPrefix is the shared arg preamble of the claim/unclaim verb pair:
+// exactly one <path-prefix> positional, canonicalized via resolveCLIPrefix.
+// Returns code 2 on usage/invalid-prefix failure; repoTop rides along so
+// claim's not-on-disk advisory doesn't re-derive it.
+func claimVerbPrefix(ctx context.Context, flags *flag.FlagSet, usage string, stderr io.Writer) (domain.Target, string, int) {
+	if flags.NArg() != 1 {
+		fmt.Fprintln(stderr, usage)
+		return domain.Target{}, "", 2
+	}
+	repoTop, _ := repoTopForCwd(ctx)
+	prefix, err := resolveCLIPrefix(repoTop, flags.Arg(0))
+	if err != nil {
+		render.EmitInvalid(stderr, []render.InvalidTarget{{Path: flags.Arg(0), Reason: classifyCanonicalizeErr(err)}})
+		return domain.Target{}, "", 2
+	}
+	return prefix, repoTop, 0
 }
 
 // emitNotOnDiskAdvisory prints the ⚠ row when the claimed prefix does not

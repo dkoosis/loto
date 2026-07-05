@@ -7,7 +7,6 @@ import (
 	"io"
 
 	"loto/internal/domain"
-	"loto/internal/render"
 	"loto/internal/store"
 )
 
@@ -35,17 +34,10 @@ func cmdUnclaim(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	if err := flags.Parse(permuteWith(flags, args)); err != nil {
 		return 2
 	}
-	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: loto unclaim <path-prefix>")
-		return 2
+	prefix, _, code := claimVerbPrefix(ctx, flags, "usage: loto unclaim <path-prefix>", stderr)
+	if code != 0 {
+		return code
 	}
-	repoTop, _ := repoTopForCwd(ctx)
-	prefix, err := resolveCLIPrefix(repoTop, flags.Arg(0))
-	if err != nil {
-		render.EmitInvalid(stderr, []render.InvalidTarget{{Path: flags.Arg(0), Reason: classifyCanonicalizeErr(err)}})
-		return 2
-	}
-
 	rt, err := openRuntime(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
