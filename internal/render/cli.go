@@ -133,6 +133,10 @@ func EmitClaimSuccess(w io.Writer, rec domain.ClaimRecord) {
 	fmt.Fprintf(w, "✓ prefix=%s ttl=%s expires_at=%s\n",
 		relToCwd(rec.PathPrefix, getCwd()), rec.ExpiresAt.Sub(rec.CreatedAt),
 		rec.ExpiresAt.UTC().Format(time.RFC3339))
+	// Advisory-limit reminder (pass-2 strategic-fit): a claim binds claimants
+	// only — lock/check under the prefix do not consult it, so the per-file
+	// lock discipline still applies inside claimed territory.
+	fmt.Fprintf(w, "ℹ advisory: claim does not block lock/check under the prefix — still lock files before editing\n")
 }
 
 // EmitClaimConflict renders the blocked-claim block: count-first, ⚠ per

@@ -393,6 +393,9 @@ func TestEmitClaimSuccess(t *testing.T) {
 	if !strings.Contains(got, want) {
 		t.Errorf("row = %q; want %q", got, want)
 	}
+	if !strings.Contains(got, "ℹ advisory: claim does not block lock/check") {
+		t.Errorf("missing advisory-limit ℹ row: %q", got)
+	}
 }
 
 func TestEmitClaimRelease_Outcomes(t *testing.T) {

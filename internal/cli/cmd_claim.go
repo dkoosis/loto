@@ -26,6 +26,8 @@ Atomically reserve a repo-relative directory prefix as session territory:
 "this package is mine this session" — coarser than a per-file lock. Refused
 while another agent's live claim overlaps the prefix (equal or ancestor/
 descendant by path segment). Re-claiming your own prefix refreshes the TTL.
+Advisory between claimants only: a claim does not block loto lock/check under
+the prefix — still lock files before editing.
 
 examples:
   loto claim internal/store -t "store refactor"
