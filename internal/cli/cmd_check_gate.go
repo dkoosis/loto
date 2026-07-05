@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"time"
 
@@ -92,6 +93,22 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 	return rows
 }
 
+// gateIdentityPinned is the gate's own identity probe: pinned iff at least
+// one of LOTO_SUBAGENT_ID, LOTO_AGENT_ID, CLAUDE_CODE_SESSION_ID is
+// NON-EMPTY. It deliberately diverges from agentIdentityPinned (runtime.go),
+// which counts a set-but-empty LOTO_AGENT_ID as pinned — correct for
+// release --all scoping (an explicit empty is the caller opting into an
+// ephemeral identity), but wrong here: Ensure mints a throwaway UUID for
+// LOTO_AGENT_ID="", a UUID that owns nothing, so the gate would fail
+// CLOSED — every foreign row denies a caller who owns no territory at all.
+// The gate's contract is fail-open on any identity it can't tie to real
+// ownership (gate-design "Rules: fail-open, everywhere").
+func gateIdentityPinned() bool {
+	return os.Getenv("LOTO_SUBAGENT_ID") != "" ||
+		os.Getenv("LOTO_AGENT_ID") != "" ||
+		os.Getenv("CLAUDE_CODE_SESSION_ID") != ""
+}
+
 // gateInfraUnreachable renders the shared infra-fail-open row: `loto check
 // --gate` never blocks the caller's loop on its own IO trouble (gate-design
 // "Rules: fail-open, everywhere"). Always stdout, never stderr — the CLI
@@ -127,7 +144,7 @@ func runCheckGate(ctx context.Context, paths []string, repoTop string, stdout io
 		return 2
 	}
 
-	if !agentIdentityPinned() {
+	if !gateIdentityPinned() {
 		fmt.Fprintln(stdout, "⚠ identity=unpinned gate=fail-open")
 		return 0
 	}

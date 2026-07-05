@@ -60,14 +60,15 @@ func sessionUUID() (id string, pinned bool) {
 
 // agentIdentityPinned reports whether an explicit identity env var is set —
 // LOTO_AGENT_ID (even ""), a non-empty LOTO_SUBAGENT_ID, or
-// CLAUDE_CODE_SESSION_ID. False means identity.Ensure will mint a fresh
-// throwaway UUID that owns no locks/claims.
+// CLAUDE_CODE_SESSION_ID.
 //
 // openRuntime uses this to set AgentPinned, which release --all consults so
-// a throwaway UUID can't scope a false-success release (loto-pody). `loto
-// check --gate` (loto-vr2) uses the same probe to fail open BEFORE opening
-// the store: an unpinned identity would otherwise deny every path on a bare
-// human-shell invocation, since Ensure's throwaway UUID owns nothing.
+// a throwaway UUID can't scope a false-success release (loto-pody). A
+// set-but-EMPTY LOTO_AGENT_ID counts as pinned here: identity.Ensure treats
+// explicit-empty as the caller opting into a fresh ephemeral identity, and
+// --all must respect that choice. `loto check --gate` deliberately uses its
+// own stricter probe (gateIdentityPinned, cmd_check_gate.go) — for the
+// gate, an ephemeral identity owns nothing and must fail OPEN.
 func agentIdentityPinned() bool {
 	_, agentIDSet := os.LookupEnv("LOTO_AGENT_ID")
 	// LOTO_SUBAGENT_ID must be NON-EMPTY to pin: identity.Ensure ignores an empty

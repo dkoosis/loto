@@ -350,6 +350,37 @@ func TestGateCLI_NoIdentityFailsOpenWithoutOpeningStore(t *testing.T) {
 	}
 }
 
+// TestGateCLI_SetButEmptyAgentIDFailsOpen: LOTO_AGENT_ID set to "" is the
+// caller opting into an ephemeral identity — identity.Ensure mints a
+// throwaway UUID that owns nothing. agentIdentityPinned (runtime.go) counts
+// set-but-empty as pinned (correct for release --all scoping), but the gate
+// must NOT: a throwaway owner is foreign to every live row, so treating it
+// as pinned fails CLOSED — the exact inversion of the gate's contract. Pin:
+// live foreign claim covering the target + LOTO_AGENT_ID="" → exit 0 + the
+// ⚠ identity=unpinned row (adherence review P2).
+func TestGateCLI_SetButEmptyAgentIDFailsOpen(t *testing.T) {
+	withTempProject(t)
+	alice, _ := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice claim failed")
+	}
+
+	t.Setenv("LOTO_AGENT_ID", "") // set-but-empty: ephemeral identity
+	os.Unsetenv("LOTO_SUBAGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcFlagGate, tcStoreStoreGo}, &out, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("expected exit 0 (ephemeral identity fails open), got %d: %q", code, out.String())
+	}
+	if !strings.Contains(out.String(), "identity=unpinned gate=fail-open") {
+		t.Errorf("expected unpinned fail-open row: %q", out.String())
+	}
+}
+
 // TestGateCLI_StoreUnreachableFailsOpen: a pinned identity with a broken
 // LOTO_BASE must fail open exit 3 with the store=unreachable row.
 func TestGateCLI_StoreUnreachableFailsOpen(t *testing.T) {
