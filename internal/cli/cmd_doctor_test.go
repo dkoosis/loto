@@ -209,6 +209,15 @@ func TestDoctor_ExpiredClaims_ListedAndRepaired(t *testing.T) {
 		t.Errorf("expected expired-claim row: %q", got)
 	}
 
+	// Dry-run names the claims sweep too, not just lock reclaims.
+	out.Reset()
+	if code := Run([]string{tcCmdDoctor, "--dry-run"}, &out, io.Discard); code != 0 {
+		t.Fatalf("doctor --dry-run exit %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "would_gc_claims=1") {
+		t.Errorf("dry-run must report would_gc_claims: %q", out.String())
+	}
+
 	out.Reset()
 	if code := Run([]string{tcCmdDoctor, tcFlagRepair}, &out, io.Discard); code != 0 {
 		t.Fatalf("doctor --repair exit %d: %s", code, out.String())

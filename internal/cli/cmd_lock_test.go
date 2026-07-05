@@ -183,13 +183,19 @@ func TestLock_NonPositiveTTL_Rejected(t *testing.T) {
 			t.Errorf("--ttl %s: expected positivity diagnostic, got %q", ttl, errBuf.String())
 		}
 	}
-	// No lock row landed and the target file stayed writable.
+	// No lock row landed and the target file stayed writable (the guard fires
+	// before openRuntime, so no strip can have happened).
 	var out bytes.Buffer
 	if code := Run([]string{tcCmdStatus, tcFlagMine}, &out, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("status exit %d", code)
 	}
 	if strings.Contains(out.String(), "target="+tcTargetA) {
 		t.Errorf("no lock should exist after rejected ttl: %q", out.String())
+	}
+	if st, err := os.Stat(tcTargetA); err != nil {
+		t.Fatal(err)
+	} else if st.Mode().Perm()&0o200 == 0 {
+		t.Errorf("rejected ttl must not strip the file, got %o", st.Mode().Perm())
 	}
 }
 

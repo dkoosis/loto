@@ -101,7 +101,10 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}, stdout)
 
 	if *dryRun {
-		fmt.Fprintf(stdout, "✓ dry-run would_reclaim=%d\n", len(report.StaleLocks))
+		// would_gc_claims mirrors the repair tx's gcClaimsTx sweep (D3) so the
+		// dry-run names everything --repair would delete, not just lock rows.
+		fmt.Fprintf(stdout, "✓ dry-run would_reclaim=%d would_gc_claims=%d\n",
+			len(report.StaleLocks), len(report.ExpiredClaims))
 		if scanIncomplete {
 			return 3
 		}
