@@ -244,6 +244,9 @@ func emitLaneTainted(w io.Writer, ref, commit string, tainted []laneBlock) {
 // leaving on-disk shape checks to lane.validateWriteSet. Output is sorted by
 // canonical path for deterministic staging and reporting.
 func resolveLaneWriteSet(args []string, repoTop string) ([]domain.Target, []render.InvalidTarget) {
+	// The canonicalize+dedupe loop intentionally mirrors validateLockTargets;
+	// the divergence (no Lstat, sort after) is the point.
+	/* jscpd:ignore-start */
 	targets := make([]domain.Target, 0, len(args))
 	seen := make(map[string]bool, len(args))
 	var invalid []render.InvalidTarget
@@ -260,6 +263,7 @@ func resolveLaneWriteSet(args []string, repoTop string) ([]domain.Target, []rend
 		seen[t.Canonical] = true
 		targets = append(targets, t)
 	}
+	/* jscpd:ignore-end */
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Canonical < targets[j].Canonical })
 	return targets, invalid
 }
