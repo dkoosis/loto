@@ -161,6 +161,26 @@ func TestGateDecide_DedupeAndOrder(t *testing.T) {
 	}
 }
 
+// TestGateDecide_SameOwnerTwoPrefixes_BlockerPathTieBreak: one owner holding
+// claims at two ancestor prefixes of one target yields two rows identical in
+// path/kind/holder — the blocker-path tie-break must order them ascending
+// regardless of claim input order (review, #211).
+func TestGateDecide_SameOwnerTwoPrefixes_BlockerPathTieBreak(t *testing.T) {
+	now := time.Now()
+	target := domain.Target{Canonical: tcPrefixStore + "/sub/new.go"}
+	claims := []domain.ClaimRecord{ // deeper prefix first: reversed vs sorted order
+		{PathPrefix: tcPrefixStore + "/sub", OwnerUUID: gateFoeUUID, Intent: "deep", ExpiresAt: now.Add(time.Hour)},
+		{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "shallow", ExpiresAt: now.Add(time.Hour)},
+	}
+	rows := gateDecide([]domain.Target{target}, nil, claims, gateMyUUID, gateEC(now))
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows (distinct blocker prefixes), got %d: %+v", len(rows), rows)
+	}
+	if rows[0].BlockerPath != tcPrefixStore || rows[1].BlockerPath != tcPrefixStore+"/sub" {
+		t.Errorf("want blocker-path ascending tie-break, got %+v", rows)
+	}
+}
+
 // --- CLI acceptance matrix (loto-vr2 build order step 5/6) ---
 //
 // brokenLOTOBase points LOTO_BASE at a path that already exists as a
@@ -200,6 +220,9 @@ func TestGateCLI_ForeignClaimDeniesNotOnDiskTarget(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "options=wait|pick-other-work|message-holder") {
 		t.Errorf("expected options line, no fix command, on a claim row: %q", out.String())
+	}
+	if strings.Contains(out.String(), "loto unlock --force") {
+		t.Errorf("claim row must not carry the lock-only fix command: %q", out.String())
 	}
 }
 
@@ -375,6 +398,28 @@ func TestGateCLI_SetButEmptyAgentIDFailsOpen(t *testing.T) {
 	code := Run([]string{tcCmdCheck, tcFlagGate, tcStoreStoreGo}, &out, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("expected exit 0 (ephemeral identity fails open), got %d: %q", code, out.String())
+	}
+	if !strings.Contains(out.String(), "identity=unpinned gate=fail-open") {
+		t.Errorf("expected unpinned fail-open row: %q", out.String())
+	}
+}
+
+// TestGateCLI_MalformedSubagentIDFailsOpen: a traversal-shaped
+// LOTO_SUBAGENT_ID is ignored by identity.Ensure (resolveSubagent falls
+// open), so with no other identity env Ensure would mint a throwaway UUID
+// owning nothing — every foreign row would deny. The gate must treat that id
+// as unpinned and fail open BEFORE store IO (review P1, #211).
+func TestGateCLI_MalformedSubagentIDFailsOpen(t *testing.T) {
+	withTempProject(t)
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+	t.Setenv("LOTO_SUBAGENT_ID", "../escape")
+	t.Setenv("LOTO_BASE", brokenLOTOBase(t)) // proves no store IO happens
+
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcFlagGate, tcTargetA}, &out, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("expected exit 0 (malformed subagent id fails open), got %d: %q", code, out.String())
 	}
 	if !strings.Contains(out.String(), "identity=unpinned gate=fail-open") {
 		t.Errorf("expected unpinned fail-open row: %q", out.String())

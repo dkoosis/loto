@@ -129,16 +129,30 @@ func loadCheckTargets(ctx context.Context, repoTop string, staged bool, posArgs 
 	return paths, 0
 }
 
-func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repoTop string, ec domain.EvalContext) ([]checkConflict, []checkInvalid) {
-	var rows []checkConflict
+// resolveCheckTargets resolves raw CLI paths into targets plus invalid rows
+// (sorted by original path, the deterministic-output rule) — the shared front
+// half of plain check and check --gate, so invalid-target classification
+// can't drift between the two codepaths (review nit, #211).
+func resolveCheckTargets(repoTop string, paths []string) ([]domain.Target, []checkInvalid) {
+	var targets []domain.Target
 	var invalid []checkInvalid
-	seen := map[string]bool{}
 	for _, raw := range paths {
 		t, err := resolveCLITarget(repoTop, raw)
 		if err != nil {
 			invalid = append(invalid, checkInvalid{Path: raw, Reason: classifyCanonicalizeErr(err)})
 			continue
 		}
+		targets = append(targets, t)
+	}
+	sort.Slice(invalid, func(i, j int) bool { return invalid[i].Path < invalid[j].Path })
+	return targets, invalid
+}
+
+func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repoTop string, ec domain.EvalContext) ([]checkConflict, []checkInvalid) {
+	targets, invalid := resolveCheckTargets(repoTop, paths)
+	var rows []checkConflict
+	seen := map[string]bool{}
+	for _, t := range targets {
 		rows = appendCheckConflictsForTarget(rows, seen, t, all, myUUID, ec)
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -147,7 +161,6 @@ func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repo
 		}
 		return rows[i].Blocker.Target.Canonical < rows[j].Blocker.Target.Canonical
 	})
-	sort.Slice(invalid, func(i, j int) bool { return invalid[i].Path < invalid[j].Path })
 	return rows, invalid
 }
 

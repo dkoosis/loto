@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/identity"
 	"loto/internal/render"
 )
 
@@ -32,8 +33,10 @@ import (
 //     minted beacon carries PID-0 (LivenessUnknown under Classify) and must
 //     still deny within its TTL, or the beacon leg of the gate no-ops.
 //
-// Output is deterministically sorted path -> kind -> holder UUID
-// (.claude/rules/design.md: same input, byte-identical output).
+// Output is deterministically sorted path -> kind -> holder UUID -> blocker
+// path (.claude/rules/design.md: same input, byte-identical output). The
+// blocker-path tie-break matters: one owner can hold claims at two ancestor
+// prefixes of one target — same path/kind/holder, distinct rows.
 func gateDecide(targets []domain.Target, locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ec domain.EvalContext) []render.GateDenyRow {
 	var rows []render.GateDenyRow
 	seen := map[string]bool{}
@@ -47,7 +50,10 @@ func gateDecide(targets []domain.Target, locks []domain.LockRecord, claims []dom
 		if rows[i].Kind != rows[j].Kind {
 			return rows[i].Kind < rows[j].Kind
 		}
-		return rows[i].HolderUUID < rows[j].HolderUUID
+		if rows[i].HolderUUID != rows[j].HolderUUID {
+			return rows[i].HolderUUID < rows[j].HolderUUID
+		}
+		return rows[i].BlockerPath < rows[j].BlockerPath
 	})
 	return rows
 }
@@ -94,17 +100,20 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 }
 
 // gateIdentityPinned is the gate's own identity probe: pinned iff at least
-// one of LOTO_SUBAGENT_ID, LOTO_AGENT_ID, CLAUDE_CODE_SESSION_ID is
-// NON-EMPTY. It deliberately diverges from agentIdentityPinned (runtime.go),
-// which counts a set-but-empty LOTO_AGENT_ID as pinned — correct for
-// release --all scoping (an explicit empty is the caller opting into an
-// ephemeral identity), but wrong here: Ensure mints a throwaway UUID for
-// LOTO_AGENT_ID="", a UUID that owns nothing, so the gate would fail
-// CLOSED — every foreign row denies a caller who owns no territory at all.
-// The gate's contract is fail-open on any identity it can't tie to real
-// ownership (gate-design "Rules: fail-open, everywhere").
+// one of LOTO_SUBAGENT_ID (usable per identity.SubagentIDPins), LOTO_AGENT_ID,
+// CLAUDE_CODE_SESSION_ID is NON-EMPTY. It deliberately diverges from
+// agentIdentityPinned (runtime.go), which counts a set-but-empty
+// LOTO_AGENT_ID as pinned — correct for release --all scoping (an explicit
+// empty is the caller opting into an ephemeral identity), but wrong here:
+// Ensure mints a throwaway UUID for LOTO_AGENT_ID="", a UUID that owns
+// nothing, so the gate would fail CLOSED — every foreign row denies a caller
+// who owns no territory at all. A malformed LOTO_SUBAGENT_ID is the same
+// trap: resolveSubagent falls open past it, so with no other env Ensure
+// mints a throwaway — SubagentIDPins keeps the gate fail-open there (review
+// P1, #211). The gate's contract is fail-open on any identity it can't tie
+// to real ownership (gate-design "Rules: fail-open, everywhere").
 func gateIdentityPinned() bool {
-	return os.Getenv("LOTO_SUBAGENT_ID") != "" ||
+	return identity.SubagentIDPins(os.Getenv("LOTO_SUBAGENT_ID")) ||
 		os.Getenv("LOTO_AGENT_ID") != "" ||
 		os.Getenv("CLAUDE_CODE_SESSION_ID") != ""
 }
@@ -129,21 +138,8 @@ func gateInfraUnreachable(stdout io.Writer, err error) int {
 // read (plan CLI contract). All output goes to stdout, including invalid/
 // infra rows, so a hook consuming this surface has one stream to read.
 func runCheckGate(ctx context.Context, paths []string, repoTop string, stdout io.Writer) int {
-	var targets []domain.Target
-	var invalid []checkInvalid
-	for _, raw := range paths {
-		t, err := resolveCLITarget(repoTop, raw)
-		if err != nil {
-			invalid = append(invalid, checkInvalid{Path: raw, Reason: classifyCanonicalizeErr(err)})
-			continue
-		}
-		targets = append(targets, t)
-	}
+	targets, invalid := resolveCheckTargets(repoTop, paths)
 	if len(invalid) > 0 {
-		// Sort by original path (the computeCheckConflicts precedent) so the
-		// block is deterministic across argv orderings (design.md: same input,
-		// byte-identical output).
-		sort.Slice(invalid, func(i, j int) bool { return invalid[i].Path < invalid[j].Path })
 		printCheckInvalid(stdout, invalid)
 		return 2
 	}

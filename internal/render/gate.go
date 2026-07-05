@@ -33,8 +33,10 @@ type GateDenyRow struct {
 }
 
 // EmitGateDeny renders the `✗ blocked` block for `loto check --gate`. Rows
-// are re-sorted path -> kind -> holder defensively (.claude/rules/design.md:
-// same input, byte-identical output), independent of caller order. The
+// are re-sorted path -> kind -> holder -> blocker path defensively
+// (.claude/rules/design.md: same input, byte-identical output), independent
+// of caller order; the blocker-path tie-break keeps two same-owner claims at
+// different ancestor prefixes of one target in a stable order. The
 // `blocker=` field name matches EmitClaimConflict/EmitConflictWithTags — one
 // vocabulary for "who is blocking me" across every conflict-reporting
 // surface. A claim-kind row also carries `prefix=` (the claimed ancestor
@@ -54,7 +56,10 @@ func EmitGateDeny(w io.Writer, rows []GateDenyRow) {
 		if sorted[i].Kind != sorted[j].Kind {
 			return sorted[i].Kind < sorted[j].Kind
 		}
-		return sorted[i].HolderUUID < sorted[j].HolderUUID
+		if sorted[i].HolderUUID != sorted[j].HolderUUID {
+			return sorted[i].HolderUUID < sorted[j].HolderUUID
+		}
+		return sorted[i].BlockerPath < sorted[j].BlockerPath
 	})
 	fmt.Fprintf(w, "✗ blocked count=%d\n", len(sorted))
 	for i := range sorted {

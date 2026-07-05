@@ -116,6 +116,20 @@ func subagentCacheKey(agentID string) string {
 	return "subagent-" + agentID
 }
 
+// SubagentIDPins reports whether a LOTO_SUBAGENT_ID value would actually pin
+// an identity via resolveSubagent's cache path. Mirrors its pre-validation: a
+// malformed (traversal-shaped) id falls open to normal resolution — which,
+// with no other identity env set, mints a throwaway UUID that owns nothing.
+// Callers deciding fail-open vs fail-closed (`loto check --gate`) must not
+// treat such an id as pinned.
+func SubagentIDPins(id string) bool {
+	if id == "" {
+		return false
+	}
+	_, err := sessionCachePath(subagentCacheKey(id))
+	return err == nil
+}
+
 // resolveSubagent resolves a stamped LOTO_SUBAGENT_ID to a stable per-sibling
 // identity. handled=true means Ensure must return (a, err) — either a
 // successful resolution or a propagated ctx cancellation; handled=false means
