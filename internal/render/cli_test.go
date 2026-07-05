@@ -395,6 +395,47 @@ func TestEmitClaimSuccess(t *testing.T) {
 	}
 }
 
+func TestEmitClaimRelease_Outcomes(t *testing.T) {
+	cases := []struct {
+		name     string
+		res      store.ClaimReleaseResult
+		wantExit int
+		wantRows []string
+	}{
+		{
+			name:     "released",
+			res:      store.ClaimReleaseResult{PathPrefix: "pkg/a", State: store.ClaimStateReleased},
+			wantExit: 0,
+			wantRows: []string{"✓ unclaimed count=1\n", "✓ prefix=pkg/a\n"},
+		},
+		{
+			name:     "no-claim",
+			res:      store.ClaimReleaseResult{PathPrefix: "pkg/a", State: store.ClaimStateNoClaim},
+			wantExit: 0,
+			wantRows: []string{"✓ unclaimed count=0\n", "ℹ prefix=pkg/a state=no-claim\n"},
+		},
+		{
+			name:     "not-owner",
+			res:      store.ClaimReleaseResult{PathPrefix: "pkg/a", State: store.ClaimStateNotOwner, Owner: "alice"},
+			wantExit: 1,
+			wantRows: []string{"✓ unclaimed count=0\n", "✗ prefix=pkg/a state=not-owner owner=alice\n"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if exit := EmitClaimRelease(&buf, c.res); exit != c.wantExit {
+				t.Errorf("exit=%d; want %d", exit, c.wantExit)
+			}
+			for _, row := range c.wantRows {
+				if !strings.Contains(buf.String(), row) {
+					t.Errorf("missing row %q in %q", row, buf.String())
+				}
+			}
+		})
+	}
+}
+
 func TestEmitClaimConflictNamesHolder(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // empty registry → holderTag falls back to UUID
 	now := time.Date(2026, 5, 10, 18, 0, 0, 0, time.UTC)

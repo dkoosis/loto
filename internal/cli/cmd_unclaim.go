@@ -7,7 +7,7 @@ import (
 	"io"
 
 	"loto/internal/domain"
-	"loto/internal/store"
+	"loto/internal/render"
 )
 
 func init() { register("unclaim", cmdUnclaim) } //nolint:gochecknoinits // command registry pattern
@@ -51,18 +51,5 @@ func cmdUnclaim(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	switch res.State {
-	case store.ClaimStateReleased:
-		fmt.Fprintf(stdout, "✓ unclaimed count=1\n✓ prefix=%s\n", res.PathPrefix)
-		return 0
-	case store.ClaimStateNoClaim:
-		fmt.Fprintf(stdout, "✓ unclaimed count=0\nℹ prefix=%s state=no-claim\n", res.PathPrefix)
-		return 0
-	case store.ClaimStateNotOwner:
-		fmt.Fprintf(stdout, "✓ unclaimed count=0\n✗ prefix=%s state=not-owner owner=%s\n", res.PathPrefix, res.Owner)
-		return 1
-	default:
-		fmt.Fprintf(stderr, "✗ unexpected release state %d\n", res.State)
-		return 3
-	}
+	return render.EmitClaimRelease(stdout, res)
 }

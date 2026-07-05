@@ -156,6 +156,28 @@ func EmitClaimConflict(w io.Writer, ce *store.ClaimConflictError) {
 	}
 }
 
+// EmitClaimRelease renders the unclaim outcome and returns the suggested exit
+// code: 0 for released / no-claim, 1 for not-owner. Render owns the rows and
+// the code so the claim verb pair matches the lock pair's shape
+// (EmitReleaseResults); the ✗ row names the actual live holder.
+func EmitClaimRelease(w io.Writer, res store.ClaimReleaseResult) int {
+	path := relToCwd(res.PathPrefix, getCwd())
+	switch res.State {
+	case store.ClaimStateReleased:
+		fmt.Fprintf(w, "✓ unclaimed count=1\n✓ prefix=%s\n", path)
+		return 0
+	case store.ClaimStateNoClaim:
+		fmt.Fprintf(w, "✓ unclaimed count=0\nℹ prefix=%s state=no-claim\n", path)
+		return 0
+	case store.ClaimStateNotOwner:
+		fmt.Fprintf(w, "✓ unclaimed count=0\n✗ prefix=%s state=not-owner owner=%s\n", path, res.Owner)
+		return 1
+	default:
+		fmt.Fprintf(w, "✗ prefix=%s state=unknown\n", path)
+		return 3
+	}
+}
+
 // EmitTagFooter renders the holder-facing trailing block of pending external
 // tags. Empty input emits nothing — the caller's primary output must stand
 // alone when there's no message to surface. Sort order is the caller's
