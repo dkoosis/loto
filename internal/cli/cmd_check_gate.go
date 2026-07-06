@@ -81,7 +81,7 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 	}
 	for i := range claims {
 		c := &claims[i]
-		if !domain.PrefixOverlaps(c.PathPrefix, t.Canonical) || string(c.OwnerUUID) == myUUID || c.Expired(ec.Now) {
+		if !domain.ClaimCoversTarget(*c, t.Canonical, myUUID, ec.Now) {
 			continue
 		}
 		key := "claim|" + t.Canonical + "|" + c.PathPrefix + "|" + string(c.OwnerUUID)
