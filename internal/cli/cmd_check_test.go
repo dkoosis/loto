@@ -198,3 +198,179 @@ func spawnAndReap(t *testing.T) string {
 	_ = cmd.Wait()
 	return strconv.Itoa(pid)
 }
+
+// --- loto-qoq: foreign-claim advisory on plain check ---
+
+// TestCheck_UnderForeignClaim_NoLockConflict_EmitsAdvisory is the P1 case
+// (plan): the dominant path — a target under a foreign claim with no lock
+// conflict — returns at the len(rows)==0 "✓ no conflicts" early return. The
+// advisory must still emit there, not only after printCheckConflicts.
+func TestCheck_UnderForeignClaim_NoLockConflict_EmitsAdvisory(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentAliceClaim}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice claim failed")
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcStoreStoreGo}, &out, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("exit %d: %q", code, out.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "✓ no conflicts") {
+		t.Errorf("expected no-conflicts line: %q", s)
+	}
+	if !strings.Contains(s, "⚠ under-claim count=1") || !strings.Contains(s, "owner="+alice.UUID) {
+		t.Errorf("expected foreign-claim advisory: %q", s)
+	}
+}
+
+// TestCheck_UnderOwnClaim_NoAdvisory: the checker's own claim must not
+// advise against itself.
+func TestCheck_UnderOwnClaim_NoAdvisory(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("claim failed")
+	}
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcStoreStoreGo}, &out, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("exit %d: %q", code, out.String())
+	}
+	if strings.Contains(out.String(), "under-claim") {
+		t.Errorf("own claim must not emit advisory: %q", out.String())
+	}
+}
+
+// TestCheck_UnderExpiredClaim_NoAdvisory: a lapsed foreign claim must not
+// advise.
+func TestCheck_UnderExpiredClaim_NoAdvisory(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest, tcFlagTTL, tcTTL1ms}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice claim failed")
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcStoreStoreGo}, &out, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("exit %d: %q", code, out.String())
+	}
+	if strings.Contains(out.String(), "under-claim") {
+		t.Errorf("expired claim must not emit advisory: %q", out.String())
+	}
+}
+
+// TestCheck_LockConflictAndForeignClaim_BothRowsExitReflectsLockOnly: a
+// target both lock-blocked and under a foreign claim prints conflict rows
+// then the advisory block; exit is driven by the lock conflict only.
+func TestCheck_LockConflictAndForeignClaim_BothRowsExitReflectsLockOnly(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid())) // ALIVE holder → hard block
+	if code := Run([]string{tcCmdLock, tcStoreStoreGo, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice lock failed")
+	}
+	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentAliceClaim}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice claim failed")
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcStoreStoreGo}, &out, &bytes.Buffer{})
+	if code != 1 {
+		t.Fatalf("expected exit 1 (lock conflict), got %d: %q", code, out.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "✗ conflicts") || !strings.Contains(s, "blocker=") {
+		t.Errorf("expected lock conflict rows: %q", s)
+	}
+	if !strings.Contains(s, "⚠ under-claim count=1") {
+		t.Errorf("expected foreign-claim advisory alongside conflict: %q", s)
+	}
+	if strings.Index(s, "✗ conflicts") > strings.Index(s, "under-claim") {
+		t.Errorf("expected conflict rows before advisory block: %q", s)
+	}
+}
+
+// TestCheck_MultiTarget_EachUnderDifferentForeignClaim: two targets, each
+// under a different foreign claimant's prefix, each yield one advisory row,
+// sorted by target.
+func TestCheck_MultiTarget_EachUnderDifferentForeignClaim(t *testing.T) {
+	repo := withTempProject(t)
+	alice, bob, carol := threeAgents(t)
+
+	renderDir := filepath.Join(repo, "internal", "render")
+	if err := os.MkdirAll(renderDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(renderDir, "cli.go"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentAliceClaim}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice claim failed")
+	}
+	t.Setenv("LOTO_AGENT_ID", carol.UUID)
+	if code := Run([]string{tcCmdClaim, "internal/render", "-t", "carol-claim"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("carol claim failed")
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcStoreStoreGo, "internal/render/cli.go"}, &out, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("exit %d: %q", code, out.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "⚠ under-claim count=2") {
+		t.Errorf("expected two advisory rows: %q", s)
+	}
+	if !strings.Contains(s, "target="+tcStoreStoreGo) || !strings.Contains(s, "target=internal/render/cli.go") {
+		t.Errorf("expected one row per target: %q", s)
+	}
+	renderIdx := strings.Index(s, "target=internal/render/cli.go")
+	storeIdx := strings.Index(s, "target="+tcStoreStoreGo)
+	if renderIdx == -1 || storeIdx == -1 || renderIdx > storeIdx {
+		t.Errorf("expected target-sorted advisory rows: %q", s)
+	}
+}
+
+// TestCheck_DuplicateTargetArg_SingleAdvisoryRow: unlike lock, plain check's
+// resolveCheckTargets does not dedup its input — "loto check foo foo" must
+// still yield a single deduped advisory row via the seen-map guard.
+func TestCheck_DuplicateTargetArg_SingleAdvisoryRow(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentAliceClaim}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice claim failed")
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcStoreStoreGo, tcStoreStoreGo}, &out, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("exit %d: %q", code, out.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "⚠ under-claim count=1") {
+		t.Errorf("expected deduped single advisory row for duplicate check arg: %q", s)
+	}
+	if strings.Count(s, "target="+tcStoreStoreGo) != 1 {
+		t.Errorf("expected exactly one advisory row: %q", s)
+	}
+}

@@ -55,6 +55,32 @@ func TestClaimRecordExpired(t *testing.T) {
 	}
 }
 
+func TestClaimCoversTarget(t *testing.T) {
+	now := time.Now()
+	const myUUID = "11111111-1111-1111-1111-111111111111"
+	const foeUUID = "22222222-2222-2222-2222-222222222222"
+	cases := []struct {
+		name   string
+		c      ClaimRecord
+		target string
+		want   bool
+	}{
+		{"foreign-live-covers", ClaimRecord{PathPrefix: tcStorePrefix, OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix + "/file.go", true},
+		{"own-claim", ClaimRecord{PathPrefix: tcStorePrefix, OwnerUUID: myUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix + "/file.go", false},
+		{"expired", ClaimRecord{PathPrefix: tcStorePrefix, OwnerUUID: foeUUID, ExpiresAt: now.Add(-time.Hour)}, tcStorePrefix + "/file.go", false},
+		{"non-overlapping-sibling", ClaimRecord{PathPrefix: tcStorePrefix, OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, "internal/storefront/file.go", false},
+		{"exact-prefix-match", ClaimRecord{PathPrefix: tcStorePrefix, OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix, true},
+		{"strict-ancestor-deep", ClaimRecord{PathPrefix: "pkg", OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, "pkg/a/b/c/deep.go", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ClaimCoversTarget(c.c, c.target, myUUID, now); got != c.want {
+				t.Errorf("ClaimCoversTarget(%+v, %q) = %v; want %v", c.c, c.target, got, c.want)
+			}
+		})
+	}
+}
+
 func TestSameCanonical(t *testing.T) {
 	cases := []struct {
 		a, b string

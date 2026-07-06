@@ -75,19 +75,36 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// (reclaimStaleAndCollectBlockers → domain.IsStale): a lock that `loto lock`
 	// would silently reclaim must not read as a hard conflict here (loto-9t0q).
 	ec := domain.EvalContext{Now: time.Now(), ThisHost: rt.Host, Live: rt.liveProbe()}
-	rows, invalid := computeCheckConflicts(paths, all, rt.Agent.UUID, repoTop, ec)
+
+	// Resolve targets once, up front. Invalid input exits 2 before any claim
+	// read — so the wasted ListClaims/resolve on the error path is gone, and
+	// both the conflict scan and the foreign-claim advisory consume the same
+	// resolved targets (no double resolution). Mirrors runCheckGate's
+	// resolve-then-branch shape (gemini/coderabbit, #214).
+	targets, invalid := resolveCheckTargets(repoTop, paths)
 	if len(invalid) > 0 {
 		printCheckInvalid(stdout, invalid)
 		return 2
 	}
+
+	// Foreign-claim advisory (loto-qoq): computed up front so it emits on every
+	// non-error plain-check exit — including the common no-conflict early
+	// return below, which never reaches the bottom of this function.
+	claimAdvisories := foreignClaimAdvisoriesFor(rt, targets, ec.Now)
+	emitAfter := func(code int) int {
+		emitForeignClaimAdvisories(stdout, claimAdvisories)
+		return code
+	}
+
+	rows := computeCheckConflicts(targets, all, rt.Agent.UUID, ec)
 	if len(rows) == 0 {
 		fmt.Fprintln(stdout, "✓ no conflicts")
-		return 0
+		return emitAfter(0)
 	}
 	if printCheckConflicts(stdout, rows) {
-		return 1
+		return emitAfter(1)
 	}
-	return 0
+	return emitAfter(0)
 }
 
 type checkInvalid struct {
@@ -148,8 +165,7 @@ func resolveCheckTargets(repoTop string, paths []string) ([]domain.Target, []che
 	return targets, invalid
 }
 
-func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repoTop string, ec domain.EvalContext) ([]checkConflict, []checkInvalid) {
-	targets, invalid := resolveCheckTargets(repoTop, paths)
+func computeCheckConflicts(targets []domain.Target, all []domain.LockRecord, myUUID string, ec domain.EvalContext) []checkConflict {
 	var rows []checkConflict
 	seen := map[string]bool{}
 	for _, t := range targets {
@@ -161,7 +177,7 @@ func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repo
 		}
 		return rows[i].Blocker.Target.Canonical < rows[j].Blocker.Target.Canonical
 	})
-	return rows, invalid
+	return rows
 }
 
 func appendCheckConflictsForTarget(rows []checkConflict, seen map[string]bool, t domain.Target, all []domain.LockRecord, myUUID string, ec domain.EvalContext) []checkConflict {
