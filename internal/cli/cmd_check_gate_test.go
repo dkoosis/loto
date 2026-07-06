@@ -375,12 +375,12 @@ func TestGateCLI_NoIdentityFailsOpenWithoutOpeningStore(t *testing.T) {
 
 // TestGateCLI_SetButEmptyAgentIDFailsOpen: LOTO_AGENT_ID set to "" is the
 // caller opting into an ephemeral identity — identity.Ensure mints a
-// throwaway UUID that owns nothing. agentIdentityPinned (runtime.go) counts
-// set-but-empty as pinned (correct for release --all scoping), but the gate
-// must NOT: a throwaway owner is foreign to every live row, so treating it
-// as pinned fails CLOSED — the exact inversion of the gate's contract. Pin:
-// live foreign claim covering the target + LOTO_AGENT_ID="" → exit 0 + the
-// ⚠ identity=unpinned row (adherence review P2).
+// throwaway UUID that owns nothing. The shared agentIdentityPinned predicate
+// (runtime.go, loto-s3l) reads set-but-empty as UNPINNED — a throwaway owner
+// is foreign to every live row, so treating it as pinned would fail CLOSED,
+// the exact inversion of the gate's contract. Pin: live foreign claim
+// covering the target + LOTO_AGENT_ID="" → exit 0 + the ⚠ identity=unpinned
+// row (adherence review P2).
 func TestGateCLI_SetButEmptyAgentIDFailsOpen(t *testing.T) {
 	withTempProject(t)
 	alice, _ := twoAgents(t)

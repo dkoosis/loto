@@ -41,7 +41,7 @@ type runtime struct {
 	StateDir      string
 	SessionUUID   domain.SessionUUID // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID
 	SessionPinned bool               // true iff LOTO_SESSION_ID was in env; gates session-scoped semantics
-	AgentPinned   bool               // true iff LOTO_AGENT_ID, a non-empty LOTO_SUBAGENT_ID, or CLAUDE_CODE_SESSION_ID was in env; false → Ensure minted a throwaway UUID
+	AgentPinned   bool               // true iff a non-empty LOTO_AGENT_ID, a usable LOTO_SUBAGENT_ID (SubagentIDPins), or CLAUDE_CODE_SESSION_ID pins an identity; false → Ensure minted a throwaway UUID
 }
 
 // sessionUUID resolves the per-session id. The SessionStart hook exports
@@ -58,24 +58,36 @@ func sessionUUID() (id string, pinned bool) {
 	return identity.NewUUID(), false
 }
 
-// agentIdentityPinned reports whether an explicit identity env var is set —
-// LOTO_AGENT_ID (even ""), a non-empty LOTO_SUBAGENT_ID, or
-// CLAUDE_CODE_SESSION_ID.
+// agentIdentityPinned reports whether the env pins an identity that
+// identity.Ensure resolves to a real, lock-owning agent (or hard-errors on) —
+// the negation of "Ensure mints a throwaway". It MUST mirror Ensure's
+// resolution PRECEDENCE, not just its inputs, because Ensure short-circuits:
+//  1. LOTO_SUBAGENT_ID via SubagentIDPins — resolveSubagent runs first; a
+//     traversal-shaped id it ignores (falls open → throwaway) must NOT pin.
+//  2. LOTO_AGENT_ID PRESENCE (LookupEnv) — Ensure branches on set-ness before
+//     it ever consults the session id. A set value resolves the record or
+//     fails loud (pinned); a set-but-EMPTY value is explicit-ephemeral →
+//     mintAgent() throwaway → UNPINNED, and Ensure returns there, so the
+//     session id below is NEVER reached. A flat `LOTO_AGENT_ID != "" || …
+//     session` OR would wrongly pin the (blank agent id + session set) combo
+//     that fleet dispatchers hit (doc.go) — the loto-pody false-success.
+//  3. CLAUDE_CODE_SESSION_ID != "" — reached only when LOTO_AGENT_ID is truly
+//     unset; ensureForSession mints+caches a stable per-session owner.
 //
-// openRuntime uses this to set AgentPinned, which release --all consults so
-// a throwaway UUID can't scope a false-success release (loto-pody). A
-// set-but-EMPTY LOTO_AGENT_ID counts as pinned here: identity.Ensure treats
-// explicit-empty as the caller opting into a fresh ephemeral identity, and
-// --all must respect that choice. `loto check --gate` deliberately uses its
-// own stricter probe (gateIdentityPinned, cmd_check_gate.go) — for the
-// gate, an ephemeral identity owns nothing and must fail OPEN.
+// This is the single source of truth for both consumers with OPPOSITE fail
+// modes: release --all reads AgentPinned to REFUSE (fail-CLOSED) when unpinned,
+// so a throwaway UUID can't scope a false-success release (loto-pody); `loto
+// check --gate` calls it directly to fail OPEN when unpinned. An edit that
+// shifts this predicate for one surface silently moves the other — keep it a
+// pure env read, no store IO, no runtime receiver (loto-s3l).
 func agentIdentityPinned() bool {
-	_, agentIDSet := os.LookupEnv("LOTO_AGENT_ID")
-	// LOTO_SUBAGENT_ID must be NON-EMPTY to pin: identity.Ensure ignores an empty
-	// value and falls through to minting a throwaway agent, so treating an empty
-	// "set" var as pinned would mis-scope an --all release (loto-pody).
-	subagentPinned := os.Getenv("LOTO_SUBAGENT_ID") != ""
-	return agentIDSet || subagentPinned || os.Getenv("CLAUDE_CODE_SESSION_ID") != ""
+	if identity.SubagentIDPins(os.Getenv("LOTO_SUBAGENT_ID")) {
+		return true
+	}
+	if v, set := os.LookupEnv("LOTO_AGENT_ID"); set {
+		return v != "" // set-but-empty is explicit-ephemeral; never falls through to the session id
+	}
+	return os.Getenv("CLAUDE_CODE_SESSION_ID") != ""
 }
 
 func openRuntime(ctx context.Context) (*runtime, error) {
