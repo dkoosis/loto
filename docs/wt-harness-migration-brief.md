@@ -2,6 +2,8 @@
 
 > **Purpose.** Full picture of the parallel-agent SDLC harness currently living in the **trixi** repo (`~/Projects/trixi/scripts/`), written so dk and a migration agent can understand what's being graduated into **loto** and what breaks when it moves. Source of truth for the extraction. Written 2026-06-01.
 
+> **⟶ Forward strategy single-sourced (2026-07-06):** where worktree-handling and bead-landing logic lives across trixi/loto/cc-plugins is now decided in `~/Projects/dk/Project/loto/specs/worktree-strategy-design.md`. This brief is retained as the **extraction analysis feeding that doc** — the component/coupling map below is the record, not the plan.
+
 ---
 
 ## 0. What this is (and why it's moving)

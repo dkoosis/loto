@@ -21,6 +21,8 @@ better-engineered one — to the **`wt-*` harness loto is absorbing**. It solves
 Verdict: steal three ideas into fork B, evaluate a fourth, leave two behind.
 Do **not** adopt wholesale.
 
+> **⟶ Decision home (2026-07-06):** `~/Projects/dk/Project/loto/specs/worktree-strategy-design.md` single-sources the call. treehouse stays **DEFERRED** behind the gate-first re-measure (decision **D4** there) — wrap it only if a Layer-2 throughput tier still earns a slot post-gate; do not port the nine scripts. The steal/evaluate/leave verdict below stands as the source input.
+
 ---
 
 ## 1. The layer model (the part that's easy to conflate)
