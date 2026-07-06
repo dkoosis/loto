@@ -44,6 +44,92 @@ func TestUnlockAll_NoPinnedIdentity_RefusesFalseSuccess(t *testing.T) {
 	}
 }
 
+// TestUnlockAll_BlankAgentID_RefusesFalseSuccess pins the loto-s3l blank-env
+// vector: a set-but-EMPTY LOTO_AGENT_ID made agentIdentityPinned report pinned
+// (LookupEnv set=true), but identity.Ensure treats explicit-empty as opting
+// into a throwaway ephemeral agent that owns zero locks. release --all then
+// scoped to that throwaway → released 0 → exit 0 false-success while the
+// caller's real locks stayed put, files write-stripped. Post-alignment blank
+// reads as unpinned → --all refuses (exit 2).
+func TestUnlockAll_BlankAgentID_RefusesFalseSuccess(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("seed lock exit %d", code)
+	}
+
+	t.Setenv("LOTO_AGENT_ID", "") // set-but-empty: Ensure mints a throwaway
+	t.Setenv("LOTO_SUBAGENT_ID", "")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcFlagAll, "-t", tcIntentDone}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("expected exit 2 (pin-required refusal), got %d; stdout=%q stderr=%q",
+			code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "LOTO_AGENT_ID") {
+		t.Errorf("diagnostic should mention LOTO_AGENT_ID; stderr=%q", errBuf.String())
+	}
+}
+
+// TestUnlockAll_MalformedSubagentID_RefusesFalseSuccess pins the aligned bonus
+// vector: a traversal-shaped LOTO_SUBAGENT_ID is ignored by identity.Ensure
+// (resolveSubagent falls open), so with no other identity env Ensure mints a
+// throwaway. The pre-alignment `LOTO_SUBAGENT_ID != ""` pin let that throwaway
+// scope release --all → the same silent false-success as the blank case. The
+// shape-validated SubagentIDPins predicate refuses it (exit 2).
+func TestUnlockAll_MalformedSubagentID_RefusesFalseSuccess(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("seed lock exit %d", code)
+	}
+
+	t.Setenv("LOTO_AGENT_ID", "")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
+	t.Setenv("LOTO_SUBAGENT_ID", "../escape") // traversal-shaped: Ensure falls open
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcFlagAll, "-t", tcIntentDone}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("expected exit 2 (pin-required refusal), got %d; stdout=%q stderr=%q",
+			code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "LOTO_AGENT_ID") {
+		t.Errorf("diagnostic should mention LOTO_AGENT_ID; stderr=%q", errBuf.String())
+	}
+}
+
+// TestUnlockAll_BlankAgentIDWithSessionSet_RefusesFalseSuccess pins the
+// precedence edge (loto-s3l P1): identity.Ensure branches on LOTO_AGENT_ID
+// set-ness BEFORE it consults CLAUDE_CODE_SESSION_ID, so a set-but-empty agent
+// id mints a throwaway even when a session id is present — the session leg
+// never rescues it. A flat `agentID != "" || session != ""` predicate would
+// wrongly pin this combo (the one fleet dispatchers export) and re-open the
+// false-success. The precedence-mirroring predicate refuses (exit 2).
+func TestUnlockAll_BlankAgentIDWithSessionSet_RefusesFalseSuccess(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("seed lock exit %d", code)
+	}
+
+	t.Setenv("LOTO_SUBAGENT_ID", "")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "some-session") // present, but shadowed by the empty agent id
+	t.Setenv("LOTO_AGENT_ID", "")                      // set-but-empty: Ensure mints a throwaway first
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcFlagAll, "-t", tcIntentDone}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("expected exit 2 (pin-required refusal), got %d; stdout=%q stderr=%q",
+			code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "LOTO_AGENT_ID") {
+		t.Errorf("diagnostic should mention LOTO_AGENT_ID; stderr=%q", errBuf.String())
+	}
+}
+
 // TestUnlock_NoIntent_Succeeds pins loto-e0mz: plain unlock of your own lock
 // must NOT require -t. ReleaseLocks takes no intent arg — the flag was validated
 // then discarded, and the rejection landed on stderr (exit 2) while stdout (the
