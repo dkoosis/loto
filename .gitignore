@@ -34,5 +34,5 @@ report/
 
 # fleet coordination heartbeats (ephemeral)
 .team/
-# bd worktree
-loto-ebkc/
+# bd worktrees (loto-<bead>/ at repo root) — glob covers all, no per-branch churn
+/loto-*/
