@@ -20,6 +20,18 @@ type foreignClaimAdvisory struct {
 	Prefix string
 }
 
+// foreignClaimAdvisoriesFor is the shared ListClaims → collect step behind both
+// loto check and loto lock's ⚠ advisory. ListClaims errors are swallowed
+// silently: the advisory is best-effort and must never mask the primary
+// lock/check result (same posture as fetchTagsForBlockers). loto-qoq.
+func foreignClaimAdvisoriesFor(rt *runtime, targets []domain.Target, now time.Time) []foreignClaimAdvisory {
+	claims, err := rt.Store.ListClaims(rt.Ctx)
+	if err != nil {
+		return nil
+	}
+	return collectForeignClaimAdvisories(targets, claims, rt.Agent.UUID, now)
+}
+
 // collectForeignClaimAdvisories returns one advisory per (target, covering
 // live foreign claim), deduped and deterministically sorted by
 // (Target, Owner, Prefix). Empty when no claim covers any target. Shares

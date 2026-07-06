@@ -166,12 +166,8 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 	}
 	render.EmitLockSuccess(stdout, acquired)
 	// Foreign-claim advisory (loto-qoq): claims never block a lock, so this
-	// only runs on the success path, after the success rows. ListClaims
-	// errors are swallowed silently — best-effort advisory must not mask a
-	// successful lock (same posture as fetchTagsForBlockers).
-	if claims, cerr := rt.Store.ListClaims(rt.Ctx); cerr == nil {
-		emitForeignClaimAdvisories(stdout, collectForeignClaimAdvisories(targets, claims, rt.Agent.UUID, now))
-	}
+	// only runs on the success path, after the success rows.
+	emitForeignClaimAdvisories(stdout, foreignClaimAdvisoriesFor(rt, targets, now))
 	return 0
 }
 

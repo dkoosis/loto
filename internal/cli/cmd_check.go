@@ -76,21 +76,27 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// would silently reclaim must not read as a hard conflict here (loto-9t0q).
 	ec := domain.EvalContext{Now: time.Now(), ThisHost: rt.Host, Live: rt.liveProbe()}
 
-	// Foreign-claim advisory (loto-qoq): computed up front, right after the
-	// store reads, so it emits on every non-error plain-check exit —
-	// including the common len(rows)==0 early return below, which never
-	// reaches the bottom of this function.
-	claimAdvisories := checkForeignClaimAdvisories(rt, repoTop, paths, ec.Now)
+	// Resolve targets once, up front. Invalid input exits 2 before any claim
+	// read — so the wasted ListClaims/resolve on the error path is gone, and
+	// both the conflict scan and the foreign-claim advisory consume the same
+	// resolved targets (no double resolution). Mirrors runCheckGate's
+	// resolve-then-branch shape (gemini/coderabbit, #214).
+	targets, invalid := resolveCheckTargets(repoTop, paths)
+	if len(invalid) > 0 {
+		printCheckInvalid(stdout, invalid)
+		return 2
+	}
+
+	// Foreign-claim advisory (loto-qoq): computed up front so it emits on every
+	// non-error plain-check exit — including the common no-conflict early
+	// return below, which never reaches the bottom of this function.
+	claimAdvisories := foreignClaimAdvisoriesFor(rt, targets, ec.Now)
 	emitAfter := func(code int) int {
 		emitForeignClaimAdvisories(stdout, claimAdvisories)
 		return code
 	}
 
-	rows, invalid := computeCheckConflicts(paths, all, rt.Agent.UUID, repoTop, ec)
-	if len(invalid) > 0 {
-		printCheckInvalid(stdout, invalid)
-		return 2
-	}
+	rows := computeCheckConflicts(targets, all, rt.Agent.UUID, ec)
 	if len(rows) == 0 {
 		fmt.Fprintln(stdout, "✓ no conflicts")
 		return emitAfter(0)
@@ -99,20 +105,6 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return emitAfter(1)
 	}
 	return emitAfter(0)
-}
-
-// checkForeignClaimAdvisories computes plain check's ⚠ under-claim rows
-// (loto-qoq): ListClaims errors are swallowed silently (best-effort, same
-// posture as lock's wiring — must not mask the check result), and targets
-// are re-resolved via resolveCheckTargets (pure, stat-free) rather than
-// threading computeCheckConflicts' internal targets out.
-func checkForeignClaimAdvisories(rt *runtime, repoTop string, paths []string, now time.Time) []foreignClaimAdvisory {
-	claims, err := rt.Store.ListClaims(rt.Ctx)
-	if err != nil {
-		return nil
-	}
-	targets, _ := resolveCheckTargets(repoTop, paths)
-	return collectForeignClaimAdvisories(targets, claims, rt.Agent.UUID, now)
 }
 
 type checkInvalid struct {
@@ -173,8 +165,7 @@ func resolveCheckTargets(repoTop string, paths []string) ([]domain.Target, []che
 	return targets, invalid
 }
 
-func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repoTop string, ec domain.EvalContext) ([]checkConflict, []checkInvalid) {
-	targets, invalid := resolveCheckTargets(repoTop, paths)
+func computeCheckConflicts(targets []domain.Target, all []domain.LockRecord, myUUID string, ec domain.EvalContext) []checkConflict {
 	var rows []checkConflict
 	seen := map[string]bool{}
 	for _, t := range targets {
@@ -186,7 +177,7 @@ func computeCheckConflicts(paths []string, all []domain.LockRecord, myUUID, repo
 		}
 		return rows[i].Blocker.Target.Canonical < rows[j].Blocker.Target.Canonical
 	})
-	return rows, invalid
+	return rows
 }
 
 func appendCheckConflictsForTarget(rows []checkConflict, seen map[string]bool, t domain.Target, all []domain.LockRecord, myUUID string, ec domain.EvalContext) []checkConflict {
