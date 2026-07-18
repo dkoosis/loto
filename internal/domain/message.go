@@ -53,7 +53,18 @@ func ValidateMessage(m Message) error {
 // RepoAddr returns the repo address for a project slug ("@<slug>"). Mail sent
 // here is surfaced to whichever agent next acts inside that project — the
 // "ask the agents over in repo X" channel when no specific agent is known.
-func RepoAddr(slug string) string { return "@" + slug }
+//
+// The literal slug "all" is reserved: "@all" is the machine-wide broadcast, so
+// a repo whose computed slug is "all" would make its repo channel indistinct
+// from broadcast (Codex). Such a slug folds to a namespaced address so @<slug>
+// routing stays unambiguous — the pathological repo simply has no bare "@all"
+// repo channel; "@all" always means broadcast.
+func RepoAddr(slug string) string {
+	if "@"+slug == AddrAll {
+		return AddrAll + "-repo"
+	}
+	return "@" + slug
+}
 
 // IsBroadcastAddr reports whether addr fans out to more than one potential
 // reader (@all or any @<slug>), i.e. read state must be tracked per reader.

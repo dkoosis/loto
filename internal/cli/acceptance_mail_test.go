@@ -23,7 +23,7 @@ func TestE2E_MailLifecycle(t *testing.T) {
 
 	// 1. alice mails bob by handle.
 	asAlice()
-	out, errOut, code := run("msg", bob.Handle, "-t", "loto-qhw: ping bob")
+	out, errOut, code := run(tcMsg, bob.Handle, "-t", "loto-qhw: ping bob")
 	if code != 0 {
 		t.Fatalf("alice msg: code=%d out=%q err=%q", code, out, errOut)
 	}
@@ -62,7 +62,7 @@ func TestE2E_MailLifecycle(t *testing.T) {
 
 	// 5. alice sends @all — bob sees it, alice doesn't see her own broadcast.
 	asAlice()
-	if _, _, code := run("msg", "@all", "-t", "loto-qhw: broadcast"); code != 0 {
+	if _, _, code := run(tcMsg, "@all", "-t", "loto-qhw: broadcast"); code != 0 {
 		t.Fatalf("msg @all: code=%d", code)
 	}
 	out, _, _ = run("inbox")
@@ -78,10 +78,10 @@ func TestE2E_MailLifecycle(t *testing.T) {
 	// 6. @<slug> routing: the temp repo's slug is test-proj (from the fake
 	//    origin remote); @elsewhere mail must not reach bob here.
 	asAlice()
-	if _, _, code := run("msg", "@test-proj", "-t", "loto-qhw: repo mail"); code != 0 {
+	if _, _, code := run(tcMsg, "@test-proj", "-t", "loto-qhw: repo mail"); code != 0 {
 		t.Fatalf("msg @test-proj: code=%d", code)
 	}
-	if _, _, code := run("msg", "@elsewhere", "-t", "loto-qhw: other repo"); code != 0 {
+	if _, _, code := run(tcMsg, "@elsewhere", "-t", "loto-qhw: other repo"); code != 0 {
 		t.Fatalf("msg @elsewhere: code=%d", code)
 	}
 	asBob()
@@ -99,14 +99,21 @@ func TestMsgRejectsUnknownHandleAndEmptyBody(t *testing.T) {
 	pinAgent(t)
 
 	var out, errBuf bytes.Buffer
-	if code := Run([]string{"msg", "NoSuchAgent", "-t", "x: hi"}, &out, &errBuf); code != 2 {
+	if code := Run([]string{tcMsg, "NoSuchAgent", "-t", "x: hi"}, &out, &errBuf); code != 2 {
 		t.Fatalf("unknown handle should exit 2, got %d (err=%q)", code, errBuf.String())
 	}
 	errBuf.Reset()
-	if code := Run([]string{"msg", "@loto"}, &out, &errBuf); code != 2 {
+	if code := Run([]string{tcMsg, "@loto"}, &out, &errBuf); code != 2 {
 		t.Fatalf("missing -t should exit 2, got %d", code)
 	}
 	if !strings.Contains(errBuf.String(), "usage: loto msg") {
 		t.Fatalf("usage teaching surface missing: %q", errBuf.String())
+	}
+	errBuf.Reset()
+	if code := Run([]string{tcMsg, "@all", "-t", "x: hi", tcFlagTTL, "-1h"}, &out, &errBuf); code != 2 {
+		t.Fatalf("negative ttl should exit 2, got %d", code)
+	}
+	if !strings.Contains(errBuf.String(), "--ttl must be non-negative") {
+		t.Fatalf("negative-ttl rejection message missing: %q", errBuf.String())
 	}
 }

@@ -74,16 +74,16 @@ func Open(ctx context.Context, path string) (*Box, error) {
 		db.Close()
 		return nil, fmt.Errorf("mail schema: %w", err)
 	}
-	b := &Box{db: db}
-	b.purgeExpired(ctx)
-	return b, nil
+	return &Box{db: db}, nil
 }
 
 func (b *Box) Close() error { return b.db.Close() }
 
-// purgeExpired hard-deletes expired messages and their read rows. Best-effort:
-// expiry is also enforced by every read query, so a failed purge only delays
-// space reclamation.
+// purgeExpired hard-deletes expired messages and their read rows. Called only
+// from write paths (Send, MarkRead) so read-only commands — the mailbox footer
+// on status/doctor opens the DB on nearly every invocation — never take a write
+// lock. Correctness does not depend on it: every read query filters on
+// expires_at, so a skipped purge only delays space reclamation. Best-effort.
 func (b *Box) purgeExpired(ctx context.Context) {
 	now := time.Now().UnixNano()
 	_, _ = b.db.ExecContext(ctx,
@@ -97,6 +97,7 @@ func (b *Box) Send(ctx context.Context, m domain.Message) (string, error) {
 	if err := domain.ValidateMessage(m); err != nil {
 		return "", err
 	}
+	b.purgeExpired(ctx)
 	if m.CreatedAt.IsZero() {
 		m.CreatedAt = time.Now()
 	}
@@ -124,7 +125,8 @@ func (b *Box) Inbox(ctx context.Context, reader domain.AgentUUID, addrs []string
 	if len(addrs) == 0 {
 		return nil, nil
 	}
-	q, args := inboxQuery(reader, addrs, time.Now())
+	where, args := unreadWhere(reader, addrs, time.Now())
+	q := `SELECT m.id, m.from_uuid, m.from_handle, m.to_addr, m.body, m.thread_id, m.created_at, m.expires_at ` + where + ` ORDER BY m.created_at, m.id` //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 	rows, err := b.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -146,40 +148,42 @@ func (b *Box) Inbox(ctx context.Context, reader domain.AgentUUID, addrs []string
 	return out, rows.Err()
 }
 
-func inboxQuery(reader domain.AgentUUID, addrs []string, now time.Time) (string, []any) {
+// unreadWhere builds the shared FROM+WHERE (and its args) selecting messages
+// addressed to any of addrs that reader has not read and that have not expired.
+// Inbox and Summary share it so the routing/read/expiry predicate lives in one
+// place; each supplies its own SELECT list. Returns everything from "FROM"
+// onward so callers prepend the columns they need.
+//
+// Self-exclusion is scoped to @-addresses: a sender must not receive their own
+// @all / @<slug> broadcast (permanent unread noise), but direct mail a sender
+// addresses to their own UUID — a cross-session note-to-self — is legitimate
+// and must still appear (loto-qhw, CodeRabbit).
+func unreadWhere(reader domain.AgentUUID, addrs []string, now time.Time) (string, []any) {
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(addrs)), ",")
-	args := make([]any, 0, len(addrs)+2)
+	args := make([]any, 0, len(addrs)+3)
 	args = append(args, string(reader))
 	for _, a := range addrs {
 		args = append(args, a)
 	}
 	args = append(args, now.UnixNano(), string(reader))
-	// from_uuid != reader: a sender's own broadcast (@all / @<slug>) must not
-	// land back in their inbox — it would be permanent unread noise.
-	q := `
-SELECT m.id, m.from_uuid, m.from_handle, m.to_addr, m.body, m.thread_id, m.created_at, m.expires_at
+	where := `
 FROM messages m
 LEFT JOIN message_reads r ON r.message_id = m.id AND r.reader_uuid = ?
 WHERE m.to_addr IN (` + placeholders + `)
   AND r.read_at IS NULL
   AND m.expires_at > ?
-  AND m.from_uuid != ?
-ORDER BY m.created_at, m.id`
-	return q, args
+  AND (m.from_uuid != ? OR m.to_addr NOT LIKE '@%')`
+	return where, args
 }
 
-// MarkRead stamps a per-reader read cursor on every message Inbox would
-// currently return for (reader, addrs). Idempotent: INSERT OR IGNORE keeps a
-// second mark from failing on the PK.
-func (b *Box) MarkRead(ctx context.Context, reader domain.AgentUUID, addrs []string) error {
-	if len(addrs) == 0 {
-		return nil
-	}
-	msgs, err := b.Inbox(ctx, reader, addrs)
-	if err != nil {
-		return err
-	}
-	if len(msgs) == 0 {
+// MarkRead stamps a per-reader read cursor on exactly the given message IDs.
+// The caller passes the IDs it actually displayed, NOT an address set: a fresh
+// address re-query here would race a concurrent Send and mark an
+// arrived-but-unshown message read, silently dropping it (loto-qhw, Codex P1).
+// Idempotent via INSERT OR IGNORE. Unknown/foreign IDs are harmless — a read
+// cursor is scoped to (message_id, reader) and only affects reader's own view.
+func (b *Box) MarkRead(ctx context.Context, reader domain.AgentUUID, ids []string) error {
+	if len(ids) == 0 {
 		return nil
 	}
 	now := time.Now().UnixNano()
@@ -188,36 +192,54 @@ func (b *Box) MarkRead(ctx context.Context, reader domain.AgentUUID, addrs []str
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck // rollback after commit is a no-op
-	for i := range msgs {
+	for _, id := range ids {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO message_reads(message_id,reader_uuid,read_at) VALUES (?,?,?)`,
-			msgs[i].ID, string(reader), now); err != nil {
+			id, string(reader), now); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	b.purgeExpired(ctx)
+	return nil
 }
 
 // Summary returns the unread count and deduplicated sender handles (fallback:
-// short UUID) for the banner line, oldest sender first.
+// short UUID) for the banner line, oldest sender first. It selects only the
+// sender columns — not the up-to-4KiB body — because it runs on the footer of
+// nearly every command and needs neither the body nor thread id (Gemini).
 func (b *Box) Summary(ctx context.Context, reader domain.AgentUUID, addrs []string) (int, []string, error) {
-	msgs, err := b.Inbox(ctx, reader, addrs)
+	if len(addrs) == 0 {
+		return 0, nil, nil
+	}
+	where, args := unreadWhere(reader, addrs, time.Now())
+	rows, err := b.db.QueryContext(ctx,
+		`SELECT m.from_uuid, m.from_handle `+where+` ORDER BY m.created_at, m.id`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 	if err != nil {
 		return 0, nil, err
 	}
+	defer rows.Close()
 	var senders []string
 	seen := map[string]bool{}
-	for i := range msgs {
-		name := msgs[i].FromHandle
+	count := 0
+	for rows.Next() {
+		var fromUUID, fromHandle string
+		if err := rows.Scan(&fromUUID, &fromHandle); err != nil {
+			return 0, nil, err
+		}
+		count++
+		name := fromHandle
 		if name == "" {
-			name = shortUUID(string(msgs[i].FromUUID))
+			name = shortUUID(fromUUID)
 		}
 		if !seen[name] {
 			seen[name] = true
 			senders = append(senders, name)
 		}
 	}
-	return len(msgs), senders, nil
+	return count, senders, rows.Err()
 }
 
 func shortUUID(u string) string {

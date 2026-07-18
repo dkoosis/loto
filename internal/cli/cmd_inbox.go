@@ -70,11 +70,15 @@ func inboxList(rt *runtime, box *mail.Box, markRead bool, stdout, stderr io.Writ
 		return 0
 	}
 	fmt.Fprintf(stdout, "ℹ unread count=%d\n", len(msgs))
+	ids := make([]string, len(msgs))
 	for i := range msgs {
+		ids[i] = msgs[i].ID
 		fmt.Fprintln(stdout, inboxRow(&msgs[i]))
 	}
 	if markRead {
-		if err := box.MarkRead(rt.Ctx, rt.agentUUID(), rt.mailAddrs()); err != nil {
+		// Mark exactly the IDs displayed above — not a fresh address re-query,
+		// which would race a concurrent Send and mark an unshown message read.
+		if err := box.MarkRead(rt.Ctx, rt.agentUUID(), ids); err != nil {
 			fmt.Fprintf(stderr, "✗ mark-read: %v\n", err)
 			return 3
 		}
@@ -91,9 +95,12 @@ func inboxRow(m *domain.Message) string {
 			from = from[:8]
 		}
 	}
+	// %q the sender-controlled thread id, as with the body: an agent could
+	// otherwise smuggle ANSI/OSC terminal control sequences into this
+	// Claude-consumed output (loto-qhw, CodeRabbit).
 	thread := ""
 	if m.ThreadID != "" {
-		thread = " thread=" + m.ThreadID
+		thread = fmt.Sprintf(" thread=%q", m.ThreadID)
 	}
 	return fmt.Sprintf("ℹ id=%s from=%s to=%s%s sent=%s body=%q",
 		m.ID, from, m.To, thread, m.CreatedAt.UTC().Format(time.RFC3339), m.Body)

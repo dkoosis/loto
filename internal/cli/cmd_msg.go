@@ -51,12 +51,24 @@ func cmdMsg(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, msgUsage)
 		return 2
 	}
+	// Reject a negative TTL rather than silently applying the 7d default: a
+	// caller writing --ttl=-1h means "expire fast", and falling through to the
+	// default retains mail they meant to drop (loto-qhw, Codex/CodeRabbit).
+	// 0 stays valid — it selects the default, matching lock/claim.
+	if *ttl < 0 {
+		fmt.Fprintf(stderr, "✗ --ttl must be non-negative, got %s\n", *ttl)
+		return 2
+	}
 	warnIfNoBeadID(*text, stderr)
 	to, err := resolveMsgAddr(fs.Arg(0))
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 2
 	}
+	return msgSend(ctx, to, *text, *thread, *ttl, stdout, stderr)
+}
+
+func msgSend(ctx context.Context, to, body, thread string, ttl time.Duration, stdout, stderr io.Writer) int {
 	rt, err := openRuntime(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
@@ -73,13 +85,13 @@ func cmdMsg(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		FromUUID:   domain.AgentUUID(rt.Agent.UUID),
 		FromHandle: rt.Agent.Handle,
 		To:         to,
-		Body:       *text,
-		ThreadID:   *thread,
+		Body:       body,
+		ThreadID:   thread,
 	}
-	if *ttl > 0 {
+	if ttl > 0 {
 		now := time.Now()
 		m.CreatedAt = now
-		m.ExpiresAt = now.Add(*ttl)
+		m.ExpiresAt = now.Add(ttl)
 	}
 	id, err := box.Send(rt.Ctx, m)
 	if err != nil {

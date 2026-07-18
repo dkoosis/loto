@@ -31,6 +31,23 @@ func addrs(reader, slug string) []string {
 	return []string{reader, domain.AddrAll, domain.RepoAddr(slug)}
 }
 
+// markInbox lists reader's inbox and marks exactly those IDs read — the
+// production call sequence (display then mark the displayed set).
+func markInbox(t *testing.T, b *Box, reader domain.AgentUUID, slug string) {
+	t.Helper()
+	msgs, err := b.Inbox(context.Background(), reader, addrs(string(reader), slug))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, len(msgs))
+	for i := range msgs {
+		ids[i] = msgs[i].ID
+	}
+	if err := b.MarkRead(context.Background(), reader, ids); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func send(t *testing.T, b *Box, from, to, body string) string {
 	t.Helper()
 	// FromHandle left empty: Summary falls back to the short UUID, keeping
@@ -84,9 +101,7 @@ func TestBroadcastPerReaderRead(t *testing.T) {
 		}
 	}
 
-	if err := b.MarkRead(ctx, tmUUIDBob, addrs(tmUUIDBob, "loto")); err != nil {
-		t.Fatal(err)
-	}
+	markInbox(t, b, tmUUIDBob, "loto")
 	bobAfter, _ := b.Inbox(ctx, tmUUIDBob, addrs(tmUUIDBob, "loto"))
 	if len(bobAfter) != 0 {
 		t.Fatalf("bob marked read but still sees %d", len(bobAfter))
@@ -109,6 +124,66 @@ func TestSenderExcludedFromOwnBroadcast(t *testing.T) {
 	}
 }
 
+// Self-exclusion is scoped to broadcasts: direct mail an agent addresses to
+// its own UUID (a cross-session note-to-self) must still arrive.
+func TestSelfDirectMailDelivered(t *testing.T) {
+	b := openTestBox(t)
+	send(t, b, tmUUIDAlice, tmUUIDAlice, "loto-qhw: note to self")
+	got, err := b.Inbox(context.Background(), tmUUIDAlice, addrs(tmUUIDAlice, "loto"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("self-addressed direct mail should arrive, got %d", len(got))
+	}
+}
+
+// MarkRead marks only the IDs passed, so a message that arrives after the
+// display query but before the mark is NOT consumed unseen.
+func TestMarkReadOnlyConsumesGivenIDs(t *testing.T) {
+	b := openTestBox(t)
+	ctx := context.Background()
+	first := send(t, b, tmUUIDAlice, tmUUIDBob, "first")
+
+	// Bob "displays" only the first message, then a second arrives.
+	displayed := []string{first}
+	send(t, b, tmUUIDAlice, tmUUIDBob, "second (arrived post-display)")
+
+	if err := b.MarkRead(ctx, tmUUIDBob, displayed); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := b.Inbox(ctx, tmUUIDBob, addrs(tmUUIDBob, "loto"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 1 || remaining[0].Body != "second (arrived post-display)" {
+		t.Fatalf("post-display message must survive mark-read: %+v", remaining)
+	}
+}
+
+// A repo whose slug is "all" must not collide with the @all broadcast.
+func TestRepoAddrReservesAll(t *testing.T) {
+	if got := domain.RepoAddr("all"); got == domain.AddrAll {
+		t.Fatalf("RepoAddr(\"all\") = %q collides with broadcast %q", got, domain.AddrAll)
+	}
+	b := openTestBox(t)
+	ctx := context.Background()
+	// Broadcast, and repo-"all" mail, must land in disjoint channels.
+	send(t, b, tmUUIDAlice, domain.AddrAll, "broadcast")
+	send(t, b, tmUUIDAlice, domain.RepoAddr("all"), "repo-all only")
+
+	// An agent NOT in repo "all" sees only the broadcast.
+	elsewhere, _ := b.Inbox(ctx, tmUUIDBob, addrs(tmUUIDBob, "loto"))
+	if len(elsewhere) != 1 || elsewhere[0].Body != "broadcast" {
+		t.Fatalf("agent outside repo-all should see only broadcast: %+v", elsewhere)
+	}
+	// An agent in repo "all" sees both (broadcast via @all, repo via @all-repo).
+	inAll, _ := b.Inbox(ctx, tmUUIDCara, addrs(tmUUIDCara, "all"))
+	if len(inAll) != 2 {
+		t.Fatalf("agent in repo-all should see broadcast + repo mail, got %d", len(inAll))
+	}
+}
+
 func TestRepoAddressRouting(t *testing.T) {
 	b := openTestBox(t)
 	ctx := context.Background()
@@ -125,37 +200,43 @@ func TestRepoAddressRouting(t *testing.T) {
 }
 
 func TestExpiryFiltersAndPurges(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mail.db")
+	b := openTestBox(t)
 	ctx := context.Background()
-	b, err := Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	now := time.Now()
-	if _, err := b.Send(ctx, domain.Message{
-		FromUUID: tmUUIDAlice, To: tmUUIDBob, Body: tmBody,
-		CreatedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour),
-	}); err != nil {
-		t.Fatal(err)
+	sendExpired := func() {
+		if _, err := b.Send(ctx, domain.Message{
+			FromUUID: tmUUIDAlice, To: tmUUIDBob, Body: tmBody,
+			CreatedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
+	sendExpired()
+
+	// Read never lists expired mail, regardless of purge.
 	got, _ := b.Inbox(ctx, tmUUIDBob, addrs(tmUUIDBob, "loto"))
 	if len(got) != 0 {
 		t.Fatalf("expired mail listed: %+v", got)
 	}
-	b.Close()
 
-	// Reopen purges the row entirely.
-	b2, err := Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b2.Close()
+	// Reads do NOT purge (read-only Open stays read-only). The expired row is
+	// still on disk after a read-only cycle.
 	var n int
-	if err := b2.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&n); err != nil {
+	if err := b.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 0 {
-		t.Fatalf("reopen should purge expired rows, %d remain", n)
+	if n != 1 {
+		t.Fatalf("read path must not purge; want 1 row on disk, got %d", n)
+	}
+
+	// A write (Send of a fresh live message) purges the expired row, leaving
+	// only the live one.
+	send(t, b, tmUUIDAlice, tmUUIDBob, "live")
+	if err := b.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("write should purge expired rows; want 1 live row, got %d", n)
 	}
 }
 
