@@ -39,6 +39,7 @@ type runtime struct {
 	Ctx           context.Context //nolint:containedctx // handle on the per-invocation ctx; threading it through every store/identity call from cmd_*.go would be uniform noise without changing semantics
 	Host          string
 	StateDir      string
+	Slug          string             // project slug of the repo being acted in; addresses @<slug> mail
 	SessionUUID   domain.SessionUUID // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID
 	SessionPinned bool               // true iff LOTO_SESSION_ID was in env; gates session-scoped semantics
 	AgentPinned   bool               // true iff a non-empty LOTO_AGENT_ID, a usable LOTO_SUBAGENT_ID (SubagentIDPins), or CLAUDE_CODE_SESSION_ID pins an identity; false → Ensure minted a throwaway UUID
@@ -102,10 +103,11 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("identity: %w", err)
 	}
-	dir, err := stateDirForCwd(ctx)
+	top, err := gitRevParseToplevel(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("not in a git repo: %w", err)
 	}
+	dir := StateDir(top)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -129,6 +131,7 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 		Ctx:           ctx,
 		Host:          host,
 		StateDir:      dir,
+		Slug:          ResolveAndPinProjectSlug(top),
 		SessionUUID:   domain.SessionUUID(sid),
 		SessionPinned: pinned,
 		AgentPinned:   agentPinned,
@@ -185,14 +188,6 @@ func (r *runtime) liveProbe() domain.PidLiveProbe {
 		}
 		return cur == storedStart
 	}
-}
-
-func stateDirForCwd(ctx context.Context) (string, error) {
-	top, err := gitRevParseToplevel(ctx)
-	if err != nil {
-		return "", fmt.Errorf("not in a git repo: %w", err)
-	}
-	return StateDir(top), nil
 }
 
 // lockOwnerUUIDs collects the set of owner_uuid values referenced by live

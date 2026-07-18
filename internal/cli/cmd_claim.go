@@ -66,6 +66,7 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
+	defer rt.DeferredMailFooter(stdout)
 
 	now := time.Now()
 	rec := domain.ClaimRecord{

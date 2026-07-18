@@ -75,6 +75,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
+	defer rt.DeferredMailFooter(stdout)
 
 	live := rt.liveProbe()
 
