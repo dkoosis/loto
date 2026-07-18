@@ -44,6 +44,7 @@ func cmdUnlock(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
+	defer rt.DeferredMailFooter(stdout)
 
 	if *all {
 		return unlockAll(rt, stdout, stderr)

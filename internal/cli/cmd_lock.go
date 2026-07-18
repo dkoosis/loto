@@ -73,6 +73,7 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
+	defer rt.DeferredMailFooter(stdout)
 
 	mode := domain.ModeExclusive
 	if *shared {

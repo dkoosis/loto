@@ -1,0 +1,15 @@
+usage: loto msg <to> -t "<text>" [--ttl 168h] [--thread <id>]
+
+Send store-and-forward mail to another agent. Host-global: crosses repos.
+
+<to> is one of:
+  <handle>   a specific agent (e.g. SunnyPorcupine)
+  @<slug>    whoever next acts in that repo (e.g. @loto, @cc-plugins)
+  @all       every agent on this machine
+
+Convention: open the text with your bead id, then the ask.
+Default TTL 168h (7d); unread mail expires silently.
+
+examples:
+  loto msg @loto -t "loto-qhw: does check --gate handle claims?"
+  loto msg SunnyPorcupine -t "loto-qhw: ei5 done? I need session release"

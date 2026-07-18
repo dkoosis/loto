@@ -1,0 +1,7 @@
+usage: loto inbox [--mark-read] [--summary]
+
+List unread mail for this agent: direct, @all, and @<this-repo-slug>.
+
+  --mark-read   stamp everything listed as read (per-reader; broadcast mail
+                stays unread for other agents)
+  --summary     one-line unread count for hooks/banners; silent when empty

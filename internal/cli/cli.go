@@ -46,6 +46,8 @@ commands:
   doctor   Detect and optionally repair stale locks
   tag      Leave a note on a target locked by another agent
   ack      Dismiss a tag by ID
+  msg      Send mail to an agent, @<repo-slug>, or @all; host-global, crosses repos
+  inbox    List unread mail; --mark-read, --summary for banners
   whoami   Print agent identity
   version  Print loto version
 
