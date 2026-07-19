@@ -26,7 +26,8 @@ Send store-and-forward mail to another agent. Host-global: crosses repos.
 
 <to> is one of:
   <handle>   a specific agent (e.g. SunnyPorcupine)
-  @<slug>    whoever next acts in that repo (e.g. @loto, @cc-plugins)
+  @<slug>    whoever next acts in that repo — pinned slug or its directory
+             basename both deliver (e.g. @dkoosis-ferret or @ferret)
   @all       every agent on this machine
 
 Convention: open the text with your bead id, then the ask.

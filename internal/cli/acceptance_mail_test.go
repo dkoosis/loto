@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -10,7 +11,7 @@ import (
 // by handle → bob's status surfaces the unread banner → bob reads and marks →
 // banner gone. Then @all and @<slug> routing, with per-reader read cursors.
 func TestE2E_MailLifecycle(t *testing.T) {
-	withTempProject(t)
+	repo := withTempProject(t)
 	alice, bob := twoAgents(t)
 
 	asAlice := func() { t.Setenv("LOTO_AGENT_ID", alice.UUID) }
@@ -91,6 +92,20 @@ func TestE2E_MailLifecycle(t *testing.T) {
 	}
 	if strings.Contains(out, "other repo") {
 		t.Fatalf("bob must not see @elsewhere mail: %q", out)
+	}
+
+	// 7. dir-basename alias: the pinned slug is test-proj (remote-derived) but
+	//    a sender who only knows the checkout dir addresses its basename —
+	//    both must deliver (loto-ykp: @ferret vs @dkoosis-ferret dead-letter).
+	base := "@" + filepath.Base(repo)
+	asAlice()
+	if _, _, code := run(tcMsg, base, "-t", "loto-ykp: dir-alias mail"); code != 0 {
+		t.Fatalf("msg %s: code=%d", base, code)
+	}
+	asBob()
+	out, _, _ = run("inbox")
+	if !strings.Contains(out, "dir-alias mail") {
+		t.Fatalf("bob should see %s mail via basename alias: %q", base, out)
 	}
 }
 

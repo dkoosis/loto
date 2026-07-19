@@ -30,9 +30,17 @@ func (r *runtime) OpenMail() (*mail.Box, error) {
 func (r *runtime) agentUUID() domain.AgentUUID { return domain.AgentUUID(r.Agent.UUID) }
 
 // mailAddrs is this invocation's full address set: direct mail, machine-wide
-// broadcast, and the repo address of the project being acted in.
+// broadcast, and the repo addresses of the project being acted in. A repo
+// answers to BOTH its pinned slug and its directory basename: senders who
+// haven't visited the target repo guess the dir name (@ferret) while the
+// pinned slug is remote-derived (@dkoosis-ferret), and send deliberately does
+// not validate slugs — so the reader is the only place the alias can resolve.
 func (r *runtime) mailAddrs() []string {
-	return []string{r.Agent.UUID, domain.AddrAll, domain.RepoAddr(r.Slug)}
+	addrs := []string{r.Agent.UUID, domain.AddrAll, domain.RepoAddr(r.Slug)}
+	if base := filepath.Base(r.RepoTop); base != "" && base != "." && base != r.Slug {
+		addrs = append(addrs, domain.RepoAddr(base))
+	}
+	return addrs
 }
 
 // DeferredMailFooter prints a one-line unread banner after the primary command
