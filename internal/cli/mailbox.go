@@ -37,7 +37,7 @@ func (r *runtime) agentUUID() domain.AgentUUID { return domain.AgentUUID(r.Agent
 // not validate slugs — so the reader is the only place the alias can resolve.
 func (r *runtime) mailAddrs() []string {
 	addrs := []string{r.Agent.UUID, domain.AddrAll, domain.RepoAddr(r.Slug)}
-	if base := filepath.Base(r.RepoTop); base != "" && base != "." && base != r.Slug {
+	if base := filepath.Base(r.RepoTop); base != "" && base != "." && base != string(filepath.Separator) && base != r.Slug {
 		addrs = append(addrs, domain.RepoAddr(base))
 	}
 	return addrs
