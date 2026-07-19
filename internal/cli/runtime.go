@@ -40,6 +40,7 @@ type runtime struct {
 	Host          string
 	StateDir      string
 	Slug          string             // project slug of the repo being acted in; addresses @<slug> mail
+	RepoTop       string             // absolute repo toplevel; its basename is the @<dir> mail alias
 	SessionUUID   domain.SessionUUID // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID
 	SessionPinned bool               // true iff LOTO_SESSION_ID was in env; gates session-scoped semantics
 	AgentPinned   bool               // true iff a non-empty LOTO_AGENT_ID, a usable LOTO_SUBAGENT_ID (SubagentIDPins), or CLAUDE_CODE_SESSION_ID pins an identity; false → Ensure minted a throwaway UUID
@@ -132,6 +133,7 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 		Host:          host,
 		StateDir:      dir,
 		Slug:          ResolveAndPinProjectSlug(top),
+		RepoTop:       top,
 		SessionUUID:   domain.SessionUUID(sid),
 		SessionPinned: pinned,
 		AgentPinned:   agentPinned,

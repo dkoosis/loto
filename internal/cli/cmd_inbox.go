@@ -16,7 +16,8 @@ func init() { register("inbox", cmdInbox) } //nolint:gochecknoinits // command r
 
 const inboxUsage = `usage: loto inbox [--mark-read] [--summary]
 
-List unread mail for this agent: direct, @all, and @<this-repo-slug>.
+List unread mail for this agent: direct, @all, and this repo's addresses
+(pinned slug and directory basename).
 
   --mark-read   stamp everything listed as read (per-reader; broadcast mail
                 stays unread for other agents)
