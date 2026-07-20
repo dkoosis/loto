@@ -30,10 +30,10 @@ func mkClaimSession(prefix, owner, session string, expIn time.Duration) domain.C
 	return c
 }
 
-// ReleaseClaimsBySession with a session filter drops only that session's claims
-// for the agent, leaving another session's claim and other agents' claims intact
-// (loto-ei5). The released prefixes come back sorted.
-func TestReleaseClaimsBySession_ScopedToSession(t *testing.T) {
+// ReleaseBySession with a session filter drops only that session's claims for
+// the agent, leaving another session's claim and other agents' claims intact
+// (loto-ei5). The released prefixes come back sorted, as the 2nd return.
+func TestReleaseBySession_ClaimsScopedToSession(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	for _, c := range []domain.ClaimRecord{
@@ -47,9 +47,9 @@ func TestReleaseClaimsBySession_ScopedToSession(t *testing.T) {
 		}
 	}
 
-	got, err := s.ReleaseClaimsBySession(ctx, tcAlice, "session-1")
+	_, got, err := s.ReleaseBySession(ctx, tcAlice, "session-1")
 	if err != nil {
-		t.Fatalf("ReleaseClaimsBySession: %v", err)
+		t.Fatalf("ReleaseBySession: %v", err)
 	}
 	want := []string{"internal/a", "internal/z"} // sorted, session-1 only
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
@@ -72,7 +72,7 @@ func TestReleaseClaimsBySession_ScopedToSession(t *testing.T) {
 
 // An empty session filter is the agent-scoped fallback: every one of the agent's
 // claims goes, across sessions, but other agents' claims stay.
-func TestReleaseClaimsBySession_AgentScopedFallback(t *testing.T) {
+func TestReleaseBySession_ClaimsAgentScopedFallback(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	for _, c := range []domain.ClaimRecord{
@@ -85,9 +85,9 @@ func TestReleaseClaimsBySession_AgentScopedFallback(t *testing.T) {
 		}
 	}
 
-	got, err := s.ReleaseClaimsBySession(ctx, tcAlice, "")
+	_, got, err := s.ReleaseBySession(ctx, tcAlice, "")
 	if err != nil {
-		t.Fatalf("ReleaseClaimsBySession: %v", err)
+		t.Fatalf("ReleaseBySession: %v", err)
 	}
 	if len(got) != 2 || got[0] != "internal/a" || got[1] != "internal/b" {
 		t.Fatalf("released = %v, want both alice prefixes across sessions", got)
@@ -102,15 +102,15 @@ func TestReleaseClaimsBySession_AgentScopedFallback(t *testing.T) {
 }
 
 // Nothing owned → nil, no error, and no write (empty result is not a failure).
-func TestReleaseClaimsBySession_NothingOwned(t *testing.T) {
+func TestReleaseBySession_ClaimsNothingOwned(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	if err := s.ClaimPrefix(ctx, mkClaimSession("internal/c", tcBob, "session-1", time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.ReleaseClaimsBySession(ctx, tcAlice, "")
+	_, got, err := s.ReleaseBySession(ctx, tcAlice, "")
 	if err != nil {
-		t.Fatalf("ReleaseClaimsBySession: %v", err)
+		t.Fatalf("ReleaseBySession: %v", err)
 	}
 	if got != nil {
 		t.Fatalf("released = %v, want nil for an agent owning no claims", got)

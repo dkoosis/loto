@@ -194,31 +194,23 @@ func (s *Store) ReleaseClaim(ctx context.Context, prefix string, owner domain.Ag
 	return out, nil
 }
 
-// ReleaseClaimsBySession deletes every claim owned by agent — optionally scoped
+// deleteClaimsBySessionTx deletes every claim owned by agent — optionally scoped
 // to one session — returning the released path-prefixes sorted (deterministic
-// output, per design.md). The claim-side companion to ReleaseBySession for
-// locks: a session-end `unlock --all` now clears an agent's claimed territory
-// too, not just its locks, closing the gap where a crashed or ended agent's
-// claim squats its prefix until the TTL lapses. Claims had a single reclamation
-// layer (TTL) where locks have three — PID probe, session-end release, doctor
-// sweep — and this restores the middle one (loto-ei5). An empty sessionUUID
-// matches all of the agent's sessions (the agent-scoped fallback, exactly as
-// ReleaseBySession treats an empty session filter).
-func (s *Store) ReleaseClaimsBySession(ctx context.Context, agent domain.AgentUUID, sessionUUID domain.SessionUUID) ([]string, error) {
-	tx, cleanup, err := s.beginTx(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer cleanup()
-
+// output, per design.md). It runs INSIDE the caller's tx so a session-end
+// release deletes locks and claims atomically: claims strip no write bits and
+// carry no PID, so unlike locks they need no post-commit filesystem restore and
+// fold safely into the lock-release transaction (loto-ei5; Codex #219 P1 — a
+// separate claim tx could leave claims squatting after the lock tx committed).
+// An empty session matches all of the agent's sessions (the agent-scoped
+// fallback, matching ReleaseBySession).
+func deleteClaimsBySessionTx(ctx context.Context, tx *sql.Tx, agent, session string) ([]string, error) {
 	where := `owner_uuid = ?`
-	args := []any{string(agent)}
-	if sessionUUID != "" {
+	args := []any{agent}
+	if session != "" {
 		where += ` AND session_uuid = ?`
-		args = append(args, string(sessionUUID))
+		args = append(args, session)
 	}
-
-	// Select-then-delete in one tx so the caller can report exactly which
+	// Select-then-delete in the same tx so the caller can report exactly which
 	// prefixes were released (a bare DELETE gives only a count).
 	prefixes, err := selectClaimPrefixesTx(ctx, tx, where, args)
 	if err != nil {
@@ -230,12 +222,12 @@ func (s *Store) ReleaseClaimsBySession(ctx context.Context, agent domain.AgentUU
 	if _, err := tx.ExecContext(ctx, `DELETE FROM claims WHERE `+where, args...); err != nil {
 		return nil, err
 	}
-	return prefixes, commitTxFn(tx)
+	return prefixes, nil
 }
 
 // selectClaimPrefixesTx returns the path_prefixes matching the where clause,
-// sorted, within tx. Split out of ReleaseClaimsBySession so the rows handle
-// closes via defer before the sibling DELETE runs on the same tx.
+// sorted, within tx. Split out so the rows handle closes via defer before the
+// sibling DELETE runs on the same tx.
 func selectClaimPrefixesTx(ctx context.Context, tx *sql.Tx, where string, args []any) ([]string, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT path_prefix FROM claims WHERE `+where+` ORDER BY path_prefix`, args...) //nolint:gosec // G202: where is built only from constant string literals (no caller input); all values pass via args
 	if err != nil {

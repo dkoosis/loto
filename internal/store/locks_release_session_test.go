@@ -10,6 +10,51 @@ import (
 	"loto/internal/domain"
 )
 
+// TestReleaseBySession_ReleasesLocksAndClaimsAtomically proves the ei5 fix:
+// ONE ReleaseBySession call clears both the session's locks and its claims in a
+// single transaction (Codex #219 P1 — no second claim tx that could leave claims
+// squatting if the first committed). A sibling session's lock AND claim survive.
+func TestReleaseBySession_ReleasesLocksAndClaimsAtomically(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	live := func(string, int, int64) bool { return true }
+
+	la := mkFileLockSession(t, "a.go", tcAlice, "session-1", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{la}, live); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimPrefix(ctx, mkClaimSession("internal/store", tcAlice, "session-1", time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	// Sibling session-2 territory that must survive.
+	lb := mkFileLockSession(t, "b.go", tcAlice, "session-2", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{lb}, live); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimPrefix(ctx, mkClaimSession("internal/render", tcAlice, "session-2", time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	results, claims, err := s.ReleaseBySession(ctx, tcAlice, "session-1")
+	if err != nil {
+		t.Fatalf("ReleaseBySession: %v", err)
+	}
+	if len(results) != 1 || results[0].Target.Canonical != la.Target.Canonical {
+		t.Fatalf("locks released = %v, want just a.go", results)
+	}
+	if len(claims) != 1 || claims[0] != "internal/store" {
+		t.Fatalf("claims released = %v, want [internal/store]", claims)
+	}
+	// session-2's lock and claim both survive.
+	if got, _ := s.LockAt(ctx, lb.Target); got == nil {
+		t.Error("session-2 lock should survive session-1 release")
+	}
+	remaining, _ := s.ListClaims(ctx)
+	if len(remaining) != 1 || remaining[0].PathPrefix != "internal/render" {
+		t.Errorf("surviving claims = %v, want just session-2's internal/render", remaining)
+	}
+}
+
 // TestReleaseBySession_ScopedToSession verifies that ReleaseBySession only
 // releases locks matching both agent UUID and session UUID — sibling sessions
 // of the same agent are left intact.
@@ -24,7 +69,7 @@ func TestReleaseBySession_ScopedToSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.ReleaseBySession(ctx, tcAlice, "session-1")
+	results, _, err := s.ReleaseBySession(ctx, tcAlice, "session-1")
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -62,7 +107,7 @@ func TestReleaseBySession_AgentScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.ReleaseBySession(ctx, tcAlice, "")
+	results, _, err := s.ReleaseBySession(ctx, tcAlice, "")
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -91,7 +136,7 @@ func TestReleaseBySession_EmptyResult(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 
-	results, err := s.ReleaseBySession(ctx, tcAlice, "no-such-session")
+	results, _, err := s.ReleaseBySession(ctx, tcAlice, "no-such-session")
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -117,7 +162,7 @@ func TestReleaseBySession_RestoresChmod(t *testing.T) {
 		t.Fatalf("precondition: acquire should strip write, got %o", st.Mode().Perm())
 	}
 
-	results, err := s.ReleaseBySession(ctx, tcAlice, "session-1")
+	results, _, err := s.ReleaseBySession(ctx, tcAlice, "session-1")
 	if err != nil {
 		t.Fatal(err)
 	}

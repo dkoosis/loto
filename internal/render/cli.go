@@ -183,7 +183,7 @@ func EmitClaimRelease(w io.Writer, res store.ClaimReleaseResult) int {
 }
 
 // EmitClaimsReleased renders the claim half of a session-end `unlock --all`:
-// the prefixes ReleaseClaimsBySession dropped. Prints a triage count first
+// the claim prefixes ReleaseBySession dropped. Prints a triage count first
 // (design.md), then one ✓ row per prefix, cwd-relative. Empty input still emits
 // the count=0 line so the claim leg is never silent — a hook reading this
 // surface must be able to tell "no claims owned" from a crash. prefixes are
