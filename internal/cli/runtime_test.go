@@ -6,19 +6,21 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"loto/internal/identity"
 )
 
-// TestAgentIdentityPinned locks the loto-s3l alignment: agentIdentityPinned
-// must mean exactly "identity.Ensure resolves a real, lock-owning identity" —
-// the negation of "Ensure mints a throwaway". A set-but-EMPTY LOTO_AGENT_ID
-// and a traversal-shaped LOTO_SUBAGENT_ID both fall through to a throwaway in
-// Ensure, so both read as UNPINNED here. Previously a blank agent id (LookupEnv
-// set=true) and any non-empty subagent id wrongly pinned, feeding release --all
-// a throwaway UUID → the loto-pody false-success. Post-alignment this predicate
-// is the single source of truth the gate probe also uses (cmd_check_gate.go).
+// TestPinnedByEnv locks the loto-s3l alignment: identity.PinnedByEnv must mean
+// exactly "identity.Ensure resolves a real, lock-owning identity" — the negation
+// of "Ensure mints a throwaway". A set-but-EMPTY LOTO_AGENT_ID and a traversal-
+// shaped LOTO_SUBAGENT_ID both fall through to a throwaway in Ensure, so both
+// read as UNPINNED here. Previously a blank agent id (LookupEnv set=true) and any
+// non-empty subagent id wrongly pinned, feeding release --all a throwaway UUID →
+// the loto-pody false-success. Post-loto-ai5 this predicate lives beside Ensure
+// and dispatches on the SAME classifier, so it can't drift from resolution.
 const tcSessID = "sess-1" // representative CLAUDE_CODE_SESSION_ID value
 
-func TestAgentIdentityPinned(t *testing.T) {
+func TestPinnedByEnv(t *testing.T) {
 	set := func(s string) *string { return &s } // present-with-value; nil = truly unset
 	cases := []struct {
 		name       string
@@ -48,8 +50,8 @@ func TestAgentIdentityPinned(t *testing.T) {
 			}
 			t.Setenv("LOTO_SUBAGENT_ID", tc.subagentID)
 			t.Setenv("CLAUDE_CODE_SESSION_ID", tc.sessionID)
-			if got := agentIdentityPinned(); got != tc.want {
-				t.Errorf("agentIdentityPinned() = %v, want %v", got, tc.want)
+			if got := identity.PinnedByEnv(); got != tc.want {
+				t.Errorf("identity.PinnedByEnv() = %v, want %v", got, tc.want)
 			}
 		})
 	}

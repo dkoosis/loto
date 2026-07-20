@@ -60,45 +60,15 @@ func sessionUUID() (id string, pinned bool) {
 	return identity.NewUUID(), false
 }
 
-// agentIdentityPinned reports whether the env pins an identity that
-// identity.Ensure resolves to a real, lock-owning agent (or hard-errors on) —
-// the negation of "Ensure mints a throwaway". It MUST mirror Ensure's
-// resolution PRECEDENCE, not just its inputs, because Ensure short-circuits:
-//  1. LOTO_SUBAGENT_ID via SubagentIDPins — resolveSubagent runs first; a
-//     traversal-shaped id it ignores (falls open → throwaway) must NOT pin.
-//  2. LOTO_AGENT_ID PRESENCE (LookupEnv) — Ensure branches on set-ness before
-//     it ever consults the session id. A set value resolves the record or
-//     fails loud (pinned); a set-but-EMPTY value is explicit-ephemeral →
-//     mintAgent() throwaway → UNPINNED, and Ensure returns there, so the
-//     session id below is NEVER reached. A flat `LOTO_AGENT_ID != "" || …
-//     session` OR would wrongly pin the (blank agent id + session set) combo
-//     that fleet dispatchers hit (doc.go) — the loto-pody false-success.
-//  3. CLAUDE_CODE_SESSION_ID != "" — reached only when LOTO_AGENT_ID is truly
-//     unset; ensureForSession mints+caches a stable per-session owner.
-//
-// This is the single source of truth for both consumers with OPPOSITE fail
-// modes: release --all reads AgentPinned to REFUSE (fail-CLOSED) when unpinned,
-// so a throwaway UUID can't scope a false-success release (loto-pody); `loto
-// check --gate` calls it directly to fail OPEN when unpinned. An edit that
-// shifts this predicate for one surface silently moves the other — keep it a
-// pure env read, no store IO, no runtime receiver (loto-s3l).
-func agentIdentityPinned() bool {
-	if identity.SubagentIDPins(os.Getenv("LOTO_SUBAGENT_ID")) {
-		return true
-	}
-	if v, set := os.LookupEnv("LOTO_AGENT_ID"); set {
-		return v != "" // set-but-empty is explicit-ephemeral; never falls through to the session id
-	}
-	return os.Getenv("CLAUDE_CODE_SESSION_ID") != ""
-}
-
 func openRuntime(ctx context.Context) (*runtime, error) {
 	// Capture whether an explicit identity env var was set before Ensure runs.
 	// Ensure mints a fresh throwaway UUID when neither is present; that UUID
 	// owns no locks and must not be used as an --all release scope — doing so
 	// produces a false-success that silently leaves real locks in place
 	// (loto-pody). AgentPinned mirrors the SessionPinned pattern for sessions.
-	agentPinned := agentIdentityPinned()
+	// identity.PinnedByEnv is the single source shared with the gate probe and
+	// Ensure's own precedence (loto-ai5), so this can't drift from resolution.
+	agentPinned := identity.PinnedByEnv()
 
 	a, err := identity.Ensure(ctx)
 	if err != nil {

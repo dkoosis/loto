@@ -194,11 +194,13 @@ func Ensure(ctx context.Context) (*Agent, error) {
 		return a, err
 	}
 
-	u, set := os.LookupEnv("LOTO_AGENT_ID")
-	if set {
-		if u == "" {
-			return mintAgent()
-		}
+	// The remaining precedence — LOTO_AGENT_ID (explicit vs blank-ephemeral) →
+	// CLAUDE_CODE_SESSION_ID → unbound — is classified in ONE place so the
+	// fail-open/closed gates read the same decision Ensure resolves by, instead
+	// of re-deriving it (loto-ai5; the earlier drift was loto-s3l's blank id).
+	switch envIdentityBinding() { //nolint:exhaustive // default handles the only remaining case, bindingUnbound
+	case bindingAgentIDExplicit:
+		u := os.Getenv("LOTO_AGENT_ID")
 		if !agentIDShape.MatchString(u) {
 			return nil, fmt.Errorf("%w: %q (want canonical uuid hex form)", errInvalidAgentID, u)
 		}
@@ -212,16 +214,70 @@ func Ensure(ctx context.Context) (*Agent, error) {
 		// in the session, since the next invocation sees a different uuid.
 		// Fail loud instead.
 		return nil, fmt.Errorf("%w: %q (no agent record at %s)", errStaleAgentID, u, filepath.Join(registryDir(), u+".json"))
+	case bindingAgentIDEphemeral:
+		// Set-but-empty LOTO_AGENT_ID is explicit-ephemeral: mint a throwaway
+		// and STOP — never fall through to the session id below (loto-s3l).
+		return mintAgent()
+	case bindingSession:
+		return ensureForSession(ctx, os.Getenv("CLAUDE_CODE_SESSION_ID"))
+	default: // bindingUnbound
+		// No explicit env binding. Per identity v4 invariant ("ambiguity allowed
+		// for display, never for authority"), do not adopt any pre-existing local
+		// agent — the heuristic 24h fallback could resurrect a dead session's
+		// UUID and silently re-attribute new locks to it. Mint a fresh identity
+		// instead; the caller can pin it by exporting LOTO_AGENT_ID.
+		return newAgent()
 	}
-	if sid := os.Getenv("CLAUDE_CODE_SESSION_ID"); sid != "" {
-		return ensureForSession(ctx, sid)
+}
+
+// envIdentityBinding classifies the post-subagent identity precedence purely
+// from env — no store IO. It is the single home for the LOTO_AGENT_ID / session
+// ordering that both Ensure (which resolves each case) and PinnedByEnv (which
+// only asks "does this pin authority?") consume, so the two can no longer drift.
+//
+// Ordering is load-bearing: LOTO_AGENT_ID set-ness is checked BEFORE the session
+// id, because a set-but-empty agent id is explicit-ephemeral and must NOT be
+// rescued by a present session id (loto-s3l P1).
+type envBinding int
+
+const (
+	bindingUnbound          envBinding = iota // no identity env → throwaway
+	bindingAgentIDExplicit                    // LOTO_AGENT_ID set & non-empty → resolves or hard-errors
+	bindingAgentIDEphemeral                   // LOTO_AGENT_ID set & empty → throwaway
+	bindingSession                            // CLAUDE_CODE_SESSION_ID set → stable per-session owner
+)
+
+func envIdentityBinding() envBinding {
+	if v, set := os.LookupEnv("LOTO_AGENT_ID"); set {
+		if v == "" {
+			return bindingAgentIDEphemeral
+		}
+		return bindingAgentIDExplicit
 	}
-	// No explicit env binding. Per identity v4 invariant ("ambiguity allowed
-	// for display, never for authority"), do not adopt any pre-existing local
-	// agent — the heuristic 24h fallback could resurrect a dead session's
-	// UUID and silently re-attribute new locks to it. Mint a fresh identity
-	// instead; the caller can pin it by exporting LOTO_AGENT_ID.
-	return newAgent()
+	if os.Getenv("CLAUDE_CODE_SESSION_ID") != "" {
+		return bindingSession
+	}
+	return bindingUnbound
+}
+
+// pinsForAuthority reports whether this binding makes Ensure resolve a real,
+// lock-owning agent (or hard-error) rather than mint a throwaway.
+func (b envBinding) pinsForAuthority() bool {
+	return b == bindingAgentIDExplicit || b == bindingSession
+}
+
+// PinnedByEnv reports whether the environment pins an authority-bearing identity
+// — i.e. Ensure will resolve a real, lock-owning agent (or hard-error), NOT mint
+// a throwaway. Pure env read (plus the subagent key-shape check), no store IO,
+// so `loto check --gate` can fail-open BEFORE opening the store on a bare human
+// shell, and `release --all` can fail-closed, both off the SAME precedence Ensure
+// dispatches on. This is the single source of truth loto-ai5 established, retiring
+// the cli-side agentIdentityPinned duplicate that loto-s3l had to realign by hand.
+func PinnedByEnv() bool {
+	if SubagentIDPins(os.Getenv("LOTO_SUBAGENT_ID")) {
+		return true
+	}
+	return envIdentityBinding().pinsForAuthority()
 }
 
 // ensureForSession resolves a stable identity for one Claude Code session
@@ -587,7 +643,7 @@ func loadByUUID(uuid string) (*Agent, error) {
 		return nil, fmt.Errorf("%w: %q", errInvalidAgentID, uuid)
 	}
 	path := filepath.Join(registryDir(), uuid+".json")
-	body, err := os.ReadFile(path)
+	body, err := os.ReadFile(path) //nolint:gosec // G703 taint FP: agentIDShape.MatchString above restricts uuid to canonical hex, so path cannot traverse (same guard sessionCachePath documents)
 	if err != nil {
 		return nil, err
 	}
