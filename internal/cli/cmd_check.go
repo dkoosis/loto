@@ -232,8 +232,14 @@ func printCheckConflicts(stdout io.Writer, rows []checkConflict) bool {
 			fmt.Fprintf(stdout, "✗ path=%s blocker=%s holder_target=%s intent=%q expires_at=%s liveness=alive\n",
 				relPath(r.Path), r.Blocker.OwnerUUID, relPath(r.Blocker.Target.Canonical), r.Blocker.Intent,
 				r.Blocker.ExpiresAt.UTC().Format(time.RFC3339))
+			// Prefer tag+defer: leaving a breadcrumb gets you a loto mail when
+			// the holder releases (loto-4lc), so you move on instead of sitting
+			// on the lock. Force-break stays the escape hatch for a dead holder.
+			// Do NOT wait in place — you will be notified.
+			blocker := relPath(r.Blocker.Target.Canonical)
 			fmt.Fprintln(stdout, "```bash")
-			fmt.Fprintf(stdout, "loto unlock --force -t \"unblock\" %s\n", relPath(r.Blocker.Target.Canonical))
+			fmt.Fprintf(stdout, "loto tag %s \"waiting — mail me on release\"  # then work elsewhere; loto mails you when it frees\n", blocker)
+			fmt.Fprintf(stdout, "loto unlock --force -t \"unblock\" %s  # only if the holder is dead\n", blocker)
 			fmt.Fprintln(stdout, "```")
 			continue
 		}

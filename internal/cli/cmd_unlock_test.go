@@ -10,6 +10,57 @@ import (
 	"time"
 )
 
+// TestUnlock_NotifiesWaiters closes the blocked-waiter loop (loto-4lc): a waiter
+// who tagged a locked target instead of sitting on it gets a loto mail when the
+// holder releases, so the mail footer pulls them back. No daemon, no polling.
+func TestUnlock_NotifiesWaiters(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("alice lock failed")
+	}
+	// Bob hits the blocked target and leaves a breadcrumb instead of waiting.
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	if code := Run([]string{"tag", tcTargetA, "bob waiting on a.go"}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("bob tag failed")
+	}
+	// Alice releases → Bob should be mailed.
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	if code := Run([]string{tcCmdUnlock, tcTargetA}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("alice unlock failed")
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out bytes.Buffer
+	if code := Run([]string{"inbox"}, &out, io.Discard); code != 0 {
+		t.Fatalf("bob inbox exit: %q", out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "released") || !strings.Contains(got, "a.go") {
+		t.Errorf("bob should have a release mail naming a.go: %q", got)
+	}
+}
+
+// The holder is not spammed for their own tag, and a target with no waiter
+// produces no mail.
+func TestUnlock_NoWaiter_NoMail(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("lock failed")
+	}
+	if code := Run([]string{tcCmdUnlock, tcTargetA}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("unlock failed")
+	}
+	var out bytes.Buffer
+	Run([]string{"inbox"}, &out, io.Discard)
+	if strings.Contains(out.String(), "released") {
+		t.Errorf("no waiter → no release mail, got: %q", out.String())
+	}
+}
+
 // TestUnlockAll_NoPinnedIdentity_RefusesFalseSuccess pins the loto-pody
 // regression: when neither LOTO_AGENT_ID nor CLAUDE_CODE_SESSION_ID is set,
 // identity.Ensure mints a fresh UUID that owns zero locks, and the old
