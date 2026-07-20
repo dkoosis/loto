@@ -299,6 +299,48 @@ func (b *Box) Summary(ctx context.Context, reader domain.AgentUUID, readerBorn t
 	return count, senders, rows.Err()
 }
 
+// Sent is one of the caller's own live outgoing messages plus how many distinct
+// readers have read it — the answer to "did anyone pick this up?". For direct
+// (@uuid) mail ReadBy is 0 or 1; for @all it is the reader count so far; for a
+// @<slug> baton it is always 0 while the row exists (the first read deletes it,
+// so a still-present baton is by definition unclaimed).
+type Sent struct {
+	Msg    domain.Message
+	ReadBy int
+}
+
+// SentBox lists the caller's own unexpired outgoing mail, newest first, each
+// with its distinct-reader count. Read state lives in message_reads keyed by
+// (message_id, reader_uuid); a LEFT JOIN + COUNT folds it in without a second
+// round-trip. No schema change — this is a new view over existing rows.
+func (b *Box) SentBox(ctx context.Context, sender domain.AgentUUID) ([]Sent, error) {
+	rows, err := b.db.QueryContext(ctx,
+		`SELECT m.id, m.to_addr, m.body, m.thread_id, m.created_at, m.expires_at, COUNT(r.reader_uuid)
+		 FROM messages m
+		 LEFT JOIN message_reads r ON r.message_id = m.id
+		 WHERE m.from_uuid = ? AND m.expires_at > ?
+		 GROUP BY m.id
+		 ORDER BY m.created_at DESC, m.id DESC`,
+		string(sender), time.Now().UnixNano())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Sent
+	for rows.Next() {
+		var s Sent
+		var createdNs, expiresNs int64
+		if err := rows.Scan(&s.Msg.ID, &s.Msg.To, &s.Msg.Body, &s.Msg.ThreadID, &createdNs, &expiresNs, &s.ReadBy); err != nil {
+			return nil, err
+		}
+		s.Msg.FromUUID = sender
+		s.Msg.CreatedAt = time.Unix(0, createdNs)
+		s.Msg.ExpiresAt = time.Unix(0, expiresNs)
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // classifyMarkRead resolves the current address class of each displayed id,
 // splitting them into repo-baton ids (delete on read) and per-reader cursor ids
 // (@uuid/@all). Queried one id at a time rather than a variadic IN (...): a

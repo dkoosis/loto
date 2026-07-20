@@ -265,6 +265,54 @@ func TestSendValidation(t *testing.T) {
 	}
 }
 
+// SentBox lists the sender's own live outgoing mail with a distinct-reader
+// count, and reflects reads: a direct message flips to ReadBy=1 once its
+// recipient reads it, while a @<slug> baton vanishes on first read (loto-eql).
+func TestSentBox(t *testing.T) {
+	b := openTestBox(t)
+	ctx := context.Background()
+	direct := send(t, b, tmUUIDAlice, tmUUIDBob, "direct to bob")
+	send(t, b, tmUUIDAlice, domain.AddrAll, "broadcast")
+	send(t, b, tmUUIDAlice, domain.RepoAddr("loto"), "repo baton")
+
+	// All three are alice's, none read yet.
+	sent, err := b.SentBox(ctx, tmUUIDAlice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 3 {
+		t.Fatalf("alice should have 3 live sent messages, got %d", len(sent))
+	}
+	for _, s := range sent {
+		if s.ReadBy != 0 {
+			t.Errorf("id=%s ReadBy=%d, want 0 before any read", s.Msg.ID, s.ReadBy)
+		}
+	}
+	// Another agent's SentBox is empty — SentBox is sender-scoped.
+	if other, _ := b.SentBox(ctx, tmUUIDBob); len(other) != 0 {
+		t.Fatalf("bob sent nothing, got %d", len(other))
+	}
+
+	// Bob reads his inbox (direct + @all + the repo baton).
+	markInbox(t, b, tmUUIDBob, "loto")
+
+	sent, err = b.SentBox(ctx, tmUUIDAlice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The repo baton was consumed (deleted on read) → 2 remain.
+	if len(sent) != 2 {
+		t.Fatalf("baton should be consumed on read, want 2 remaining, got %d", len(sent))
+	}
+	byID := map[string]int{}
+	for _, s := range sent {
+		byID[s.Msg.ID] = s.ReadBy
+	}
+	if byID[direct] != 1 {
+		t.Errorf("direct message ReadBy=%d after recipient read, want 1", byID[direct])
+	}
+}
+
 // @all mail means "whoever is working NOW": an identity minted after the send
 // never sees the broadcast, so a fresh session's fresh UUID stops re-surfacing
 // week-old broadcasts (loto-mail-lifetimes.1).

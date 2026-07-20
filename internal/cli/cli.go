@@ -48,6 +48,7 @@ commands:
   ack      Dismiss a tag by ID
   msg      Send mail to an agent, @<repo-slug>, or @all; host-global, crosses repos
   inbox    List unread mail; --mark-read, --summary for banners
+  sent     List your live outgoing mail with read status ("did anyone pick this up?")
   whoami   Print agent identity
   version  Print loto version
 
