@@ -489,6 +489,26 @@ func TestEmitClaimRelease_Outcomes(t *testing.T) {
 	}
 }
 
+func TestEmitClaimsReleased(t *testing.T) {
+	t.Run("some released", func(t *testing.T) {
+		var buf bytes.Buffer
+		EmitClaimsReleased(&buf, []string{"pkg/a", "pkg/b"})
+		got := buf.String()
+		for _, row := range []string{"ℹ claims-released count=2\n", "✓ prefix=pkg/a\n", "✓ prefix=pkg/b\n"} {
+			if !strings.Contains(got, row) {
+				t.Errorf("missing row %q in %q", row, got)
+			}
+		}
+	})
+	t.Run("none released still emits count", func(t *testing.T) {
+		var buf bytes.Buffer
+		EmitClaimsReleased(&buf, nil)
+		if got := buf.String(); got != "ℹ claims-released count=0\n" {
+			t.Errorf("empty claim release = %q, want the count=0 line (never silent)", got)
+		}
+	})
+}
+
 func TestEmitClaimConflictNamesHolder(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // empty registry → holderTag falls back to UUID
 	now := time.Date(2026, 5, 10, 18, 0, 0, 0, time.UTC)

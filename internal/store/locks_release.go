@@ -305,27 +305,45 @@ func deleteOwnedTx(ctx context.Context, tx *sql.Tx, canonicals []string, byAgent
 // list+filter+release dance in unlockAll: a single SQL query finds matching
 // rows and deletes them in one transaction, closing the TOCTOU gap where the
 // old path could miss locks created between ListLocks and ReleaseLocks.
-func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, sessionUUID domain.SessionUUID) ([]ReleaseResult, error) {
+//
+// It also releases the agent's claims in the SAME transaction, returning the
+// released claim prefixes alongside the lock results: a session-end unlock must
+// clear claimed territory too, or a crashed/ended agent's claim squats until TTL
+// (loto-ei5). Claims strip no write bits and carry no PID, so unlike locks they
+// need no post-commit filesystem restore and fold safely into this tx — making
+// the lock+claim release atomic (Codex #219 P1: a separate claim tx could leave
+// claims squatting after the lock tx already committed).
+func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, sessionUUID domain.SessionUUID) ([]ReleaseResult, []string, error) {
 	byAgent := string(agent) // internal store helpers thread the owner as a plain string
 	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer flock.release()
 
 	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer cleanup()
+
+	// Claims first: pure DB, nothing to restore after commit.
+	claimPrefixes, err := deleteClaimsBySessionTx(ctx, tx, byAgent, string(sessionUUID))
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Find all targets matching agent (+session if pinned).
 	canonicals, err := loadSessionTargetsTx(ctx, tx, byAgent, string(sessionUUID))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(canonicals) == 0 {
-		return []ReleaseResult{}, nil
+		// No locks — still commit any claim deletes above.
+		if err := tx.Commit(); err != nil {
+			return nil, nil, err
+		}
+		return []ReleaseResult{}, claimPrefixes, nil
 	}
 	paths := make([]string, len(canonicals))
 	for i, c := range canonicals {
@@ -334,32 +352,16 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 
 	// Ack tags before deleting host locks (same ordering as ReleaseLocks).
 	if err := ackTagsForReleaseTx(ctx, tx, paths, byAgent); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := deleteOwnedTx(ctx, tx, paths, byAgent); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	// Emit lock_released events in the same tx (atomic with the row deletes).
-	now := time.Now()
-	evs := make([]domain.Event, len(canonicals))
-	for i, c := range canonicals {
-		evs[i] = domain.Event{
-			Target:    domain.Target{Canonical: c.Canonical},
-			Kind:      EventLockReleased,
-			ActorUUID: byAgent,
-			CreatedAt: now,
-		}
-	}
-	if err := appendEventsTx(ctx, tx, evs); err != nil {
-		return nil, err
-	}
-	// Trim events in the same tx (mirrors AcquireLocks→rotateEventsTx) so a
-	// release-heavy workload can't grow the events table unbounded (loto-bvdk).
-	if err := rotateEventsTx(ctx, tx, now); err != nil {
-		return nil, err
+	if err := emitLockReleaseEventsTx(ctx, tx, canonicals, byAgent, time.Now()); err != nil {
+		return nil, nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Build results and do chmod restore outside the tx.
@@ -372,7 +374,27 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 		}
 	}
 	s.restoreReleasesThenAudit(flock, results, byAgent)
-	return results, nil
+	return results, claimPrefixes, nil
+}
+
+// emitLockReleaseEventsTx appends one lock_released event per released target
+// and trims the events table, both in tx (atomic with the row deletes). The
+// rotate mirrors AcquireLocks→rotateEventsTx so a release-heavy workload can't
+// grow the events table unbounded (loto-bvdk).
+func emitLockReleaseEventsTx(ctx context.Context, tx *sql.Tx, canonicals []sessionTarget, byAgent string, now time.Time) error {
+	evs := make([]domain.Event, len(canonicals))
+	for i, c := range canonicals {
+		evs[i] = domain.Event{
+			Target:    domain.Target{Canonical: c.Canonical},
+			Kind:      EventLockReleased,
+			ActorUUID: byAgent,
+			CreatedAt: now,
+		}
+	}
+	if err := appendEventsTx(ctx, tx, evs); err != nil {
+		return err
+	}
+	return rotateEventsTx(ctx, tx, now)
 }
 
 // sessionTarget pairs a session-owned lock's canonical path with its mode so

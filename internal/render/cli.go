@@ -182,6 +182,20 @@ func EmitClaimRelease(w io.Writer, res store.ClaimReleaseResult) int {
 	}
 }
 
+// EmitClaimsReleased renders the claim half of a session-end `unlock --all`:
+// the claim prefixes ReleaseBySession dropped. Prints a triage count first
+// (design.md), then one ✓ row per prefix, cwd-relative. Empty input still emits
+// the count=0 line so the claim leg is never silent — a hook reading this
+// surface must be able to tell "no claims owned" from a crash. prefixes are
+// pre-sorted by the store.
+func EmitClaimsReleased(w io.Writer, prefixes []string) {
+	fmt.Fprintf(w, "ℹ claims-released count=%d\n", len(prefixes))
+	cwd := getCwd()
+	for _, p := range prefixes {
+		fmt.Fprintf(w, "✓ prefix=%s\n", relToCwd(p, cwd))
+	}
+}
+
 // EmitTagFooter renders the holder-facing trailing block of pending external
 // tags. Empty input emits nothing — the caller's primary output must stand
 // alone when there's no message to surface. Sort order is the caller's

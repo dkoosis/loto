@@ -245,7 +245,7 @@ func TestRotateEvents_FiresOnReleaseBreakDowngrade(t *testing.T) {
 			t.Fatalf("acquire: %v", err)
 		}
 		seedExcess(t, s, eventsRetentionMax+50)
-		if _, err := s.ReleaseBySession(ctx, tcAlice, ""); err != nil {
+		if _, _, err := s.ReleaseBySession(ctx, tcAlice, ""); err != nil {
 			t.Fatalf("release-by-session: %v", err)
 		}
 		assertTrimmed(t, s)

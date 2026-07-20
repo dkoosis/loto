@@ -194,6 +194,57 @@ func (s *Store) ReleaseClaim(ctx context.Context, prefix string, owner domain.Ag
 	return out, nil
 }
 
+// deleteClaimsBySessionTx deletes every claim owned by agent — optionally scoped
+// to one session — returning the released path-prefixes sorted (deterministic
+// output, per design.md). It runs INSIDE the caller's tx so a session-end
+// release deletes locks and claims atomically: claims strip no write bits and
+// carry no PID, so unlike locks they need no post-commit filesystem restore and
+// fold safely into the lock-release transaction (loto-ei5; Codex #219 P1 — a
+// separate claim tx could leave claims squatting after the lock tx committed).
+// An empty session matches all of the agent's sessions (the agent-scoped
+// fallback, matching ReleaseBySession).
+func deleteClaimsBySessionTx(ctx context.Context, tx *sql.Tx, agent, session string) ([]string, error) {
+	where := `owner_uuid = ?`
+	args := []any{agent}
+	if session != "" {
+		where += ` AND session_uuid = ?`
+		args = append(args, session)
+	}
+	// Select-then-delete in the same tx so the caller can report exactly which
+	// prefixes were released (a bare DELETE gives only a count).
+	prefixes, err := selectClaimPrefixesTx(ctx, tx, where, args)
+	if err != nil {
+		return nil, err
+	}
+	if len(prefixes) == 0 {
+		return nil, nil // nothing owned; skip the write entirely
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM claims WHERE `+where, args...); err != nil {
+		return nil, err
+	}
+	return prefixes, nil
+}
+
+// selectClaimPrefixesTx returns the path_prefixes matching the where clause,
+// sorted, within tx. Split out so the rows handle closes via defer before the
+// sibling DELETE runs on the same tx.
+func selectClaimPrefixesTx(ctx context.Context, tx *sql.Tx, where string, args []any) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT path_prefix FROM claims WHERE `+where+` ORDER BY path_prefix`, args...) //nolint:gosec // G202: where is built only from constant string literals (no caller input); all values pass via args
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var prefixes []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		prefixes = append(prefixes, p)
+	}
+	return prefixes, rows.Err()
+}
+
 const claimCols = `path_prefix,owner_uuid,session_uuid,intent,created_at,expires_at,host`
 
 // ListClaims returns every claim row, expired included — staleness is a

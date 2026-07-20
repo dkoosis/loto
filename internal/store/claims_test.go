@@ -22,6 +22,101 @@ func mkClaim(prefix, owner string, expIn time.Duration) domain.ClaimRecord {
 	}
 }
 
+// mkClaimSession is mkClaim with an explicit session, for the session-scoped
+// release paths (mkClaim defaults SessionUUID to the owner).
+func mkClaimSession(prefix, owner, session string, expIn time.Duration) domain.ClaimRecord {
+	c := mkClaim(prefix, owner, expIn)
+	c.SessionUUID = domain.SessionUUID(session)
+	return c
+}
+
+// ReleaseBySession with a session filter drops only that session's claims for
+// the agent, leaving another session's claim and other agents' claims intact
+// (loto-ei5). The released prefixes come back sorted, as the 2nd return.
+func TestReleaseBySession_ClaimsScopedToSession(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	for _, c := range []domain.ClaimRecord{
+		mkClaimSession("internal/z", tcAlice, "session-1", time.Hour),
+		mkClaimSession("internal/a", tcAlice, "session-1", time.Hour),
+		mkClaimSession("internal/b", tcAlice, "session-2", time.Hour),
+		mkClaimSession("internal/c", tcBob, "session-1", time.Hour),
+	} {
+		if err := s.ClaimPrefix(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, got, err := s.ReleaseBySession(ctx, tcAlice, "session-1")
+	if err != nil {
+		t.Fatalf("ReleaseBySession: %v", err)
+	}
+	want := []string{"internal/a", "internal/z"} // sorted, session-1 only
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("released = %v, want %v (sorted, session-1 alice only)", got, want)
+	}
+
+	remaining, err := s.ListClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// alice/session-2 and bob/session-1 survive.
+	surviving := map[string]bool{}
+	for _, c := range remaining {
+		surviving[c.PathPrefix] = true
+	}
+	if !surviving["internal/b"] || !surviving["internal/c"] || len(remaining) != 2 {
+		t.Fatalf("survivors = %v, want internal/b + internal/c", remaining)
+	}
+}
+
+// An empty session filter is the agent-scoped fallback: every one of the agent's
+// claims goes, across sessions, but other agents' claims stay.
+func TestReleaseBySession_ClaimsAgentScopedFallback(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	for _, c := range []domain.ClaimRecord{
+		mkClaimSession("internal/a", tcAlice, "session-1", time.Hour),
+		mkClaimSession("internal/b", tcAlice, "session-2", time.Hour),
+		mkClaimSession("internal/c", tcBob, "session-1", time.Hour),
+	} {
+		if err := s.ClaimPrefix(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, got, err := s.ReleaseBySession(ctx, tcAlice, "")
+	if err != nil {
+		t.Fatalf("ReleaseBySession: %v", err)
+	}
+	if len(got) != 2 || got[0] != "internal/a" || got[1] != "internal/b" {
+		t.Fatalf("released = %v, want both alice prefixes across sessions", got)
+	}
+	remaining, err := s.ListClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 1 || remaining[0].OwnerUUID != domain.AgentUUID(tcBob) {
+		t.Fatalf("only bob's claim should survive, got %v", remaining)
+	}
+}
+
+// Nothing owned → nil, no error, and no write (empty result is not a failure).
+func TestReleaseBySession_ClaimsNothingOwned(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	if err := s.ClaimPrefix(ctx, mkClaimSession("internal/c", tcBob, "session-1", time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	_, got, err := s.ReleaseBySession(ctx, tcAlice, "")
+	if err != nil {
+		t.Fatalf("ReleaseBySession: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("released = %v, want nil for an agent owning no claims", got)
+	}
+}
+
 func TestClaimPrefixBlocksOverlap(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
