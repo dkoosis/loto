@@ -68,14 +68,16 @@ func unlockTargets(rt *runtime, args []string, repoTop string, stdout, stderr io
 	if code != 0 {
 		return code
 	}
-	// Read waiters' tags BEFORE release — the release acks them (loto-4lc).
-	waiters := rt.collectWaiterTags(targets)
+	// Stamp the pre-release moment; after the release acks the waiters' tags,
+	// mail whoever was waiting (loto-4lc). Reading acked-since AFTER release is
+	// race-free (a gap tag is acked too) — see notifyReleasedWaiters.
+	since := nowNanos()
 	results, err := rt.Store.ReleaseLocks(rt.Ctx, targets, domain.AgentUUID(rt.Agent.UUID), rt.Host, rt.liveProbe())
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	rt.notifyWaiters(freedFromReleases(results), waiters)
+	rt.notifyReleasedWaiters(since)
 	return render.EmitReleaseResults(stdout, results)
 }
 
@@ -88,13 +90,15 @@ func breakTargets(rt *runtime, args []string, intent, repoTop string, stdout, st
 	if code != 0 {
 		return code
 	}
-	waiters := rt.collectWaiterTags(targets)
+	// No waiter mail on --force: break ORPHANS tags (gc-deletes them) rather
+	// than acking, by design (edge #6, release-ack vs break-orphan). Force is the
+	// dead-holder escape hatch, not a voluntary "you can go now" — the waiter
+	// retries at cycle-end. Voluntary release is the only notify trigger (loto-4lc).
 	results, err := rt.Store.BreakLocks(rt.Ctx, targets, domain.AgentUUID(rt.Agent.UUID), store.BreakForce, intent, rt.Host, rt.liveProbe())
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	rt.notifyWaiters(freedFromBreaks(results), waiters)
 	return render.EmitBreakResults(stdout, stderr, results)
 }
 
@@ -132,8 +136,7 @@ func unlockAll(rt *runtime, stdout, stderr io.Writer) int {
 	if rt.SessionPinned {
 		sessionFilter = rt.SessionUUID
 	}
-	// Read waiters across all my locks before the release acks their tags.
-	waiters := rt.collectWaiterTags(nil)
+	since := nowNanos() // stamp before release; mail acked-since waiters after
 
 	// ReleaseBySession releases the agent's locks AND claims in one atomic tx
 	// (same agent, session-if-pinned scope), so a session-end --all clears
@@ -144,7 +147,7 @@ func unlockAll(rt *runtime, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	rt.notifyWaiters(freedFromReleases(results), waiters)
+	rt.notifyReleasedWaiters(since)
 	exit := render.EmitReleaseResults(stdout, results)
 	render.EmitClaimsReleased(stdout, claimPrefixes)
 	return exit

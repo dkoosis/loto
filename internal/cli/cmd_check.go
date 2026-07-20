@@ -236,7 +236,10 @@ func printCheckConflicts(stdout io.Writer, rows []checkConflict) bool {
 			// the holder releases (loto-4lc), so you move on instead of sitting
 			// on the lock. Force-break stays the escape hatch for a dead holder.
 			// Do NOT wait in place — you will be notified.
-			blocker := relPath(r.Blocker.Target.Canonical)
+			// Shell-quote the path: it lands in copy-pasted shell commands, and a
+			// path with spaces or metacharacters would otherwise break or inject
+			// (Codex #223 P2).
+			blocker := shellQuote(relPath(r.Blocker.Target.Canonical))
 			fmt.Fprintln(stdout, "```bash")
 			fmt.Fprintf(stdout, "loto tag %s \"waiting — mail me on release\"  # then work elsewhere; loto mails you when it frees\n", blocker)
 			fmt.Fprintf(stdout, "loto unlock --force -t \"unblock\" %s  # only if the holder is dead\n", blocker)
@@ -248,4 +251,11 @@ func printCheckConflicts(stdout io.Writer, rows []checkConflict) bool {
 			r.Blocker.ExpiresAt.UTC().Format(time.RFC3339))
 	}
 	return blocking > 0
+}
+
+// shellQuote wraps s in single quotes for safe interpolation into a copy-pasted
+// shell command, escaping any embedded single quote as the POSIX '\” idiom. A
+// path with spaces or shell metacharacters is thus inert (Codex #223 P2).
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
