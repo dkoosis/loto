@@ -2,6 +2,7 @@ package render
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,22 @@ import (
 	"loto/internal/domain"
 	"loto/internal/store"
 )
+
+// seedAgent writes a minimal agent record under home so holderTag/holderMemo
+// resolve uuid to "Handle(prefix)" — the friendly-tag path the bare-UUID
+// fallback tests don't exercise (loto-a8t). uuid must be canonical-hex shaped,
+// or loadByUUID rejects it before the read.
+func seedAgent(t *testing.T, home, uuid, handle string) {
+	t.Helper()
+	dir := filepath.Join(home, ".loto", "agents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"uuid":%q,"handle":%q,"created_at":"2026-05-10T18:00:00Z","host":"h"}`, uuid, handle)
+	if err := os.WriteFile(filepath.Join(dir, uuid+".json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
 
 const (
 	aGo  = "a.go"
@@ -505,6 +522,35 @@ func TestEmitClaimsReleased(t *testing.T) {
 		EmitClaimsReleased(&buf, nil)
 		if got := buf.String(); got != "ℹ claims-released count=0\n" {
 			t.Errorf("empty claim release = %q, want the count=0 line (never silent)", got)
+		}
+	})
+}
+
+// Both release surfaces name the holder on a not-owner row, matching the
+// conflict surface (loto-a8t): a resolvable UUID renders as Handle(prefix).
+func TestReleaseNotOwnerNamesHolder(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	const uuid = "aaaaaaaa-1111-4111-8111-111111111111"
+	seedAgent(t, home, uuid, "SunnyPorcupine")
+	want := "owner=SunnyPorcupine(aaaaaaaa)"
+
+	t.Run("lock release", func(t *testing.T) {
+		var buf bytes.Buffer
+		EmitReleaseResults(&buf, []store.ReleaseResult{
+			{Target: domain.Target{Canonical: pkgA}, State: store.StateNotOwner, Owner: uuid},
+		})
+		if got := buf.String(); !strings.Contains(got, want) {
+			t.Errorf("lock not-owner row must name holder %q, got %q", want, got)
+		}
+	})
+	t.Run("claim release", func(t *testing.T) {
+		var buf bytes.Buffer
+		EmitClaimRelease(&buf, store.ClaimReleaseResult{
+			PathPrefix: pkgA, State: store.ClaimStateNotOwner, Owner: uuid,
+		})
+		if got := buf.String(); !strings.Contains(got, want) {
+			t.Errorf("claim not-owner row must name holder %q, got %q", want, got)
 		}
 	})
 }

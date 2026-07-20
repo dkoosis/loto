@@ -174,7 +174,9 @@ func EmitClaimRelease(w io.Writer, res store.ClaimReleaseResult) int {
 		fmt.Fprintf(w, "✓ unclaimed count=0\nℹ prefix=%s state=no-claim\n", path)
 		return 0
 	case store.ClaimStateNotOwner:
-		fmt.Fprintf(w, "✓ unclaimed count=0\n✗ prefix=%s state=not-owner owner=%s\n", path, res.Owner)
+		// Name the holder like EmitClaimConflict does — matches the lock-side
+		// not-owner row now that both route through holderTag (loto-a8t).
+		fmt.Fprintf(w, "✓ unclaimed count=0\n✗ prefix=%s state=not-owner owner=%s\n", path, holderTag(res.Owner))
 		return 1
 	default:
 		fmt.Fprintf(w, "✗ prefix=%s state=unknown\n", path)
@@ -281,6 +283,7 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 		return 0
 	}
 	cwd := getCwd()
+	holders := &holderMemo{}
 	sorted := append([]store.ReleaseResult(nil), results...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })
 	exit := writeReleaseTriageLine(w, sorted)
@@ -294,7 +297,9 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 		case store.StateNoLock:
 			fmt.Fprintf(w, "ℹ target=%s state=no-lock\n", path)
 		case store.StateNotOwner:
-			fmt.Fprintf(w, "✗ target=%s state=not-owner owner=%s\n", path, r.Owner)
+			// Name the holder like EmitClaimConflict/EmitConflictWithTags do —
+			// a bare UUID here forked the release-surface convention (loto-a8t).
+			fmt.Fprintf(w, "✗ target=%s state=not-owner owner=%s\n", path, holders.tag(r.Owner))
 		case store.StateRestoreFailed:
 			writeRestoreFailed(w, "target", path, r.Owner, r.RestoreErr, r.AuditErr)
 		}
