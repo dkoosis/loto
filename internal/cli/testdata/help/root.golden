@@ -6,7 +6,7 @@ commands:
   claim    Reserve a path-prefix territory for this session; -t required
   unclaim  Release your claim by path-prefix
   check    Check targets for lock conflicts; --staged reads git staged paths
-  status   Show lock state; --mine to filter to yours
+  status   Show lock state; --mine to filter to yours, --collisions for ≥2-owner targets
   doctor   Detect and optionally repair stale locks
   tag      Leave a note on a target locked by another agent
   ack      Dismiss a tag by ID

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"time"
 
 	"loto/internal/domain"
@@ -18,6 +19,7 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	mine := fs.Bool("mine", false, "show only locks and claims owned by my uuid")
+	collisions := fs.Bool("collisions", false, "report only targets held live by ≥2 distinct owners (shared-beacon collisions)")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
@@ -34,6 +36,10 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fmt.Fprintf(stdout, "project: %s\n", ResolveAndPinProjectSlug(repoTop))
 	fmt.Fprintf(stdout, "repo:    %s\n", repoTop)
 	fmt.Fprintf(stdout, "state:   %s\n", rt.StateDir)
+
+	if *collisions {
+		return statusCollisions(stdout, stderr, rt)
+	}
 
 	if fs.NArg() == 1 {
 		t, err := resolveCLITarget(repoTop, fs.Arg(0))
@@ -102,6 +108,65 @@ func printStatusClaims(stdout io.Writer, rt *runtime, all []domain.ClaimRecord, 
 			c.CreatedAt.UTC().Format(time.RFC3339),
 			fmtTTL(c.ExpiresAt.Sub(now)), c.Host)
 	}
+}
+
+// statusCollisions reports every target held live by ≥2 DISTINCT owners — the
+// shared-beacon collision the gate deliberately can't see. `loto check` treats
+// Conflicts(shared,shared)=false so readers coexist, which means two subagents
+// that stamped the SAME file (a write-set partition failure the LOTO_SUBAGENT_ID
+// beacon exists to expose) never surface anywhere. The signal is in the data;
+// this pushes it (loto-bo8c). Advisory: exits 0 even with collisions — it is a
+// detection surface, and shared coexistence is legal; the ⚠ rows carry the heads-
+// up. "Live" = not stale (PID probe for real pids, TTL for PID-0 beacons).
+func statusCollisions(stdout, stderr io.Writer, rt *runtime) int {
+	all, err := rt.Store.ListLocks(rt.Ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return 3
+	}
+	ec := domain.EvalContext{Now: time.Now(), ThisHost: rt.Host, Live: rt.liveProbe()}
+	ownersByTarget := map[string]map[string]bool{}
+	for i := range all {
+		l := &all[i]
+		if ec.IsStale(*l) {
+			continue
+		}
+		m := ownersByTarget[l.Target.Canonical]
+		if m == nil {
+			m = map[string]bool{}
+			ownersByTarget[l.Target.Canonical] = m
+		}
+		m[string(l.OwnerUUID)] = true
+	}
+
+	type collision struct {
+		target string
+		owners []string
+	}
+	var cols []collision
+	for tgt, owners := range ownersByTarget {
+		if len(owners) < 2 {
+			continue
+		}
+		os := make([]string, 0, len(owners))
+		for o := range owners {
+			os = append(os, o)
+		}
+		sort.Strings(os)
+		cols = append(cols, collision{target: tgt, owners: os})
+	}
+	sort.Slice(cols, func(i, j int) bool { return cols[i].target < cols[j].target })
+
+	if len(cols) == 0 {
+		fmt.Fprintln(stdout, "✓ no collisions")
+		return 0
+	}
+	fmt.Fprintf(stdout, "⚠ collisions count=%d\n", len(cols))
+	for _, c := range cols {
+		fmt.Fprintf(stdout, "⚠ target=%s distinct_owners=%d owners=%s\n",
+			relPath(c.target), len(c.owners), strings.Join(c.owners, ","))
+	}
+	return 0
 }
 
 func filterLocksByOwner(all []domain.LockRecord, ownerUUID string) []domain.LockRecord {
