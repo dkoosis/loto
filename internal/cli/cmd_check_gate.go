@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/identity"
 	"loto/internal/render"
 )
 
@@ -126,10 +127,11 @@ func runCheckGate(ctx context.Context, paths []string, repoTop string, stdout io
 	// Fail OPEN before any store IO on an identity the gate can't tie to real
 	// ownership: an unpinned identity.Ensure mints a throwaway owning nothing,
 	// so opening the store would false-deny every path (gate-design "Rules:
-	// fail-open, everywhere"). agentIdentityPinned (runtime.go) is the single
-	// source of truth shared with release --all's fail-CLOSED refuse — both
-	// hinge on the same "does Ensure resolve a real owner" question (loto-s3l).
-	if !agentIdentityPinned() {
+	// fail-open, everywhere"). identity.PinnedByEnv is the single source of truth
+	// shared with release --all's fail-CLOSED refuse and Ensure's own precedence
+	// — all hinge on the same "does Ensure resolve a real owner" question, so the
+	// gate probe can't drift from resolution (loto-ai5, loto-s3l).
+	if !identity.PinnedByEnv() {
 		fmt.Fprintln(stdout, "⚠ identity=unpinned gate=fail-open")
 		return 0
 	}
