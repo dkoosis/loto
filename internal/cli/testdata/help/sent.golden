@@ -1,0 +1,10 @@
+usage: loto sent
+
+List your own live outgoing mail with read status — the follow-up view for
+"did anyone pick this up?" after a loto msg scrolls out of context. Newest
+first; expired mail is omitted.
+
+Read status by address class:
+  <uuid>    read=yes once the recipient has read it, else read=no
+  @all      read_by=N distinct readers so far
+  @<slug>   a repo baton; still listed = not yet consumed (first read deletes it)
