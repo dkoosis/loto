@@ -8,6 +8,57 @@ import (
 	"time"
 )
 
+// TestStatusCollisions pins loto-bo8c: two distinct agents shared-locking the
+// same target coexist (Conflicts(shared,shared)=false), so `loto check` never
+// surfaces them — but `status --collisions` flags the target as a ≥2-owner
+// collision, the signal the shared beacon exists to expose.
+func TestStatusCollisions(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+	lockShared := func(uuid string) {
+		t.Setenv("LOTO_AGENT_ID", uuid)
+		if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, "--shared"},
+			&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+			t.Fatalf("shared lock for %s failed", uuid)
+		}
+	}
+	lockShared(alice.UUID)
+	lockShared(bob.UUID)
+
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdStatus, "--collisions"}, &out, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("status --collisions exit: %q", out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "⚠ collisions count=1") {
+		t.Errorf("expected 1 collision: %q", got)
+	}
+	if !strings.Contains(got, "target=a.go distinct_owners=2") {
+		t.Errorf("expected a.go with 2 distinct owners: %q", got)
+	}
+	if !strings.Contains(got, alice.UUID) || !strings.Contains(got, bob.UUID) {
+		t.Errorf("both colliding owners must be named: %q", got)
+	}
+}
+
+// A single shared owner is not a collision — coexistence needs two DISTINCT
+// owners on one target.
+func TestStatusCollisions_NoneWhenSingleOwner(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, "--shared"},
+		&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("shared lock failed")
+	}
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdStatus, "--collisions"}, &out, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("exit: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "✓ no collisions") {
+		t.Errorf("single shared owner must not collide: %q", out.String())
+	}
+}
+
 func TestStatusEmpty(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)

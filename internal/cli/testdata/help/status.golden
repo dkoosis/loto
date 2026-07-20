@@ -1,3 +1,5 @@
 Usage of status:
+  -collisions
+    	report only targets held live by ≥2 distinct owners (shared-beacon collisions)
   -mine
     	show only locks and claims owned by my uuid
