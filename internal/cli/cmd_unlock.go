@@ -132,5 +132,17 @@ func unlockAll(rt *runtime, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	return render.EmitReleaseResults(stdout, results)
+	exit := render.EmitReleaseResults(stdout, results)
+
+	// Release claims in the same scope: a session-end --all must clear the
+	// agent's claimed territory too, or a crashed/ended agent's claim squats its
+	// prefix until the TTL lapses — the reclamation-parity gap ei5 closes. Same
+	// (agent, session-if-pinned) scope as the locks above.
+	prefixes, err := rt.Store.ReleaseClaimsBySession(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), sessionFilter)
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return 3
+	}
+	render.EmitClaimsReleased(stdout, prefixes)
+	return exit
 }
