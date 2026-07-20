@@ -27,6 +27,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -298,34 +299,29 @@ func (b *Box) Summary(ctx context.Context, reader domain.AgentUUID, readerBorn t
 	return count, senders, rows.Err()
 }
 
-// classifyMarkRead resolves the current address class of each displayed id in
-// one query, splitting them into repo-baton ids (delete on read) and per-reader
-// cursor ids (@uuid/@all). A peer may have already consumed a baton message, in
-// which case it simply drops out of the result — never resurrected downstream.
+// classifyMarkRead resolves the current address class of each displayed id,
+// splitting them into repo-baton ids (delete on read) and per-reader cursor ids
+// (@uuid/@all). Queried one id at a time rather than a variadic IN (...): a
+// displayed set is at most one inbox listing, but a single IN would still cap at
+// SQLite's bind-variable limit and fail --mark-read on a large inbox (CodeRabbit
+// P1). A peer may have already consumed a baton message — a missing row (no
+// rows) simply drops out, never resurrected downstream as an orphan cursor.
 func classifyMarkRead(ctx context.Context, tx *sql.Tx, ids []string) (baton, cursor []string, err error) {
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-	idArgs := make([]any, len(ids))
-	for i, id := range ids {
-		idArgs[i] = id
-	}
-	rows, err := tx.QueryContext(ctx,
-		`SELECT id, to_addr FROM messages WHERE id IN (`+placeholders+`)`, idArgs...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
-	if err != nil {
-		return nil, nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, toAddr string
-		if err := rows.Scan(&id, &toAddr); err != nil {
+	for _, id := range ids {
+		var toAddr string
+		switch err := tx.QueryRowContext(ctx,
+			`SELECT to_addr FROM messages WHERE id = ?`, id).Scan(&toAddr); {
+		case errors.Is(err, sql.ErrNoRows):
+			continue // peer-consumed or unknown id — skip
+		case err != nil:
 			return nil, nil, err
-		}
-		if domain.IsRepoAddr(toAddr) {
+		case domain.IsRepoAddr(toAddr):
 			baton = append(baton, id)
-		} else {
+		default:
 			cursor = append(cursor, id)
 		}
 	}
-	return baton, cursor, rows.Err()
+	return baton, cursor, nil
 }
 
 func shortUUID(u string) string {
