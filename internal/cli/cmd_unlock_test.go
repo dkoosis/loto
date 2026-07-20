@@ -298,7 +298,9 @@ func TestUnlock_LiveForeignLock_StaysNotOwner(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("unlock of live foreign lock exit %d, want 1; out=%q err=%q", code, out.String(), errBuf.String())
 	}
-	if !strings.Contains(out.String(), "state=not-owner owner="+alice.UUID) {
-		t.Errorf("expected not-owner row naming alice: %q", out.String())
+	// not-owner row names the holder via holderTag now (loto-a8t): Handle(prefix).
+	wantOwner := "owner=" + alice.Handle + "(" + alice.UUID[:8] + ")"
+	if !strings.Contains(out.String(), wantOwner) {
+		t.Errorf("expected not-owner row naming alice as %q: %q", wantOwner, out.String())
 	}
 }
