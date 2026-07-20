@@ -69,3 +69,12 @@ func RepoAddr(slug string) string {
 // IsBroadcastAddr reports whether addr fans out to more than one potential
 // reader (@all or any @<slug>), i.e. read state must be tracked per reader.
 func IsBroadcastAddr(addr string) bool { return strings.HasPrefix(addr, "@") }
+
+// IsRepoAddr reports whether addr is a repo baton address (@<slug>): a note
+// taped to a repo's door, consumed by the FIRST agent to read it rather than
+// surfaced per-reader. @all (machine-wide broadcast) and bare-UUID direct mail
+// are NOT baton addresses. Drives both the longer repo-mail TTL at send and the
+// delete-on-first-read (baton) semantics at MarkRead.
+func IsRepoAddr(addr string) bool {
+	return strings.HasPrefix(addr, "@") && addr != AddrAll
+}

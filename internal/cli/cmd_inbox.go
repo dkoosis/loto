@@ -17,10 +17,12 @@ func init() { register("inbox", cmdInbox) } //nolint:gochecknoinits // command r
 const inboxUsage = `usage: loto inbox [--mark-read] [--summary]
 
 List unread mail for this agent: direct, @all, and this repo's addresses
-(pinned slug and directory basename).
+(pinned slug and directory basename). @all mail sent before this session's
+identity existed is filtered out — broadcasts reach whoever is working now.
 
-  --mark-read   stamp everything listed as read (per-reader; broadcast mail
-                stays unread for other agents)
+  --mark-read   consume everything listed. Direct/@all mail is stamped read
+                per-reader (stays unread for other agents); @<slug> repo mail
+                is a baton — the first reader deletes it for everyone.
   --summary     one-line unread count for hooks/banners; silent when empty`
 
 func cmdInbox(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -50,7 +52,7 @@ func cmdInbox(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	defer box.Close()
 
 	if *summary {
-		n, senders, err := box.Summary(rt.Ctx, rt.agentUUID(), rt.mailAddrs())
+		n, senders, err := box.Summary(rt.Ctx, rt.agentUUID(), rt.agentBorn(), rt.mailAddrs())
 		if err != nil || n == 0 {
 			return 0 // silent: the summary surface is a banner, not a report
 		}
@@ -61,7 +63,7 @@ func cmdInbox(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 }
 
 func inboxList(rt *runtime, box *mail.Box, markRead bool, stdout, stderr io.Writer) int {
-	msgs, err := box.Inbox(rt.Ctx, rt.agentUUID(), rt.mailAddrs())
+	msgs, err := box.Inbox(rt.Ctx, rt.agentUUID(), rt.agentBorn(), rt.mailAddrs())
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

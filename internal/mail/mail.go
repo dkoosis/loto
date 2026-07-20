@@ -2,8 +2,21 @@
 // machine (not per project), addressed by agent UUID, @<repo-slug>, or @all.
 // It is deliberately a separate store from the per-project lock DB — mail must
 // cross project boundaries, and coupling it to the lock schema is what killed
-// the gen-2 mailbox (loto-vra). Read state is per reader (message_reads), so
-// broadcast and repo addresses deliver to every agent independently.
+// the gen-2 mailbox (loto-vra).
+//
+// The address CLASS encodes the message's lifetime (loto-mail-lifetimes):
+//
+//	@uuid    direct to one agent; a per-reader cursor marks it read; 7d TTL.
+//	@all     broadcast to whoever is working NOW: a per-reader cursor marks it
+//	         read, and it is invisible to any identity minted after the send
+//	         (created_at >= reader birth), so a fresh session's fresh UUID does
+//	         not re-greet week-old broadcasts; 7d TTL.
+//	@<slug>  a baton for whoever NEXT works that repo: the FIRST reader's
+//	         MarkRead DELETES the row for everyone (one reader consumes for all);
+//	         30d TTL, since a dormant repo may see no reader for weeks.
+//
+// Per-reader read state (message_reads) therefore applies only to @uuid and
+// @all; @<slug> lifetime is the row's existence itself.
 //
 // Everything here is coordination hygiene, not invariant: callers on hot paths
 // (footers, banners) treat errors as "no mail" and stay silent.
@@ -47,9 +60,16 @@ CREATE TABLE IF NOT EXISTS message_reads (
 );
 `
 
-// DefaultTTL bounds unanswered mail. A week outlives any session burst while
-// keeping the global DB self-cleaning; senders override per message via --ttl.
+// DefaultTTL bounds unanswered direct (@uuid) and broadcast (@all) mail. A week
+// outlives any session burst while keeping the global DB self-cleaning; senders
+// override per message via --ttl.
 const DefaultTTL = 7 * 24 * time.Hour
+
+// RepoTTL bounds repo baton mail (@<slug>). A dormant repo may see no agent for
+// weeks, and the note is meant for whoever NEXT works there — a 7d expiry would
+// retire it before anyone is born to read it. 30d gives the baton a realistic
+// window; senders still override via --ttl.
+const RepoTTL = 30 * 24 * time.Hour
 
 // Box is an open handle on the host-global mail DB.
 type Box struct {
@@ -102,7 +122,11 @@ func (b *Box) Send(ctx context.Context, m domain.Message) (string, error) {
 		m.CreatedAt = time.Now()
 	}
 	if m.ExpiresAt.IsZero() {
-		m.ExpiresAt = m.CreatedAt.Add(DefaultTTL)
+		ttl := DefaultTTL
+		if domain.IsRepoAddr(m.To) {
+			ttl = RepoTTL
+		}
+		m.ExpiresAt = m.CreatedAt.Add(ttl)
 	}
 	if m.ID == "" {
 		m.ID = newMsgID()
@@ -120,12 +144,13 @@ func (b *Box) Send(ctx context.Context, m domain.Message) (string, error) {
 // Inbox lists live messages addressed to any of addrs that reader has not yet
 // read, oldest first (created_at then id — deterministic on ties). addrs is
 // the reader's full address set: their UUID, @all, and the @<slug> of the repo
-// they are acting in.
-func (b *Box) Inbox(ctx context.Context, reader domain.AgentUUID, addrs []string) ([]domain.Message, error) {
+// they are acting in. readerBorn is the reader's identity CreatedAt — @all mail
+// sent before the reader existed is filtered out (loto-mail-lifetimes.1).
+func (b *Box) Inbox(ctx context.Context, reader domain.AgentUUID, readerBorn time.Time, addrs []string) ([]domain.Message, error) {
 	if len(addrs) == 0 {
 		return nil, nil
 	}
-	where, args := unreadWhere(reader, addrs, time.Now())
+	where, args := unreadWhere(reader, readerBorn, addrs, time.Now())
 	q := `SELECT m.id, m.from_uuid, m.from_handle, m.to_addr, m.body, m.thread_id, m.created_at, m.expires_at ` + where + ` ORDER BY m.created_at, m.id` //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 	rows, err := b.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -158,44 +183,75 @@ func (b *Box) Inbox(ctx context.Context, reader domain.AgentUUID, addrs []string
 // @all / @<slug> broadcast (permanent unread noise), but direct mail a sender
 // addresses to their own UUID — a cross-session note-to-self — is legitimate
 // and must still appear (loto-qhw, CodeRabbit).
-func unreadWhere(reader domain.AgentUUID, addrs []string, now time.Time) (string, []any) {
+//
+// The @all cutoff (m.to_addr != '@all' OR m.created_at >= readerBorn) makes a
+// broadcast mean "whoever is working NOW": an identity minted after the send
+// never sees it, so a fresh session's fresh UUID does not re-surface every 7d
+// broadcast (loto-mail-lifetimes.1). @<slug> repo mail is exempt — it uses
+// baton semantics (delete-on-read), not a cutoff.
+func unreadWhere(reader domain.AgentUUID, readerBorn time.Time, addrs []string, now time.Time) (string, []any) {
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(addrs)), ",")
-	args := make([]any, 0, len(addrs)+3)
+	args := make([]any, 0, len(addrs)+4)
 	args = append(args, string(reader))
 	for _, a := range addrs {
 		args = append(args, a)
 	}
-	args = append(args, now.UnixNano(), string(reader))
+	args = append(args, now.UnixNano(), string(reader), readerBorn.UnixNano())
 	where := `
 FROM messages m
 LEFT JOIN message_reads r ON r.message_id = m.id AND r.reader_uuid = ?
 WHERE m.to_addr IN (` + placeholders + `)
   AND r.read_at IS NULL
   AND m.expires_at > ?
-  AND (m.from_uuid != ? OR m.to_addr NOT LIKE '@%')`
+  AND (m.from_uuid != ? OR m.to_addr NOT LIKE '@%')
+  AND (m.to_addr != '@all' OR m.created_at >= ?)`
 	return where, args
 }
 
-// MarkRead stamps a per-reader read cursor on exactly the given message IDs.
+// MarkRead resolves exactly the given message IDs, splitting on address class:
+//
+//   - @<slug> repo baton mail is DELETED (message row + its read rows): the note
+//     is taped to the repo door and the first reader takes it down for everyone
+//     (loto-mail-lifetimes.2). Idempotent under concurrent readers — a message a
+//     peer already deleted simply is not in the resolve query, so it is skipped,
+//     never resurrected as an orphan read cursor.
+//   - direct (@uuid) and @all mail gets a per-reader read cursor stamped, staying
+//     unread for other readers.
+//
 // The caller passes the IDs it actually displayed, NOT an address set: a fresh
 // address re-query here would race a concurrent Send and mark an
 // arrived-but-unshown message read, silently dropping it (loto-qhw, Codex P1).
-// Idempotent via INSERT OR IGNORE. Unknown/foreign IDs are harmless — a read
-// cursor is scoped to (message_id, reader) and only affects reader's own view.
+// Cursor writes are INSERT OR IGNORE (idempotent); unknown/foreign IDs are
+// harmless — a cursor is scoped to (message_id, reader) and only affects
+// reader's own view.
 func (b *Box) MarkRead(ctx context.Context, reader domain.AgentUUID, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	now := time.Now().UnixNano()
 	tx, err := b.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck // rollback after commit is a no-op
-	for _, id := range ids {
+
+	batonIDs, cursorIDs, err := classifyMarkRead(ctx, tx, ids)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().UnixNano()
+	for _, id := range cursorIDs {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO message_reads(message_id,reader_uuid,read_at) VALUES (?,?,?)`,
 			id, string(reader), now); err != nil {
+			return err
+		}
+	}
+	for _, id := range batonIDs {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE id = ?`, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM message_reads WHERE message_id = ?`, id); err != nil {
 			return err
 		}
 	}
@@ -210,11 +266,11 @@ func (b *Box) MarkRead(ctx context.Context, reader domain.AgentUUID, ids []strin
 // short UUID) for the banner line, oldest sender first. It selects only the
 // sender columns — not the up-to-4KiB body — because it runs on the footer of
 // nearly every command and needs neither the body nor thread id (Gemini).
-func (b *Box) Summary(ctx context.Context, reader domain.AgentUUID, addrs []string) (int, []string, error) {
+func (b *Box) Summary(ctx context.Context, reader domain.AgentUUID, readerBorn time.Time, addrs []string) (int, []string, error) {
 	if len(addrs) == 0 {
 		return 0, nil, nil
 	}
-	where, args := unreadWhere(reader, addrs, time.Now())
+	where, args := unreadWhere(reader, readerBorn, addrs, time.Now())
 	rows, err := b.db.QueryContext(ctx,
 		`SELECT m.from_uuid, m.from_handle `+where+` ORDER BY m.created_at, m.id`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 	if err != nil {
@@ -240,6 +296,36 @@ func (b *Box) Summary(ctx context.Context, reader domain.AgentUUID, addrs []stri
 		}
 	}
 	return count, senders, rows.Err()
+}
+
+// classifyMarkRead resolves the current address class of each displayed id in
+// one query, splitting them into repo-baton ids (delete on read) and per-reader
+// cursor ids (@uuid/@all). A peer may have already consumed a baton message, in
+// which case it simply drops out of the result — never resurrected downstream.
+func classifyMarkRead(ctx context.Context, tx *sql.Tx, ids []string) (baton, cursor []string, err error) {
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	idArgs := make([]any, len(ids))
+	for i, id := range ids {
+		idArgs[i] = id
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id, to_addr FROM messages WHERE id IN (`+placeholders+`)`, idArgs...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, toAddr string
+		if err := rows.Scan(&id, &toAddr); err != nil {
+			return nil, nil, err
+		}
+		if domain.IsRepoAddr(toAddr) {
+			baton = append(baton, id)
+		} else {
+			cursor = append(cursor, id)
+		}
+	}
+	return baton, cursor, rows.Err()
 }
 
 func shortUUID(u string) string {

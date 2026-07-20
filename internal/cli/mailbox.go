@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"loto/internal/domain"
 	"loto/internal/mail"
@@ -28,6 +29,10 @@ func (r *runtime) OpenMail() (*mail.Box, error) {
 }
 
 func (r *runtime) agentUUID() domain.AgentUUID { return domain.AgentUUID(r.Agent.UUID) }
+
+// agentBorn is this reader's identity CreatedAt — the @all cutoff: broadcast
+// mail sent before this identity existed never surfaces (loto-mail-lifetimes.1).
+func (r *runtime) agentBorn() time.Time { return r.Agent.CreatedAt }
 
 // mailAddrs is this invocation's full address set: direct mail, machine-wide
 // broadcast, and the repo addresses of the project being acted in. A repo
@@ -55,7 +60,7 @@ func (r *runtime) DeferredMailFooter(w io.Writer) {
 		return
 	}
 	defer box.Close()
-	n, senders, err := box.Summary(r.Ctx, r.agentUUID(), r.mailAddrs())
+	n, senders, err := box.Summary(r.Ctx, r.agentUUID(), r.agentBorn(), r.mailAddrs())
 	if err != nil || n == 0 {
 		return
 	}

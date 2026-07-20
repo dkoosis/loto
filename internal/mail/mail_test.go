@@ -17,6 +17,10 @@ const (
 	tmBody      = "loto-test: ping"
 )
 
+// bornEarly is a reader-birth far before any test send, so the @all cutoff
+// (loto-mail-lifetimes.1) does not filter mail in tests that predate it.
+var bornEarly = time.Unix(0, 0)
+
 func openTestBox(t *testing.T) *Box {
 	t.Helper()
 	b, err := Open(context.Background(), filepath.Join(t.TempDir(), "mail.db"))
@@ -35,7 +39,7 @@ func addrs(reader, slug string) []string {
 // production call sequence (display then mark the displayed set).
 func markInbox(t *testing.T, b *Box, reader domain.AgentUUID, slug string) {
 	t.Helper()
-	msgs, err := b.Inbox(context.Background(), reader, addrs(string(reader), slug))
+	msgs, err := b.Inbox(context.Background(), reader, bornEarly, addrs(string(reader), slug))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +70,7 @@ func TestSendInboxDirect(t *testing.T) {
 	ctx := context.Background()
 	send(t, b, tmUUIDAlice, tmUUIDBob, tmBody)
 
-	got, err := b.Inbox(ctx, tmUUIDBob, addrs(tmUUIDBob, "loto"))
+	got, err := b.Inbox(ctx, tmUUIDBob, bornEarly, addrs(tmUUIDBob, "loto"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +81,7 @@ func TestSendInboxDirect(t *testing.T) {
 		t.Errorf("default TTL not applied: created=%v expires=%v", got[0].CreatedAt, got[0].ExpiresAt)
 	}
 
-	other, err := b.Inbox(ctx, tmUUIDCara, addrs(tmUUIDCara, "loto"))
+	other, err := b.Inbox(ctx, tmUUIDCara, bornEarly, addrs(tmUUIDCara, "loto"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +96,7 @@ func TestBroadcastPerReaderRead(t *testing.T) {
 	send(t, b, tmUUIDAlice, domain.AddrAll, tmBody)
 
 	for _, reader := range []string{tmUUIDBob, tmUUIDCara} {
-		got, err := b.Inbox(ctx, domain.AgentUUID(reader), addrs(reader, "loto"))
+		got, err := b.Inbox(ctx, domain.AgentUUID(reader), bornEarly, addrs(reader, "loto"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -102,11 +106,11 @@ func TestBroadcastPerReaderRead(t *testing.T) {
 	}
 
 	markInbox(t, b, tmUUIDBob, "loto")
-	bobAfter, _ := b.Inbox(ctx, tmUUIDBob, addrs(tmUUIDBob, "loto"))
+	bobAfter, _ := b.Inbox(ctx, tmUUIDBob, bornEarly, addrs(tmUUIDBob, "loto"))
 	if len(bobAfter) != 0 {
 		t.Fatalf("bob marked read but still sees %d", len(bobAfter))
 	}
-	caraAfter, _ := b.Inbox(ctx, tmUUIDCara, addrs(tmUUIDCara, "loto"))
+	caraAfter, _ := b.Inbox(ctx, tmUUIDCara, bornEarly, addrs(tmUUIDCara, "loto"))
 	if len(caraAfter) != 1 {
 		t.Fatalf("cara's read cursor must be independent of bob's, got %d", len(caraAfter))
 	}
@@ -115,7 +119,7 @@ func TestBroadcastPerReaderRead(t *testing.T) {
 func TestSenderExcludedFromOwnBroadcast(t *testing.T) {
 	b := openTestBox(t)
 	send(t, b, tmUUIDAlice, domain.AddrAll, tmBody)
-	got, err := b.Inbox(context.Background(), tmUUIDAlice, addrs(tmUUIDAlice, "loto"))
+	got, err := b.Inbox(context.Background(), tmUUIDAlice, bornEarly, addrs(tmUUIDAlice, "loto"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +133,7 @@ func TestSenderExcludedFromOwnBroadcast(t *testing.T) {
 func TestSelfDirectMailDelivered(t *testing.T) {
 	b := openTestBox(t)
 	send(t, b, tmUUIDAlice, tmUUIDAlice, "loto-qhw: note to self")
-	got, err := b.Inbox(context.Background(), tmUUIDAlice, addrs(tmUUIDAlice, "loto"))
+	got, err := b.Inbox(context.Background(), tmUUIDAlice, bornEarly, addrs(tmUUIDAlice, "loto"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +156,7 @@ func TestMarkReadOnlyConsumesGivenIDs(t *testing.T) {
 	if err := b.MarkRead(ctx, tmUUIDBob, displayed); err != nil {
 		t.Fatal(err)
 	}
-	remaining, err := b.Inbox(ctx, tmUUIDBob, addrs(tmUUIDBob, "loto"))
+	remaining, err := b.Inbox(ctx, tmUUIDBob, bornEarly, addrs(tmUUIDBob, "loto"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,12 +177,12 @@ func TestRepoAddrReservesAll(t *testing.T) {
 	send(t, b, tmUUIDAlice, domain.RepoAddr("all"), "repo-all only")
 
 	// An agent NOT in repo "all" sees only the broadcast.
-	elsewhere, _ := b.Inbox(ctx, tmUUIDBob, addrs(tmUUIDBob, "loto"))
+	elsewhere, _ := b.Inbox(ctx, tmUUIDBob, bornEarly, addrs(tmUUIDBob, "loto"))
 	if len(elsewhere) != 1 || elsewhere[0].Body != "broadcast" {
 		t.Fatalf("agent outside repo-all should see only broadcast: %+v", elsewhere)
 	}
 	// An agent in repo "all" sees both (broadcast via @all, repo via @all-repo).
-	inAll, _ := b.Inbox(ctx, tmUUIDCara, addrs(tmUUIDCara, "all"))
+	inAll, _ := b.Inbox(ctx, tmUUIDCara, bornEarly, addrs(tmUUIDCara, "all"))
 	if len(inAll) != 2 {
 		t.Fatalf("agent in repo-all should see broadcast + repo mail, got %d", len(inAll))
 	}
@@ -189,11 +193,11 @@ func TestRepoAddressRouting(t *testing.T) {
 	ctx := context.Background()
 	send(t, b, tmUUIDAlice, domain.RepoAddr("loto"), tmBody)
 
-	inLoto, _ := b.Inbox(ctx, tmUUIDBob, addrs(tmUUIDBob, "loto"))
+	inLoto, _ := b.Inbox(ctx, tmUUIDBob, bornEarly, addrs(tmUUIDBob, "loto"))
 	if len(inLoto) != 1 {
 		t.Fatalf("bob acting in loto should see @loto mail, got %d", len(inLoto))
 	}
-	inOther, _ := b.Inbox(ctx, tmUUIDBob, addrs(tmUUIDBob, "cc-plugins"))
+	inOther, _ := b.Inbox(ctx, tmUUIDBob, bornEarly, addrs(tmUUIDBob, "cc-plugins"))
 	if len(inOther) != 0 {
 		t.Fatalf("bob acting in cc-plugins should NOT see @loto mail, got %d", len(inOther))
 	}
@@ -214,7 +218,7 @@ func TestExpiryFiltersAndPurges(t *testing.T) {
 	sendExpired()
 
 	// Read never lists expired mail, regardless of purge.
-	got, _ := b.Inbox(ctx, tmUUIDBob, addrs(tmUUIDBob, "loto"))
+	got, _ := b.Inbox(ctx, tmUUIDBob, bornEarly, addrs(tmUUIDBob, "loto"))
 	if len(got) != 0 {
 		t.Fatalf("expired mail listed: %+v", got)
 	}
@@ -261,6 +265,126 @@ func TestSendValidation(t *testing.T) {
 	}
 }
 
+// @all mail means "whoever is working NOW": an identity minted after the send
+// never sees the broadcast, so a fresh session's fresh UUID stops re-surfacing
+// week-old broadcasts (loto-mail-lifetimes.1).
+func TestBroadcastCutoffByReaderBirth(t *testing.T) {
+	b := openTestBox(t)
+	ctx := context.Background()
+	now := time.Now()
+	sent := now.Add(-time.Hour)
+	if _, err := b.Send(ctx, domain.Message{
+		FromUUID: tmUUIDAlice, To: domain.AddrAll, Body: tmBody,
+		CreatedAt: sent, ExpiresAt: now.Add(DefaultTTL),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Born before the send: sees it.
+	pre, _ := b.Inbox(ctx, tmUUIDBob, sent.Add(-time.Minute), addrs(tmUUIDBob, "loto"))
+	if len(pre) != 1 {
+		t.Fatalf("reader predating the broadcast should see it, got %d", len(pre))
+	}
+	// Born after the send: never sees it.
+	post, _ := b.Inbox(ctx, tmUUIDCara, sent.Add(time.Minute), addrs(tmUUIDCara, "loto"))
+	if len(post) != 0 {
+		t.Fatalf("reader minted after the broadcast must not see it, got %d", len(post))
+	}
+}
+
+// The cutoff is scoped to @all: repo (@<slug>) mail is meant for whoever NEXT
+// works the repo, so a reader minted after the send must still see it.
+func TestRepoMailIgnoresReaderBirthCutoff(t *testing.T) {
+	b := openTestBox(t)
+	ctx := context.Background()
+	now := time.Now()
+	sent := now.Add(-time.Hour)
+	if _, err := b.Send(ctx, domain.Message{
+		FromUUID: tmUUIDAlice, To: domain.RepoAddr("loto"), Body: tmBody,
+		CreatedAt: sent, ExpiresAt: now.Add(RepoTTL),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := b.Inbox(ctx, tmUUIDBob, sent.Add(time.Minute), addrs(tmUUIDBob, "loto"))
+	if len(got) != 1 {
+		t.Fatalf("repo mail must reach a later-born reader, got %d", len(got))
+	}
+}
+
+// Repo (@<slug>) mail is a baton: the first reader's MarkRead DELETES it for
+// everyone, so a second agent working the repo does not re-read a consumed note
+// (loto-mail-lifetimes.2).
+func TestRepoMailBatonConsumedOnFirstRead(t *testing.T) {
+	b := openTestBox(t)
+	ctx := context.Background()
+	id := send(t, b, tmUUIDAlice, domain.RepoAddr("loto"), tmBody)
+
+	// Both agents working the repo initially see the note.
+	for _, r := range []string{tmUUIDBob, tmUUIDCara} {
+		got, _ := b.Inbox(ctx, domain.AgentUUID(r), bornEarly, addrs(r, "loto"))
+		if len(got) != 1 {
+			t.Fatalf("reader %s should see repo mail before consume, got %d", r, len(got))
+		}
+	}
+
+	// Bob reads it → the row is gone, not just cursor-stamped.
+	if err := b.MarkRead(ctx, tmUUIDBob, []string{id}); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := b.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id = ?`, id).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("baton read must delete the message row, still present (%d)", n)
+	}
+	// Cara, arriving after, sees nothing — the baton is taken.
+	caraAfter, _ := b.Inbox(ctx, tmUUIDCara, bornEarly, addrs(tmUUIDCara, "loto"))
+	if len(caraAfter) != 0 {
+		t.Fatalf("consumed baton must not resurface for a later reader, got %d", len(caraAfter))
+	}
+}
+
+// A concurrent second reader whose message was already consumed by a peer must
+// not resurrect it as an orphan read cursor — MarkRead skips ids no longer in
+// the store.
+func TestRepoMailBatonIdempotentUnderConcurrentReaders(t *testing.T) {
+	b := openTestBox(t)
+	ctx := context.Background()
+	id := send(t, b, tmUUIDAlice, domain.RepoAddr("loto"), tmBody)
+
+	if err := b.MarkRead(ctx, tmUUIDBob, []string{id}); err != nil {
+		t.Fatal(err)
+	}
+	// Cara displayed the same id before Bob consumed it, then marks it too.
+	if err := b.MarkRead(ctx, tmUUIDCara, []string{id}); err != nil {
+		t.Fatalf("second consume of a gone baton must be a no-op: %v", err)
+	}
+	var reads int
+	if err := b.db.QueryRow(`SELECT COUNT(*) FROM message_reads WHERE message_id = ?`, id).Scan(&reads); err != nil {
+		t.Fatal(err)
+	}
+	if reads != 0 {
+		t.Fatalf("consumed baton must leave no orphan read rows, got %d", reads)
+	}
+}
+
+// Repo baton mail gets the longer 30d TTL by default (a dormant repo may see no
+// reader for weeks); direct/@all keep 7d (loto-mail-lifetimes.2).
+func TestRepoMailDefaultTTL(t *testing.T) {
+	b := openTestBox(t)
+	id := send(t, b, tmUUIDAlice, domain.RepoAddr("loto"), tmBody)
+	// Baton mail is deleted on read, so query the row directly.
+	var createdNs, expiresNs int64
+	if err := b.db.QueryRow(`SELECT created_at, expires_at FROM messages WHERE id = ?`, id).
+		Scan(&createdNs, &expiresNs); err != nil {
+		t.Fatal(err)
+	}
+	if ttl := time.Duration(expiresNs - createdNs); ttl != RepoTTL {
+		t.Errorf("repo mail TTL = %v, want %v", ttl, RepoTTL)
+	}
+}
+
 func TestSummaryDedupesSenders(t *testing.T) {
 	b := openTestBox(t)
 	ctx := context.Background()
@@ -268,7 +392,7 @@ func TestSummaryDedupesSenders(t *testing.T) {
 	send(t, b, tmUUIDAlice, tmUUIDBob, "two")
 	send(t, b, tmUUIDCara, tmUUIDBob, "three")
 
-	n, senders, err := b.Summary(ctx, tmUUIDBob, addrs(tmUUIDBob, "loto"))
+	n, senders, err := b.Summary(ctx, tmUUIDBob, bornEarly, addrs(tmUUIDBob, "loto"))
 	if err != nil {
 		t.Fatal(err)
 	}
