@@ -38,7 +38,7 @@ func cmdInbox(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintln(stderr, inboxUsage)
 		return 2
 	}
-	rt, err := openRuntime(ctx)
+	rt, err := openMailRuntime(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

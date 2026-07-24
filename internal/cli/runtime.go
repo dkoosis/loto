@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +20,14 @@ import (
 // gitTimeout caps blocking git rev-parse calls so a hung repo (stale NFS,
 // fsmonitor wedge) cannot turn the CLI into an unkillable process.
 const gitTimeout = 5 * time.Second
+
+// errNotInGitRepo is deliberately actionable (design.md: fix block under
+// actionable findings) rather than surfacing the raw git exec error — "exit
+// status 128" tells a Claude caller nothing it can act on. Repo-scoped
+// commands (lock/status/tag/...) have no rendezvous point without a git
+// toplevel to derive a project slug from, so this stays a hard fail; git init
+// is the correct remedy, not a rootless fallback (loto-7wi).
+var errNotInGitRepo = errors.New("not in a git repo\n  fix: git init   (loto coordinates within a repo; scratch work needs none)")
 
 func gitRevParseToplevel(parent context.Context) (string, error) {
 	if parent == nil {
@@ -76,7 +85,7 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 	}
 	top, err := gitRevParseToplevel(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("not in a git repo: %w", err)
+		return nil, errNotInGitRepo
 	}
 	dir := StateDir(top)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -114,7 +123,15 @@ func repoTopForCwd(ctx context.Context) (string, error) {
 	return gitRevParseToplevel(ctx)
 }
 
-func (r *runtime) Close() error { return r.Store.Close() }
+// Close releases the per-project store, if one was opened. Mail-only
+// runtimes (openMailRuntime) never open a store — Store is nil, and Close is
+// then a no-op rather than a nil-pointer panic.
+func (r *runtime) Close() error {
+	if r.Store == nil {
+		return nil
+	}
+	return r.Store.Close()
+}
 
 // DeferredTagFooter prints the caller-as-holder's pending external tags after
 // the primary command output. Opted-in commands (lock, unlock, status, doctor)

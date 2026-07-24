@@ -12,20 +12,24 @@ import (
 )
 
 // TestEnsureCallerSet pins the production call graph of identity.Ensure to
-// the two sanctioned edges: openRuntime (every command that opens the
-// store) and cmdWhoami (whoami answers from anywhere, including outside a
-// git repo, so it can't route through openRuntime). A third edge is the
-// regression class this guardrail exists to catch — any future command
-// resolving identity directly bypasses the one-edge-per-process discipline
-// and reintroduces the env-drift bug Ensure's contract is meant to prevent.
+// the three sanctioned edges: openRuntime (every repo-scoped command that
+// opens the store), cmdWhoami (whoami answers from anywhere, including
+// outside a git repo, so it can't route through openRuntime), and
+// openMailRuntime (msg/inbox/sent — mail is host-global and needs identity
+// but never the per-project store, so it likewise can't route through
+// openRuntime; loto-7wi). A fourth edge is the regression class this
+// guardrail exists to catch — any future command resolving identity directly
+// bypasses the one-edge-per-process discipline and reintroduces the
+// env-drift bug Ensure's contract is meant to prevent.
 //
 // Do not silence this test by adding a sync.Once around Ensure. Memoizing
 // hides the very env-flipping that identity tests document as legal; the
 // discipline belongs in the call graph, not behind a cache.
 func TestEnsureCallerSet(t *testing.T) {
 	want := map[string]struct{}{
-		"openRuntime": {},
-		"cmdWhoami":   {},
+		"openRuntime":     {},
+		"cmdWhoami":       {},
+		"openMailRuntime": {},
 	}
 
 	got := ensureCallers(t, "../cli")

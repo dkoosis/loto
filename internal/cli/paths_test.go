@@ -52,6 +52,20 @@ func TestStateDirRespectsLOTO_BASE(t *testing.T) {
 	}
 }
 
+// TestXdgStateHomeAbsoluteWhenHomeUnset guards against the relative-path
+// regression: os.UserHomeDir() failing (empty $HOME) used to return a bare
+// ".local/state", silently rooting the per-project store AND mail.db at
+// whatever cwd a command happened to run from (loto-7wi). The fallback must
+// stay absolute regardless of which rung of the cascade answers.
+func TestXdgStateHomeAbsoluteWhenHomeUnset(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("HOME", "")
+	got := xdgStateHome()
+	if !filepath.IsAbs(got) {
+		t.Errorf("xdgStateHome() = %q; want an absolute path even when $HOME is unset", got)
+	}
+}
+
 // loto-d3l (case variant): on a case-insensitive filesystem a repo checked out
 // at .../MixedCaseRepo can receive a path with a different case in the segments
 // at/above the checkout root — a git worktree minted from a lowercase cwd hands

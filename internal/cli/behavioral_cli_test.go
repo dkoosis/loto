@@ -88,3 +88,24 @@ func TestRunBehavior_CheckStagedOutsideRepoReturnsError(t *testing.T) {
 		t.Fatalf("expected git-repo error in stderr, got %q", stderr)
 	}
 }
+
+// TestRunBehavior_StatusOutsideRepoReturnsActionableError pins the openRuntime
+// gate's error text (loto-7wi): repo-scoped commands still hard-fail outside a
+// git repo — there's no rendezvous point to derive a project slug from — but
+// the message must name its own remedy per design.md's actionable-finding
+// convention, not just echo the raw git exec error.
+func TestRunBehavior_StatusOutsideRepoReturnsActionableError(t *testing.T) {
+	t.Chdir(t.TempDir())
+	pinAgent(t)
+
+	stdout, stderr, code := executeCommand(tcCmdStatus)
+	if code != 3 {
+		t.Fatalf("expected exit code 3, got %d", code)
+	}
+	if stdout != "" {
+		t.Fatalf("expected empty stdout, got %q", stdout)
+	}
+	if !strings.Contains(stderr, "✗ not in a git repo") || !strings.Contains(stderr, "fix: git init") {
+		t.Fatalf("expected actionable not-in-a-git-repo error, got %q", stderr)
+	}
+}
