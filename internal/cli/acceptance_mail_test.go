@@ -156,6 +156,53 @@ func TestMailWorksOutsideGitRepo(t *testing.T) {
 	if !strings.Contains(out, "loto-7wi: ping from a scratch dir") {
 		t.Fatalf("bob should see alice's direct mail: %q", out)
 	}
+
+	// @all broadcast must resolve the same way outside a repo (CodeRabbit
+	// nitpick on loto-7wi #224): mailAddrs() always includes AddrAll
+	// regardless of RepoTop/Slug, so this doesn't depend on repo context.
+	asAlice()
+	out, errOut, code = run(tcMsg, "@all", "-t", "loto-7wi: broadcast from a scratch dir")
+	if code != 0 {
+		t.Fatalf("msg @all outside a git repo: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	asBob()
+	out, errOut, code = run("inbox")
+	if code != 0 {
+		t.Fatalf("inbox @all outside a git repo: code=%d err=%q", code, errOut)
+	}
+	if !strings.Contains(out, "loto-7wi: broadcast from a scratch dir") {
+		t.Fatalf("bob should see alice's @all broadcast: %q", out)
+	}
+}
+
+// TestMailDegradesOnRealGitFailureWithWarning (adversarial review on
+// loto-7wi): inside a real repo, a git failure that ISN'T "not a repository"
+// — here, a broken PATH standing in for a missing binary/timeout/permission
+// fault — must not be swallowed the same silent way the true outside-a-repo
+// case is. openMailRuntime still succeeds (mail is never allowed to
+// hard-fail), but warns on stderr so a caller can tell repo-addressed
+// (@<slug>/@<dir>) mail may be incomplete rather than just missing it.
+func TestMailDegradesOnRealGitFailureWithWarning(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("LOTO_BASE", filepath.Join(t.TempDir(), "state"))
+	t.Setenv("XDG_STATE_HOME", "")
+
+	repo := t.TempDir()
+	initBareGitRepo(t, repo)
+	t.Chdir(repo)
+	pinAgent(t)
+	t.Setenv("PATH", t.TempDir()) // git binary now unresolvable
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{"inbox"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("mail must not hard-fail on a non-not-a-repo git error: code=%d err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "loto: warning: repo context unavailable") {
+		t.Fatalf("expected a repo-context warning on stderr, got %q", errBuf.String())
+	}
 }
 
 func TestMsgRejectsUnknownHandleAndEmptyBody(t *testing.T) {

@@ -35,8 +35,11 @@ func (r *runtime) OpenMail() (*mail.Box, error) {
 // never hard-fails outside one — RepoTop/Slug are populated when a git
 // toplevel resolves (so inbox's @<slug> address matching works exactly as it
 // does today inside a repo) and left zero-value otherwise, which mailAddrs
-// treats as "no repo address to add" rather than a failure (loto-7wi).
-func openMailRuntime(ctx context.Context) (*runtime, error) {
+// treats as "no repo address to add" rather than a failure (loto-7wi). A git
+// failure that ISN'T "not a repository" (missing binary, timeout, permission)
+// gets a warning on stderr rather than silent treatment identical to the
+// genuinely-outside-a-repo case (adversarial review on loto-7wi #224).
+func openMailRuntime(ctx context.Context, stderr io.Writer) (*runtime, error) {
 	agentPinned := identity.PinnedByEnv()
 	a, err := identity.Ensure(ctx)
 	if err != nil {
@@ -55,6 +58,13 @@ func openMailRuntime(ctx context.Context) (*runtime, error) {
 	if top, err := gitRevParseToplevel(ctx); err == nil {
 		rt.RepoTop = top
 		rt.Slug = ResolveAndPinProjectSlug(top)
+	} else if !isNotAGitRepo(err) {
+		// A real git/infra failure (missing binary, timeout, permission) inside
+		// what may be a live repo — not the "genuinely outside a repo" case.
+		// Degrading silently here would drop @<slug>/@<dir> mail with no signal
+		// (Codex adversarial review on loto-7wi); warn so the omission is
+		// visible instead of just missing mail.
+		fmt.Fprintf(stderr, "loto: warning: repo context unavailable (%v); mail scoped to direct/@all only\n", err)
 	}
 	return rt, nil
 }

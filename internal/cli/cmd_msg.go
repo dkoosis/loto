@@ -73,7 +73,7 @@ func cmdMsg(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 func msgSend(ctx context.Context, to, body, thread string, ttl time.Duration, stdout, stderr io.Writer) int {
-	rt, err := openMailRuntime(ctx)
+	rt, err := openMailRuntime(ctx, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -40,6 +41,22 @@ func gitRevParseToplevel(parent context.Context) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// isNotAGitRepo reports whether err is specifically git's own "not a
+// repository" failure, as opposed to an infra failure — missing git binary,
+// ctx timeout/cancellation, permission error — that must not be collapsed
+// into the same case. Only *exec.ExitError carries captured stderr to check;
+// a ctx-cancel/timeout or a LookPath failure surfaces as a different error
+// type and correctly reads as false here (adversarial review on loto-7wi:
+// the prior code mapped every gitRevParseToplevel error to "not in a git
+// repo", misreporting real git/infra faults with a bogus `git init` remedy).
+func isNotAGitRepo(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	return bytes.Contains(exitErr.Stderr, []byte("not a git repository"))
 }
 
 type runtime struct {
@@ -85,7 +102,10 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 	}
 	top, err := gitRevParseToplevel(ctx)
 	if err != nil {
-		return nil, errNotInGitRepo
+		if isNotAGitRepo(err) {
+			return nil, errNotInGitRepo
+		}
+		return nil, fmt.Errorf("git rev-parse --show-toplevel: %w", err)
 	}
 	dir := StateDir(top)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
