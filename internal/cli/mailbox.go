@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/identity"
 	"loto/internal/mail"
 )
 
@@ -28,6 +30,45 @@ func (r *runtime) OpenMail() (*mail.Box, error) {
 	return mail.Open(r.Ctx, mailDBPath())
 }
 
+// openMailRuntime bootstraps msg/inbox/sent: identity, always; repo context,
+// best-effort. mailDBPath never depends on a repo, so unlike openRuntime this
+// never hard-fails outside one — RepoTop/Slug are populated when a git
+// toplevel resolves (so inbox's @<slug> address matching works exactly as it
+// does today inside a repo) and left zero-value otherwise, which mailAddrs
+// treats as "no repo address to add" rather than a failure (loto-7wi). A git
+// failure that ISN'T "not a repository" (missing binary, timeout, permission)
+// gets a warning on stderr rather than silent treatment identical to the
+// genuinely-outside-a-repo case (adversarial review on loto-7wi #224).
+func openMailRuntime(ctx context.Context, stderr io.Writer) (*runtime, error) {
+	agentPinned := identity.PinnedByEnv()
+	a, err := identity.Ensure(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("identity: %w", err)
+	}
+	host, _ := os.Hostname()
+	sid, pinned := sessionUUID()
+	rt := &runtime{
+		Agent:         a,
+		Ctx:           ctx,
+		Host:          host,
+		SessionUUID:   domain.SessionUUID(sid),
+		SessionPinned: pinned,
+		AgentPinned:   agentPinned,
+	}
+	if top, err := gitRevParseToplevel(ctx); err == nil {
+		rt.RepoTop = top
+		rt.Slug = ResolveAndPinProjectSlug(top)
+	} else if !isNotAGitRepo(err) {
+		// A real git/infra failure (missing binary, timeout, permission) inside
+		// what may be a live repo — not the "genuinely outside a repo" case.
+		// Degrading silently here would drop @<slug>/@<dir> mail with no signal
+		// (Codex adversarial review on loto-7wi); warn so the omission is
+		// visible instead of just missing mail.
+		fmt.Fprintf(stderr, "loto: warning: repo context unavailable (%v); mail scoped to direct/@all only\n", err)
+	}
+	return rt, nil
+}
+
 func (r *runtime) agentUUID() domain.AgentUUID { return domain.AgentUUID(r.Agent.UUID) }
 
 // agentBorn is this reader's identity CreatedAt — the @all cutoff: broadcast
@@ -41,7 +82,10 @@ func (r *runtime) agentBorn() time.Time { return r.Agent.CreatedAt }
 // pinned slug is remote-derived (@dkoosis-ferret), and send deliberately does
 // not validate slugs — so the reader is the only place the alias can resolve.
 func (r *runtime) mailAddrs() []string {
-	addrs := []string{r.Agent.UUID, domain.AddrAll, domain.RepoAddr(r.Slug)}
+	addrs := []string{r.Agent.UUID, domain.AddrAll}
+	if r.Slug != "" {
+		addrs = append(addrs, domain.RepoAddr(r.Slug))
+	}
 	if base := filepath.Base(r.RepoTop); base != "" && base != "." && base != string(filepath.Separator) && base != r.Slug {
 		addrs = append(addrs, domain.RepoAddr(base))
 	}

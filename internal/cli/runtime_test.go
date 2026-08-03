@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -101,4 +102,38 @@ func TestGitTimeoutIsBounded(t *testing.T) {
 	if gitTimeout <= 0 || gitTimeout > 30*time.Second {
 		t.Fatalf("gitTimeout out of sane range: %v", gitTimeout)
 	}
+}
+
+// TestIsNotAGitRepo pins the classifier that keeps a real git/infra failure
+// from being misreported as "not in a git repo" (adversarial review on
+// loto-7wi): only git's own exit-128 "not a git repository" failure reads as
+// true; a differently-worded ExitError, a non-ExitError (missing binary,
+// ctx timeout), and nil all read as false.
+func TestIsNotAGitRepo(t *testing.T) {
+	t.Run("real not-a-repo error", func(t *testing.T) {
+		t.Chdir(t.TempDir()) // deliberately not a git repo
+		_, err := exec.CommandContext(context.Background(), "git", "rev-parse", "--show-toplevel").Output()
+		if err == nil {
+			t.Fatal("expected git rev-parse to fail in a non-repo tempdir")
+		}
+		if !isNotAGitRepo(err) {
+			t.Fatalf("expected isNotAGitRepo(true) for a real not-a-repo failure, got false; err=%v", err)
+		}
+	})
+
+	t.Run("other ExitError stderr does not match", func(t *testing.T) {
+		exitErr := &exec.ExitError{Stderr: []byte("fatal: some other failure\n")}
+		if isNotAGitRepo(exitErr) {
+			t.Fatal("expected false for an ExitError whose stderr isn't the not-a-repo message")
+		}
+	})
+
+	t.Run("non-ExitError reads false", func(t *testing.T) {
+		if isNotAGitRepo(errors.New("exec: \"git\": executable file not found in $PATH")) {
+			t.Fatal("expected false for a non-ExitError (e.g. missing binary)")
+		}
+		if isNotAGitRepo(context.DeadlineExceeded) {
+			t.Fatal("expected false for a ctx timeout")
+		}
+	})
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -22,15 +23,32 @@ func StateDir(repoTop string) string {
 	return filepath.Join(xdgStateHome(), "loto", "projects", ResolveAndPinProjectSlug(repoTop))
 }
 
+// xdgStateHome mirrors identity.homeDir's cascade (registry.go): prefer
+// os.UserHomeDir ($HOME), fall back to os/user.Current().HomeDir (getpwuid_r)
+// when $HOME is unset, and only then /tmp. Duplicated rather than shared —
+// identity must import no internal package (.go-arch-lint.yml) — but this
+// keeps the fallback ABSOLUTE. The old bare os.UserHomeDir()-fails case
+// returned a relative ".local/state", silently rooting the state dir (and
+// with it mail.db) at whatever cwd the command happened to run from.
 func xdgStateHome() string {
 	if v := os.Getenv("XDG_STATE_HOME"); v != "" {
 		return v
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".local", "state")
-	}
+	home := fallbackHomeDir()
 	return filepath.Join(home, ".local", "state")
+}
+
+// fallbackHomeDir resolves a home directory that's always absolute: prefer
+// os.UserHomeDir ($HOME), fall back to os/user.Current().HomeDir
+// (getpwuid_r) when $HOME is unset, and only then /tmp.
+func fallbackHomeDir() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return home
+	}
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		return u.HomeDir
+	}
+	return "/tmp"
 }
 
 // ResolveAndPinProjectSlug returns a stable slug for the repo at repoTop. Uses pinned slug

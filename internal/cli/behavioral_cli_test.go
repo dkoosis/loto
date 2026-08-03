@@ -88,3 +88,52 @@ func TestRunBehavior_CheckStagedOutsideRepoReturnsError(t *testing.T) {
 		t.Fatalf("expected git-repo error in stderr, got %q", stderr)
 	}
 }
+
+// TestRunBehavior_StatusOutsideRepoReturnsActionableError pins the openRuntime
+// gate's error text (loto-7wi): repo-scoped commands still hard-fail outside a
+// git repo — there's no rendezvous point to derive a project slug from — but
+// the message must name its own remedy per design.md's actionable-finding
+// convention, not just echo the raw git exec error.
+func TestRunBehavior_StatusOutsideRepoReturnsActionableError(t *testing.T) {
+	t.Chdir(t.TempDir())
+	pinAgent(t)
+
+	stdout, stderr, code := executeCommand(tcCmdStatus)
+	if code != 3 {
+		t.Fatalf("expected exit code 3, got %d", code)
+	}
+	if stdout != "" {
+		t.Fatalf("expected empty stdout, got %q", stdout)
+	}
+	if !strings.Contains(stderr, "✗ not in a git repo") || !strings.Contains(stderr, "fix: git init") {
+		t.Fatalf("expected actionable not-in-a-git-repo error, got %q", stderr)
+	}
+}
+
+// TestRunBehavior_StatusRealGitFailureIsNotMisreportedAsNotInRepo (adversarial
+// review on loto-7wi): a git failure that ISN'T "not a repository" — here,
+// simulated by breaking PATH so the git binary can't be found — must not
+// collapse into errNotInGitRepo's "git init" remedy. That would send an
+// operator toward the wrong fix when the repo exists and it's git access
+// itself that's broken (missing binary, timeout, permission).
+func TestRunBehavior_StatusRealGitFailureIsNotMisreportedAsNotInRepo(t *testing.T) {
+	repo := t.TempDir()
+	initBareGitRepo(t, repo)
+	t.Chdir(repo)
+	pinAgent(t)
+	t.Setenv("PATH", t.TempDir()) // git binary now unresolvable
+
+	stdout, stderr, code := executeCommand(tcCmdStatus)
+	if code != 3 {
+		t.Fatalf("expected exit code 3, got %d (stderr=%q)", code, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("expected empty stdout, got %q", stdout)
+	}
+	if strings.Contains(stderr, "not in a git repo") || strings.Contains(stderr, "fix: git init") {
+		t.Fatalf("a real git/infra failure must not be misreported as not-in-a-repo: %q", stderr)
+	}
+	if !strings.Contains(stderr, "git rev-parse --show-toplevel:") {
+		t.Fatalf("expected the wrapped underlying git error, got %q", stderr)
+	}
+}

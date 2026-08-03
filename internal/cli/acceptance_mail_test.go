@@ -109,6 +109,102 @@ func TestE2E_MailLifecycle(t *testing.T) {
 	}
 }
 
+// TestMailWorksOutsideGitRepo (loto-7wi): msg/sent/inbox are host-global —
+// mailDBPath never derives from a repo slug — so openMailRuntime bootstraps
+// identity + the mailbox without ever hitting openRuntime's git-repo hard
+// fail. Direct-handle mail resolves correctly from a plain, non-git
+// directory; the @<slug> baton class (which DOES need a repo, to have
+// something to be a baton for) is exercised elsewhere (TestE2E_MailLifecycle).
+func TestMailWorksOutsideGitRepo(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("LOTO_BASE", filepath.Join(t.TempDir(), "state"))
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Chdir(t.TempDir()) // deliberately not a git repo
+	alice, bob := twoAgents(t)
+
+	asAlice := func() { t.Setenv("LOTO_AGENT_ID", alice.UUID) }
+	asBob := func() { t.Setenv("LOTO_AGENT_ID", bob.UUID) }
+	run := func(argv ...string) (string, string, int) {
+		var out, errBuf bytes.Buffer
+		code := Run(argv, &out, &errBuf)
+		return out.String(), errBuf.String(), code
+	}
+
+	asAlice()
+	out, errOut, code := run(tcMsg, bob.Handle, "-t", "loto-7wi: ping from a scratch dir")
+	if code != 0 {
+		t.Fatalf("msg outside a git repo: code=%d out=%q err=%q", code, out, errOut)
+	}
+	if !strings.Contains(out, "✓ sent id=m-") {
+		t.Fatalf("send confirmation missing: %q", out)
+	}
+
+	out, errOut, code = run("sent")
+	if code != 0 {
+		t.Fatalf("sent outside a git repo: code=%d err=%q", code, errOut)
+	}
+	if !strings.Contains(out, "loto-7wi: ping from a scratch dir") {
+		t.Fatalf("sent should list the outgoing mail: %q", out)
+	}
+
+	asBob()
+	out, errOut, code = run("inbox")
+	if code != 0 {
+		t.Fatalf("inbox outside a git repo: code=%d err=%q", code, errOut)
+	}
+	if !strings.Contains(out, "loto-7wi: ping from a scratch dir") {
+		t.Fatalf("bob should see alice's direct mail: %q", out)
+	}
+
+	// @all broadcast must resolve the same way outside a repo (CodeRabbit
+	// nitpick on loto-7wi #224): mailAddrs() always includes AddrAll
+	// regardless of RepoTop/Slug, so this doesn't depend on repo context.
+	asAlice()
+	out, errOut, code = run(tcMsg, "@all", "-t", "loto-7wi: broadcast from a scratch dir")
+	if code != 0 {
+		t.Fatalf("msg @all outside a git repo: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	asBob()
+	out, errOut, code = run("inbox")
+	if code != 0 {
+		t.Fatalf("inbox @all outside a git repo: code=%d err=%q", code, errOut)
+	}
+	if !strings.Contains(out, "loto-7wi: broadcast from a scratch dir") {
+		t.Fatalf("bob should see alice's @all broadcast: %q", out)
+	}
+}
+
+// TestMailDegradesOnRealGitFailureWithWarning (adversarial review on
+// loto-7wi): inside a real repo, a git failure that ISN'T "not a repository"
+// — here, a broken PATH standing in for a missing binary/timeout/permission
+// fault — must not be swallowed the same silent way the true outside-a-repo
+// case is. openMailRuntime still succeeds (mail is never allowed to
+// hard-fail), but warns on stderr so a caller can tell repo-addressed
+// (@<slug>/@<dir>) mail may be incomplete rather than just missing it.
+func TestMailDegradesOnRealGitFailureWithWarning(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("LOTO_BASE", filepath.Join(t.TempDir(), "state"))
+	t.Setenv("XDG_STATE_HOME", "")
+
+	repo := t.TempDir()
+	initBareGitRepo(t, repo)
+	t.Chdir(repo)
+	pinAgent(t)
+	t.Setenv("PATH", t.TempDir()) // git binary now unresolvable
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{"inbox"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("mail must not hard-fail on a non-not-a-repo git error: code=%d err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "loto: warning: repo context unavailable") {
+		t.Fatalf("expected a repo-context warning on stderr, got %q", errBuf.String())
+	}
+}
+
 func TestMsgRejectsUnknownHandleAndEmptyBody(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)

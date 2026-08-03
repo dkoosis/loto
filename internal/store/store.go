@@ -116,12 +116,10 @@ func acquireOpenLocks(ctx context.Context, p string) (*Store, error) {
 	// Release op-flock BEFORE any recovery-lock acquire. If openOnce
 	// succeeded the create race is resolved; if it failed with corruption
 	// or version mismatch, openWithRecovery will retake recovery-lock
-	// alone — never with op-flock held. Null the handle's file afterward so
-	// the deferred safety-net release above becomes a no-op (release()
-	// nil-guards on h.f == nil), preserving the explicit-before-recovery
-	// ordering.
+	// alone — never with op-flock held. After release the handle is
+	// already nil-guarded; the deferred safety-net release above will
+	// become a no-op.
 	flock.release()
-	flock.f = nil
 	if openErr == nil {
 		return s, nil
 	}
