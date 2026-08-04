@@ -36,3 +36,4 @@ report/
 .team/
 # bd worktrees (loto-<bead>/ at repo root) — glob covers all, no per-branch churn
 /loto-*/
+.aider*
