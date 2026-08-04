@@ -34,7 +34,7 @@ func TestUnlock_NotifiesWaiters(t *testing.T) {
 
 	t.Setenv("LOTO_AGENT_ID", bob.UUID)
 	var out bytes.Buffer
-	if code := Run([]string{"inbox"}, &out, io.Discard); code != 0 {
+	if code := Run([]string{tcCmdInbox}, &out, io.Discard); code != 0 {
 		t.Fatalf("bob inbox exit: %q", out.String())
 	}
 	got := out.String()
@@ -55,7 +55,7 @@ func TestUnlock_NoWaiter_NoMail(t *testing.T) {
 		t.Fatal("unlock failed")
 	}
 	var out bytes.Buffer
-	Run([]string{"inbox"}, &out, io.Discard)
+	Run([]string{tcCmdInbox}, &out, io.Discard)
 	if strings.Contains(out.String(), "released") {
 		t.Errorf("no waiter → no release mail, got: %q", out.String())
 	}

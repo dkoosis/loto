@@ -109,6 +109,10 @@ func TestGitTimeoutIsBounded(t *testing.T) {
 // loto-7wi): only git's own exit-128 "not a git repository" failure reads as
 // true; a differently-worded ExitError, a non-ExitError (missing binary,
 // ctx timeout), and nil all read as false.
+// errGitMissing mimics exec's missing-binary failure — the non-ExitError shape
+// that must read false in isNotAGitRepo.
+var errGitMissing = errors.New(`exec: "git": executable file not found in $PATH`)
+
 func TestIsNotAGitRepo(t *testing.T) {
 	t.Run("real not-a-repo error", func(t *testing.T) {
 		t.Chdir(t.TempDir()) // deliberately not a git repo
@@ -129,7 +133,7 @@ func TestIsNotAGitRepo(t *testing.T) {
 	})
 
 	t.Run("non-ExitError reads false", func(t *testing.T) {
-		if isNotAGitRepo(errors.New("exec: \"git\": executable file not found in $PATH")) {
+		if isNotAGitRepo(errGitMissing) {
 			t.Fatal("expected false for a non-ExitError (e.g. missing binary)")
 		}
 		if isNotAGitRepo(context.DeadlineExceeded) {

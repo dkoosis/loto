@@ -43,7 +43,7 @@ func TestE2E_MailLifecycle(t *testing.T) {
 	}
 
 	// 3. bob reads: sees the body, marks read.
-	out, _, code = run("inbox", "--mark-read")
+	out, _, code = run(tcCmdInbox, "--mark-read")
 	if code != 0 {
 		t.Fatalf("bob inbox: code=%d", code)
 	}
@@ -56,7 +56,7 @@ func TestE2E_MailLifecycle(t *testing.T) {
 	if strings.Contains(out, "mail unread") {
 		t.Fatalf("banner should clear after mark-read: %q", out)
 	}
-	out, _, code = run("inbox", "--summary")
+	out, _, code = run(tcCmdInbox, "--summary")
 	if code != 0 || strings.TrimSpace(out) != "" {
 		t.Fatalf("summary should be silent when empty: code=%d out=%q", code, out)
 	}
@@ -66,12 +66,12 @@ func TestE2E_MailLifecycle(t *testing.T) {
 	if _, _, code := run(tcMsg, "@all", "-t", "loto-qhw: broadcast"); code != 0 {
 		t.Fatalf("msg @all: code=%d", code)
 	}
-	out, _, _ = run("inbox")
+	out, _, _ = run(tcCmdInbox)
 	if !strings.Contains(out, "✓ inbox empty") {
 		t.Fatalf("sender must not see own broadcast: %q", out)
 	}
 	asBob()
-	out, _, _ = run("inbox")
+	out, _, _ = run(tcCmdInbox)
 	if !strings.Contains(out, "loto-qhw: broadcast") {
 		t.Fatalf("bob should see @all: %q", out)
 	}
@@ -86,7 +86,7 @@ func TestE2E_MailLifecycle(t *testing.T) {
 		t.Fatalf("msg @elsewhere: code=%d", code)
 	}
 	asBob()
-	out, _, _ = run("inbox")
+	out, _, _ = run(tcCmdInbox)
 	if !strings.Contains(out, "repo mail") {
 		t.Fatalf("bob should see @test-proj mail: %q", out)
 	}
@@ -103,7 +103,7 @@ func TestE2E_MailLifecycle(t *testing.T) {
 		t.Fatalf("msg %s: code=%d", base, code)
 	}
 	asBob()
-	out, _, _ = run("inbox")
+	out, _, _ = run(tcCmdInbox)
 	if !strings.Contains(out, "dir-alias mail") {
 		t.Fatalf("bob should see %s mail via basename alias: %q", base, out)
 	}
@@ -149,7 +149,7 @@ func TestMailWorksOutsideGitRepo(t *testing.T) {
 	}
 
 	asBob()
-	out, errOut, code = run("inbox")
+	out, errOut, code = run(tcCmdInbox)
 	if code != 0 {
 		t.Fatalf("inbox outside a git repo: code=%d err=%q", code, errOut)
 	}
@@ -167,7 +167,7 @@ func TestMailWorksOutsideGitRepo(t *testing.T) {
 	}
 
 	asBob()
-	out, errOut, code = run("inbox")
+	out, errOut, code = run(tcCmdInbox)
 	if code != 0 {
 		t.Fatalf("inbox @all outside a git repo: code=%d err=%q", code, errOut)
 	}
@@ -196,7 +196,7 @@ func TestMailDegradesOnRealGitFailureWithWarning(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // git binary now unresolvable
 
 	var out, errBuf bytes.Buffer
-	code := Run([]string{"inbox"}, &out, &errBuf)
+	code := Run([]string{tcCmdInbox}, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("mail must not hard-fail on a non-not-a-repo git error: code=%d err=%q", code, errBuf.String())
 	}
