@@ -58,7 +58,7 @@ func (s *Store) appendAuditDetached(evs []domain.Event) error {
 		return nil
 	}
 	auditDetachedHook()
-	ctx, cancel := context.WithTimeout(context.Background(), auditDetachedTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), auditDetachedTimeout) //nolint:forbidigo // detached audit write must outlive the (cancelled) triggering op so the trail is recorded (gh#107).
 	defer cancel()
 	err := s.AppendEvents(ctx, evs)
 	if err != nil && s.stderr != nil {

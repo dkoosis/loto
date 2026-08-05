@@ -42,7 +42,7 @@ func connDSN(path string) string {
 // existence check and clobber each other's writes. Subsequent Opens on
 // an initialized DB take the fast path (no flock).
 func Open(p string) (*Store, error) {
-	return OpenContext(context.Background(), p)
+	return OpenContext(context.Background(), p) //nolint:forbidigo // Open is the no-context convenience root; OpenContext is the ctx-threaded path for callers that have one.
 }
 
 // OpenContext is Open with a caller-supplied context. Cancellation aborts
@@ -384,7 +384,7 @@ func (s *Store) beginTx(ctx context.Context) (*sql.Tx, func(), error) {
 		// Reset busy_timeout to the DSN default before the conn returns to
 		// the pool — otherwise the next caller inherits this caller's
 		// ctx-scaled value (gh#55 follow-up).
-		_, _ = conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout=%d", txBusyTimeoutDefaultMs))
+		_, _ = conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout=%d", txBusyTimeoutDefaultMs)) //nolint:forbidigo // teardown reset must run on conn return even if the request ctx is already cancelled (gh#55).
 		_ = conn.Close()
 	}
 	return tx, cleanup, nil

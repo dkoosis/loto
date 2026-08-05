@@ -20,7 +20,7 @@ include .sandbox/lib/Makefile.cross.mk
 
 .PHONY: help scan check audit deploy report report-human \
         vet lint arch test race demo demo-v vuln dupl nilcheck stress \
-        build install tidy clean
+        pack-drift build install tidy clean
 
 BIN_DIR := bin
 BIN     := $(BIN_DIR)/loto
@@ -54,7 +54,7 @@ help: ## Show this help
 		/^## [^-]/ { printf "\n%s\n", substr($$0, 4) } \
 		/^[a-zA-Z0-9_-]+:.*?## / { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-check: vet lint arch test ## Full repo: vet + lint + arch + test + build
+check: vet lint arch pack-drift test ## Full repo: vet + lint + arch + pack-drift + test + build
 	@go build -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/loto
 	@echo "=== check pass ==="
 
@@ -92,6 +92,13 @@ arch: ## Enforce layering (.go-arch-lint.yml)
 		exit 1; \
 	fi
 	@go-arch-lint check --json 2>/dev/null | fo wrap archlint | fo --format llm
+
+pack-drift: ## Fail if the copied bugclasses pack has drifted from upstream (network-soft)
+	@# bugclasses pack (ccp-sbp): fail if .golangci-rules/bugclasses.go has
+	@# drifted from the upstream cc-plugins pack. Network-soft — an unreachable
+	@# upstream (cc-plugins is private) warns and passes, so this never breaks an
+	@# offline build.
+	@scripts/check-pack-drift.sh .golangci-rules/bugclasses.go
 
 lint: ## Run golangci-lint (full)
 	@if ! command -v golangci-lint >/dev/null 2>&1; then \

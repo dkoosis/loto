@@ -16,6 +16,8 @@ bin/
 
 # Sandbox caches and ephemeral reports
 .sandbox/cache/
+# Repo-local golangci-lint cache (Makefile GOLANGCI_LINT_CACHE)
+.cache/
 .sandbox/setup-report.json
 .sandbox/baseline.txt
 

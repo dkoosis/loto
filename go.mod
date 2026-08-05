@@ -3,6 +3,7 @@ module loto
 go 1.25.0
 
 require (
+	github.com/quasilyte/go-ruleguard/dsl v0.3.23
 	github.com/rogpeppe/go-internal v1.14.1
 	golang.org/x/sys v0.45.0
 	modernc.org/sqlite v1.50.0

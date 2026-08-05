@@ -5,6 +5,13 @@ exclude:
   - .sandbox
   - bin
   - docs
+  # bugclasses pack (ccp-sbp): ruleguard DSL, not part of the layered graph.
+  - .golangci-rules
+
+excludeFiles:
+  # tools.go pins the ruleguard DSL into the module graph (build tag `tools`);
+  # it is not a layered component.
+  - "tools.go"
 
 # Layering invariants for loto v2:
 #   cmd/loto → internal/cli (only)

@@ -261,7 +261,7 @@ func (s *Store) stripAndHandleFailure(tx *sql.Tx, sorted []domain.LockRecord, no
 	for _, re := range restoreErrs {
 		evs = append(evs, modeRestoreFailedEvent(re.path, string(sorted[0].OwnerUUID), now, re.err))
 	}
-	auditCtx, cancel := context.WithTimeout(context.Background(), auditDetachedTimeout)
+	auditCtx, cancel := context.WithTimeout(context.Background(), auditDetachedTimeout) //nolint:forbidigo // detached audit write must outlive a cancelled acquire so the failure trail still records (gh#107).
 	defer cancel()
 	if err := appendEventsTx(auditCtx, tx, evs); err != nil {
 		_ = tx.Rollback()

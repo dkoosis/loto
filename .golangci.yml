@@ -16,6 +16,7 @@ linters:
     # Safety
     - bodyclose
     - containedctx
+    - forbidigo
     - forcetypeassert
     - gosec
     - noctx
@@ -96,6 +97,20 @@ linters:
       enabled-tags:
         - diagnostic
         - performance
+      # bugclasses pack (ccp-sbp, decision nug d7ea466a8172): the ruleguard
+      # checker runs the shared machine rules for the recurring cross-repo Go
+      # defect classes. Rules live in .golangci-rules/bugclasses.go — a verbatim
+      # copy of the upstream pack, drift-guarded by scripts/check-pack-drift.sh.
+      enabled-checks:
+        - ruleguard
+      settings:
+        ruleguard:
+          # ${base-path} = the .golangci.yml directory (golangci-lint v2). The
+          # glob names ONLY bugclasses.go, so rule 2 (raw-state-write, the
+          # opt-in file) stays off until loto moves durable state to atomicfile.
+          rules: "${base-path}/.golangci-rules/bugclasses.go"
+          # Fail the run on rule-compile errors — never silently skip them.
+          failOn: dsl
       disabled-checks:
         - appendCombine
         - commentFormatting
@@ -103,6 +118,18 @@ linters:
         - hugeParam
         - ifElseChain
         - unlambda
+    forbidigo:
+      # bugclasses rule 5: context.Background() deep in daemon code should
+      # thread the caller/shutdown ctx (strand st-47z, trixi #606,
+      # trixi-bot gg-8rq.3, canapay can-x38). loto is a short-lived CLI, so the
+      # ban is scoped in exclusions below to the CLI command roots + git
+      # plumbing where a fresh root context is the correct root; the ban still
+      # covers the SQLite store, whose detached audit writes carry their own
+      # //nolint audit trail. Types-aware so a `ctx.Background` field can't misfire.
+      analyze-types: true
+      forbid:
+        - pattern: '^context\.Background$'
+          msg: "thread the caller/shutdown ctx; context.Background belongs only at a daemon's root (main/startup)"
     cyclop:
       max-complexity: 15
     funlen:
@@ -182,6 +209,16 @@ linters:
           - gocritic
         path: cmd/.*/main\.go
         text: exitAfterDefer
+      # bugclasses rule 5 (forbidigo Background ban): loto is a short-lived CLI,
+      # not a long-lived daemon (a `loto serve` daemon is only proposed —
+      # loto-e6r). Every command invocation IS a root, so context.Background is
+      # legitimate at the CLI command layer and its git plumbing. Scope the ban
+      # out of those; it still covers internal/store, where the detached audit
+      # writes each carry their own //nolint audit trail.
+      - linters:
+          - forbidigo
+        path: '(_test\.go$|/cmd/|(^|/)main\.go$|internal/cli/|internal/lane/)'
+        text: 'context\.Background'
     paths:
       - third_party$
       - examples$

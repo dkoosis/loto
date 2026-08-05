@@ -74,3 +74,12 @@ jobs:
         run: |
           go install github.com/fe3dback/go-arch-lint@v1.15.0
           "$(go env GOPATH)/bin/go-arch-lint" check
+
+      # bugclasses pack drift (ccp-sbp): fail if .golangci-rules/bugclasses.go
+      # has drifted from upstream. Network-soft — skips cleanly when upstream is
+      # unreachable (cc-plugins is private; activates once a token or public URL
+      # is wired via PACK_UPSTREAM_URL). Linux-only: it's a file-hash check,
+      # OS-independent, and every PR + push-to-main runs the linux leg.
+      - name: pack-drift
+        if: matrix.name == 'linux'
+        run: make pack-drift
