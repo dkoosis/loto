@@ -63,7 +63,7 @@ func cmdMsg(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "✗ --ttl must be non-negative, got %s\n", *ttl)
 		return 2
 	}
-	warnIfNoBeadID(*text, stderr)
+	warnIfNoBeadID("msg", *text, stderr)
 	to, err := resolveMsgAddr(fs.Arg(0))
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)

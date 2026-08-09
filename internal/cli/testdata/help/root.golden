@@ -14,6 +14,7 @@ commands:
   inbox    List unread mail; --mark-read, --summary for banners
   sent     List your live outgoing mail with read status ("did anyone pick this up?")
   whoami   Print agent identity
+  who      Map handles to Claude Code peer names — the address SendMessage needs
   version  Print loto version
 
 lane choreography (engine verbs; used by the /team fleet harness):

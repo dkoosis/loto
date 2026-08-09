@@ -24,7 +24,8 @@ description: >
 | `check <paths…>` | Silent probe: exit 0 means no peer holds any path. `--staged` reads git staged paths. | 0 free / 1 held / 2 / 3 |
 | `status [<paths…>] [--mine]` | Per-target table of holders + intents. | 0 / 2 / 3 |
 | `doctor` | Detect / repair stale locks. | 0 / 3 |
-| `whoami` | Print agent identity (name + id). | 0 |
+| `whoami` | Print agent identity (name + id) plus this session's Claude Code peer name; `--peer-name <n>` records a name loto cannot derive. | 0 |
+| `who [<handle>]` | Map loto handles to Claude Code peer names — the address `SendMessage` needs. `--json`, `--all` (include gone sessions). | 0 / 1 no live peer / 2 |
 | `version` | Print loto version. | 0 |
 
 ‡ Targets must be **regular files**. Globs and directory locks were cut (PR #65). Lock one anchor file per subtree instead.
@@ -34,6 +35,7 @@ description: >
 - About to edit a file where another Claude session may be active (worktrees, named subagents, multiple windows).
 - Before a multi-file sweep — `check` the blast radius first, then `lock` anchor files.
 - Surprising diffs ("I didn't write that") → `loto status` to find the holder.
+- About to `SendMessage` a peer you only know by loto handle → `loto who <handle>` for the name the messaging layer answers to.
 
 ## Operating loop
 
