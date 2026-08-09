@@ -36,7 +36,7 @@ func TestWhoamiJSON(t *testing.T) {
 	os.Unsetenv("LOTO_AGENT_ID")
 	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
 	var stdout bytes.Buffer
-	code := Run([]string{cmdWhoamiName, "--json"}, &stdout, &bytes.Buffer{})
+	code := Run([]string{cmdWhoamiName, flagJSON}, &stdout, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
@@ -63,7 +63,7 @@ func TestWhoamiEnsureFlag(t *testing.T) {
 	os.Unsetenv("LOTO_AGENT_ID")
 	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
 	var stdout bytes.Buffer
-	code := Run([]string{cmdWhoamiName, "--ensure", "--json"}, &stdout, &bytes.Buffer{})
+	code := Run([]string{cmdWhoamiName, "--ensure", flagJSON}, &stdout, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}

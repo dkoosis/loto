@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -51,7 +53,7 @@ func cmdTag(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "✗ tag text required")
 		return 2
 	}
-	warnIfNoBeadID(text, stderr)
+	warnIfNoBeadID("tag", text, stderr)
 	repoTop, _ := repoTopForCwd(ctx)
 	target, err := resolveCLITarget(repoTop, fs.Arg(0))
 	if err != nil {
@@ -67,14 +69,57 @@ func cmdTag(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return runTag(rt, target.Canonical, text, stdout, stderr)
 }
 
-// warnIfNoBeadID shapes input lightly: if the tag text does not open with a
+// warnIfNoBeadID shapes input lightly: if the text does not open with a
 // "<bead-id>:" prefix, warn but proceed. Agents aren't always under a bead and
 // humans tag too, so the free-text field stays — this is a nudge, not a gate.
-func warnIfNoBeadID(text string, stderr io.Writer) {
+//
+// It fires at most once per session (loto-2hl0): a fleet's coordination
+// traffic is dozens of `loto msg` calls, and a nudge repeated on every one of
+// them stops teaching and starts training the reader to skip stderr. kind
+// names the surface so the msg path doesn't say "tag text".
+func warnIfNoBeadID(kind, text string, stderr io.Writer) {
 	if beadIDPrefix.MatchString(text) {
 		return
 	}
-	fmt.Fprintln(stderr, "∇ tag text should open with your bead id (e.g. loto-c6rg: want next)")
+	if !claimBeadWarn() {
+		return
+	}
+	fmt.Fprintf(stderr, "∇ %s text should open with your bead id (e.g. loto-c6rg: want next)\n", kind)
+}
+
+// beadWarnMarker is the once-per-session witness file. Var so tests can point
+// it at a temp dir instead of the real one.
+var beadWarnMarker = defaultBeadWarnMarker //nolint:gochecknoglobals // test seam for the once-per-session marker
+
+func defaultBeadWarnMarker() (string, bool) {
+	sid := os.Getenv("LOTO_SESSION_ID")
+	if sid == "" {
+		sid = os.Getenv("CLAUDE_CODE_SESSION_ID")
+	}
+	// No session id (a bare human shell, one command at a time) → no marker,
+	// so the nudge stays on. Reject any path-shaped id rather than sanitizing:
+	// the fallback is simply "warn every time", which is the old behavior.
+	if sid == "" || strings.ContainsAny(sid, `/\`) || strings.Contains(sid, "..") {
+		return "", false
+	}
+	return filepath.Join(os.TempDir(), "loto-beadwarn-"+sid), true
+}
+
+// claimBeadWarn reports whether this invocation owns the session's one bead-id
+// nudge. O_EXCL makes the claim atomic across the concurrent loto processes a
+// fleet session runs, so the warning cannot double-print. Any marker failure
+// falls open to warning — a nudge printed twice beats a nudge lost.
+func claimBeadWarn() bool {
+	path, ok := beadWarnMarker()
+	if !ok {
+		return true
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return errors.Is(err, os.ErrPermission) || !errors.Is(err, os.ErrExist)
+	}
+	f.Close()
+	return true
 }
 
 func runTag(rt *runtime, canonical, text string, stdout, stderr io.Writer) int {

@@ -1,0 +1,18 @@
+usage: loto who [<handle>] [--json] [--all]
+
+Print the handle ↔ Claude Code peer-name table for sessions live on this host.
+Answers the question you have right before SendMessage: "I know this agent as
+LotoHandle — what name does the messaging layer know it by?"
+
+  <handle>  print just that agent's row; exit 1 if it has no live peer
+  --json    emit the rows as a JSON array
+  --all     include peers whose session is gone (last observation)
+
+Liveness is socket-file existence, not process liveness — a worktree agent
+reads as dead to the lock-liveness check (loto-r11w) but is plainly reachable
+here. Dead rows are pruned from disk as they are listed.
+
+A row with peer=- is a top-level session: Claude Code names those from their
+cwd or /rename, and that name is readable nowhere a loto hook can reach. Make
+it addressable by running /rename <handle> in that session, or have it record
+its own name with 'loto whoami --peer-name <name>'.

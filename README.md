@@ -58,7 +58,8 @@ loto unlock <path>... -t "<intent>"   # release; --force to break another's, --a
 loto check [<path>...]                # check targets for conflicts; --staged for git staged paths
 loto status                           # who holds what; --mine to filter
 loto doctor [--dry-run|--repair]      # detect and optionally repair stale locks
-loto whoami                           # session identity
+loto whoami                           # session identity; --peer-name records its messaging name
+loto who [<handle>]                   # handle ↔ Claude Code peer name, for cross-session messaging
 loto version                          # version
 ```
 
