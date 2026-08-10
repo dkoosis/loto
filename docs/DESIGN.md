@@ -111,7 +111,8 @@ Invariants:
   remains an open dk decision.)
 
 CLI: `loto lock <t> --shared` takes a read lease (default is exclusive);
-`loto downgrade <t>` steps an exclusive hold down to shared.
+`loto downgrade <t>` steps an exclusive hold down to shared;
+`loto refresh <t> [--ttl d] | --all` extends the lease you already hold.
 
 ## the operating loop (Claude's POV)
 
@@ -149,7 +150,12 @@ or work elsewhere. Both are one command away.
 **Soft-TTL on rows.** A `locks` row carries `expires_at`. Past expiry
 it's *soft-stale*: still present, flagged in status output, eligible for
 GC on next acquirer's pass. Lets a Claude declare "I'll touch this within
-30min" without holding a process open the whole time. For the file-flock
+30min" without holding a process open the whole time. A crashed holder
+frees its territory at the deadline with no `doctor` run — doctor stays
+for forensics and orphan-mode repair, not for reclamation. A holder still
+alive proves it with `loto refresh`, which extends `expires_at` in place
+(same row, same `created_at`); refreshing an already-lapsed lease is
+refused, since a peer may already be taking it. For the file-flock
 tier (deferred), flock will remain authoritative for *currently* held;
 TTL just bounds *advisory* signals on the record tier.
 

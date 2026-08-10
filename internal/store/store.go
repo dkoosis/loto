@@ -555,25 +555,28 @@ CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);`
 }
 
 // ensureEventsCheckCurrent widens the events CHECK constraint to admit the
-// lock_downgraded kind on a DB created before loto-k5el.2. A CHECK can't be
-// ALTERed, so the events table is rebuilt — but only when the stored DDL lacks
-// the new kind (probe via sqlite_master.sql substring), making this a no-op on
-// fresh DBs and re-Opens. The probe doubles as the events-table existence
-// check for schemaCurrent (ErrNoRows → pending). user_version not bumped.
+// kinds added after a DB was created — lock_downgraded (loto-k5el.2), then
+// lock_refreshed (ccp-z1vj.6). A CHECK can't be ALTERed, so the events table is
+// rebuilt — but only when the stored DDL lacks the NEWEST kind (probe via
+// sqlite_master.sql substring), making this a no-op on fresh DBs and re-Opens.
+// The probe tracks the newest kind, so widening the constraint again means
+// updating both the probe string and the rebuild DDL below. The probe doubles as
+// the events-table existence check for schemaCurrent (ErrNoRows → pending).
+// user_version not bumped.
 func ensureEventsCheckCurrent(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	var ddl string
 	if err := db.QueryRowContext(ctx,
 		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&ddl); err != nil {
 		return false, err
 	}
-	if strings.Contains(ddl, "'lock_downgraded'") {
+	if strings.Contains(ddl, "'lock_refreshed'") {
 		return false, nil // already current
 	}
 	const rebuild = `
 CREATE TABLE events_new (
   id               TEXT PRIMARY KEY,
   target_canonical TEXT NOT NULL,
-  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started','lock_downgraded')),
+  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started','lock_downgraded','lock_refreshed')),
   actor_uuid       TEXT NOT NULL,
   subject_uuid     TEXT,
   reason           TEXT NOT NULL DEFAULT '',

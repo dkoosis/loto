@@ -1,0 +1,14 @@
+usage: loto refresh <target> [<target>...] [--ttl 30m] | --all [--ttl 30m]
+
+Extend the TTL on locks you already hold, in place — the "I'm still alive"
+heartbeat. A lock whose TTL lapses is reclaimable by any peer's next acquire
+with no doctor run, so a long job must refresh before its deadline. Refreshing
+an already-expired lease is refused: re-acquire instead.
+
+examples:
+  loto refresh internal/store/store.go --ttl 1h
+  loto refresh --all
+  -all
+    	refresh every lock owned by my uuid
+  -ttl duration
+    	new lock TTL, measured from now (default 30m0s)

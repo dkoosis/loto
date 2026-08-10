@@ -24,6 +24,7 @@ const (
 	tcCmdTag       = "tag"
 	tcCmdAck       = "ack"
 	tcCmdDowngrade = "downgrade"
+	tcCmdRefresh   = "refresh"
 	tcFlagAll      = "--all"
 	tcFlagShared   = "--shared"
 	tcCmdLane      = "lane"
