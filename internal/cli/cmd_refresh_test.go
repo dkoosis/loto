@@ -21,15 +21,19 @@ func TestAcceptance_ExpiredLeaseFreesTerritoryWithoutDoctor(t *testing.T) {
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
 	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
-	// Lease measured from here: the pre-expiry block check below must land
-	// inside it, and each Run opens+migrates the store. The margin is sized for
-	// a loaded serial CI runner; the sleep below runs to the deadline, so a
-	// wider margin costs wall time only when the Runs finish fast.
+	// The margin is sized for a loaded serial CI runner: the pre-expiry block
+	// check below must land inside the lease, and each Run opens+migrates the
+	// store. The sleep runs to the deadline, so a wider margin costs wall time
+	// only when the Runs finish fast.
 	const ttl = 10 * time.Second
-	deadline := time.Now().Add(ttl)
 	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, "crash me", tcFlagTTL, ttl.String()}, io.Discard, io.Discard); code != 0 {
 		t.Fatal("alice lock failed")
 	}
+	// Deadline taken AFTER the acquire: the row's expires_at is now+ttl as of a
+	// moment inside that Run, so a deadline read here is at or past the real
+	// one. Taken before, slow setup would put the true expiry beyond the sleep
+	// and bob would still be blocked when the test expects him through.
+	deadline := time.Now().Add(ttl)
 
 	// Peer is blocked while the lease is live.
 	t.Setenv("LOTO_AGENT_ID", bob.UUID)
@@ -59,13 +63,16 @@ func TestAcceptance_RefreshBeforeExpiryHoldsTerritory(t *testing.T) {
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
 	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
 	// The original lease must outlive the refresh invocation itself (each Run
-	// opens+migrates the store), so it is measured from here rather than assumed,
-	// with the same loaded-CI margin as the expiry test above.
+	// opens+migrates the store), hence the loaded-CI margin of the expiry test.
 	const origTTL = 10 * time.Second
-	deadline := time.Now().Add(origTTL)
 	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, "long haul", tcFlagTTL, origTTL.String()}, io.Discard, io.Discard); code != 0 {
 		t.Fatal("alice lock failed")
 	}
+	// Deadline taken AFTER the acquire, as in the expiry test — here it is what
+	// makes the assertion mean anything: read before, slow setup would leave the
+	// original lease still live at wake-up and bob's blocked check would pass
+	// whether or not the refresh did a thing.
+	deadline := time.Now().Add(origTTL)
 	var out bytes.Buffer
 	if code := Run([]string{tcCmdRefresh, tcTargetA, tcFlagTTL, "1h"}, &out, io.Discard); code != 0 {
 		t.Fatalf("refresh exit %d: %s", code, out.String())
