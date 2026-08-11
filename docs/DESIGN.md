@@ -155,7 +155,10 @@ frees its territory at the deadline with no `doctor` run — doctor stays
 for forensics and orphan-mode repair, not for reclamation. A holder still
 alive proves it with `loto refresh`, which extends `expires_at` in place
 (same row, same `created_at`); refreshing an already-lapsed lease is
-refused, since a peer may already be taking it. For the file-flock
+refused, since a peer may already be taking it. Naming a lapsed target
+explicitly is a `✗` and exit 1; the same row under `--all` is a `⚠`
+advisory and exit 0, so one stale lock can't fail a heartbeat that
+extended every live lease it owns. For the file-flock
 tier (deferred), flock will remain authoritative for *currently* held;
 TTL just bounds *advisory* signals on the record tier.
 

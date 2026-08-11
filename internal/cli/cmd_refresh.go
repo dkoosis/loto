@@ -77,7 +77,9 @@ func cmdRefresh(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	return emitRefreshResults(stdout, results)
+	// --all named no target, so a lease that lapsed before the heartbeat ran is
+	// reported but must not fail the run (see emitRefreshResults).
+	return emitRefreshResults(stdout, results, *all)
 }
 
 // refreshTargets resolves the target set: --all reads back every lock this
@@ -118,7 +120,13 @@ func refreshTargets(rt *runtime, args []string, all bool, stderr io.Writer) ([]d
 // target (css:cli convention, mirroring EmitReleaseResults). Exit 1 when any
 // target failed — a partial refresh must not read as success to a caller that
 // only checks the exit code.
-func emitRefreshResults(stdout io.Writer, results []store.RefreshResult) int {
+//
+// allTargets flips a lapsed lease from ✗/exit-1 to ⚠/exit-0: under --all the
+// target set is whatever this agent happens to own, so one lock that lapsed
+// before the heartbeat ran would otherwise poison the exit code of a run whose
+// live leases were all extended. An explicitly named target keeps ✗ and exit 1
+// — there the caller asked about that lock and the answer is "you lost it".
+func emitRefreshResults(stdout io.Writer, results []store.RefreshResult, allTargets bool) int {
 	ok := 0
 	for i := range results {
 		if results[i].Err == nil {
@@ -137,6 +145,10 @@ func emitRefreshResults(stdout io.Writer, results []store.RefreshResult) int {
 			fmt.Fprintf(stdout, "✗ target=%s reason=no-lock-held\n", path)
 			exit = 1
 		case errors.Is(r.Err, store.ErrLeaseExpired):
+			if allTargets {
+				fmt.Fprintf(stdout, "⚠ target=%s reason=lease-expired hint=re-acquire\n", path)
+				continue
+			}
 			fmt.Fprintf(stdout, "✗ target=%s reason=lease-expired hint=re-acquire\n", path)
 			exit = 1
 		default:

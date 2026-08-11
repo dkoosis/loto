@@ -22,8 +22,10 @@ func TestAcceptance_ExpiredLeaseFreesTerritoryWithoutDoctor(t *testing.T) {
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
 	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
 	// Lease measured from here: the pre-expiry block check below must land
-	// inside it, and each Run opens+migrates the store.
-	const ttl = 3 * time.Second
+	// inside it, and each Run opens+migrates the store. The margin is sized for
+	// a loaded serial CI runner; the sleep below runs to the deadline, so a
+	// wider margin costs wall time only when the Runs finish fast.
+	const ttl = 10 * time.Second
 	deadline := time.Now().Add(ttl)
 	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, "crash me", tcFlagTTL, ttl.String()}, io.Discard, io.Discard); code != 0 {
 		t.Fatal("alice lock failed")
@@ -57,8 +59,9 @@ func TestAcceptance_RefreshBeforeExpiryHoldsTerritory(t *testing.T) {
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
 	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
 	// The original lease must outlive the refresh invocation itself (each Run
-	// opens+migrates the store), so it is measured from here rather than assumed.
-	const origTTL = 3 * time.Second
+	// opens+migrates the store), so it is measured from here rather than assumed,
+	// with the same loaded-CI margin as the expiry test above.
+	const origTTL = 10 * time.Second
 	deadline := time.Now().Add(origTTL)
 	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, "long haul", tcFlagTTL, origTTL.String()}, io.Discard, io.Discard); code != 0 {
 		t.Fatal("alice lock failed")
@@ -112,6 +115,54 @@ func TestRefresh_All(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "✓ refreshed count=2") {
 		t.Errorf("expected both locks refreshed, got: %s", out.String())
+	}
+}
+
+// TestRefresh_AllLapsedLeaseIsAdvisoryNotFailure — a heartbeat that extends
+// every live lease it owns must exit 0 even when some unrelated lock lapsed
+// earlier: --all names no target, so the lapsed row is a ⚠ advisory, not the
+// answer to a question the caller asked.
+func TestRefresh_AllLapsedLeaseIsAdvisoryNotFailure(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, tcIntentWrite, tcFlagTTL, "5m"}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("live lock failed")
+	}
+	if code := Run([]string{tcCmdLock, tcStoreStoreGo, tcFlagIntent, tcIntentWrite, tcFlagTTL, "150ms"}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("short-TTL lock failed")
+	}
+	time.Sleep(250 * time.Millisecond) // let the second lease lapse
+
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdRefresh, tcFlagAll, tcFlagTTL, "2h"}, &out, io.Discard); code != 0 {
+		t.Fatalf("--all must not fail on a lapsed lease, got %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "✓ refreshed count=1") {
+		t.Errorf("expected the live lease refreshed, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "⚠") || !strings.Contains(out.String(), "lease-expired") {
+		t.Errorf("expected a ⚠ lease-expired advisory row, got: %s", out.String())
+	}
+}
+
+// TestRefresh_ExplicitLapsedLeaseExits1 — the same lapsed lease named
+// explicitly is a ✗ with exit 1: the caller asked about that lock.
+func TestRefresh_ExplicitLapsedLeaseExits1(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, tcIntentWrite, tcFlagTTL, "150ms"}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("short-TTL lock failed")
+	}
+	time.Sleep(250 * time.Millisecond)
+
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdRefresh, tcTargetA, tcFlagTTL, "2h"}, &out, io.Discard); code != 1 {
+		t.Fatalf("want exit 1 for an explicitly named lapsed lease, got %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "✗") || !strings.Contains(out.String(), "lease-expired") {
+		t.Errorf("expected a ✗ lease-expired row, got: %s", out.String())
 	}
 }
 

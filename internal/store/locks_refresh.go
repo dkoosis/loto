@@ -100,6 +100,9 @@ func (s *Store) RefreshLocks(ctx context.Context, targets []domain.Target, owner
 // events in one immediate-mode write tx. The owner_uuid predicate is the
 // authorization gate at the SQL layer too, not just in the caller's classify
 // loop: a peer's row is unreachable even if the snapshot went stale under us.
+// `expires_at > now` carries the ErrLeaseExpired invariant down with it — the
+// op-flock makes both redundant today, and both stay so a caller that ever
+// reaches this path unserialized still cannot resurrect a lapsed lease.
 func (s *Store) commitRefreshes(ctx context.Context, extend []domain.Target, owner string, newExpiry time.Time, events []domain.Event, now time.Time) error {
 	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
@@ -108,9 +111,9 @@ func (s *Store) commitRefreshes(ctx context.Context, extend []domain.Target, own
 	defer cleanup()
 
 	placeholders, canonArgs := inClause(extend)
-	args := append([]any{newExpiry.UnixNano(), owner}, canonArgs...)
+	args := append([]any{newExpiry.UnixNano(), owner, now.UnixNano()}, canonArgs...)
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE locks SET expires_at = ? WHERE owner_uuid = ? AND target_canonical IN (`+placeholders+`)`, //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+		`UPDATE locks SET expires_at = ? WHERE owner_uuid = ? AND expires_at > ? AND target_canonical IN (`+placeholders+`)`, //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 		args...); err != nil {
 		return err
 	}
