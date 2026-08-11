@@ -98,6 +98,50 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 	return rows
 }
 
+// gateDecideAny is gateDecide's path-free sibling (ccp-vx4w): "does any
+// foreign live lock or claim exist anywhere in this repo", for a guard whose
+// operation (a branch switch) has no meaningful path operand — unlike
+// gateDecide, it never matches a target, it enumerates. One deny row per
+// distinct foreign live lock and per distinct foreign live claim; the
+// per-target dedupe keys collapse to lock/claim identity alone since there
+// is no target path to key on. Same liveness rule as gateDecide (!IsStale,
+// not Classify==Alive) and the same wave carve-out (myUUID excluded) —
+// deliberately reuses gateDecide's semantics rather than drifting a second
+// definition of "foreign" and "live".
+func gateDecideAny(locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ec domain.EvalContext) []render.GateDenyRow {
+	var rows []render.GateDenyRow
+	for i := range locks {
+		l := &locks[i]
+		if string(l.OwnerUUID) == myUUID || ec.IsStale(*l) {
+			continue
+		}
+		rows = append(rows, render.GateDenyRow{
+			Path: l.Target.Canonical, Kind: render.GateKindLock, HolderUUID: string(l.OwnerUUID),
+			Intent: l.Intent, ExpiresAt: l.ExpiresAt, BlockerPath: l.Target.Canonical,
+		})
+	}
+	for i := range claims {
+		c := &claims[i]
+		if string(c.OwnerUUID) == myUUID || c.Expired(ec.Now) {
+			continue
+		}
+		rows = append(rows, render.GateDenyRow{
+			Path: c.PathPrefix, Kind: render.GateKindClaim, HolderUUID: string(c.OwnerUUID),
+			Intent: c.Intent, ExpiresAt: c.ExpiresAt, BlockerPath: c.PathPrefix,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Path != rows[j].Path {
+			return rows[i].Path < rows[j].Path
+		}
+		if rows[i].Kind != rows[j].Kind {
+			return rows[i].Kind < rows[j].Kind
+		}
+		return rows[i].HolderUUID < rows[j].HolderUUID
+	})
+	return rows
+}
+
 // gateInfraUnreachable renders the shared infra-fail-open row: `loto check
 // --gate` never blocks the caller's loop on its own IO trouble (gate-design
 // "Rules: fail-open, everywhere"). Always stdout, never stderr — the CLI

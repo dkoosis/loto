@@ -1,0 +1,39 @@
+# `loto guard checkout` refuses under a live peer, names them, and honors
+# the override escape hatch (ccp-vx4w). No peer -> passes through silently.
+
+touch internal/store/store.go
+
+env LOTO_AGENT_ID=$ALICE
+loto lock internal/store/store.go -t 'alice mid-edit'
+stdout '✓ locked count=1'
+
+# Bob's branch switch is refused while Alice's lock is live — a repo-wide
+# claim, not scoped to any path. The tree must not move: HEAD stays put.
+env LOTO_AGENT_ID=$BOB
+! loto guard checkout -b refused-branch
+stderr '✗ blocked: git checkout refused'
+stderr 'AliceTester'
+stderr 'alice mid-edit'
+stderr 'LOTO_GUARD_OVERRIDE=1'
+exec git symbolic-ref --short HEAD
+! stdout 'refused-branch'
+
+# Override proceeds anyway, and still logs who was overridden.
+env LOTO_GUARD_OVERRIDE=1
+loto guard checkout -b override-branch
+stderr '⚠ override: LOTO_GUARD_OVERRIDE=1'
+stderr 'AliceTester'
+exec git symbolic-ref --short HEAD
+stdout '^override-branch$'
+env LOTO_GUARD_OVERRIDE=
+
+# Unlock Alice's file — no live peer left, so the guard is silent and the
+# real checkout runs.
+env LOTO_AGENT_ID=$ALICE
+loto unlock internal/store/store.go
+env LOTO_AGENT_ID=$BOB
+loto guard checkout -b solo-branch
+! stderr 'blocked'
+! stderr 'override'
+exec git symbolic-ref --short HEAD
+stdout '^solo-branch$'

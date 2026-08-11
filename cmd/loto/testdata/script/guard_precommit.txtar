@@ -1,0 +1,35 @@
+# .githooks/pre-commit wires `loto check --gate --staged` as guard 2
+# (ccp-vx4w): a commit whose staged set includes a peer's live lock is
+# refused, naming them; override proceeds; an unrelated commit is untouched.
+
+exec git config core.hooksPath $REALHOOKS
+
+touch mine.go shared.go
+
+# Baseline: an unrelated file, no peer lock in play at all — commits clean.
+env LOTO_AGENT_ID=$BOB
+exec git add mine.go
+exec git commit -m 'bob: unrelated file'
+stdout 'bob: unrelated file'
+
+# Alice locks shared.go; Bob stages it into his next commit.
+env LOTO_AGENT_ID=$ALICE
+loto lock shared.go -t 'alice mid-edit'
+stdout '✓ locked count=1'
+
+env LOTO_AGENT_ID=$BOB
+exec git add shared.go
+! exec git commit -m 'bob: sweeps alice file'
+stderr 'refused'
+stderr 'AliceTester'
+stderr 'alice mid-edit'
+stderr 'LOTO_GUARD_OVERRIDE=1'
+
+# Override proceeds anyway.
+env LOTO_GUARD_OVERRIDE=1
+exec git commit -m 'bob: overrides and commits anyway'
+env LOTO_GUARD_OVERRIDE=
+
+exec git log --oneline
+stdout 'overrides and commits anyway'
+stdout 'unrelated file'

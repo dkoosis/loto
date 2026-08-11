@@ -24,8 +24,10 @@ const tcFlagGate = "--gate"
 // Classify==Alive) as the liveness threshold.
 
 const (
-	gateMyUUID  = "11111111-1111-1111-1111-111111111111"
-	gateFoeUUID = "22222222-2222-2222-2222-222222222222"
+	gateMyUUID     = "11111111-1111-1111-1111-111111111111"
+	gateFoeUUID    = "22222222-2222-2222-2222-222222222222"
+	gateIntentMine = "mine"
+	gateIntentFoe  = "foe edit"
 )
 
 func gateEC(now time.Time) domain.EvalContext {
@@ -51,7 +53,7 @@ func TestGateDecide_OwnClaimAllows(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcPrefixStore + "/new.go"}
 	claims := []domain.ClaimRecord{
-		{PathPrefix: tcPrefixStore, OwnerUUID: gateMyUUID, Intent: "mine", ExpiresAt: now.Add(time.Hour)},
+		{PathPrefix: tcPrefixStore, OwnerUUID: gateMyUUID, Intent: gateIntentMine, ExpiresAt: now.Add(time.Hour)},
 	}
 	rows := gateDecide([]domain.Target{target}, nil, claims, gateMyUUID, gateEC(now))
 	if len(rows) != 0 {
@@ -102,7 +104,7 @@ func TestGateDecide_OwnLockAllows(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateMyUUID, Mode: domain.ModeExclusive, Intent: "mine", ExpiresAt: now.Add(time.Hour)},
+		{Target: target, OwnerUUID: gateMyUUID, Mode: domain.ModeExclusive, Intent: gateIntentMine, ExpiresAt: now.Add(time.Hour)},
 	}
 	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 0 {
@@ -178,6 +180,77 @@ func TestGateDecide_SameOwnerTwoPrefixes_BlockerPathTieBreak(t *testing.T) {
 	}
 	if rows[0].BlockerPath != tcPrefixStore || rows[1].BlockerPath != tcPrefixStore+"/sub" {
 		t.Errorf("want blocker-path ascending tie-break, got %+v", rows)
+	}
+}
+
+// gateDecideAny unit tests (ccp-vx4w): the repo-wide sibling of gateDecide,
+// used by `loto guard`. Table-driven per ADR-008 — one lock/claim fixture
+// set per row, no target list since the predicate is path-free.
+func TestGateDecideAny(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name   string
+		locks  []domain.LockRecord
+		claims []domain.ClaimRecord
+		want   int
+	}{
+		{
+			name: "foreign live lock denies",
+			locks: []domain.LockRecord{
+				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
+			},
+			want: 1,
+		},
+		{
+			name: "own lock allows",
+			locks: []domain.LockRecord{
+				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateMyUUID, Intent: gateIntentMine, ExpiresAt: now.Add(time.Hour)},
+			},
+			want: 0,
+		},
+		{
+			name: "stale foreign lock allows",
+			locks: []domain.LockRecord{
+				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, Intent: gateIntentFoe, ExpiresAt: now.Add(-time.Hour)},
+			},
+			want: 0,
+		},
+		{
+			name: "foreign live claim denies",
+			claims: []domain.ClaimRecord{
+				{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "foe claim", ExpiresAt: now.Add(time.Hour)},
+			},
+			want: 1,
+		},
+		{
+			name: "expired foreign claim allows",
+			claims: []domain.ClaimRecord{
+				{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "stale", ExpiresAt: now.Add(-time.Minute)},
+			},
+			want: 0,
+		},
+		{
+			name: "no locks or claims allows",
+			want: 0,
+		},
+		{
+			name: "one foreign lock plus one foreign claim denies both",
+			locks: []domain.LockRecord{
+				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
+			},
+			claims: []domain.ClaimRecord{
+				{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "foe claim", ExpiresAt: now.Add(time.Hour)},
+			},
+			want: 2,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rows := gateDecideAny(c.locks, c.claims, gateMyUUID, gateEC(now))
+			if len(rows) != c.want {
+				t.Fatalf("gateDecideAny() = %d rows, want %d: %+v", len(rows), c.want, rows)
+			}
+		})
 	}
 }
 
