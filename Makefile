@@ -168,6 +168,15 @@ hooks: ## Route git hooks to the tracked .githooks/ dir (bd integration, ccp-th5
 	git config core.hooksPath .githooks
 	@echo "git hooks enabled (.githooks): pre-commit / post-merge / pre-push / post-checkout / prepare-commit-msg (bd)."
 	@bd hooks list 2>/dev/null || true
+	@# Tree-move claim (ccp-vx4w): git has no pre-checkout hook, so checkout/
+	@# switch/restore are guarded via git aliases instead — `-c alias.<verb>=`
+	@# inside `loto guard` strips the alias for its own real-git call, so this
+	@# does not recurse. Fires for any session (shell, script, agent), not
+	@# just wrap flows, since git itself resolves the alias.
+	git config alias.checkout '!f(){ loto guard checkout "$$@"; }; f'
+	git config alias.switch   '!f(){ loto guard switch "$$@"; }; f'
+	git config alias.restore  '!f(){ loto guard restore "$$@"; }; f'
+	@echo "git aliases enabled: checkout / switch / restore route through 'loto guard'."
 
 ## ---------------------------------------------------------------------
 ## Utilities

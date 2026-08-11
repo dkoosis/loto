@@ -1,11 +1,35 @@
 #!/usr/bin/env sh
-# pre-commit — dispatcher: beads integration (ccp-th5.2, shape B).
+# pre-commit — dispatcher: beads integration (ccp-th5.2, shape B) + loto
+# staged-vs-locks guard (ccp-vx4w, decision nug 682b236fdd2d / 7a2b16d6aaaf).
 #
 # core.hooksPath is .githooks (this file), so bd's own shim in .beads/hooks/
 # is NOT invoked by git — that dir is also excluded via .git/info/exclude, so
 # it would not survive a fresh clone anyway. This calls bd's public entry
 # point directly, best-effort, mirroring bd 1.1.2's own shim timeout/exit-3
-# contract. loto has no repo gate on this event; add one below if that changes.
+# contract.
+
+# loto guard 2: refuse a commit whose staged set reaches a path a peer holds
+# a live lock or claim on. `loto check --gate --staged` already implements
+# the exact decision (foreign live lock/claim -> deny, naming the holder);
+# this just wires it in and adds the escape hatch. Fail-open, matching every
+# other dispatcher here: no `loto` on PATH -> skip silently.
+if command -v loto >/dev/null 2>&1; then
+  if [ "$LOTO_GUARD_OVERRIDE" = "1" ]; then
+    echo "pre-commit: LOTO_GUARD_OVERRIDE=1 — skipping loto staged-lock guard" >&2
+  else
+    _loto_gate_out=$(loto check --gate --staged 2>&1)
+    _loto_gate_exit=$?
+    if [ "$_loto_gate_exit" -eq 1 ]; then
+      echo "$_loto_gate_out" >&2
+      echo "pre-commit: refused — staged paths include a peer's live lock/claim" >&2
+      echo "pre-commit: override with LOTO_GUARD_OVERRIDE=1 git commit ..." >&2
+      exit 1
+    fi
+    # exit 0 (no conflicts) or 3 (gate infra unreachable, fail-open) both
+    # proceed — only a confirmed foreign live conflict (exit 1) blocks.
+  fi
+fi
+
 if command -v bd >/dev/null 2>&1; then
   export BD_GIT_HOOK=1
   _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}

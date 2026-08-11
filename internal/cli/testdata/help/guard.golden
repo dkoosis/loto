@@ -1,0 +1,13 @@
+usage: loto guard <checkout|switch|restore> [<git-args>...]
+
+Repo-scoped tree-move claim (ccp-vx4w): refuses to run the wrapped git verb
+while any peer holds a live lock or claim anywhere in this repo, naming the
+peer. No live peer -> passes through silently. Escape hatch: set
+LOTO_GUARD_OVERRIDE=1 to proceed anyway; the override is still logged.
+
+Installed as a git alias so it fires for any session (interactive shell,
+script, or agent), not just wrap flows — see 'make hooks'.
+
+examples:
+  loto guard checkout main
+  LOTO_GUARD_OVERRIDE=1 loto guard switch -c feature/x

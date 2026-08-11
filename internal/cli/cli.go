@@ -43,6 +43,7 @@ commands:
   claim    Reserve a path-prefix territory for this session; -t required
   unclaim  Release your claim by path-prefix
   check    Check targets for lock conflicts; --staged reads git staged paths
+  guard    Wrap checkout|switch|restore; refuses under a live peer (make hooks installs it)
   status   Show lock state; --mine to filter to yours, --collisions for ≥2-owner targets
   doctor   Detect and optionally repair stale locks
   tag      Leave a note on a target locked by another agent

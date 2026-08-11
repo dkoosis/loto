@@ -57,6 +57,15 @@ func TestScripts(t *testing.T) {
 			// probe doesn't reclaim Alice's lock the instant her `loto` subprocess
 			// exits.
 			env.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+			// Absolute path to this repo's real .githooks/ dir, so a script can
+			// `git config core.hooksPath $REALHOOKS` and exercise the actual
+			// tracked pre-commit dispatcher (ccp-vx4w) — not a hand-copied
+			// stand-in that could drift from what ships.
+			realHooks, err := filepath.Abs(filepath.Join("..", "..", ".githooks"))
+			if err != nil {
+				return err
+			}
+			env.Setenv("REALHOOKS", realHooks)
 
 			// Pre-mint two persisted agents so scripts can swap personas via
 			// `env LOTO_AGENT_ID=$ALICE`. Written directly to disk to avoid
