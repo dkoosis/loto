@@ -150,8 +150,8 @@ func scanOrphansAndHint(rt *runtime, repoTop string, f orphanFlags, stdout io.Wr
 	return orphans, scanIncomplete
 }
 
-func doRepair(rt *runtime, live domain.PidLiveProbe, restoreOrphan bool, orphans []string, stdout, stderr io.Writer) int {
-	if err := rt.Store.DoctorRepair(rt.Ctx, rt.Host, domain.AgentUUID(rt.Agent.UUID), live); err != nil {
+func doRepair(rt *runtime, live domain.HolderLiveProbe, restoreOrphan bool, orphans []string, stdout, stderr io.Writer) int {
+	if err := rt.Store.DoctorRepair(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), live); err != nil {
 		fmt.Fprintf(stderr, "✗ repair: %v\n", err)
 		return 3
 	}

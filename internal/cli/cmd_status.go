@@ -124,7 +124,7 @@ func statusCollisions(stdout, stderr io.Writer, rt *runtime) int {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	ec := domain.EvalContext{Now: time.Now(), ThisHost: rt.Host, Live: rt.liveProbe()}
+	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
 	ownersByTarget := map[string]map[string]bool{}
 	for i := range all {
 		l := &all[i]
@@ -185,7 +185,7 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord) {
 		return
 	}
 	fmt.Fprintf(stdout, "✓ locks count=%d\n", len(all))
-	ec := domain.EvalContext{Now: time.Now(), ThisHost: rt.Host, Live: rt.liveProbe()}
+	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
 	canonicals := make([]domain.Canonical, len(all))
 	for i := range all {
 		canonicals[i] = domain.Canonical(all[i].Target.Canonical)
@@ -224,7 +224,7 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 	}
 	// ec is only consumed by the per-holder rows below; build it after the
 	// no-overlap early return so the happy path skips the closure + time.Now.
-	ec := domain.EvalContext{Now: time.Now(), ThisHost: rt.Host, Live: rt.liveProbe()}
+	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
 	fmt.Fprintf(w, "✗ overlap count=%d target=%s\n", len(overlapping), relPath(t.Canonical))
 	for i := range overlapping {
 		l := &overlapping[i]

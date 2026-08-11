@@ -9,8 +9,7 @@ func TestAuthorizeBreak(t *testing.T) {
 	now := time.Now()
 	stale := LockRecord{OwnerUUID: tcAlice, ExpiresAt: now.Add(-time.Minute), Host: "h", PID: 1}
 	live := LockRecord{OwnerUUID: tcAlice, ExpiresAt: now.Add(time.Hour), Host: "h", PID: 1}
-	probe := func(string, int, int64) bool { return true }
-	ctx := EvalContext{Now: now, ThisHost: "h", Live: probe}
+	ctx := EvalContext{Now: now, Live: aliveOn("h")}
 
 	if err := ctx.AuthorizeBreak(stale, false); err != nil {
 		t.Fatalf("stale break without --force must succeed: %v", err)

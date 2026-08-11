@@ -20,11 +20,9 @@ import (
 	"loto/internal/domain"
 )
 
-// deadProbe (locks_shared_test.go) reports every pid dead; liveProbe
-// (locks_shared_test.go) every pid alive.
-
-// tcHost matches mkFileLock's Host so the probe is consulted for same-host rows.
-const tcHost = "h"
+// liveProbe / deadProbe / tcHost live in liveprobe_test.go: the probes report
+// every same-host durable pid alive resp. dead, and tcHost matches mkFileLock's
+// Host so those probes are consulted rather than short-circuiting to UNKNOWN.
 
 func countEvents(t *testing.T, s *Store, target domain.Target, kind string) int {
 	t.Helper()
@@ -54,7 +52,7 @@ func TestReleaseLocks_ForeignExpiredExclusive_Reclaimed(t *testing.T) {
 		t.Fatalf("precondition: acquire should strip write, got %o", st.Mode().Perm())
 	}
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, tcHost, deadProbe)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, deadProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -102,7 +100,7 @@ func TestReleaseLocks_ForeignLiveExclusive_NotOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, tcHost, liveProbe)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -132,7 +130,7 @@ func TestReleaseLocks_TTLExpiredPidAlive_Reclaimed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, tcHost, liveProbe)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -164,7 +162,7 @@ func TestReleaseLocks_AllSharedStale_DeletedNoRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, "carol", tcHost, deadProbe)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, "carol", deadProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -201,9 +199,9 @@ func TestReleaseLocks_MixedLiveStaleShared_NotOwner(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	bobAlive := func(_ string, pid int, _ int64) bool { return pid == 102 }
+	bobAlive := hostPidProbe(tcHost, func(pid int, _ int64) bool { return pid == 102 })
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, "carol", tcHost, bobAlive)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, "carol", bobAlive)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -230,7 +228,7 @@ func TestReleaseLocks_OwnStale_Unlocked(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, tcHost, deadProbe)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, deadProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -269,9 +267,9 @@ func TestReleaseLocks_OwnLiveSharedForeignStaleShared_OwnOnly(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	aliceAlive := func(_ string, pid int, _ int64) bool { return pid == 101 }
+	aliceAlive := hostPidProbe(tcHost, func(pid int, _ int64) bool { return pid == 101 })
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, tcAlice, tcHost, aliceAlive)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, tcAlice, aliceAlive)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -313,7 +311,7 @@ func TestReleaseLocks_ReclaimGCsDeadHoldersTags(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, tcHost, deadProbe)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, deadProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -358,7 +356,7 @@ func TestConcurrentReleaseReclaimVsAcquire(t *testing.T) {
 		defer done.Done()
 		ready.Done()
 		start.Wait()
-		releaseRes, releaseErr = s.ReleaseLocks(ctx, []domain.Target{stale.Target}, tcBob, tcHost, liveProbe)
+		releaseRes, releaseErr = s.ReleaseLocks(ctx, []domain.Target{stale.Target}, tcBob, liveProbe)
 	}()
 	go func() {
 		defer done.Done()
@@ -442,7 +440,7 @@ func TestReleaseLocks_MixedBatch_AckedTagSurvivesReclaimGC(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{own.Target, dead.Target}, tcAlice, tcHost, liveProbe)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{own.Target, dead.Target}, tcAlice, liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -487,7 +485,7 @@ func TestReleaseLocks_ReclaimRestoreFailure_KeepsOwner(t *testing.T) {
 		return orig(f, mode)
 	}
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, tcHost, deadProbe)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, deadProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -516,7 +514,7 @@ func TestReleaseLocks_DuplicateTargets_SingleEventPerRow(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{stale}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	res, err := s.ReleaseLocks(ctx, []domain.Target{stale.Target, stale.Target}, tcBob, tcHost, liveProbe)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{stale.Target, stale.Target}, tcBob, liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -532,7 +530,7 @@ func TestReleaseLocks_DuplicateTargets_SingleEventPerRow(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{own}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	res, err = s.ReleaseLocks(ctx, []domain.Target{own.Target, own.Target}, tcAlice, tcHost, liveProbe)
+	res, err = s.ReleaseLocks(ctx, []domain.Target{own.Target, own.Target}, tcAlice, liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -556,7 +554,7 @@ func TestReleaseLocks_DuplicateTargets_NonConsumingFirstMirrors(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{live}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	res, err := s.ReleaseLocks(ctx, []domain.Target{live.Target, live.Target}, tcBob, tcHost, liveProbe)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{live.Target, live.Target}, tcBob, liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}

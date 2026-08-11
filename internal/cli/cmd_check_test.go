@@ -187,7 +187,7 @@ func TestCheckIgnoresDeadPidHolder(t *testing.T) {
 }
 
 // spawnAndReap runs a short-lived process, waits for it to exit, and returns its
-// (now-dead) PID as a string. pidLive(pid) will report it dead on this host.
+// (now-dead) PID as a string. identity.PIDAlive(pid) reports it dead on this host.
 func spawnAndReap(t *testing.T) string {
 	t.Helper()
 	cmd := exec.Command("/bin/sh", "-c", "exit 0")

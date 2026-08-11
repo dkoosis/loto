@@ -149,7 +149,6 @@ func TestStripAndHandleFailure_AuditCommittedInTx(t *testing.T) {
 		return orig(f, mode)
 	}
 
-	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 	mk := func(p string) domain.LockRecord {
 		return domain.LockRecord{
@@ -162,7 +161,7 @@ func TestStripAndHandleFailure_AuditCommittedInTx(t *testing.T) {
 			PID:         1,
 		}
 	}
-	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{mk(a), mk(b)}, live); err == nil {
+	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{mk(a), mk(b)}, liveProbe); err == nil {
 		t.Fatal("expected ChmodFailureError")
 	}
 

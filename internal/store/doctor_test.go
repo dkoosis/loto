@@ -19,13 +19,12 @@ const tcRepoTop = "/repo"
 func TestDoctorListsStaleLocks(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int, int64) bool { return false }
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
-	report, err := s.DoctorAudit(ctx, l.Host, dead, SidecarCheck{})
+	report, err := s.DoctorAudit(ctx, l.Host, deadProbe, SidecarCheck{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,13 +36,12 @@ func TestDoctorListsStaleLocks(t *testing.T) {
 func TestDoctorRepairReclaims(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int, int64) bool { return false }
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := s.DoctorRepair(ctx, l.Host, "doctor-agent", dead); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor-agent", deadProbe); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.LockAt(ctx, l.Target)
@@ -93,7 +91,7 @@ func TestScanOrphanModes_OwnedFileSkipped(t *testing.T) {
 		Host:        "h",
 		PID:         1,
 	}
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
@@ -210,7 +208,7 @@ func TestRestoreOrphanMode_SkipsRelockedPaths(t *testing.T) {
 	// AcquireLocks writes back the file to writable first, then strips write for
 	// KindFile — but for this test we only need the lock row in the DB. Reset
 	// the file back to read-only to replicate the real scenario.
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{racedLock}, func(string, int, int64) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{racedLock}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(raced, 0o444); err != nil {
@@ -245,12 +243,11 @@ func TestRestoreOrphanMode_SkipsRelockedPaths(t *testing.T) {
 func TestDoctorSidecarMissingDirIsNoOp(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	alive := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAudit(ctx, l.Host, alive, SidecarCheck{
+	report, err := s.DoctorAudit(ctx, l.Host, liveProbe, SidecarCheck{
 		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
 		RepoTop:    tcRepoTop,
 	})
@@ -265,12 +262,11 @@ func TestDoctorSidecarMissingDirIsNoOp(t *testing.T) {
 func TestDoctorSidecarDisabledWhenDirEmpty(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	alive := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAudit(ctx, l.Host, alive, SidecarCheck{})
+	report, err := s.DoctorAudit(ctx, l.Host, liveProbe, SidecarCheck{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,9 +278,8 @@ func TestDoctorSidecarDisabledWhenDirEmpty(t *testing.T) {
 func TestDoctorSidecarCwdMismatch(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	alive := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
@@ -292,7 +287,7 @@ func TestDoctorSidecarCwdMismatch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "1.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAudit(ctx, l.Host, alive, SidecarCheck{
+	report, err := s.DoctorAudit(ctx, l.Host, liveProbe, SidecarCheck{
 		SidecarDir: dir,
 		RepoTop:    "/Users/me/repo",
 	})
@@ -310,9 +305,8 @@ func TestDoctorSidecarCwdMismatch(t *testing.T) {
 func TestDoctorSidecarHealthyWhenCwdMatches(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	alive := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
@@ -321,7 +315,7 @@ func TestDoctorSidecarHealthyWhenCwdMatches(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "1.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAudit(ctx, l.Host, alive, SidecarCheck{
+	report, err := s.DoctorAudit(ctx, l.Host, liveProbe, SidecarCheck{
 		SidecarDir: dir,
 		RepoTop:    repoTop,
 	})
@@ -336,12 +330,11 @@ func TestDoctorSidecarHealthyWhenCwdMatches(t *testing.T) {
 func TestDoctorSidecarSkippedForStaleLocks(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int, int64) bool { return false }
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAudit(ctx, l.Host, dead, SidecarCheck{
+	report, err := s.DoctorAudit(ctx, l.Host, deadProbe, SidecarCheck{
 		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
 		RepoTop:    tcRepoTop,
 	})
@@ -364,13 +357,12 @@ func TestDoctorSidecarSkippedForStaleLocks(t *testing.T) {
 func TestDoctorSidecarSkippedForNoDurablePid(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	alive := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
 	l.PID = 0
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, alive); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAudit(ctx, l.Host, alive, SidecarCheck{
+	report, err := s.DoctorAudit(ctx, l.Host, liveProbe, SidecarCheck{
 		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
 		RepoTop:    tcRepoTop,
 	})
@@ -503,12 +495,11 @@ func TestMoveCorruptAsideAtomic(t *testing.T) {
 func TestDoctorRepair_RestoresWriteMode(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int, int64) bool { return false }
 	l := mkFileLock(t, "d.go", "alice", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DoctorRepair(ctx, l.Host, "doctor", dead); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := os.Stat(l.Target.Canonical)
@@ -520,7 +511,6 @@ func TestDoctorRepair_RestoresWriteMode(t *testing.T) {
 func TestDoctorRepair_SharedReclaimLeavesModeUntouched(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int, int64) bool { return false }
 	l := mkFileLock(t, "ro.md", "alice", time.Hour)
 	l.Mode = domain.ModeShared
 	// Deliberately read-only file: shared acquire never strips owner-write,
@@ -528,10 +518,10 @@ func TestDoctorRepair_SharedReclaimLeavesModeUntouched(t *testing.T) {
 	if err := os.Chmod(l.Target.Canonical, 0o444); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DoctorRepair(ctx, l.Host, "doctor", dead); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.LockAt(ctx, l.Target)
@@ -550,16 +540,15 @@ func TestDoctorRepair_SharedReclaimLeavesModeUntouched(t *testing.T) {
 func TestDoctorRepair_MultipleStaleLocksSameOwner(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int, int64) bool { return false }
 	a := mkFileLock(t, "a.go", "alice", time.Hour)
 	b := mkFileLock(t, "b.go", "alice", time.Hour)
 	c := mkFileLock(t, "c.go", "alice", time.Hour)
 	// All three under one transaction, same actor + same now() inside reclaim
 	// — the old deterministic event ID would collide. Verify all reclaim.
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a, b, c}, func(string, int, int64) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a, b, c}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DoctorRepair(ctx, a.Host, "doctor", dead); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatalf("repair with multiple stale locks: %v", err)
 	}
 	for _, l := range []domain.LockRecord{a, b, c} {
@@ -626,9 +615,8 @@ func TestMoveCorruptAside_PreservesBytesOnCommitFailure(t *testing.T) {
 func TestDoctorRepair_VACUUMFailureDoesNotMaskSuccess(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int, int64) bool { return false }
 	l := mkFileLock(t, "v.go", "alice", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
@@ -641,7 +629,7 @@ func TestDoctorRepair_VACUUMFailureDoesNotMaskSuccess(t *testing.T) {
 	}
 	t.Cleanup(func() { vacuumFn = origVacuum })
 
-	if err := s.DoctorRepair(ctx, l.Host, "doctor", dead); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatalf("VACUUM failure must not surface as DoctorRepair error: %v", err)
 	}
 
@@ -667,9 +655,8 @@ func TestDoctorRepair_ReleasesOpFlockBeforeVACUUM(t *testing.T) {
 	t.Setenv("LOTO_FLOCK_TIMEOUT", "100ms")
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int, int64) bool { return false }
 	l := mkFileLock(t, "v.go", "alice", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
@@ -691,7 +678,7 @@ func TestDoctorRepair_ReleasesOpFlockBeforeVACUUM(t *testing.T) {
 	}
 	t.Cleanup(func() { vacuumFn = origVacuum })
 
-	if err := s.DoctorRepair(ctx, l.Host, "doctor", dead); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatalf("DoctorRepair: %v", err)
 	}
 	if lockedAtVacuum {
@@ -713,8 +700,7 @@ func TestDoctorRepair_SweepsExpiredClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dead := func(string, int, int64) bool { return false }
-	if err := s.DoctorRepair(ctx, "h", "doctor", dead); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatal(err)
 	}
 	all, err := s.ListClaims(ctx)
@@ -743,8 +729,7 @@ func TestDoctorAudit_ListsExpiredClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	alive := func(string, int, int64) bool { return true }
-	report, err := s.DoctorAudit(ctx, "h", alive, SidecarCheck{})
+	report, err := s.DoctorAudit(ctx, "h", liveProbe, SidecarCheck{})
 	if err != nil {
 		t.Fatal(err)
 	}

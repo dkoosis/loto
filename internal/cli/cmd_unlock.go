@@ -72,7 +72,7 @@ func unlockTargets(rt *runtime, args []string, repoTop string, stdout, stderr io
 	// mail whoever was waiting (loto-4lc). Reading acked-since AFTER release is
 	// race-free (a gap tag is acked too) — see notifyReleasedWaiters.
 	since := nowNanos()
-	results, err := rt.Store.ReleaseLocks(rt.Ctx, targets, domain.AgentUUID(rt.Agent.UUID), rt.Host, rt.liveProbe())
+	results, err := rt.Store.ReleaseLocks(rt.Ctx, targets, domain.AgentUUID(rt.Agent.UUID), rt.liveProbe())
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
@@ -94,7 +94,7 @@ func breakTargets(rt *runtime, args []string, intent, repoTop string, stdout, st
 	// than acking, by design (edge #6, release-ack vs break-orphan). Force is the
 	// dead-holder escape hatch, not a voluntary "you can go now" — the waiter
 	// retries at cycle-end. Voluntary release is the only notify trigger (loto-4lc).
-	results, err := rt.Store.BreakLocks(rt.Ctx, targets, domain.AgentUUID(rt.Agent.UUID), store.BreakForce, intent, rt.Host, rt.liveProbe())
+	results, err := rt.Store.BreakLocks(rt.Ctx, targets, domain.AgentUUID(rt.Agent.UUID), store.BreakForce, intent, rt.liveProbe())
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

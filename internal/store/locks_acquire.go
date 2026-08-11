@@ -35,7 +35,7 @@ func sortedByCanonical(recs []domain.LockRecord) []domain.LockRecord {
 // future batch-import/migration caller that submits mixed owners must thread
 // the per-record owner through stripped/reclaimed before relying on these
 // audit events.
-func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live domain.PidLiveProbe) ([]domain.LockRecord, error) {
+func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live domain.HolderLiveProbe) ([]domain.LockRecord, error) {
 	if len(recs) == 0 {
 		return nil, nil
 	}
@@ -324,9 +324,10 @@ func validateFileTarget(p string) error {
 // collectAllBlockers returns the live conflicting holders plus the canonical
 // paths of reclaimed stale EXCLUSIVE rows (deduped) — the caller must restore
 // owner-write on those after commit unless it re-stripped them itself.
-func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, sorted []domain.LockRecord, now time.Time, live domain.PidLiveProbe) ([]domain.LockRecord, []string, error) {
-	// Bundle the (now, live) ambient pair once; ThisHost is set per-lock inside
-	// reclaimStaleAndCollectBlockers, where the acquiring lock's host is known.
+func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, sorted []domain.LockRecord, now time.Time, live domain.HolderLiveProbe) ([]domain.LockRecord, []string, error) {
+	// Bundle the (now, live) ambient pair once. Host policy rides inside the
+	// probe closure (HolderLiveProbe takes the record), so one EvalContext
+	// serves every lock in the batch — no per-lock rebinding.
 	ec := domain.EvalContext{Now: now, Live: live}
 	seen := map[string]bool{}
 	seenReclaimed := map[string]bool{}
@@ -402,7 +403,6 @@ func rollbackStripped(failedTarget domain.Target, failedErr error, stripped []st
 // shouldRestoreOwnerWrite guard, locks.go) so the caller can restore the bit
 // once the deletes commit.
 func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, l domain.LockRecord, ec domain.EvalContext) ([]domain.LockRecord, []string, error) {
-	ec = ec.WithHost(l.Host)
 	var blockers []domain.LockRecord
 	var reclaimed []string
 	for i := range all {

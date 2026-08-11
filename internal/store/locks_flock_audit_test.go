@@ -34,14 +34,14 @@ func TestOpFlockReleasedBeforeDetachedAudit(t *testing.T) {
 		// run performs the operation under test on a target that AcquireLocks has
 		// already locked EXCLUSIVE (write bit stripped). The chmod-restore is
 		// rigged to fail, so each op schedules a detached mode_restore_failed audit.
-		run func(t *testing.T, s *Store, ctx context.Context, target domain.Target, live domain.PidLiveProbe)
+		run func(t *testing.T, s *Store, ctx context.Context, target domain.Target, live domain.HolderLiveProbe)
 	}{
 		{
 			name:   "DoctorRepair",
 			expiry: -time.Hour,
-			run: func(t *testing.T, s *Store, ctx context.Context, target domain.Target, live domain.PidLiveProbe) {
+			run: func(t *testing.T, s *Store, ctx context.Context, target domain.Target, live domain.HolderLiveProbe) {
 				t.Helper()
-				if err := s.DoctorRepair(ctx, "h", tcBob, live); err != nil {
+				if err := s.DoctorRepair(ctx, tcBob, live); err != nil {
 					t.Fatalf("DoctorRepair: %v", err)
 				}
 			},
@@ -49,9 +49,9 @@ func TestOpFlockReleasedBeforeDetachedAudit(t *testing.T) {
 		{
 			name:   "BreakLocks",
 			expiry: time.Hour,
-			run: func(t *testing.T, s *Store, ctx context.Context, target domain.Target, live domain.PidLiveProbe) {
+			run: func(t *testing.T, s *Store, ctx context.Context, target domain.Target, live domain.HolderLiveProbe) {
 				t.Helper()
-				if _, err := s.BreakLocks(ctx, []domain.Target{target}, tcBob, BreakForce, "r", "h", live); err != nil {
+				if _, err := s.BreakLocks(ctx, []domain.Target{target}, tcBob, BreakForce, "r", live); err != nil {
 					t.Fatalf("BreakLocks: %v", err)
 				}
 			},
@@ -59,9 +59,9 @@ func TestOpFlockReleasedBeforeDetachedAudit(t *testing.T) {
 		{
 			name:   "ReleaseLocks",
 			expiry: time.Hour,
-			run: func(t *testing.T, s *Store, ctx context.Context, target domain.Target, live domain.PidLiveProbe) {
+			run: func(t *testing.T, s *Store, ctx context.Context, target domain.Target, live domain.HolderLiveProbe) {
 				t.Helper()
-				if _, err := s.ReleaseLocks(ctx, []domain.Target{target}, tcAlice, "h", liveProbe); err != nil {
+				if _, err := s.ReleaseLocks(ctx, []domain.Target{target}, tcAlice, liveProbe); err != nil {
 					t.Fatalf("ReleaseLocks: %v", err)
 				}
 			},
@@ -69,7 +69,7 @@ func TestOpFlockReleasedBeforeDetachedAudit(t *testing.T) {
 		{
 			name:   "ReleaseBySession",
 			expiry: time.Hour,
-			run: func(t *testing.T, s *Store, ctx context.Context, target domain.Target, live domain.PidLiveProbe) {
+			run: func(t *testing.T, s *Store, ctx context.Context, target domain.Target, live domain.HolderLiveProbe) {
 				t.Helper()
 				if _, _, err := s.ReleaseBySession(ctx, tcAlice, tcAlice); err != nil {
 					t.Fatalf("ReleaseBySession: %v", err)
@@ -83,7 +83,7 @@ func TestOpFlockReleasedBeforeDetachedAudit(t *testing.T) {
 			s := mustOpen(t)
 			ctx := context.Background()
 			// pid-dead → the lock reads stale, which DoctorRepair needs to reclaim.
-			live := func(string, int, int64) bool { return false }
+			live := deadProbe
 
 			// Alice holds an EXCLUSIVE lock (write bit stripped on acquire). The
 			// per-case expiry decides whether the lock reads stale (DoctorRepair) or

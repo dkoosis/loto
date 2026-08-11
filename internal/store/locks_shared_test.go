@@ -10,10 +10,6 @@ import (
 	"loto/internal/domain"
 )
 
-// liveProbe reports every pid alive — keeps seeded holders non-stale so the
-// mode predicate (not reclaim) governs coexistence.
-func liveProbe(string, int, int64) bool { return true }
-
 // peerOn clones base onto a different owner, preserving the same on-disk target
 // so two records contend on one file. Mode is set explicitly by the caller.
 func peerOn(base domain.LockRecord, owner, mode string) domain.LockRecord {
@@ -116,7 +112,7 @@ func TestRelease_MultiHolderEachReleasesOwn(t *testing.T) {
 		t.Fatalf("bob: %v", err)
 	}
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, tcAlice, "h", liveProbe)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, tcAlice, liveProbe)
 	if err != nil {
 		t.Fatalf("alice release: %v", err)
 	}
@@ -187,7 +183,7 @@ func TestBreakLocks_SharedDoesNotRestoreWriteBit(t *testing.T) {
 		t.Fatalf("bob shared acquire: %v", err)
 	}
 
-	res, err := s.BreakLocks(ctx, []domain.Target{a.Target}, "carol", BreakForce, "test break", "h", liveProbe)
+	res, err := s.BreakLocks(ctx, []domain.Target{a.Target}, "carol", BreakForce, "test break", liveProbe)
 	if err != nil {
 		t.Fatalf("BreakLocks: %v", err)
 	}
@@ -238,7 +234,7 @@ func TestRelease_SharedDoesNotRestoreWriteBit(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
 		t.Fatalf("shared acquire: %v", err)
 	}
-	if _, err := s.ReleaseLocks(ctx, []domain.Target{rec.Target}, tcAlice, "h", liveProbe); err != nil {
+	if _, err := s.ReleaseLocks(ctx, []domain.Target{rec.Target}, tcAlice, liveProbe); err != nil {
 		t.Fatalf("release: %v", err)
 	}
 	fi, err := os.Stat(rec.Target.Canonical)
@@ -249,10 +245,6 @@ func TestRelease_SharedDoesNotRestoreWriteBit(t *testing.T) {
 		t.Fatalf("shared release must NOT restore owner-write; perm=%v", fi.Mode().Perm())
 	}
 }
-
-// deadProbe reports every pid dead — makes seeded holders stale so a peer's
-// acquire reclaims them despite a live TTL.
-func deadProbe(string, int, int64) bool { return false }
 
 // TestAcquire_SharedReclaimRestoresWriteBit guards the acquire-reclaim restore
 // (loto-22ka): a stale EXCLUSIVE holder left the file write-stripped (0o444);
@@ -392,7 +384,7 @@ func TestBreakLocks_MultiHolderShared(t *testing.T) {
 		t.Fatalf("bob shared acquire: %v", err)
 	}
 
-	res, err := s.BreakLocks(ctx, []domain.Target{a.Target}, "carol", BreakForce, "test break", "h", liveProbe)
+	res, err := s.BreakLocks(ctx, []domain.Target{a.Target}, "carol", BreakForce, "test break", liveProbe)
 	if err != nil {
 		t.Fatalf("BreakLocks: %v", err)
 	}

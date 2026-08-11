@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -29,7 +30,9 @@ func recordPeer(t *testing.T, handle, peerName string) func() {
 		t.Fatalf("listen unix: %v", err)
 	}
 	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", sockPath)
-	t.Setenv("CLAUDE_PID", "4242")
+	// A real, live pid: the oracle (loto-ygty) now probes it, and a fabricated
+	// dead pid gets the record pruned as a recycled-pid orphan.
+	t.Setenv("CLAUDE_PID", strconv.Itoa(os.Getpid()))
 	t.Setenv("LOTO_PEER_NAME", peerName)
 	t.Setenv("LOTO_HANDLE", handle)
 	os.Unsetenv("LOTO_AGENT_ID")
@@ -118,7 +121,7 @@ func TestWhoJSON(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("output is not a JSON array: %v\noutput: %q", err, out.String())
 	}
-	if len(got) != 1 || got[0].Handle != "NeatDace" || got[0].Name != "itzy-8c" || got[0].PID != 4242 {
+	if len(got) != 1 || got[0].Handle != "NeatDace" || got[0].Name != "itzy-8c" || got[0].PID != os.Getpid() {
 		t.Fatalf("unexpected rows: %+v", got)
 	}
 	if got[0].Socket == "" {

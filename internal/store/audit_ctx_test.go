@@ -36,7 +36,6 @@ func TestAcquireLocks_CommitFailureBreadcrumbLandsWithoutSelfContention(t *testi
 		return &os.PathError{Op: "commit", Path: "loto.db", Err: syscall.EIO}
 	}
 
-	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 	rec := domain.LockRecord{
 		Target:      domain.Target{Canonical: p},
@@ -50,7 +49,7 @@ func TestAcquireLocks_CommitFailureBreadcrumbLandsWithoutSelfContention(t *testi
 	}
 
 	start := time.Now()
-	_, err := s.AcquireLocks(context.Background(), []domain.LockRecord{rec}, live)
+	_, err := s.AcquireLocks(context.Background(), []domain.LockRecord{rec}, liveProbe)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("expected commit-failure error from AcquireLocks")
@@ -92,9 +91,8 @@ func TestDoctorRepair_RestoreAuditSurvivesCancelledCtx(t *testing.T) {
 	var stderr bytes.Buffer
 	s.setStderr(&stderr)
 
-	dead := func(string, int, int64) bool { return false }
 	l := mkFileLock(t, "dr.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
@@ -114,7 +112,7 @@ func TestDoctorRepair_RestoreAuditSurvivesCancelledCtx(t *testing.T) {
 		return orig(f, mode)
 	}
 
-	if err := s.DoctorRepair(ctx, l.Host, "doctor", dead); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatalf("repair should succeed (commit happened before cancel): %v", err)
 	}
 

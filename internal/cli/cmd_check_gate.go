@@ -195,7 +195,7 @@ func runCheckGate(ctx context.Context, paths []string, repoTop string, stdout io
 		return gateInfraUnreachable(stdout, err)
 	}
 
-	ec := domain.EvalContext{Now: time.Now(), ThisHost: rt.Host, Live: rt.liveProbe()}
+	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
 	rows := gateDecide(targets, locks, claims, rt.Agent.UUID, ec)
 	if len(rows) == 0 {
 		fmt.Fprintln(stdout, "✓ no conflicts")

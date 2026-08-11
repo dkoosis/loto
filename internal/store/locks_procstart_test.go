@@ -16,12 +16,11 @@ import (
 func TestProcStartRoundTrip(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 
 	t.Run("known proc_start persists", func(t *testing.T) {
 		l := mkFileLock(t, "known.go", tcAlice, time.Hour)
 		l.ProcStart = 123456789
-		if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+		if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 			t.Fatal(err)
 		}
 		got, err := s.LockAt(ctx, l.Target)
@@ -36,7 +35,7 @@ func TestProcStartRoundTrip(t *testing.T) {
 	t.Run("unknown proc_start round-trips as 0 (NULL)", func(t *testing.T) {
 		l := mkFileLock(t, "legacy.go", tcBob, time.Hour)
 		l.ProcStart = 0 // unknown / legacy
-		if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+		if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 			t.Fatal(err)
 		}
 		got, err := s.LockAt(ctx, l.Target)
@@ -50,14 +49,14 @@ func TestProcStartRoundTrip(t *testing.T) {
 
 	t.Run("IsStale: known mismatch stale, unknown falls back", func(t *testing.T) {
 		now := time.Now()
-		recycleAware := func(_ string, _ int, storedStart int64) bool {
+		recycleAware := hostPidProbe(tcHost, func(_ int, storedStart int64) bool {
 			const occupant = 999
 			if storedStart != 0 && storedStart != occupant {
 				return false
 			}
 			return true
-		}
-		ec := domain.EvalContext{Now: now, ThisHost: "h", Live: recycleAware}
+		})
+		ec := domain.EvalContext{Now: now, Live: recycleAware}
 		known := domain.LockRecord{Host: "h", PID: 1, ProcStart: 123456789, ExpiresAt: now.Add(time.Hour)}
 		if !ec.IsStale(known) {
 			t.Fatal("known proc_start mismatching occupant must be stale")

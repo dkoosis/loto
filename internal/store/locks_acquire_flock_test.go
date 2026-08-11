@@ -31,7 +31,7 @@ import (
 func TestAcquireLocks_HoldsFlockAcrossRestore(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true } // pid-live not consulted; staleness drives reclaim
+	live := liveProbe // pid-live not consulted; staleness drives reclaim
 
 	// Bob holds a stale EXCLUSIVE lock — already expired, so Alice's acquire
 	// reclaims it. mkFileLock strips owner-write on exclusive acquire.

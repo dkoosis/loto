@@ -40,22 +40,22 @@ type Peer struct {
 	SessionID string    `json:"session_id,omitempty"`
 	CWD       string    `json:"cwd,omitempty"`
 	SeenAt    time.Time `json:"seen_at"`
+	// ParentSessionID is --parent-session-id from the recording process's argv
+	// (subagents; empty for top-level sessions). Recorded so SessionVerdict can
+	// detect a recycled pid: the occupant's argv must still carry the same
+	// identity flags the recorder's did (loto-ygty).
+	ParentSessionID string `json:"parent_session_id,omitempty"`
 }
 
 // Named reports whether this peer is addressable by SendMessage today.
 func (p Peer) Named() bool { return p.Name != "" }
 
-// Live reports whether the session behind this peer is still up. Socket-file
-// existence is the witness — NOT the process-liveness check locks use, which
-// misreads worktree agents as dead (loto-r11w). The socket is created by the
-// session process and disappears with it, so it answers exactly the question
-// "can I still message this peer".
-func (p Peer) Live() bool {
-	if p.Socket == "" {
-		return false
-	}
-	_, err := os.Stat(p.Socket)
-	return err == nil
+// Live reports whether the session behind this peer is still up, per the one
+// liveness oracle (SessionVerdict, liveness.go). Kept as the boolean
+// convenience for callers that only branch; unknown maps to true — a verdict
+// this record cannot support must not read as dead.
+func (p Peer) Live(ctx context.Context) bool {
+	return p.SessionVerdict(ctx).Liveness != SessionDead
 }
 
 func peersDir() string { return filepath.Join(homeDir(), ".loto", "peers") }
@@ -128,15 +128,16 @@ func PeerFromEnv(ctx context.Context, a *Agent, name string) *Peer {
 	}
 	cwd, _ := os.Getwd()
 	return &Peer{
-		UUID:      a.UUID,
-		Handle:    a.Handle,
-		Name:      name,
-		AgentID:   argvFlag(argv, "agent-id"),
-		Socket:    socket,
-		PID:       pid,
-		SessionID: os.Getenv("CLAUDE_CODE_SESSION_ID"),
-		CWD:       cwd,
-		SeenAt:    time.Now().UTC(),
+		UUID:            a.UUID,
+		Handle:          a.Handle,
+		Name:            name,
+		AgentID:         argvFlag(argv, "agent-id"),
+		Socket:          socket,
+		PID:             pid,
+		SessionID:       os.Getenv("CLAUDE_CODE_SESSION_ID"),
+		CWD:             cwd,
+		SeenAt:          time.Now().UTC(),
+		ParentSessionID: argvFlag(argv, "parent-session-id"),
 	}
 }
 
@@ -210,11 +211,10 @@ func writePeer(p *Peer) error {
 	return syncDir(dir)
 }
 
-// readPeerFile loads one peer record, unlinking it when its session is gone.
-// ok=false means "skip this entry": unreadable, unparseable, or dead and not
-// asked for. An unreadable record is skipped rather than surfaced — a peer
-// table is a convenience, and half of one still beats an error.
-func readPeerFile(path string, includeDead bool) (Peer, bool) {
+// readPeerRaw loads one peer record with no side effects. ok=false means
+// unreadable or unparseable. The oracle (peerByUUID) reads through this: a
+// liveness question must never unlink a record.
+func readPeerRaw(path string) (Peer, bool) {
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return Peer{}, false
@@ -223,19 +223,34 @@ func readPeerFile(path string, includeDead bool) (Peer, bool) {
 	if err := json.Unmarshal(body, &p); err != nil {
 		return Peer{}, false
 	}
-	if p.Live() {
+	return p, true
+}
+
+// readPeerFile loads one peer record, unlinking it when the oracle says the
+// session is DEAD — presence prunes itself. An UNKNOWN verdict keeps the
+// record: no witness either way is not evidence of death. ok=false means "skip
+// this entry": unreadable, unparseable, or dead and not asked for. An
+// unreadable record is skipped rather than surfaced — a peer table is a
+// convenience, and half of one still beats an error.
+func readPeerFile(ctx context.Context, path string, includeDead bool) (Peer, bool) {
+	p, ok := readPeerRaw(path)
+	if !ok {
+		return Peer{}, false
+	}
+	if p.SessionVerdict(ctx).Liveness != SessionDead {
 		return p, true
 	}
 	_ = os.Remove(path)
 	return p, includeDead
 }
 
-// Peers lists recorded peers, newest-seen first. Dead ones (socket gone) are
-// unlinked as they are found — presence prunes itself, so no TTL sweep and no
-// dependence on the lock-liveness check. Pass includeDead to see them anyway
-// (they are dropped from disk regardless; the returned slice is the last
-// observation, useful for "where did that session go").
-func Peers(includeDead bool) ([]Peer, error) {
+// Peers lists recorded peers, newest-seen first. Dead ones (per the oracle:
+// socket gone, pid gone, or argv mismatch) are unlinked as they are found —
+// presence prunes itself, so no TTL sweep and no dependence on the lock-liveness
+// check. Pass includeDead to see them anyway (they are dropped from disk
+// regardless; the returned slice is the last observation, useful for "where did
+// that session go").
+func Peers(ctx context.Context, includeDead bool) ([]Peer, error) {
 	entries, err := os.ReadDir(peersDir())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -248,7 +263,7 @@ func Peers(includeDead bool) ([]Peer, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		p, ok := readPeerFile(filepath.Join(peersDir(), e.Name()), includeDead)
+		p, ok := readPeerFile(ctx, filepath.Join(peersDir(), e.Name()), includeDead)
 		if !ok {
 			continue
 		}

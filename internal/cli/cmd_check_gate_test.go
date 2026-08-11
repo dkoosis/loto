@@ -31,7 +31,7 @@ const (
 )
 
 func gateEC(now time.Time) domain.EvalContext {
-	return domain.EvalContext{Now: now, ThisHost: "host-a", Live: nil}
+	return domain.EvalContext{Now: now, Live: nil}
 }
 
 func TestGateDecide_ForeignLiveClaimDenies(t *testing.T) {

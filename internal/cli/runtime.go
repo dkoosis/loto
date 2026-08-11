@@ -168,35 +168,55 @@ func (r *runtime) DeferredTagFooter(w io.Writer) {
 	render.EmitTagFooter(w, tags, r.Agent.UUID)
 }
 
-// liveProbe returns a PidLiveProbe that treats remote-host PIDs as live and
-// probes local PIDs via pidLive. Centralizes the live-probe closure that
-// otherwise gets re-built at every lock/unlock/doctor call site.
+// liveProbe returns the HolderLiveProbe every staleness predicate consumes:
+// oracle first, pid fallback. Centralizes the live-probe closure that otherwise
+// gets re-built at every lock/unlock/doctor call site.
 //
-// PID-reuse defense (loto-kwlp): for a live local pid, if the lock carries a
-// known start-time (storedStart != 0), the current occupant's start-time is
-// re-read and compared. A mismatch means the original holder died and the OS
-// recycled its pid to an unrelated process → report dead so IsStale reclaims
-// the lock. storedStart == 0 (legacy row, or an OS without a start-time
-// reader) falls back to pid-alive-only — preserving prior behavior.
-func (r *runtime) liveProbe() domain.PidLiveProbe {
-	return func(host string, pid int, storedStart int64) bool {
-		if host != r.Host {
-			return true
+// Layer 1 — the session-liveness oracle (identity.AgentLive, loto-ygty), keyed
+// on the lock's owner uuid. A LIVE verdict overrides the pid probe entirely:
+// a worktree/subagent holder whose stamped pid probes dead is still alive if
+// its session socket + ps identity check out (loto-r11w). A DEAD verdict
+// fast-reclaims without touching the pid.
+//
+// Layer 2 — pid fallback, when the oracle has no peer record. Remote-host and
+// PID-0 locks are UNKNOWN (TTL is the sole authority — loto-t1tq/loto-j1bo).
+// PID-reuse defense (loto-kwlp): for a live local pid with a known start-time,
+// the occupant's start-time is re-read; a mismatch means the OS recycled the
+// pid → DEAD. Indeterminate start-time reads never escalate — the pid already
+// probed alive.
+func (r *runtime) liveProbe() domain.HolderLiveProbe {
+	return func(l domain.LockRecord) domain.Liveness {
+		if l.Host != r.Host {
+			return domain.LivenessUnknown
 		}
-		if !pidLive(pid) {
-			return false
+		switch identity.AgentLive(r.Ctx, string(l.OwnerUUID)).Liveness {
+		case identity.SessionLive:
+			return domain.LivenessAlive
+		case identity.SessionDead:
+			return domain.LivenessDead
+		case identity.SessionUnknown:
+			// no peer record — fall through to the pid probe
 		}
-		if storedStart == 0 {
-			return true
-		}
-		cur, ok := procStart(pid)
-		if !ok {
-			// Can't read the occupant's start-time; don't escalate to "dead"
-			// on indeterminate reads — pidLive already said alive.
-			return true
-		}
-		return cur == storedStart
+		return pidVerdict(l)
 	}
+}
+
+// pidVerdict is liveProbe's layer-2 fallback for a local lock with no peer
+// record: PID-0 sentinel → unknown (TTL governs), dead pid → dead, live pid
+// with a recycled start-time (loto-kwlp) → dead, else alive.
+func pidVerdict(l domain.LockRecord) domain.Liveness {
+	if l.PID <= 0 {
+		return domain.LivenessUnknown
+	}
+	if !identity.PIDAlive(l.PID) {
+		return domain.LivenessDead
+	}
+	if l.ProcStart != 0 {
+		if cur, ok := procStart(l.PID); ok && cur != l.ProcStart {
+			return domain.LivenessDead
+		}
+	}
+	return domain.LivenessAlive
 }
 
 // lockOwnerUUIDs collects the set of owner_uuid values referenced by live
