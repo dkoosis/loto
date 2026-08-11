@@ -18,6 +18,7 @@ const (
 	EventModeRestoreFailed    = "mode_restore_failed"
 	EventAcquireRollbackStart = "acquire_rollback_started"
 	EventLockDowngraded       = "lock_downgraded"
+	EventLockRefreshed        = "lock_refreshed"
 )
 
 var ErrNoLockAtTarget = errors.New("no lock at target")
