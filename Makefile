@@ -20,7 +20,7 @@ include .sandbox/lib/Makefile.cross.mk
 
 .PHONY: help scan check audit deploy report report-human \
         vet lint arch test race demo demo-v vuln dupl nilcheck stress \
-        pack-drift build install tidy clean
+        pack-drift build install tidy clean hooks
 
 BIN_DIR := bin
 BIN     := $(BIN_DIR)/loto
@@ -155,6 +155,19 @@ tidy: ## Tidy go.mod
 
 clean: ## Remove build artifacts
 	rm -rf $(BIN_DIR)
+
+hooks: ## Route git hooks to the tracked .githooks/ dir (bd integration, ccp-th5.2). Local-only, per-clone; run once after cloning.
+	@missing=""; \
+	for h in pre-commit post-merge pre-push post-checkout prepare-commit-msg; do \
+		if [ ! -x ".githooks/$$h" ]; then missing="$$missing $$h"; fi; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "make hooks: missing or non-executable dispatcher(s):$$missing" >&2; \
+		exit 1; \
+	fi
+	git config core.hooksPath .githooks
+	@echo "git hooks enabled (.githooks): pre-commit / post-merge / pre-push / post-checkout / prepare-commit-msg (bd)."
+	@bd hooks list 2>/dev/null || true
 
 ## ---------------------------------------------------------------------
 ## Utilities
