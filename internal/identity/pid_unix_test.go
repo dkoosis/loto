@@ -1,13 +1,13 @@
 //go:build unix
 
-package cli
+package identity
 
 import (
 	"syscall"
 	"testing"
 )
 
-func TestPidLive(t *testing.T) {
+func TestPIDAliveKillErrors(t *testing.T) {
 	orig := killFn
 	t.Cleanup(func() { killFn = orig })
 
@@ -26,8 +26,8 @@ func TestPidLive(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			killFn = func(pid int, sig syscall.Signal) error { return tc.err }
-			if got := pidLive(tc.pid); got != tc.want {
-				t.Fatalf("pidLive(%d) err=%v: got %v want %v", tc.pid, tc.err, got, tc.want)
+			if got := PIDAlive(tc.pid); got != tc.want {
+				t.Fatalf("PIDAlive(%d) err=%v: got %v want %v", tc.pid, tc.err, got, tc.want)
 			}
 		})
 	}

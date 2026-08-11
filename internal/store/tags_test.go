@@ -30,8 +30,7 @@ func TestSchemaVersionPaired(t *testing.T) {
 func acquireForTest(t *testing.T, s *Store, name, agent string) (domain.LockRecord, int64) {
 	t.Helper()
 	rec := mkFileLock(t, name, agent, time.Hour)
-	live := func(string, int, int64) bool { return true }
-	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{rec}, live); err != nil {
+	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{rec}, liveProbe); err != nil {
 		t.Fatalf("AcquireLocks: %v", err)
 	}
 	got, err := s.LockAt(context.Background(), rec.Target)
@@ -83,8 +82,7 @@ func TestTaggersAckedSince(t *testing.T) {
 	}
 
 	since := time.Now().UnixNano()
-	live := func(string, int, int64) bool { return true }
-	if _, err := s.ReleaseLocks(ctx, []domain.Target{lock.Target}, tcAlice, "h", live); err != nil {
+	if _, err := s.ReleaseLocks(ctx, []domain.Target{lock.Target}, tcAlice, liveProbe); err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
 
@@ -435,7 +433,7 @@ func TestReleaseLocks_AcksTagsOnReleasedLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ReleaseLocks(ctx, []domain.Target{lock.Target}, tcAlice, "h", liveProbe); err != nil {
+	if _, err := s.ReleaseLocks(ctx, []domain.Target{lock.Target}, tcAlice, liveProbe); err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
 	// Tag row should still exist with acked_at set (audit), not orphaned.
@@ -472,8 +470,7 @@ func TestBreakLocks_GCsOrphanedTags(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Force-break by a 3rd party (bob).
-	live := func(string, int, int64) bool { return true }
-	res, err := s.BreakLocks(ctx, []domain.Target{lock.Target}, tcBob, BreakForce, "break", "h", live)
+	res, err := s.BreakLocks(ctx, []domain.Target{lock.Target}, tcBob, BreakForce, "break", liveProbe)
 	if err != nil || res[0].Err != nil {
 		t.Fatalf("break: %v / %v", err, res[0].Err)
 	}
@@ -495,7 +492,7 @@ func TestReleaseLocks_MultiTarget_AcksEachLocksTags(t *testing.T) {
 	lb, lockBNs := acquireForTest(t, s, "b.go", tcAlice)
 	idA, _ := s.InsertTag(ctx, NewTag{TargetCanonical: domain.Canonical(la.Target.Canonical), LockOwnerUUID: tcAlice, LockCreatedAt: lockANs, TaggerUUID: tcBob, Text: "a"})
 	idB, _ := s.InsertTag(ctx, NewTag{TargetCanonical: domain.Canonical(lb.Target.Canonical), LockOwnerUUID: tcAlice, LockCreatedAt: lockBNs, TaggerUUID: tcBob, Text: "b"})
-	if _, err := s.ReleaseLocks(ctx, []domain.Target{la.Target, lb.Target}, tcAlice, "h", liveProbe); err != nil {
+	if _, err := s.ReleaseLocks(ctx, []domain.Target{la.Target, lb.Target}, tcAlice, liveProbe); err != nil {
 		t.Fatalf("multi release: %v", err)
 	}
 	for _, id := range []string{idA, idB} {
@@ -526,8 +523,7 @@ func TestDoctorRepair_GCsOrphanedTags(t *testing.T) {
 	if n := rawTagRowCount(t, s); n != 1 {
 		t.Fatalf("precondition: 1 orphan tag row, got %d", n)
 	}
-	live := func(string, int, int64) bool { return true }
-	if err := s.DoctorRepair(ctx, "h", tcAlice, live); err != nil {
+	if err := s.DoctorRepair(ctx, tcAlice, liveProbe); err != nil {
 		t.Fatalf("DoctorRepair: %v", err)
 	}
 	if n := rawTagRowCount(t, s); n != 0 {

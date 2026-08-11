@@ -11,10 +11,9 @@ import (
 func TestAcquireLocks_EmitsLockAcquiredEvent(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
 
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
@@ -37,13 +36,12 @@ func TestAcquireLocks_EmitsLockAcquiredEvent(t *testing.T) {
 func TestReleaseLocks_EmitsLockReleasedEvent(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
 
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, "h", liveProbe); err != nil {
+	if _, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
@@ -66,14 +64,13 @@ func TestReleaseLocks_EmitsLockReleasedEvent(t *testing.T) {
 func TestReleaseLocks_NoEventForNonOwner(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
 
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 	// Bob tries to release alice's lock — should be rejected.
-	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, "h", liveProbe)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, liveProbe)
 	if err != nil {
 		t.Fatal(err)
 	}

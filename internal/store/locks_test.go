@@ -15,20 +15,19 @@ import (
 func TestReleaseLock(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
-	bobRes, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, "h", liveProbe)
+	bobRes, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks(bob): %v", err)
 	}
 	if bobRes[0].State != StateNotOwner {
 		t.Fatalf("non-owner release must report StateNotOwner, got %+v", bobRes)
 	}
-	aliceRes, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, "h", liveProbe)
+	aliceRes, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks(alice): %v", err)
 	}
@@ -44,17 +43,16 @@ func TestReleaseLock(t *testing.T) {
 func TestBreakLockStaleOnly(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
-	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, tcTest, "h", live)
+	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, tcTest, liveProbe)
 	if err != nil || res[0].Err == nil {
-		t.Fatal("live break without force must fail")
+		t.Fatal("liveProbe break without force must fail")
 	}
-	res, err = s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "deadline", "h", live)
+	res, err = s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "deadline", liveProbe)
 	if err != nil || res[0].Err != nil {
 		t.Fatalf("force break: %v / %v", err, res[0].Err)
 	}
@@ -75,11 +73,10 @@ func TestBreakLockStaleOnly(t *testing.T) {
 }
 
 // TestBreakLockStaleOnly_CrossHost verifies that BreakStale on a lock held by a
-// remote host does NOT attempt pid-probing (which would be meaningless). Before
-// the fix, classifyBreaks passed l.Host as thisHost, making IsStale always see
-// l.Host == thisHost → always pid-probe. With the fix, the requester's host is
-// threaded through, so IsStale correctly skips the pid check for cross-host
-// locks and falls back to TTL-only staleness.
+// remote host does NOT attempt pid-probing (which would be meaningless). The
+// host comparison now lives inside the HolderLiveProbe closure (loto-ygty): a
+// probe evaluating from "local-host" answers UNKNOWN for a holder stamped
+// "remote-host", so TTL is the sole staleness authority there.
 func TestBreakLockStaleOnly_CrossHost(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
@@ -89,15 +86,14 @@ func TestBreakLockStaleOnly_CrossHost(t *testing.T) {
 	l := mkFileLock(t, "cross.go", tcAlice, time.Hour)
 	l.Host = "remote-host"
 	l.PID = 9999
-	live := func(string, int, int64) bool { return true }
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, aliveOn("remote-host")); err != nil {
 		t.Fatal(err)
 	}
 
 	// BreakStale from "local-host": the lock is on a different host, not
-	// expired → IsStale should return false (can't probe remote pid), so the
-	// break must be refused.
-	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "cross-host", "local-host", live)
+	// expired → the probe answers UNKNOWN, IsStale is false (can't probe a
+	// remote pid), so the break must be refused.
+	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "cross-host", aliveOn("local-host"))
 	if err != nil {
 		t.Fatalf("BreakLocks: %v", err)
 	}
@@ -107,7 +103,7 @@ func TestBreakLockStaleOnly_CrossHost(t *testing.T) {
 
 	// Same lock, but BreakStale from "remote-host" (same host as lock holder):
 	// pid probe says alive → also refused.
-	res, err = s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "same-host", "remote-host", live)
+	res, err = s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "same-host", aliveOn("remote-host"))
 	if err != nil {
 		t.Fatalf("BreakLocks: %v", err)
 	}
@@ -116,8 +112,7 @@ func TestBreakLockStaleOnly_CrossHost(t *testing.T) {
 	}
 
 	// Same host, but pid probe says dead → stale, break succeeds.
-	dead := func(string, int, int64) bool { return false }
-	res, err = s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "same-host-dead", "remote-host", dead)
+	res, err = s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "same-host-dead", deadOn("remote-host"))
 	if err != nil || res[0].Err != nil {
 		t.Fatalf("BreakStale from same host with dead pid should succeed: %v / %v", err, res[0].Err)
 	}
@@ -159,9 +154,8 @@ func mkFileLock(t *testing.T, name, agent string, expIn time.Duration) domain.Lo
 func TestBreakLocks_RestoreErrSurfaced(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
@@ -177,7 +171,7 @@ func TestBreakLocks_RestoreErrSurfaced(t *testing.T) {
 		return orig(f, mode)
 	}
 
-	results, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "restore-fail", "h", live)
+	results, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "restore-fail", liveProbe)
 	if err != nil {
 		t.Fatalf("BreakLocks: %v", err)
 	}
@@ -203,17 +197,16 @@ func TestBreakLocks_RestoreErrSurfaced(t *testing.T) {
 func TestBreakLocks_BatchedMultiTarget(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 
 	la := mkFileLock(t, "a.go", tcAlice, time.Hour)
 	lb := mkFileLock(t, "b.go", tcAlice, time.Hour)
 	lc := mkFileLock(t, "c.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{la, lb, lc}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{la, lb, lc}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
 	targets := []domain.Target{la.Target, lb.Target, lc.Target}
-	results, err := s.BreakLocks(ctx, targets, tcBob, BreakForce, "batch break", "h", live)
+	results, err := s.BreakLocks(ctx, targets, tcBob, BreakForce, "batch break", liveProbe)
 	if err != nil {
 		t.Fatalf("BreakLocks: %v", err)
 	}
@@ -246,10 +239,9 @@ func TestBreakLocks_BatchedMultiTarget(t *testing.T) {
 func TestBreakLocks_MixedNoLockAndOwned(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 
 	la := mkFileLock(t, "a.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{la}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{la}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 	missing := domain.Target{Canonical: filepath.Join(t.TempDir(), "missing.go")}
@@ -257,7 +249,7 @@ func TestBreakLocks_MixedNoLockAndOwned(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.BreakLocks(ctx, []domain.Target{la.Target, missing}, tcBob, BreakForce, "mixed", "h", live)
+	results, err := s.BreakLocks(ctx, []domain.Target{la.Target, missing}, tcBob, BreakForce, "mixed", liveProbe)
 	if err != nil {
 		t.Fatalf("BreakLocks: %v", err)
 	}
@@ -275,11 +267,10 @@ func TestBreakLocks_MixedNoLockAndOwned(t *testing.T) {
 func TestReleaseLocks_BatchedMixedStates(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 
 	la := mkFileLock(t, "a.go", tcAlice, time.Hour)
 	lb := mkFileLock(t, "b.go", tcBob, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{la, lb}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{la, lb}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 	never := domain.Target{Canonical: filepath.Join(t.TempDir(), "never.go")}
@@ -287,7 +278,7 @@ func TestReleaseLocks_BatchedMixedStates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{la.Target, lb.Target, never}, tcAlice, "h", liveProbe)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{la.Target, lb.Target, never}, tcAlice, liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -313,7 +304,6 @@ func TestAcquireOverlapBlocks(t *testing.T) {
 	}
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 
 	aliceLock := domain.LockRecord{
@@ -325,14 +315,14 @@ func TestAcquireOverlapBlocks(t *testing.T) {
 		Host:        "h",
 		PID:         1,
 	}
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{aliceLock}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{aliceLock}, liveProbe); err != nil {
 		t.Fatalf("alice acquire: %v", err)
 	}
 
 	bobLock := aliceLock
 	bobLock.OwnerUUID = tcBob
 	bobLock.SessionUUID = tcBob
-	res, err := s.AcquireLocks(ctx, []domain.LockRecord{bobLock}, live)
+	res, err := s.AcquireLocks(ctx, []domain.LockRecord{bobLock}, liveProbe)
 	if err == nil {
 		t.Fatalf("expected conflict; got result %+v", res)
 	}
@@ -358,7 +348,6 @@ func TestAcquireNoDurablePidBlocksUntilTTL(t *testing.T) {
 	}
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int, int64) bool { return false }
 	now := time.Now()
 
 	aliceLock := domain.LockRecord{
@@ -370,14 +359,14 @@ func TestAcquireNoDurablePidBlocksUntilTTL(t *testing.T) {
 		Host:        "h",
 		PID:         0, // no durable pid → TTL governs
 	}
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{aliceLock}, dead); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{aliceLock}, deadProbe); err != nil {
 		t.Fatalf("alice acquire: %v", err)
 	}
 
 	bobLock := aliceLock
 	bobLock.OwnerUUID = tcBob
 	bobLock.SessionUUID = tcBob
-	_, err := s.AcquireLocks(ctx, []domain.LockRecord{bobLock}, dead)
+	_, err := s.AcquireLocks(ctx, []domain.LockRecord{bobLock}, deadProbe)
 	var conflict *MultiConflictError
 	if !errors.As(err, &conflict) {
 		t.Fatalf("PID-0 lock within TTL must block a peer (not reclaim); got err=%v", err)
@@ -395,7 +384,6 @@ func TestAcquireSameAgentRefreshes(t *testing.T) {
 	}
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 
 	first := domain.LockRecord{
@@ -408,13 +396,13 @@ func TestAcquireSameAgentRefreshes(t *testing.T) {
 		Host:        "h",
 		PID:         1,
 	}
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{first}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{first}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 	second := first
 	second.Intent = "refreshed"
 	second.ExpiresAt = first.ExpiresAt.Add(time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{second}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{second}, liveProbe); err != nil {
 		t.Fatalf("refresh must succeed: %v", err)
 	}
 	got, err := s.LockAt(ctx, second.Target)
@@ -438,7 +426,6 @@ func TestAcquireLocks_MultiFile_AtomicSuccess(t *testing.T) {
 
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 	mk := func(p, owner string) domain.LockRecord {
 		return domain.LockRecord{
@@ -453,7 +440,7 @@ func TestAcquireLocks_MultiFile_AtomicSuccess(t *testing.T) {
 	}
 	recs := []domain.LockRecord{mk(a, tcAlice), mk(b, tcAlice)}
 
-	if _, err := s.AcquireLocks(ctx, recs, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, recs, liveProbe); err != nil {
 		t.Fatalf("AcquireLocks: %v", err)
 	}
 
@@ -479,7 +466,6 @@ func TestAcquireLocks_MultiFile_ConflictAbortsNoChmod(t *testing.T) {
 	}
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 	mk := func(p, owner string) domain.LockRecord {
 		return domain.LockRecord{
@@ -494,7 +480,7 @@ func TestAcquireLocks_MultiFile_ConflictAbortsNoChmod(t *testing.T) {
 	}
 
 	// alice already holds a.
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{mk(a, tcAlice)}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{mk(a, tcAlice)}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 	stA, _ := os.Stat(a)
@@ -503,7 +489,7 @@ func TestAcquireLocks_MultiFile_ConflictAbortsNoChmod(t *testing.T) {
 	modeBBefore := stB.Mode().Perm()
 
 	// bob tries to acquire both. Should fail, no chmod side effect on b.
-	_, err := s.AcquireLocks(ctx, []domain.LockRecord{mk(a, tcBob), mk(b, tcBob)}, live)
+	_, err := s.AcquireLocks(ctx, []domain.LockRecord{mk(a, tcBob), mk(b, tcBob)}, liveProbe)
 	if err == nil {
 		t.Fatal("expected conflict, got nil")
 	}
@@ -543,7 +529,6 @@ func TestAcquireLocks_ChmodFailureRollsBack(t *testing.T) {
 		return orig(f, mode)
 	}
 
-	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 	mk := func(p string) domain.LockRecord {
 		return domain.LockRecord{
@@ -556,7 +541,7 @@ func TestAcquireLocks_ChmodFailureRollsBack(t *testing.T) {
 			PID:         1,
 		}
 	}
-	_, err := s.AcquireLocks(ctx, []domain.LockRecord{mk(a), mk(b)}, live)
+	_, err := s.AcquireLocks(ctx, []domain.LockRecord{mk(a), mk(b)}, liveProbe)
 	var cfe *ChmodFailureError
 	if !errors.As(err, &cfe) {
 		t.Fatalf("want *ChmodFailureError, got %v", err)
@@ -596,7 +581,6 @@ func TestAcquireLocks_RollbackRestoreFailureLeavesBreadcrumb(t *testing.T) {
 		return orig(f, mode)
 	}
 
-	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 	mk := func(p string) domain.LockRecord {
 		return domain.LockRecord{
@@ -609,7 +593,7 @@ func TestAcquireLocks_RollbackRestoreFailureLeavesBreadcrumb(t *testing.T) {
 			PID:         1,
 		}
 	}
-	_, err := s.AcquireLocks(ctx, []domain.LockRecord{mk(a), mk(b)}, live)
+	_, err := s.AcquireLocks(ctx, []domain.LockRecord{mk(a), mk(b)}, liveProbe)
 	var cfe *ChmodFailureError
 	if !errors.As(err, &cfe) {
 		t.Fatalf("want *ChmodFailureError, got %v", err)
@@ -649,7 +633,6 @@ func TestAcquireLocks_AuditSurvivesCancelledCtx(t *testing.T) {
 	s := mustOpen(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	live := func(string, int, int64) bool { return true }
 	rec := domain.LockRecord{
 		Target:      domain.Target{Canonical: p},
 		OwnerUUID:   tcAlice,
@@ -659,7 +642,7 @@ func TestAcquireLocks_AuditSurvivesCancelledCtx(t *testing.T) {
 		Host:        "h",
 		PID:         1,
 	}
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 	cancel()
@@ -682,15 +665,14 @@ func TestAcquireLocks_AuditSurvivesCancelledCtx(t *testing.T) {
 func TestReleaseLock_RestoresWriteMode(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "r.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 	if st, _ := os.Stat(l.Target.Canonical); st.Mode().Perm()&0o200 != 0 {
 		t.Fatalf("precondition: acquire should strip write, got %o", st.Mode().Perm())
 	}
-	results, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, "h", liveProbe)
+	results, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, liveProbe)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,12 +688,12 @@ func TestReleaseLock_RestoresWriteMode(t *testing.T) {
 func TestBreakLock_RestoresWriteMode(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return false } // stale
+	live := deadProbe // stale
 	l := mkFileLock(t, "b.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, func(string, int, int64) bool { return true }); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "stale", "h", live)
+	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "stale", live)
 	if err != nil || res[0].Err != nil {
 		t.Fatalf("break: %v / %v", err, res[0].Err)
 	}
@@ -724,20 +706,19 @@ func TestBreakLock_RestoresWriteMode(t *testing.T) {
 func TestReleaseLocks_NoLockVsNotOwner(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 
 	l := mkFileLock(t, "x.go", tcAlice, time.Hour)
-	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, "h", liveProbe)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks (no row): %v", err)
 	}
 	if res[0].State != StateNoLock {
 		t.Fatalf("expected StateNoLock, got %+v", res)
 	}
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	res, err = s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, "h", liveProbe)
+	res, err = s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks (not owner): %v", err)
 	}
@@ -749,12 +730,10 @@ func TestReleaseLocks_NoLockVsNotOwner(t *testing.T) {
 func TestAcquireLocks_LazyGCRestoresMode(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	dead := func(string, int, int64) bool { return false }
-	live := func(string, int, int64) bool { return true }
 
-	// Alice acquires (live probe), then her lock goes stale (probe dead).
+	// Alice acquires (liveProbe probe), then her lock goes stale (probe deadProbe).
 	a := mkFileLock(t, "shared.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 	// Verify stripped.
@@ -763,11 +742,11 @@ func TestAcquireLocks_LazyGCRestoresMode(t *testing.T) {
 		t.Fatalf("acquire should strip owner-write, got %o", st.Mode().Perm())
 	}
 
-	// Bob comes along; Alice is dead → lazy GC reclaims her row, Bob acquires.
+	// Bob comes along; Alice is deadProbe → lazy GC reclaims her row, Bob acquires.
 	b := a
 	b.OwnerUUID = tcBob
 	b.SessionUUID = tcBob
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, dead); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, deadProbe); err != nil {
 		t.Fatalf("Bob acquire after stale reclaim: %v", err)
 	}
 	// Bob now holds; file should still be stripped (he owns it).
@@ -777,7 +756,7 @@ func TestAcquireLocks_LazyGCRestoresMode(t *testing.T) {
 	}
 
 	// Sanity: if Bob releases, mode comes back.
-	results, err := s.ReleaseLocks(ctx, []domain.Target{b.Target}, tcBob, "h", liveProbe)
+	results, err := s.ReleaseLocks(ctx, []domain.Target{b.Target}, tcBob, liveProbe)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -793,7 +772,6 @@ func TestAcquireLocks_LazyGCRestoresMode(t *testing.T) {
 func TestReleaseLocks_DistinguishesMissingFromNotOwner(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 
 	a := mkFileLock(t, "a.go", tcAlice, time.Hour)
 	c := mkFileLock(t, "c.go", tcBob, time.Hour)
@@ -803,10 +781,10 @@ func TestReleaseLocks_DistinguishesMissingFromNotOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{c}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{c}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
@@ -814,7 +792,7 @@ func TestReleaseLocks_DistinguishesMissingFromNotOwner(t *testing.T) {
 		a.Target,
 		{Canonical: bPath},
 		c.Target,
-	}, tcAlice, "h", liveProbe)
+	}, tcAlice, liveProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -843,10 +821,9 @@ func TestReleaseLocks_DistinguishesMissingFromNotOwner(t *testing.T) {
 func TestReleaseLocks_RestoreFailureIsReported(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 
 	rec := mkFileLock(t, "x.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
@@ -859,7 +836,7 @@ func TestReleaseLocks_RestoreFailureIsReported(t *testing.T) {
 		return orig(f, mode)
 	}
 
-	results, err := s.ReleaseLocks(ctx, []domain.Target{rec.Target}, tcAlice, "h", liveProbe)
+	results, err := s.ReleaseLocks(ctx, []domain.Target{rec.Target}, tcAlice, liveProbe)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -926,17 +903,15 @@ func TestValidateFileTarget_TypedErrors(t *testing.T) {
 func TestAcquireReclaimsDeadSession(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 
 	dead := mkFileLock(t, "a.go", tcAlice, time.Hour) // TTL NOT expired
 	dead.PID = 4242                                   // durable pid (probe will say dead)
 	dead.ProcStart = 9999
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{dead}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{dead}, liveProbe); err != nil {
 		t.Fatalf("seed alice lock: %v", err)
 	}
 
-	// Probe reports pid 4242 dead → liveness-primary reclaim despite live TTL.
-	deadProbe := func(host string, pid int, start int64) bool { return false }
+	// Probe reports pid 4242 dead → liveness-primary reclaim despite liveProbe TTL.
 	bob := dead
 	bob.OwnerUUID, bob.SessionUUID, bob.PID = tcBob, tcBob, 5555
 	got, err := s.AcquireLocks(ctx, []domain.LockRecord{bob}, deadProbe)
@@ -957,18 +932,17 @@ func TestAcquireReclaimsDeadSession(t *testing.T) {
 func TestAcquireBlocksOnLiveSession(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 
 	held := mkFileLock(t, "a.go", tcAlice, time.Hour)
 	held.PID = 4242
 	held.ProcStart = 9999
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{held}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{held}, liveProbe); err != nil {
 		t.Fatalf("seed alice lock: %v", err)
 	}
 
 	bob := held
 	bob.OwnerUUID, bob.SessionUUID, bob.PID = tcBob, tcBob, 5555
-	_, err := s.AcquireLocks(ctx, []domain.LockRecord{bob}, live)
+	_, err := s.AcquireLocks(ctx, []domain.LockRecord{bob}, liveProbe)
 	var mce *MultiConflictError
 	if !errors.As(err, &mce) {
 		t.Fatalf("bob acquire over LIVE holder must conflict, got err=%v", err)

@@ -16,12 +16,12 @@ import (
 // restore-failed) are reported via ReleaseResult.State.
 //
 // Stale-aware (loto-ebkc): when the caller holds no row at a target and EVERY
-// foreign holder is stale under (thisHost, live), the plain unlock reclaims
-// them all — delete + lock_reclaimed_stale audit in the same tx — instead of
-// bouncing to not-owner. One live foreign holder vetoes the whole target
+// foreign holder is stale under live, the plain unlock reclaims them all —
+// delete + lock_reclaimed_stale audit in the same tx — instead of bouncing to
+// not-owner. One live foreign holder vetoes the whole target
 // (authorizeHolders, loto-w77f parity). The caller's own row always wins
 // first (prefer-own, loto-k5el.2) and never piggybacks a co-holder reclaim.
-func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, agent domain.AgentUUID, thisHost string, live domain.PidLiveProbe) ([]ReleaseResult, error) {
+func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, agent domain.AgentUUID, live domain.HolderLiveProbe) ([]ReleaseResult, error) {
 	byAgent := string(agent) // internal store helpers thread the owner as a plain string
 	if len(targets) == 0 {
 		return []ReleaseResult{}, nil
@@ -45,7 +45,7 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, agent
 	}
 
 	now := time.Now()
-	ec := domain.EvalContext{Now: now, ThisHost: thisHost, Live: live}
+	ec := domain.EvalContext{Now: now, Live: live}
 	results, owned, reclaims := classifyReleases(targets, existing, byAgent, ec)
 
 	if err := s.applyReleaseChangesTx(ctx, tx, owned, reclaims, byAgent, now); err != nil {

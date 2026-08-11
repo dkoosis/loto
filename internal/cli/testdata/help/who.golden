@@ -8,9 +8,9 @@ LotoHandle — what name does the messaging layer know it by?"
   --json    emit the rows as a JSON array
   --all     include peers whose session is gone (last observation)
 
-Liveness is socket-file existence, not process liveness — a worktree agent
-reads as dead to the lock-liveness check (loto-r11w) but is plainly reachable
-here. Dead rows are pruned from disk as they are listed.
+Liveness is the session oracle (loto alive): socket existence plus a ps
+identity check on the socket's pid. Dead rows are pruned from disk as they
+are listed.
 
 A row with peer=- is a top-level session: Claude Code names those from their
 cwd or /rename, and that name is readable nowhere a loto hook can reach. Make

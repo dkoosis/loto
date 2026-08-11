@@ -98,7 +98,7 @@ func cmdLane(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // cannot close that TOCTOU window alone; this is the CLI half that closes it.
 func runLaneCommit(rt *runtime, repoTop, ref, base, msg, closes string, targets []domain.Target, stdout, stderr io.Writer) int {
 	owner := domain.AgentUUID(rt.Agent.UUID)
-	ec := domain.EvalContext{Now: time.Now(), ThisHost: rt.Host, Live: rt.liveProbe()}
+	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
 
 	// Pre-assert: every write-set path must be held by THIS identity under a
 	// live exclusive lock. A single unheld path refuses the whole commit and

@@ -2,50 +2,39 @@ package domain
 
 import "time"
 
-// PidLiveProbe returns true if (host,pid) is currently running. storedStart is
-// the lock's persisted holder start-time (0 = unknown): when nonzero, the real
-// probe reads the current occupant's start-time and reports the pid dead on a
-// mismatch, defeating PID reuse (loto-kwlp). Unknown (0) degrades to a plain
-// pid-alive check.
-type PidLiveProbe func(host string, pid int, storedStart int64) bool
+// HolderLiveProbe answers "is the holder of this lock still alive?" with the
+// display-tier trichotomy. The probe owns ALL environmental policy — which
+// host it runs on, the session-liveness oracle (identity.AgentLive, loto-ygty),
+// the pid + start-time fallback (loto-kwlp) — so the domain predicates stay
+// pure over the verdict. Replaces PidLiveProbe(host, pid, storedStart): the
+// record is the subject, and a positional (string, int, int64) probe cannot
+// carry the owner uuid the oracle keys on.
+//
+// Contract: LivenessAlive = holder provably up (oracle or local pid probe);
+// LivenessDead = provably gone; LivenessUnknown = no durable handle (remote
+// host, PID-0 sentinel, no peer record) → TTL is the sole authority.
+type HolderLiveProbe func(l LockRecord) Liveness
 
 // EvalContext bundles the ambient inputs every staleness/authz predicate needs:
-// the evaluation clock, the host doing the evaluating, and the pid-liveness
-// probe. It replaces the (now, thisHost, live) trio that previously threaded
-// positionally through IsStale/AuthorizeBreak and their call sites — a real
-// arg-order hazard given two strings-and-a-func with no compiler guard
-// (loto-vtg6). The LockRecord stays the per-call subject and is passed
-// separately.
+// the evaluation clock and the holder-liveness probe. It replaces the trio that
+// previously threaded positionally through IsStale/AuthorizeBreak and their
+// call sites — a real arg-order hazard with no compiler guard (loto-vtg6). The
+// LockRecord stays the per-call subject and is passed separately.
 type EvalContext struct {
-	Now      time.Time
-	ThisHost string
-	Live     PidLiveProbe
+	Now  time.Time
+	Live HolderLiveProbe
 }
 
-// WithHost returns a copy of the context evaluating from host. Acquisition
-// reclaim scans blockers from the perspective of the acquiring lock's host, so
-// the same (now, live) ambient pair is reused while ThisHost varies per lock.
-func (c EvalContext) WithHost(host string) EvalContext {
-	c.ThisHost = host
-	return c
-}
-
-// IsStale returns true if the lock is past its TTL OR the holder pid is provably
-// dead on this host. Cross-host pid checks are out of scope.
+// IsStale returns true if the lock is past its TTL OR the holder is provably
+// dead. A nil probe (zero-value EvalContext) means liveness is undeterminable →
+// TTL governs, no panic. Liveness accelerates staleness, it never extends the
+// lease: an ALIVE holder past its TTL is still stale (refresh is the remedy —
+// locks_refresh.go).
 func (c EvalContext) IsStale(l LockRecord) bool {
 	if !c.Now.Before(l.ExpiresAt) {
 		return true
 	}
-	// PID <= 0 is the no-durable-liveness sentinel (a lock placed without
-	// LOTO_PID — loto-t1tq/loto-j1bo): the holder pid is unknown, so liveness
-	// can't be probed and the TTL gate above is the sole authority. Never
-	// instant-stale, never consult the probe. A real holder pid (>0) does.
-	// A nil probe (zero-value EvalContext) is the same "undeterminable" case →
-	// TTL governs, no panic.
-	if l.PID > 0 && l.Host == c.ThisHost && c.Live != nil && !c.Live(l.Host, l.PID, l.ProcStart) {
-		return true
-	}
-	return false
+	return c.Live != nil && c.Live(l) == LivenessDead
 }
 
 // Liveness is the display-tier refinement of IsStale: it splits a non-stale
@@ -74,16 +63,17 @@ func (l Liveness) String() string {
 	}
 }
 
-// Classify returns the display-tier liveness verdict. DEAD ⟺ IsStale (I1).
+// Classify returns the display-tier liveness verdict. DEAD ⟺ IsStale (I1):
+// the TTL backstop firing renders the lock DEAD for display even when the
+// holder still probes alive, because the lock is reclaimable either way.
 func (c EvalContext) Classify(l LockRecord) Liveness {
 	if c.IsStale(l) {
 		return LivenessDead
 	}
-	if l.PID > 0 && l.Host == c.ThisHost && c.Live != nil {
-		// Not stale + durable handle on this host ⟹ probe said alive.
-		return LivenessAlive
+	if c.Live == nil {
+		return LivenessUnknown
 	}
-	return LivenessUnknown
+	return c.Live(l) // not stale ⟹ probe returned Alive or Unknown
 }
 
 // RemainingTTL is the time until the TTL backstop fires, clamped at 0. Expiry

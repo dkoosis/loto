@@ -23,8 +23,10 @@ const (
 
 // BreakLocks force/stale-reclaims a batch of locks in one transaction. Per-target
 // errors do not abort the batch — see BreakResult.Err. Returned error is non-nil
-// only on internal/SQL failures. Results are returned in input order.
-func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, agent domain.AgentUUID, mode BreakMode, reason string, thisHost string, live domain.PidLiveProbe) ([]BreakResult, error) {
+// only on internal/SQL failures. Results are returned in input order. Host
+// policy rides inside `live` (HolderLiveProbe takes the record), so callers no
+// longer pass a this-host string.
+func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, agent domain.AgentUUID, mode BreakMode, reason string, live domain.HolderLiveProbe) ([]BreakResult, error) {
 	byAgent := string(agent) // internal store helpers thread the owner as a plain string
 	if len(targets) == 0 {
 		return []BreakResult{}, nil
@@ -51,7 +53,7 @@ func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, agent d
 	}
 
 	now := time.Now()
-	ec := domain.EvalContext{Now: now, ThisHost: thisHost, Live: live}
+	ec := domain.EvalContext{Now: now, Live: live}
 	force := mode == BreakForce
 	kind := EventLockBroken
 	if !force {

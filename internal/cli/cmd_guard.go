@@ -115,7 +115,7 @@ func guardPeerRows(ctx context.Context, stdout io.Writer) (rows []render.GateDen
 		fmt.Fprintf(stdout, "⚠ store=unreachable guard=fail-open err=%q\n", err)
 		return nil, true
 	}
-	ec := domain.EvalContext{Now: time.Now(), ThisHost: rt.Host, Live: rt.liveProbe()}
+	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
 	return gateDecideAny(locks, claims, rt.Agent.UUID, ec), false
 }
 

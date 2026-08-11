@@ -53,6 +53,7 @@ commands:
   sent     List your live outgoing mail with read status ("did anyone pick this up?")
   whoami   Print agent identity
   who      Map handles to Claude Code peer names — the address SendMessage needs
+  alive    Liveness verdict per agent; exit 1 if any is dead, 0 if none provably is
   version  Print loto version
 
 lane choreography (engine verbs; used by the /team fleet harness):

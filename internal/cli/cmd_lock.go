@@ -144,7 +144,7 @@ func classifyCanonicalizeErr(err error) string {
 	}
 }
 
-func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.Duration, mode string, live domain.PidLiveProbe, stdout, stderr io.Writer) int {
+func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.Duration, mode string, live domain.HolderLiveProbe, stdout, stderr io.Writer) int {
 	now := time.Now()
 	if w := degradedPidWarning(); w != "" {
 		fmt.Fprint(stderr, w)

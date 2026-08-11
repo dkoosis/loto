@@ -28,9 +28,9 @@ LotoHandle — what name does the messaging layer know it by?"
   --json    emit the rows as a JSON array
   --all     include peers whose session is gone (last observation)
 
-Liveness is socket-file existence, not process liveness — a worktree agent
-reads as dead to the lock-liveness check (loto-r11w) but is plainly reachable
-here. Dead rows are pruned from disk as they are listed.
+Liveness is the session oracle (loto alive): socket existence plus a ps
+identity check on the socket's pid. Dead rows are pruned from disk as they
+are listed.
 
 A row with peer=- is a top-level session: Claude Code names those from their
 cwd or /rename, and that name is readable nowhere a loto hook can reach. Make
@@ -53,7 +53,7 @@ func cmdWho(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 	// No openRuntime: peer presence is host-global identity state, so `who`
 	// answers outside a git repo — the same reach as `whoami`.
-	peers, err := identity.Peers(*all)
+	peers, err := identity.Peers(ctx, *all)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
@@ -76,7 +76,7 @@ func cmdWho(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	emitPeers(stdout, peers, time.Now())
+	emitPeers(ctx, stdout, peers, time.Now())
 	return 0
 }
 
@@ -93,7 +93,7 @@ func filterPeersByHandle(peers []identity.Peer, handle string) []identity.Peer {
 // emitPeers renders the table: count on the first body line, one key=value row
 // per peer, no ANSI (docs/design.md). The unnamed footer fires once, not per
 // row — the remedy is the same for every one of them.
-func emitPeers(w io.Writer, peers []identity.Peer, now time.Time) {
+func emitPeers(ctx context.Context, w io.Writer, peers []identity.Peer, now time.Time) {
 	fmt.Fprintf(w, "peers: %d\n", len(peers))
 	unnamed := 0
 	for i := range peers {
@@ -104,7 +104,7 @@ func emitPeers(w io.Writer, peers []identity.Peer, now time.Time) {
 			unnamed++
 		}
 		state := "live"
-		if !p.Live() {
+		if !p.Live(ctx) {
 			state = "gone"
 		}
 		fmt.Fprintf(w, "handle=%s peer=%s state=%s pid=%d cwd=%s socket=%s seen=%s\n",

@@ -44,13 +44,13 @@ type SidecarCheck struct {
 	RepoTop    string
 }
 
-func (s *Store) DoctorAudit(ctx context.Context, thisHost string, live domain.PidLiveProbe, sc SidecarCheck) (*DoctorReport, error) {
+func (s *Store) DoctorAudit(ctx context.Context, thisHost string, live domain.HolderLiveProbe, sc SidecarCheck) (*DoctorReport, error) {
 	r := &DoctorReport{}
 	locks, err := s.ListLocks(ctx)
 	if err != nil {
 		return nil, err
 	}
-	ec := domain.EvalContext{Now: time.Now(), ThisHost: thisHost, Live: live}
+	ec := domain.EvalContext{Now: time.Now(), Live: live}
 	for i := range locks {
 		if ec.IsStale(locks[i]) {
 			r.StaleLocks = append(r.StaleLocks, locks[i])
@@ -152,7 +152,11 @@ func checkSidecar(l domain.LockRecord, sc SidecarCheck) (SidecarFinding, bool) {
 	return SidecarFinding{}, false
 }
 
-func (s *Store) DoctorRepair(ctx context.Context, thisHost string, agent domain.AgentUUID, live domain.PidLiveProbe) error {
+// DoctorRepair sweeps stale locks, expired claims, and orphaned tags. Host
+// policy rides inside `live` (HolderLiveProbe takes the record), so unlike
+// DoctorAudit — whose sidecar cross-check still needs a this-host string — it
+// takes no host argument.
+func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live domain.HolderLiveProbe) error {
 	byAgent := string(agent) // internal store helpers thread the owner as a plain string
 	// Hold the op-flock across the tx AND the post-commit chmod restores
 	// so concurrent AcquireLocks can't race the filesystem half of the
@@ -174,7 +178,7 @@ func (s *Store) DoctorRepair(ctx context.Context, thisHost string, agent domain.
 		return err
 	}
 	now := time.Now()
-	ec := domain.EvalContext{Now: now, ThisHost: thisHost, Live: live}
+	ec := domain.EvalContext{Now: now, Live: live}
 	reclaimed, err := reclaimStaleLocks(ctx, tx, all, ec, byAgent, now)
 	if err != nil {
 		return err

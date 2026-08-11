@@ -31,7 +31,6 @@ func TestConcurrentOverlappingAcquire(t *testing.T) {
 		t.Fatal(err)
 	}
 	tgt := domain.Target{Canonical: target}
-	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 
 	var ready, start sync.WaitGroup
@@ -57,7 +56,7 @@ func TestConcurrentOverlappingAcquire(t *testing.T) {
 				Host:        tcTest,
 				PID:         1000 + i,
 			}
-			_, err := s.AcquireLocks(context.Background(), []domain.LockRecord{rec}, live)
+			_, err := s.AcquireLocks(context.Background(), []domain.LockRecord{rec}, liveProbe)
 			switch {
 			case err == nil:
 				wins.Add(1)

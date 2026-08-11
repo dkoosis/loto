@@ -1,0 +1,24 @@
+usage: loto alive [<handle-or-uuid>...]
+
+Ask the one liveness oracle whether the Claude Code session behind an agent is
+still up. With no arguments, every recorded peer is checked.
+
+  <handle>  loto handle, matched case-insensitively against the peer registry
+  <uuid>    agent uuid in canonical hex form
+
+A DEAD verdict is necessary but never sufficient for kill-class actions:
+killing additionally requires an idle/TaskStop signal from the harness. LIVE
+vetoes a kill. UNKNOWN means no peer record — fall back to TTL, never treat as
+dead.
+
+exit 0  nothing queried is provably dead — live and unknown both land here
+exit 1  at least one queried subject is dead
+exit 2  usage
+exit 3  the peer registry could not be read
+
+Callers gating kill-class actions must therefore read exit 0 as "not provably
+dead", never as "alive".
+
+examples:
+  loto alive NeatDace
+  loto alive NeatDace GoldBadger && echo "no proof either is gone — do not kill"

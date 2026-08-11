@@ -94,9 +94,8 @@ func TestOpen_RecoversStaleVersionOnIntactSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed open: %v", err)
 	}
-	live := func(string, int, int64) bool { return true }
 	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{l}, live); err != nil {
+	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatalf("seed acquire: %v", err)
 	}
 	// Simulate the window: schema present, user_version behind current.
@@ -111,13 +110,13 @@ func TestOpen_RecoversStaleVersionOnIntactSchema(t *testing.T) {
 	}
 	defer s2.Close()
 
-	// The live lock must survive — proof the DB re-migrated, not move-aside'd.
+	// The liveProbe lock must survive — proof the DB re-migrated, not move-aside'd.
 	locks, err := s2.ListLocks(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(locks) != 1 {
-		t.Errorf("live lock destroyed: got %d locks, want 1 (DB move-aside'd?)", len(locks))
+		t.Errorf("liveProbe lock destroyed: got %d locks, want 1 (DB move-aside'd?)", len(locks))
 	}
 	if matches, _ := filepath.Glob(path + ".corrupt.*"); len(matches) != 0 {
 		t.Errorf("DB moved aside (%d aside files); expected in-place re-migrate", len(matches))

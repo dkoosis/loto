@@ -5,11 +5,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
 
-// liveSocket creates a real unix socket so Peer.Live() sees the same witness it
+// liveSocket creates a real unix socket so Peer.Live(ctx) sees the same witness it
 // sees in production: a file at the socket path. The listener is closed (and
 // the file removed) via the returned func to simulate the session exiting.
 func liveSocket(t *testing.T, dir string) (path string, kill func()) {
@@ -127,7 +128,9 @@ func TestRecordPeerRoundTrip(t *testing.T) {
 	defer kill()
 
 	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", sock)
-	t.Setenv("CLAUDE_PID", "4242")
+	// A real, running pid: the liveness oracle probes the recorded pid, so a
+	// fabricated one would read as a dead session.
+	t.Setenv("CLAUDE_PID", strconv.Itoa(os.Getpid()))
 	t.Setenv("LOTO_PEER_NAME", "")
 	prev := procArgv
 	procArgv = func(context.Context, int) string { return subagentArgv }
@@ -142,14 +145,14 @@ func TestRecordPeerRoundTrip(t *testing.T) {
 		t.Fatalf("RecordPeer = %+v, want name impl-x", p)
 	}
 
-	peers, err := Peers(false)
+	peers, err := Peers(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(peers) != 1 || peers[0].Handle != peerHandle || peers[0].Name != subagentName {
 		t.Fatalf("Peers = %+v, want one live NeatDace/impl-x row", peers)
 	}
-	if !peers[0].Live() {
+	if !peers[0].Live(context.Background()) {
 		t.Fatal("peer with an existing socket must read live")
 	}
 }
@@ -161,7 +164,8 @@ func TestPeersPrunesDeadSessions(t *testing.T) {
 	sock, kill := liveSocket(t, sockDir)
 
 	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", sock)
-	t.Setenv("CLAUDE_PID", "4242")
+	// Real pid, so the socket's disappearance is what kills this peer.
+	t.Setenv("CLAUDE_PID", strconv.Itoa(os.Getpid()))
 	t.Setenv("LOTO_PEER_NAME", "")
 	prev := procArgv
 	procArgv = func(context.Context, int) string { return subagentArgv }
@@ -173,11 +177,11 @@ func TestPeersPrunesDeadSessions(t *testing.T) {
 	}
 	kill() // the session exits: its socket goes away
 
-	peers, err := Peers(true)
+	peers, err := Peers(context.Background(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(peers) != 1 || peers[0].Live() {
+	if len(peers) != 1 || peers[0].Live(context.Background()) {
 		t.Fatalf("--all must still surface the dead row: %+v", peers)
 	}
 	// Listing a dead peer unlinks it — presence prunes itself rather than
@@ -186,14 +190,14 @@ func TestPeersPrunesDeadSessions(t *testing.T) {
 	if _, err := os.Stat(record); !os.IsNotExist(err) {
 		t.Fatalf("dead peer record must be pruned; stat err = %v", err)
 	}
-	if peers, err = Peers(false); err != nil || len(peers) != 0 {
+	if peers, err = Peers(context.Background(), false); err != nil || len(peers) != 0 {
 		t.Fatalf("Peers(false) = %+v, %v; want empty", peers, err)
 	}
 }
 
 func TestPeersEmptyWithoutRegistry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	peers, err := Peers(false)
+	peers, err := Peers(context.Background(), false)
 	if err != nil {
 		t.Fatalf("a missing peers dir is not an error: %v", err)
 	}
@@ -217,7 +221,7 @@ func TestPeersSortNewestFirst(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	peers, err := Peers(false)
+	peers, err := Peers(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
 	}

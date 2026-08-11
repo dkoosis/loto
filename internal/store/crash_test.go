@@ -20,7 +20,6 @@ func TestCrash_AcquireConflictNoPartialRow(t *testing.T) {
 	}
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
 	now := time.Now()
 
 	aliceLock := domain.LockRecord{
@@ -32,10 +31,10 @@ func TestCrash_AcquireConflictNoPartialRow(t *testing.T) {
 	bobLock.OwnerUUID = tcBob
 	bobLock.SessionUUID = tcBob
 
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{aliceLock}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{aliceLock}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{bobLock}, live); err == nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{bobLock}, liveProbe); err == nil {
 		t.Fatal("expected conflict")
 	}
 	all, _ := s.ListLocks(ctx)
@@ -53,13 +52,12 @@ func TestCrash_BreakLockAtomic(t *testing.T) {
 	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
 	s := mustOpen(t)
 	ctx := context.Background()
-	live := func(string, int, int64) bool { return true }
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, live); err != nil {
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "x", "h", live)
+	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "x", liveProbe)
 	if err != nil || res[0].Err == nil {
-		t.Fatal("expected break-without-force on live lock to fail")
+		t.Fatal("expected break-without-force on liveProbe lock to fail")
 	}
 	got, _ := s.LockAt(ctx, l.Target)
 	if got == nil || got.OwnerUUID != tcAlice {

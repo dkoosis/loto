@@ -147,6 +147,20 @@ with everything it needs to decide: handle, intent, target, held_since,
 expires_at, branch, host, pid. The blocked Claude can then decide: wait
 or work elsewhere. Both are one command away.
 
+**One liveness oracle.** "Is the session behind this agent still up?" is
+answered once, in `identity.AgentLive` (loto-ygty): messaging-socket
+existence, then a ps identity check on the socket's pid (`--agent-id` /
+`--parent-session-id` recorded at peer-record time must still match the
+occupant's argv — defeats PID reuse). Verdicts: LIVE (socket + ps check
+out — overrides the lock-row pid probe, so a worktree agent whose stamped
+pid probes dead is not misread, loto-r11w), DEAD (socket gone, pid gone,
+or argv mismatch — fast-reclaim), UNKNOWN (no peer record — TTL is the
+sole authority; never treated as dead). `loto locks`' staleness, `loto
+who`'s pruning, and `loto alive` (the verb kill-class tooling like the
+bdx reaper calls) all consume this one check. A DEAD verdict is necessary
+but never sufficient for killing an agent: kill-class actions also
+require an idle/TaskStop signal from the harness.
+
 **Soft-TTL on rows.** A `locks` row carries `expires_at`. Past expiry
 it's *soft-stale*: still present, flagged in status output, eligible for
 GC on next acquirer's pass. Lets a Claude declare "I'll touch this within
