@@ -5,6 +5,11 @@ run:
   tests: true
 
 linters:
+  # bugclasses baseline floor (ccp-sbp.2, decision nug d7ea466a8172): keep
+  # golangci's own defaults (errcheck, govet, ineffassign, staticcheck, unused)
+  # under loto's richer list, so the floor is never below the shared minimum.
+  default: standard
+
   enable:
     # Error handling
     - err113
@@ -63,6 +68,7 @@ linters:
     - recvcheck
     - revive
     - sloglint
+    - staticcheck # baseline floor: a golangci default, named so the floor is explicit
     - unconvert
     - unparam
     - unqueryvet
