@@ -38,7 +38,7 @@ func cmdDowngrade(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		render.EmitInvalid(stderr, invalid)
 		return 2
 	}
-	rt, err := openRuntime(ctx)
+	rt, err := openRuntimeGC(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

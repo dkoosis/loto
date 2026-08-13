@@ -116,14 +116,11 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store.Open: %w", err)
 	}
-	// Drive identity GC now that the store is open. Collect the owner_uuid
-	// of every live lock so gcStaleAgents pins them; otherwise a long-lived
-	// lock whose owner agent file has aged past agentsGCMaxAge would have
-	// its owner reaped, stranding the lock with an unresolvable holder
-	// (gh#125 / loto-ffg). Best-effort: GC errors and ListLocks errors are
-	// non-fatal — identity GC is hygiene, not invariant.
-	pinnedAgents := lockOwnerUUIDs(ctx, s)
-	_ = identity.GCAgents(time.Now(), pinnedAgents)
+	// No identity GC here — openRuntime is the read path (check, check --gate,
+	// guard, status) and must stay cheap. GC lives in openRuntimeGC (write
+	// verbs) and doctor's explicit two-phase pass; sessionReferencedUUIDs walks
+	// every ~/.loto/session/*.json, which cost 1.1s against a 15.5k-file dir on
+	// this hot path (loto-6pn6).
 	host, hostKnown := identity.HostID()
 	if !hostKnown {
 		// Announce the degradation: without a host id every lock recorded
@@ -145,6 +142,23 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 		SessionPinned: pinned,
 		AgentPinned:   agentPinned,
 	}, nil
+}
+
+// openRuntimeGC is openRuntime plus the identity-registry GC pass, for verbs
+// that mutate coordination state (lock/unlock/tag/ack/claim/unclaim/lane/
+// downgrade/refresh). Read verbs — check, check --gate, guard, status — must
+// NOT use it: sessionReferencedUUIDs walks every ~/.loto/session/*.json, which
+// cost 1.1s on the PreToolUse gate path against a 15.5k-file dir (loto-6pn6).
+// GC runs here, before the caller mutates anything: lockOwnerUUIDs must see
+// the lock rows that pin their owner agents, and an unlock --all has already
+// dropped them by the time it returns (gh#125 / loto-ffg).
+func openRuntimeGC(ctx context.Context) (*runtime, error) {
+	rt, err := openRuntime(ctx)
+	if err != nil {
+		return nil, err
+	}
+	_ = identity.GCAgents(time.Now(), lockOwnerUUIDs(ctx, rt.Store))
+	return rt, nil
 }
 
 func repoTopForCwd(ctx context.Context) (string, error) {

@@ -38,7 +38,7 @@ func cmdUnclaim(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	if code != 0 {
 		return code
 	}
-	rt, err := openRuntime(ctx)
+	rt, err := openRuntimeGC(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

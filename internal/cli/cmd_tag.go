@@ -60,7 +60,7 @@ func cmdTag(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 2
 	}
-	rt, err := openRuntime(ctx)
+	rt, err := openRuntimeGC(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

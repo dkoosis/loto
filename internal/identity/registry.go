@@ -42,6 +42,14 @@ var (
 // overwhelmingly likely to be dead (crashed session, ephemeral pre-fix run).
 const agentsGCMaxAge = 30 * 24 * time.Hour
 
+// sessionGCMaxUnlink bounds one GCSessions reap pass. 12,888 unlinks measured
+// 1.81s (loto-6pn6); a neglected box with 500k session files must not turn
+// `loto doctor` into a minute-long stall, so the pass stops and reports a
+// residual for the next run to finish. Var, not const — sessionPollInterval
+// is the in-repo precedent for a test-tunable knob so the bound test doesn't
+// need to create 5,000+ fixture files.
+var sessionGCMaxUnlink = 5000
+
 // sessionWriteGrace bounds how recently the session cache file may have been
 // touched for recoverCorruptSessionCache to treat a still-corrupt (0-byte or
 // unparseable) file as a crashed winner rather than an in-flight one. The
@@ -61,6 +69,15 @@ const sessionWriteGrace = 1 * time.Second
 var recoverCacheRecheckHook func()
 
 var agentsGCOnce sync.Once
+
+// ResetGCOnceForTests clears the once-per-process GCAgents guard. It exists so
+// a test in another package (internal/cli's openRuntime/openRuntimeGC verb-
+// split tests, loto-6pn6) can observe GCAgents actually run, rather than
+// silently no-op because some earlier test in the same binary already
+// consumed the process-wide Once. Production code must never call this.
+func ResetGCOnceForTests() {
+	agentsGCOnce = sync.Once{}
+}
 
 type Agent struct {
 	UUID      string    `json:"uuid"`
@@ -604,6 +621,11 @@ func GCAgents(now time.Time, lockOwnerUUIDs map[string]struct{}) error {
 // sessionReferencedUUIDs returns the set of agent uuids that any session
 // cache currently points at. Used by gcStaleAgents to avoid breaking a
 // session→agent binding from underneath a live session.
+//
+// Not on any read path: the CLI's write verbs (via GCAgents/openRuntimeGC)
+// and `loto doctor` are its only drivers. It used to run inside openRuntime
+// on every store-opening verb, which cost 1.1s against a 15.5k-file session
+// dir on the `check --gate` hot path (loto-6pn6).
 func sessionReferencedUUIDs() map[string]struct{} {
 	out := map[string]struct{}{}
 	entries, err := os.ReadDir(sessionDir())
@@ -629,6 +651,93 @@ func sessionReferencedUUIDs() map[string]struct{} {
 		}
 	}
 	return out
+}
+
+// GCSessions removes ~/.loto/session/*.json whose mtime is older than
+// agentsGCMaxAge, and reports how many it removed and how many candidates it
+// left for a later pass. Three pins, in cost order:
+//
+//  1. mtime — the cutoff is measured from session BIRTH, not last activity:
+//     claimSessionCache creates the file O_EXCL and never re-touches it. A
+//     session that outlives the cutoff would have its cache reaped from under
+//     it, minting it a fresh identity that reads its own live locks as
+//     foreign. 30 days is chosen to exceed any plausible continuous session
+//     by a wide margin, and it subsumes sessionWriteGrace: a 0-byte file an
+//     O_EXCL winner is still writing is milliseconds old, never 30 days.
+//  2. keepSID — never reap the caller's own session, whatever its age.
+//  3. pinned — owner_uuids of live lock rows, passed in by the CLI for the
+//     same reason gcStaleAgents takes them: identity cannot import store.
+//     Scoped to one project's store, so a session holding locks only in
+//     another repo rests on pin (1); that is why (1) is generous.
+//
+// The mtime cutoff is checked before any file is opened, so a steady-state
+// pass (nothing stale) parses zero files — nothing on the read path parses
+// any (loto-6pn6). Once sessionGCMaxUnlink candidates have been reaped this
+// pass, remaining stale entries are counted as residual without being parsed
+// or unlinked, so a neglected box with hundreds of thousands of files still
+// returns promptly instead of paying a full read-judge-unlink sweep.
+//
+// Best-effort, matching gcStaleAgents: a denied read/unlink or a racing
+// writer is skipped, not fatal — session hygiene is hygiene, not invariant.
+func GCSessions(now time.Time, keepSID string, pinned map[string]struct{}) (reaped, residual int, err error) {
+	entries, err := os.ReadDir(sessionDir())
+	if err != nil {
+		return 0, 0, err
+	}
+	cutoff := now.Add(-agentsGCMaxAge)
+	for _, e := range entries {
+		if !isStaleSessionCandidate(e, cutoff, keepSID) {
+			continue
+		}
+		// Past the bound, count without paying the read+parse cost — the pin
+		// check only matters for a file this pass would otherwise unlink.
+		if reaped >= sessionGCMaxUnlink {
+			residual++
+			continue
+		}
+		if reapSessionFile(filepath.Join(sessionDir(), e.Name()), pinned) {
+			reaped++
+		}
+	}
+	return reaped, residual, nil
+}
+
+// isStaleSessionCandidate reports whether e is a session cache file eligible
+// for GCSessions to consider reaping: a `.json` file, not the caller's own
+// session, and past the mtime cutoff. Checked before any file is opened, so
+// a steady-state pass (nothing stale) parses zero files.
+func isStaleSessionCandidate(e os.DirEntry, cutoff time.Time, keepSID string) bool {
+	if !strings.HasSuffix(e.Name(), ".json") {
+		return false
+	}
+	if keepSID != "" && e.Name() == keepSID+".json" {
+		return false
+	}
+	info, err := e.Info()
+	if err != nil {
+		return false
+	}
+	return info.ModTime().Before(cutoff)
+}
+
+// reapSessionFile removes the session cache at path unless it references a
+// pinned uuid, in which case it survives regardless of age. A read, parse,
+// or unlink failure is treated as "kept" — best-effort, matching
+// gcStaleAgents: a denied unlink or a racing writer is skipped, not fatal.
+func reapSessionFile(path string, pinned map[string]struct{}) bool {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var ref struct {
+		UUID string `json:"uuid"`
+	}
+	if json.Unmarshal(body, &ref) == nil && ref.UUID != "" {
+		if _, keep := pinned[ref.UUID]; keep {
+			return false
+		}
+	}
+	return os.Remove(path) == nil
 }
 
 // LookupByUUID returns the agent record for uuid, or an error if no record
