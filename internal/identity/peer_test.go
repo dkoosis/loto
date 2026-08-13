@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -233,5 +234,195 @@ func TestPeersSortNewestFirst(t *testing.T) {
 func TestPeerPathRejectsTraversal(t *testing.T) {
 	if _, err := peerPath("../../etc/passwd"); err == nil {
 		t.Fatal("peerPath must reject a non-uuid id")
+	}
+}
+
+// peerRaceHome sets up a HOME with a peers dir and a live socket, and stubs
+// procArgv, so a test can write records whose liveness is deterministic:
+// Socket = the returned sock reads live, a Socket pointing at a nonexistent
+// path reads dead ("socket-missing") with no `ps` involved.
+func peerRaceHome(t *testing.T) (home, sock string) {
+	t.Helper()
+	home = t.TempDir()
+	t.Setenv("HOME", home)
+	// Unix socket paths are length-capped (~104 bytes on darwin) and t.TempDir()
+	// embeds the test name — too long for these. Keep the socket dir short.
+	//nolint:usetesting // t.TempDir() embeds the test name, and these names overrun darwin's ~104-byte sockaddr_un limit
+	sockDir, err := os.MkdirTemp("", "lt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+	sock, kill := liveSocket(t, sockDir)
+	t.Cleanup(kill)
+	t.Setenv("CLAUDE_PID", strconv.Itoa(os.Getpid()))
+	prev := procArgv
+	procArgv = func(context.Context, int) string { return subagentArgv }
+	t.Cleanup(func() { procArgv = prev })
+	return home, sock
+}
+
+// deadPeer builds a record whose socket path does not exist, so
+// SessionVerdict returns dead/socket-missing without probing the proc table.
+func deadPeer(t *testing.T, sockName string) *Peer {
+	t.Helper()
+	return &Peer{
+		UUID:   peerTestUUID,
+		Handle: peerHandle,
+		Socket: filepath.Join(t.TempDir(), sockName),
+		PID:    os.Getpid(),
+		SeenAt: time.Now().UTC(),
+	}
+}
+
+// TestPeersDoesNotUnlinkRecordRewrittenDuringVerdict is the loto-gj1z
+// acceptance test: a hook republishes the peer record between readPeerFile's
+// read and its unlink — simulating a session restarting inside the seconds-wide
+// SessionVerdict window — and Peers must NOT delete the fresh record. It must
+// also report it, on this same invocation.
+func TestPeersDoesNotUnlinkRecordRewrittenDuringVerdict(t *testing.T) {
+	home, sock := peerRaceHome(t)
+	if err := writePeer(deadPeer(t, "gone.sock")); err != nil {
+		t.Fatal(err)
+	}
+
+	fired := 0
+	peerPruneRecheckHook = func() {
+		if fired > 0 {
+			return // one-shot: the restarted session publishes once
+		}
+		fired++
+		live := &Peer{UUID: peerTestUUID, Handle: peerHandle, Socket: sock, PID: os.Getpid(), SeenAt: time.Now().UTC()}
+		if werr := writePeer(live); werr != nil {
+			t.Errorf("hook republish: %v", werr)
+		}
+	}
+	t.Cleanup(func() { peerPruneRecheckHook = nil })
+
+	peers, err := Peers(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fired != 1 {
+		t.Fatalf("hook fired %d times, want 1 — the read→unlink window was never entered", fired)
+	}
+	record := filepath.Join(home, ".loto", "peers", peerTestUUID+".json")
+	if _, err := os.Stat(record); err != nil {
+		t.Fatalf("the republished record was unlinked by a verdict it never earned: %v", err)
+	}
+	p, ok := readPeerRaw(record)
+	if !ok || p.Socket != sock {
+		t.Fatalf("surviving record is not the fresh one: ok=%v socket=%q want %q", ok, p.Socket, sock)
+	}
+	if len(peers) != 1 || peers[0].Socket != sock {
+		t.Fatalf("Peers must report the fresh peer on this same invocation: %+v", peers)
+	}
+}
+
+// TestReadPeerFileDeclinesAfterRepeatedReplacement pins the bounded-retry
+// contract: a record replaced on every attempt is re-judged exactly
+// peerReadAttempts times, then left alone — no spin, and nothing unlinked that
+// was not verified.
+func TestReadPeerFileDeclinesAfterRepeatedReplacement(t *testing.T) {
+	home, _ := peerRaceHome(t)
+	if err := writePeer(deadPeer(t, "gone.sock")); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	peerPruneRecheckHook = func() {
+		calls++
+		// Another DEAD record, at a different (still nonexistent) socket: the
+		// replacement is real, so the dev+ino guard must decline every time.
+		if werr := writePeer(deadPeer(t, "gone"+strconv.Itoa(calls)+".sock")); werr != nil {
+			t.Errorf("hook republish: %v", werr)
+		}
+	}
+	t.Cleanup(func() { peerPruneRecheckHook = nil })
+
+	peers, err := Peers(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != peerReadAttempts {
+		t.Fatalf("hook fired %d times, want exactly peerReadAttempts=%d", calls, peerReadAttempts)
+	}
+	record := filepath.Join(home, ".loto", "peers", peerTestUUID+".json")
+	if _, err := os.Stat(record); err != nil {
+		t.Fatalf("a record replaced on every attempt must be left alone, not unlinked: %v", err)
+	}
+	if len(peers) != 1 {
+		t.Fatalf("--all must still surface the observation: %+v", peers)
+	}
+}
+
+// TestPeersSweepsAgedTmpOrphansOnly asserts the crash-debris sweep: a *.tmp
+// older than tmpOrphanGrace goes, a fresh one — which may be a live writer's
+// in-flight publish — never does.
+func TestPeersSweepsAgedTmpOrphansOnly(t *testing.T) {
+	home, sock := peerRaceHome(t)
+	live := &Peer{UUID: peerTestUUID, Handle: peerHandle, Socket: sock, PID: os.Getpid(), SeenAt: time.Now().UTC()}
+	if err := writePeer(live); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := filepath.Join(home, ".loto", "peers")
+	aged := filepath.Join(dir, peerTestUUID+".aged.tmp")
+	fresh := filepath.Join(dir, peerTestUUID+".fresh.tmp")
+	for _, p := range []string{aged, fresh} {
+		if err := os.WriteFile(p, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * tmpOrphanGrace)
+	if err := os.Chtimes(aged, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	peers, err := Peers(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(aged); !os.IsNotExist(err) {
+		t.Fatalf("aged .tmp crash debris must be swept; stat err = %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("a fresh .tmp may be a live writer's in-flight publish and must survive: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, peerTestUUID+".json")); err != nil {
+		t.Fatalf("the live record must be untouched: %v", err)
+	}
+	if len(peers) != 1 || peers[0].Handle != peerHandle {
+		t.Fatalf("no .tmp entry may reach output: %+v", peers)
+	}
+}
+
+// TestWritePeerCleansTmpOnPublishFailure proves writePeer's deferred cleanup
+// covers the reachable error paths, so only a hard kill can leak a .tmp — which
+// is what makes the sweep's one-hour grace safe.
+func TestWritePeerCleansTmpOnPublishFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".loto", "peers")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the record belongs: os.Rename cannot publish over it.
+	if err := os.Mkdir(filepath.Join(dir, peerTestUUID+".json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	err := writePeer(&Peer{UUID: peerTestUUID, Handle: peerHandle, SeenAt: time.Now().UTC()})
+	if err == nil {
+		t.Fatal("writePeer must fail when the record path is not writable")
+	}
+	entries, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Fatalf("failed publish leaked a temp: %s", e.Name())
+		}
 	}
 }

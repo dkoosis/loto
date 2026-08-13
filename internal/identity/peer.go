@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,11 +55,27 @@ func (p Peer) Named() bool { return p.Name != "" }
 // liveness oracle (SessionVerdict, liveness.go). Kept as the boolean
 // convenience for callers that only branch; unknown maps to true — a verdict
 // this record cannot support must not read as dead.
+//
+// Caveat, honestly: PID reuse is closed only for peers that recorded an
+// identity flag (--agent-id / --parent-session-id) — subagents. A top-level
+// session records neither (see PeerFromEnv), so mismatch() has nothing to
+// compare and a dead top-level peer under an orphaned socket whose pid the OS
+// recycled still reads LIVE, indefinitely. Closing that needs a proc
+// start-time witness: loto-uxhg.
 func (p Peer) Live(ctx context.Context) bool {
 	return p.SessionVerdict(ctx).Liveness != SessionDead
 }
 
 func peersDir() string { return filepath.Join(homeDir(), ".loto", "peers") }
+
+// tmpOrphanGrace bounds how long a *.tmp file in ~/.loto/peers may linger
+// before Peers treats it as crash debris rather than an in-flight publish.
+// writePeer's CreateTemp→Rename completes in milliseconds; an hour is six
+// orders of magnitude of slack, so a swept file cannot plausibly be one a live
+// writer is about to Rename. (Unlinking an in-flight temp would fail that
+// writer's Rename with ENOENT and error its RecordPeer hook — the grace, not
+// the glob, is what makes this safe.)
+const tmpOrphanGrace = time.Hour
 
 // peerPath validates uuid before joining, on the same fail-closed principle as
 // sessionCachePath: a caller-supplied id must not be able to escape peersDir.
@@ -73,9 +90,23 @@ func peerPath(uuid string) (string, error) {
 // proc table cannot hang a hook.
 const procTimeout = 2 * time.Second
 
+// peerReadAttempts bounds readPeerFile's re-read loop. A record replaced
+// inside the read→unlink window is re-judged once, so the realistic
+// single-restart case reports the FRESH peer on the same `loto who`
+// invocation rather than merely sparing it from the unlink. The bound
+// guarantees termination: a replacement storm degrades to "print the stale
+// observation, unlink nothing", never to a spin.
+const peerReadAttempts = 2
+
 // procArgv returns the full command line of pid, or "" if it cannot be read.
 // Var, not func, so tests can drive the parse without a real process.
 var procArgv = psArgv //nolint:gochecknoglobals // test seam for the proc-table read
+
+// peerPruneRecheckHook, when non-nil, is invoked inside prunePeerRecord after
+// the record is judged dead and before the pre-unlink re-stat. Tests use it to
+// simulate a session that republishes its record inside the read→unlink TOCTOU
+// window; production leaves it nil.
+var peerPruneRecheckHook func()
 
 func psArgv(ctx context.Context, pid int) string {
 	if pid <= 0 {
@@ -184,6 +215,11 @@ func writePeer(p *Peer) error {
 	}
 	// Same atomic-publish discipline as writeAgent: a concurrent `loto who`
 	// must never read a half-written record.
+	//
+	// prunePeerRecord's dev+ino guard DEPENDS on this publish-by-rename: every
+	// rewrite lands a new inode at path, which is what makes os.SameFile an
+	// exact replacement detector rather than a heuristic (loto-gj1z). Changing
+	// this to write in place would silently reduce that guard to a no-op.
 	tmp, err := os.CreateTemp(dir, p.UUID+".*.tmp")
 	if err != nil {
 		return err
@@ -215,15 +251,65 @@ func writePeer(p *Peer) error {
 // unreadable or unparseable. The oracle (peerByUUID) reads through this: a
 // liveness question must never unlink a record.
 func readPeerRaw(path string) (Peer, bool) {
-	body, err := os.ReadFile(path)
+	p, _, ok := readPeerAt(path)
+	return p, ok
+}
+
+// readPeerAt loads one peer record together with the OS identity of the file
+// the bytes actually came from. Bytes and identity are taken from the SAME
+// open fd, so no rewrite can slip between them: whatever a caller judges from
+// these bytes, os.SameFile can later prove is or is not still at the path.
+//
+// Ordering matters: stat-then-read admits a skew where the identity describes
+// one inode and the bytes came from another (fails safe, but silently and
+// non-deterministically), and read-then-stat is actively WRONG — it would
+// capture a replacement's identity and then confirm the replacement against
+// itself, authorizing the exact unlink the guard exists to prevent.
+func readPeerAt(path string) (Peer, os.FileInfo, bool) {
+	f, err := os.Open(path)
 	if err != nil {
-		return Peer{}, false
+		return Peer{}, nil, false
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return Peer{}, nil, false
+	}
+	body, err := io.ReadAll(f)
+	if err != nil {
+		return Peer{}, nil, false
 	}
 	var p Peer
 	if err := json.Unmarshal(body, &p); err != nil {
-		return Peer{}, false
+		return Peer{}, nil, false
 	}
-	return p, true
+	return p, fi, true
+}
+
+// prunePeerRecord unlinks path only if it still holds the same file the dead
+// verdict was read from. writePeer publishes by CreateTemp+Rename, so every
+// rewrite lands a NEW inode at the same path: dev+ino is an exact replacement
+// detector here, not a heuristic — the replacement's inode cannot collide with
+// the old one, because the old one is still linked when CreateTemp allocates.
+// Returns false when the record was replaced (leave it alone: the new record
+// was never judged) or already gone (someone else pruned it).
+//
+// Honest limit: this cuts the read→unlink window from seconds (a `ps` call
+// bounded at procTimeout, per record, serially) to the microseconds between
+// this Stat and this Remove. It does not eliminate it.
+func prunePeerRecord(path string, judged os.FileInfo) bool {
+	if peerPruneRecheckHook != nil {
+		peerPruneRecheckHook()
+	}
+	now, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if !os.SameFile(judged, now) {
+		return false
+	}
+	_ = os.Remove(path)
+	return true
 }
 
 // readPeerFile loads one peer record, unlinking it when the oracle says the
@@ -232,16 +318,51 @@ func readPeerRaw(path string) (Peer, bool) {
 // this entry": unreadable, unparseable, or dead and not asked for. An
 // unreadable record is skipped rather than surfaced — a peer table is a
 // convenience, and half of one still beats an error.
+//
+// The unlink is conditional on the file still being the one that was judged
+// (loto-gj1z): a session restarting inside the seconds-wide verdict window
+// republishes its record, and unlinking by path alone would delete that fresh
+// record for the remaining life of the session. On detecting a replacement the
+// record is re-judged, bounded by peerReadAttempts, so `loto who` reports the
+// new peer on this same invocation instead of blinking.
 func readPeerFile(ctx context.Context, path string, includeDead bool) (Peer, bool) {
-	p, ok := readPeerRaw(path)
-	if !ok {
-		return Peer{}, false
+	var p Peer
+	for range peerReadAttempts {
+		var (
+			fi os.FileInfo
+			ok bool
+		)
+		p, fi, ok = readPeerAt(path)
+		if !ok {
+			return Peer{}, false
+		}
+		if p.SessionVerdict(ctx).Liveness != SessionDead {
+			return p, true
+		}
+		if prunePeerRecord(path, fi) {
+			return p, includeDead
+		}
+		// Replaced inside the window — the record now at path was never judged,
+		// so re-read and judge it on its own terms.
 	}
-	if p.SessionVerdict(ctx).Liveness != SessionDead {
-		return p, true
+	// Attempts exhausted against a record that keeps being replaced: report the
+	// last observation, unlink nothing that was not verified.
+	return p, includeDead
+}
+
+// sweepTmpOrphan removes a leftover publish temp from ~/.loto/peers once it is
+// older than tmpOrphanGrace. writePeer's `defer os.Remove(tmpName)` covers
+// every error path, so only a hard kill (SIGKILL, power loss) between
+// CreateTemp and Rename leaks one. Nothing ever reads these — the .json filter
+// keeps them out of output — so this is litter collection, not correctness;
+// the grace is what keeps it from unlinking a live writer's in-flight temp and
+// failing that writer's Rename with ENOENT.
+func sweepTmpOrphan(path string) {
+	fi, err := os.Stat(path)
+	if err != nil || time.Since(fi.ModTime()) < tmpOrphanGrace {
+		return
 	}
 	_ = os.Remove(path)
-	return p, includeDead
 }
 
 // Peers lists recorded peers, newest-seen first. Dead ones (per the oracle:
@@ -250,6 +371,9 @@ func readPeerFile(ctx context.Context, path string, includeDead bool) (Peer, boo
 // check. Pass includeDead to see them anyway (they are dropped from disk
 // regardless; the returned slice is the last observation, useful for "where did
 // that session go").
+//
+// The same walk sweeps aged *.tmp crash debris (sweepTmpOrphan) — free, since
+// the ReadDir already happens, and Peers is the declared self-pruning path.
 func Peers(ctx context.Context, includeDead bool) ([]Peer, error) {
 	entries, err := os.ReadDir(peersDir())
 	if err != nil {
@@ -260,7 +384,14 @@ func Peers(ctx context.Context, includeDead bool) ([]Peer, error) {
 	}
 	out := make([]Peer, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			sweepTmpOrphan(filepath.Join(peersDir(), e.Name()))
+			continue
+		}
+		if !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
 		p, ok := readPeerFile(ctx, filepath.Join(peersDir(), e.Name()), includeDead)
