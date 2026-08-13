@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -929,5 +930,231 @@ func TestEnsureSubagentIDRespectsCtxCancel(t *testing.T) {
 
 	if _, err := Ensure(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("want context.Canceled, got %v", err)
+	}
+}
+
+// --- GCSessions (loto-6pn6): ~/.loto/session reaper -------------------------
+
+// sessionFilePath is the test-side mirror of sessionCachePath, used to locate
+// fixture files without exercising the validating helper.
+func sessionFilePath(home, sid string) string {
+	return filepath.Join(home, ".loto", "session", sid+".json")
+}
+
+// mkSessionFile claims a session cache file for sid pointing at a, then backs
+// its mtime up by age (0 leaves it fresh). Returns the file path.
+func mkSessionFile(t *testing.T, home, sid string, a *Agent, age time.Duration) string {
+	t.Helper()
+	if err := claimSessionCache(sid, a); err != nil {
+		t.Fatal(err)
+	}
+	path := sessionFilePath(home, sid)
+	if age > 0 {
+		old := time.Now().Add(-age)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return path
+}
+
+func TestGCSessionsReapsStaleAndKeepsFresh(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	stale := &Agent{UUID: newUUID(), Handle: "StaleOne", CreatedAt: time.Now().UTC(), Host: "h"}
+	stalePath := mkSessionFile(t, dir, "stale-sid", stale, 90*24*time.Hour)
+
+	fresh := &Agent{UUID: newUUID(), Handle: "FreshOne", CreatedAt: time.Now().UTC(), Host: "h"}
+	freshPath := mkSessionFile(t, dir, "fresh-sid", fresh, 0)
+
+	reaped, residual, err := GCSessions(time.Now(), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reaped != 1 || residual != 0 {
+		t.Fatalf("GCSessions() = (%d, %d), want (1, 0)", reaped, residual)
+	}
+	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+		t.Fatalf("stale session cache not removed: err=%v", err)
+	}
+	if _, err := os.Stat(freshPath); err != nil {
+		t.Fatalf("fresh session cache must survive: %v", err)
+	}
+}
+
+// TestGCSessionsKeepsCallersOwnSession is the regression for Surprise 3: the
+// session mtime is birth time, not last-activity, so a long-lived session
+// must be protected by keepSID regardless of age — the age pin alone would
+// swap its identity out from under it.
+func TestGCSessionsKeepsCallersOwnSession(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	a := &Agent{UUID: newUUID(), Handle: "LongRunner", CreatedAt: time.Now().UTC(), Host: "h"}
+	path := mkSessionFile(t, dir, "my-sid", a, 90*24*time.Hour)
+
+	reaped, _, err := GCSessions(time.Now(), "my-sid", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reaped != 0 {
+		t.Fatalf("GCSessions reaped=%d, want 0 (keepSID must survive its own age)", reaped)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("caller's own session must survive despite age: %v", err)
+	}
+}
+
+// TestGCSessionsKeepsLockPinnedSession is GCSessions' twin of
+// TestGCPreservesLockReferencedAgents: a session backing a live lock must
+// survive even past the age cutoff.
+func TestGCSessionsKeepsLockPinnedSession(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	a := &Agent{UUID: newUUID(), Handle: "LockHolder", CreatedAt: time.Now().UTC(), Host: "h"}
+	path := mkSessionFile(t, dir, "locked-sid", a, 90*24*time.Hour)
+
+	pinned := map[string]struct{}{a.UUID: {}}
+	reaped, _, err := GCSessions(time.Now(), "", pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reaped != 0 {
+		t.Fatalf("GCSessions reaped=%d, want 0 (lock-pinned session must survive)", reaped)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("lock-pinned session must survive: %v", err)
+	}
+}
+
+// TestGCSessionsBoundedByMaxUnlink pins the bound (D6): a pass stops at
+// sessionGCMaxUnlink unlinks and reports the rest as residual, so a
+// neglected box's catch-up can't turn one `loto doctor` into a stall.
+// sessionGCMaxUnlink is dropped to a small number for the duration so the
+// fixture doesn't need thousands of files (sessionPollInterval precedent).
+func TestGCSessionsBoundedByMaxUnlink(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	orig := sessionGCMaxUnlink
+	sessionGCMaxUnlink = 5
+	t.Cleanup(func() { sessionGCMaxUnlink = orig })
+
+	const extra = 3
+	total := sessionGCMaxUnlink + extra
+	for i := range total {
+		sid := fmt.Sprintf("bulk-sid-%03d", i)
+		a := &Agent{UUID: newUUID(), Handle: fmt.Sprintf("Bulk%03d", i), CreatedAt: time.Now().UTC(), Host: "h"}
+		mkSessionFile(t, dir, sid, a, 90*24*time.Hour)
+	}
+
+	reaped, residual, err := GCSessions(time.Now(), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reaped != sessionGCMaxUnlink {
+		t.Fatalf("reaped=%d, want %d", reaped, sessionGCMaxUnlink)
+	}
+	if residual != extra {
+		t.Fatalf("residual=%d, want %d", residual, extra)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, ".loto", "session"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != residual {
+		t.Fatalf("files left on disk=%d, want residual=%d (reaped+left must equal total)", len(entries), residual)
+	}
+}
+
+// TestGCSessionsThenGCAgentsFreesPins is the ordering test (D4) and proves
+// Surprise 1: an agent record pinned only by its own (now-stale) session
+// cache survives GCAgents alone, but is freed for reap once GCSessions has
+// removed that cache — sessions must run first in the same doctor pass.
+func TestGCSessionsThenGCAgentsFreesPins(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+	agentsGCOnce = sync.Once{} // isolate from any earlier test's GCAgents call
+
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	a := &Agent{UUID: newUUID(), Handle: "PinnedBySession", CreatedAt: old.UTC(), Host: "h"}
+	if err := writeAgent(a); err != nil {
+		t.Fatal(err)
+	}
+	agentPath := filepath.Join(dir, ".loto", "agents", a.UUID+".json")
+	if err := os.Chtimes(agentPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	sessPath := mkSessionFile(t, dir, "pin-sid", a, 90*24*time.Hour)
+
+	// GCAgents alone: the session cache still references a, so it survives
+	// despite its own age.
+	if err := GCAgents(time.Now(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(agentPath); err != nil {
+		t.Fatalf("agent must survive while its session cache still pins it: %v", err)
+	}
+
+	// GCSessions reaps the now-stale session cache.
+	reaped, _, err := GCSessions(time.Now(), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reaped != 1 {
+		t.Fatalf("GCSessions reaped=%d, want 1", reaped)
+	}
+	if _, err := os.Stat(sessPath); !os.IsNotExist(err) {
+		t.Fatalf("session cache not removed: err=%v", err)
+	}
+
+	// gcStaleAgents directly, not GCAgents — agentsGCOnce already fired above.
+	if err := gcStaleAgents(time.Now(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(agentPath); !os.IsNotExist(err) {
+		t.Fatalf("agent freed of its session pin must now be reaped: err=%v", err)
+	}
+}
+
+func TestGCSessionsSurvivesMissingDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	// Deliberately no ~/.loto/session directory created.
+
+	reaped, residual, err := GCSessions(time.Now(), "", nil)
+	if reaped != 0 || residual != 0 {
+		t.Fatalf("GCSessions() = (%d, %d, %v), want (0, 0, <any>)", reaped, residual, err)
+	}
+}
+
+// TestWedgedSidIsWhatAnMtimeSkipWouldCause documents Surprise 2 so the
+// rejected mtime-skip optimization (dropping the session→agent pin while
+// leaving the session file on disk) cannot be reintroduced without a red
+// test: a session file whose agent record is missing wedges Ensure with a
+// hard error on every call for that sid, forever — recoverCorruptSessionCache
+// correctly declines to unlink a file that is valid JSON with a uuid, even
+// though the uuid resolves nowhere.
+func TestWedgedSidIsWhatAnMtimeSkipWouldCause(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "wedge-sid")
+	os.Unsetenv("LOTO_AGENT_ID")
+
+	a, err := Ensure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPath := filepath.Join(dir, ".loto", "agents", a.UUID+".json")
+	if err := os.Remove(agentPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Ensure(context.Background()); err == nil {
+		t.Fatal("Ensure must hard-fail when the session cache points at a missing agent record — this is the wedged-sid state an mtime-skip pin would manufacture")
 	}
 }

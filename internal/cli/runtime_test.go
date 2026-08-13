@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -164,5 +166,121 @@ func TestLiveProbeUnknownHostNeverPIDProbes(t *testing.T) {
 				t.Errorf("liveProbe(host=%q) = %v, want %v", tc.host, got, domain.LivenessUnknown)
 			}
 		})
+	}
+}
+
+// --- openRuntime / openRuntimeGC verb split (loto-6pn6) ---------------------
+
+// agentFilePath returns the on-disk path of uuid's agent record under the
+// current $HOME.
+func agentFilePath(uuid string) string {
+	return filepath.Join(os.Getenv("HOME"), ".loto", "agents", uuid+".json")
+}
+
+// mintUnboundAgent mints a fresh, persisted, UNPINNED agent record — no
+// LOTO_AGENT_ID and no session cache references it — so backdating its file
+// is the only thing standing between it and GC.
+func mintUnboundAgent(t *testing.T) *identity.Agent {
+	t.Helper()
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+	os.Unsetenv("LOTO_SUBAGENT_ID")
+	a, err := identity.Ensure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func backdate(t *testing.T, path string, age time.Duration) {
+	t.Helper()
+	old := time.Now().Add(-age)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// gcVerbSplitFixture sets up one live lock (owned by a pinned "holder"
+// identity, via a real `loto lock` invocation) plus one unpinned agent
+// record backdated past agentsGCMaxAge — the shared fixture for
+// TestOpenRuntimeDoesNotReapAgents / TestOpenRuntimeGCReapsAgents. Restores
+// LOTO_AGENT_ID to holder afterward (mintUnboundAgent unset it to mint the
+// orphan cleanly) so the caller's own openRuntime/openRuntimeGC call
+// resolves the same identity that owns the lock, matching production shape.
+func gcVerbSplitFixture(t *testing.T) (holder *identity.Agent, orphanPath string) {
+	t.Helper()
+	withTempProject(t)
+	holder = pinAgent(t)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock setup failed, exit %d", code)
+	}
+
+	orphan := mintUnboundAgent(t)
+	orphanPath = agentFilePath(orphan.UUID)
+	backdate(t, orphanPath, 90*24*time.Hour)
+
+	t.Setenv("LOTO_AGENT_ID", holder.UUID)
+	return holder, orphanPath
+}
+
+// TestOpenRuntimeDoesNotReapAgents is the perf fix expressed as a behavioral
+// assertion, not a benchmark: openRuntime is the read path (check, check
+// --gate, guard, status) and must never run identity GC (loto-6pn6).
+func TestOpenRuntimeDoesNotReapAgents(t *testing.T) {
+	_, orphanPath := gcVerbSplitFixture(t)
+
+	rt, err := openRuntime(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+
+	if _, err := os.Stat(orphanPath); err != nil {
+		t.Fatalf("openRuntime must not GC agents on the read path; orphan gone: %v", err)
+	}
+}
+
+// TestOpenRuntimeGCReapsAgents is TestOpenRuntimeDoesNotReapAgents' pair:
+// same fixture, openRuntimeGC → the unpinned stale record is gone.
+// identity.ResetGCOnceForTests clears the process-wide once-per-process GC
+// guard, which an earlier write-verb test in this binary has near-certainly
+// already consumed.
+func TestOpenRuntimeGCReapsAgents(t *testing.T) {
+	_, orphanPath := gcVerbSplitFixture(t)
+	identity.ResetGCOnceForTests()
+
+	rt, err := openRuntimeGC(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+
+	if _, err := os.Stat(orphanPath); !os.IsNotExist(err) {
+		t.Fatalf("openRuntimeGC must reap an unpinned stale agent; err=%v", err)
+	}
+}
+
+// TestOpenRuntimeGCPinsLockOwners is the gh#125/loto-ffg regression at the
+// CLI boundary: a backdated agent record that is the owner of a live lock
+// row must survive openRuntimeGC — direct proof the verb split did not drop
+// the pin set.
+func TestOpenRuntimeGCPinsLockOwners(t *testing.T) {
+	withTempProject(t)
+	holder := pinAgent(t)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock setup failed")
+	}
+	holderPath := agentFilePath(holder.UUID)
+	backdate(t, holderPath, 90*24*time.Hour)
+
+	identity.ResetGCOnceForTests()
+	rt, err := openRuntimeGC(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+
+	if _, err := os.Stat(holderPath); err != nil {
+		t.Fatalf("openRuntimeGC must not reap a live lock's own owner agent (gh#125/loto-ffg): %v", err)
 	}
 }

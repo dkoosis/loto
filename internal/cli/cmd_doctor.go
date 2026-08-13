@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/identity"
 	"loto/internal/store"
 )
 
@@ -58,6 +59,25 @@ func renderDoctorReport(stdout io.Writer, report *store.DoctorReport) {
 	}
 }
 
+// renderIdentityGC reports the session-directory reap doctor just ran
+// (loto-6pn6). Suppressed entirely at zero/zero so a healthy box keeps
+// today's byte-identical output — no new noise on the common path
+// (help_golden_test / output_glyphs_test). `ℹ`: a data row, neither pass nor
+// fail. `⚠` + fix block only fires when the bound (sessionGCMaxUnlink) left
+// unreaped candidates for a later run.
+func renderIdentityGC(stdout io.Writer, reaped, residual int) {
+	if reaped == 0 && residual == 0 {
+		return
+	}
+	fmt.Fprintf(stdout, "ℹ identity_gc sessions_reaped=%d sessions_residual=%d\n", reaped, residual)
+	if residual > 0 {
+		fmt.Fprintf(stdout, "⚠ identity_gc residual=%d — reap bounded at 5000/pass; re-run:\n", residual)
+		fmt.Fprintln(stdout, "```bash")
+		fmt.Fprintln(stdout, "loto doctor")
+		fmt.Fprintln(stdout, "```")
+	}
+}
+
 func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -77,6 +97,16 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	defer rt.DeferredTagFooter(stdout)
 	defer rt.DeferredMailFooter(stdout)
 
+	// Identity-registry hygiene: sessions first, agents second, so records the
+	// session reap unpins are reapable in the same run (loto-6pn6). doctor is
+	// the only verb that reaps sessions; write verbs run the agents pass only
+	// (openRuntimeGC), and the read path runs neither. Sequenced explicitly
+	// here rather than via openRuntimeGC — agentsGCOnce fires once per
+	// process, so an agents pass at open time would consume it before this
+	// session reap ran.
+	sessionsReaped, sessionsResidual, _ := identity.GCSessions(time.Now(), string(rt.SessionUUID), lockOwnerUUIDs(ctx, rt.Store))
+	_ = identity.GCAgents(time.Now(), lockOwnerUUIDs(ctx, rt.Store))
+
 	live := rt.liveProbe()
 
 	repoTop, _ := repoTopForCwd(ctx)
@@ -92,6 +122,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fmt.Fprintf(stdout, "project: %s\n", ResolveAndPinProjectSlug(repoTop))
 	fmt.Fprintf(stdout, "repo:    %s\n", repoTop)
 	fmt.Fprintf(stdout, "state:   %s\n", rt.StateDir)
+	renderIdentityGC(stdout, sessionsReaped, sessionsResidual)
 
 	renderDoctorReport(stdout, report)
 
