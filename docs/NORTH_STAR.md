@@ -3,13 +3,16 @@
 # loto north star
 
 *Author: dk. Audience: future Claudes (and dk).*
-*Updated: 2026-05-14 — drift cleanup: install-hook/check-paths struck (cut in v2 commit 3d5f3de); KV output replaces JSON-first claim.*
+*Updated: 2026-08-12 — mail retired: agent-to-agent messaging is native SendMessage now (decision 90b671928bbe); loto is Lock Out Tag Out only. Prior 2026-05-14: drift cleanup — install-hook/check-paths struck (cut in v2 commit 3d5f3de); KV output replaces JSON-first claim.*
+
+**One-liner** (`docs/NORTH_STAR_MINI.md`): Lockout/tagout for files — so parallel Claude sessions in one repo coordinate writes instead of clobbering each other.
 
 ## what this is for
 
-loto brings [lockout/tagout](https://www.osha.com/blog/lockout-tagout) to files. An agent locks a file while editing it, so no other agent can change it at the same time. The agent tags the file with basic information such as who holds it and what work is being performed(such as a Git issue or bead ID).
+loto brings [lockout/tagout](https://www.osha.com/blog/lockout-tagout) to files. An agent locks a file while editing it, so no other agent can change it at the same time. The agent tags the file with basic information such as who holds it and what work is being performed (such as a Git issue or bead ID).
 
-Loto is meant the solve the problem that when multiple Claude Code sessions run in the same repo, they clobber each other or panic on unexpected diffs. (Worktrees just delay the issue until merge.) With loto, a participating agent can instantly see if a file is locked by another team member, and why. 
+loto solves the problem that when multiple Claude Code sessions run in the same repo, they clobber each other or panic on unexpected diffs. (Worktrees just delay the issue until merge.) With loto, a participating agent can instantly see if a file is locked by another team member, and why.
+
 ## non-goals
 
 ✗ Multi-host coordination (NFS, network shares — flock semantics break).
@@ -308,3 +311,4 @@ of a project where 4 other Claudes are working, can:
 
 That's the bar. Everything in the backlog (loto-7wp.*) is a step toward
 it. Anything else is scope creep.
+
