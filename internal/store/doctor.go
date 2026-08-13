@@ -44,7 +44,7 @@ type SidecarCheck struct {
 	RepoTop    string
 }
 
-func (s *Store) DoctorAudit(ctx context.Context, thisHost string, live domain.HolderLiveProbe, sc SidecarCheck) (*DoctorReport, error) {
+func (s *Store) DoctorAudit(ctx context.Context, thisHost string, hostKnown bool, live domain.HolderLiveProbe, sc SidecarCheck) (*DoctorReport, error) {
 	r := &DoctorReport{}
 	locks, err := s.ListLocks(ctx)
 	if err != nil {
@@ -59,7 +59,14 @@ func (s *Store) DoctorAudit(ctx context.Context, thisHost string, live domain.Ho
 		// PID <= 0 is the no-durable-pid sentinel (loto-j1bo): no CC session
 		// sidecar is keyed by it, so the zombie cross-check has nothing to read
 		// and would only emit a spurious no-cc-sidecar finding. Skip it.
-		if locks[i].PID > 0 && locks[i].Host == thisHost && sc.SidecarDir != "" {
+		//
+		// !hostKnown must gate ahead of the Host equality compare (loto-0yot,
+		// mirrors liveProbe's loto-u7e guard): a host-unknown caller's
+		// thisHost is untrustworthy, so "" == "" for another hostname-broken
+		// machine's lock would otherwise pass and run the cross-check against
+		// a pid from a foreign kernel. Skipping is safe — doctor only
+		// reports; running against the wrong kernel produces a false finding.
+		if hostKnown && locks[i].PID > 0 && locks[i].Host == thisHost && sc.SidecarDir != "" {
 			if f, ok := checkSidecar(locks[i], sc); ok {
 				r.SidecarFindings = append(r.SidecarFindings, f)
 			}
