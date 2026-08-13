@@ -64,6 +64,7 @@ type runtime struct {
 	Store         *store.Store
 	Ctx           context.Context //nolint:containedctx // handle on the per-invocation ctx; threading it through every store/identity call from cmd_*.go would be uniform noise without changing semantics
 	Host          string
+	HostKnown     bool // false → this machine has no verifiable host id; liveProbe must not compare hosts (loto-u7e)
 	StateDir      string
 	Slug          string             // project slug of the repo being acted in; addresses @<slug> mail
 	RepoTop       string             // absolute repo toplevel; its basename is the @<dir> mail alias
@@ -123,13 +124,20 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 	// non-fatal — identity GC is hygiene, not invariant.
 	pinnedAgents := lockOwnerUUIDs(ctx, s)
 	_ = identity.GCAgents(time.Now(), pinnedAgents)
-	host, _ := os.Hostname()
+	host, hostKnown := identity.HostID()
+	if !hostKnown {
+		// Announce the degradation: without a host id every lock recorded
+		// under a real hostname reads UNKNOWN, so crashed holders wait for the
+		// TTL backstop instead of being reclaimed on sight (loto-u7e).
+		fmt.Fprintf(os.Stderr, "⚠ loto: hostname unavailable; stale-lock reclaim degraded to TTL only\n  fix: export LOTO_HOST=<stable-name-unique-to-this-machine>\n")
+	}
 	sid, pinned := sessionUUID()
 	return &runtime{
 		Agent:         a,
 		Store:         s,
 		Ctx:           ctx,
 		Host:          host,
+		HostKnown:     hostKnown,
 		StateDir:      dir,
 		Slug:          ResolveAndPinProjectSlug(top),
 		RepoTop:       top,
@@ -180,13 +188,20 @@ func (r *runtime) DeferredTagFooter(w io.Writer) {
 //
 // Layer 2 — pid fallback, when the oracle has no peer record. Remote-host and
 // PID-0 locks are UNKNOWN (TTL is the sole authority — loto-t1tq/loto-j1bo).
+// Degraded mode (loto-u7e): when this process has no verifiable host id every
+// lock is UNKNOWN, including host-less records — two machines that both failed
+// the lookup would otherwise compare equal and pid-probe each other's pids.
+// Reclaim then rests entirely on the TTL backstop until LOTO_HOST is set. The
+// bias is deliberate: a false DEAD breaks a live lock and lets two agents write
+// one file, which is unrecoverable, while a false UNKNOWN only delays reclaim.
+//
 // PID-reuse defense (loto-kwlp): for a live local pid with a known start-time,
 // the occupant's start-time is re-read; a mismatch means the OS recycled the
 // pid → DEAD. Indeterminate start-time reads never escalate — the pid already
 // probed alive.
 func (r *runtime) liveProbe() domain.HolderLiveProbe {
 	return func(l domain.LockRecord) domain.Liveness {
-		if l.Host != r.Host {
+		if !r.HostKnown || l.Host != r.Host {
 			return domain.LivenessUnknown
 		}
 		switch identity.AgentLive(r.Ctx, string(l.OwnerUUID)).Liveness {

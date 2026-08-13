@@ -533,7 +533,7 @@ func mintAgent() (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	host, _ := os.Hostname()
+	host, _ := HostID()
 	return &Agent{UUID: newUUID(), Handle: handle, CreatedAt: time.Now().UTC(), Host: host}, nil
 }
 
