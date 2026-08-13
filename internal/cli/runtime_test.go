@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"loto/internal/domain"
 	"loto/internal/identity"
 )
 
@@ -140,4 +141,28 @@ func TestIsNotAGitRepo(t *testing.T) {
 			t.Fatal("expected false for a ctx timeout")
 		}
 	})
+}
+
+// An unknown host must never authorize a pid probe. The host-less lock case is
+// the one today's `l.Host != r.Host` compare gets wrong: two machines that both
+// failed the hostname lookup record Host="", compare equal, and probe pid
+// numbers that belong to a different kernel (loto-u7e).
+func TestLiveProbeUnknownHostNeverPIDProbes(t *testing.T) {
+	rt := &runtime{Ctx: context.Background(), Host: "", HostKnown: false}
+	probe := rt.liveProbe()
+
+	for _, tc := range []struct {
+		name string
+		host string
+	}{
+		{name: "remote host", host: "otherbox"},
+		{name: "host-less record", host: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := probe(domain.LockRecord{Host: tc.host, PID: os.Getpid()})
+			if got != domain.LivenessUnknown {
+				t.Errorf("liveProbe(host=%q) = %v, want %v", tc.host, got, domain.LivenessUnknown)
+			}
+		})
+	}
 }
