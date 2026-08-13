@@ -20,25 +20,44 @@ const (
 
 	// The oracle's machine-stable reason tokens, named here so a rename in
 	// liveness.go shows up as one compile-time diff rather than scattered strings.
-	reasonNoSocket      = "no-socket-recorded"
-	reasonSocketMissing = "socket-missing"
-	reasonSocketOnly    = "socket-only"
-	reasonPIDDead       = "pid-dead"
-	reasonSocketPID     = "socket+pid"
-	reasonPSMatch       = "socket+ps-match"
-	reasonArgvMismatch  = "argv-mismatch"
-	reasonNoRecord      = "no-peer-record"
+	reasonNoSocket          = "no-socket-recorded"
+	reasonSocketMissing     = "socket-missing"
+	reasonSocketOnly        = "socket-only"
+	reasonPIDDead           = "pid-dead"
+	reasonSocketPID         = "socket+pid"
+	reasonPSMatch           = "socket+ps-match"
+	reasonArgvMismatch      = "argv-mismatch"
+	reasonNoRecord          = "no-peer-record"
+	reasonProcStartMismatch = "procstart-mismatch"
+	reasonProcStartMatch    = "socket+procstart"
 
 	livenessUnknown = "unknown"
 )
 
 // stubArgv replaces the proc-table read for one test, so the argv branch of the
-// oracle is exercised without a real process carrying the flags.
-func stubArgv(t *testing.T, argv string) {
+// oracle is exercised without a real process carrying the flags. It also
+// tracks whether the argv read fired at all, so a test can pin that the
+// start-time short-circuit (D3) skips it on a match.
+func stubArgv(t *testing.T, argv string) *bool {
 	t.Helper()
+	called := false
 	prev := procArgv
-	procArgv = func(context.Context, int) string { return argv }
+	procArgv = func(context.Context, int) string {
+		called = true
+		return argv
+	}
 	t.Cleanup(func() { procArgv = prev })
+	return &called
+}
+
+// stubProcStart replaces the start-time reader for one test, so the
+// start-time branch of the oracle is exercised deterministically — no real
+// recycled pid required.
+func stubProcStart(t *testing.T, val int64, ok bool) {
+	t.Helper()
+	prev := procStartFn
+	procStartFn = func(int) (int64, bool) { return val, ok }
+	t.Cleanup(func() { procStartFn = prev })
 }
 
 // deadPID starts and reaps a trivial process, then hands back its pid: a pid
@@ -208,6 +227,89 @@ func TestSessionVerdict(t *testing.T) {
 			// Live() is the boolean face of the same oracle: unknown is not dead.
 			if want := tc.wantLiveness != SessionDead; p.Live(context.Background()) != want {
 				t.Fatalf("Live() = %v, want %v for verdict %s", p.Live(context.Background()), want, got.Liveness)
+			}
+		})
+	}
+}
+
+// TestSessionVerdictUnknownStartTimeStaysLive is the bead's AC-2, the property
+// that must never regress: an indeterminate start-time read is an absence of
+// evidence, never a reason to declare dead. Table row 3 additionally pins
+// D3's short-circuit — a matching start-time must skip the ps exec entirely.
+func TestSessionVerdictUnknownStartTimeStaysLive(t *testing.T) {
+	sock := existingSocket(t)
+	self := os.Getpid()
+
+	t.Run("unreadable proc table falls through to argv", func(t *testing.T) {
+		called := stubArgv(t, topLevelArgv)
+		stubProcStart(t, 0, false)
+		p := &Peer{UUID: oracleUUID, Handle: oracleHandle, Socket: sock, PID: self, ProcStart: 12345}
+		got := p.SessionVerdict(context.Background())
+		if got.Liveness != SessionLive || got.Reason != reasonPSMatch {
+			t.Fatalf("SessionVerdict = %s/%s, want live/%s", got.Liveness, got.Reason, reasonPSMatch)
+		}
+		if !*called {
+			t.Fatal("an unreadable start-time must still fall through to the argv check")
+		}
+	})
+
+	t.Run("legacy record (ProcStart == 0) is byte-identical to main", func(t *testing.T) {
+		stubArgv(t, topLevelArgv)
+		p := &Peer{UUID: oracleUUID, Handle: oracleHandle, Socket: sock, PID: self, ProcStart: 0}
+		got := p.SessionVerdict(context.Background())
+		if got.Liveness != SessionLive || got.Reason != reasonPSMatch {
+			t.Fatalf("SessionVerdict = %s/%s, want live/%s", got.Liveness, got.Reason, reasonPSMatch)
+		}
+	})
+
+	t.Run("matching start-time short-circuits the ps exec", func(t *testing.T) {
+		called := stubArgv(t, topLevelArgv)
+		stubProcStart(t, 12345, true)
+		p := &Peer{UUID: oracleUUID, Handle: oracleHandle, Socket: sock, PID: self, ProcStart: 12345}
+		got := p.SessionVerdict(context.Background())
+		if got.Liveness != SessionLive || got.Reason != reasonProcStartMatch {
+			t.Fatalf("SessionVerdict = %s/%s, want live/%s", got.Liveness, got.Reason, reasonProcStartMatch)
+		}
+		if *called {
+			t.Fatal("a start-time match must short-circuit the ps exec (D3); procArgv must not be called")
+		}
+	})
+}
+
+// TestSessionVerdictLegacyRecordUnchanged pins "legacy path is untouched" as a
+// mechanical claim: the full pre-existing token matrix, re-run with ProcStart
+// left at 0, must still produce every token unchanged.
+func TestSessionVerdictLegacyRecordUnchanged(t *testing.T) {
+	sock := existingSocket(t)
+	gone := filepath.Join(t.TempDir(), "gone.sock")
+	self := os.Getpid()
+	dead := deadPID(t)
+
+	tests := []struct {
+		name         string
+		socket       string
+		pid          int
+		agentID      string
+		argv         string
+		wantLiveness SessionLiveness
+		wantReason   string
+	}{
+		{"no socket recorded", "", self, "", "", SessionUnknown, reasonNoSocket},
+		{"socket path gone", gone, self, "", "", SessionDead, reasonSocketMissing},
+		{"socket without a pid", sock, 0, "", "", SessionLive, reasonSocketOnly},
+		{"pid reaped", sock, dead, "", "", SessionDead, reasonPIDDead},
+		{"proc table unreadable", sock, self, agentIDX, "", SessionLive, reasonSocketPID},
+		{"argv matches", sock, self, agentIDX, "claude --agent-id " + agentIDX, SessionLive, reasonPSMatch},
+		{"argv mismatch", sock, self, agentIDX, "claude --agent-id " + agentIDOther, SessionDead, reasonArgvMismatch},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stubArgv(t, tc.argv)
+			p := &Peer{UUID: oracleUUID, Handle: oracleHandle, Socket: tc.socket, PID: tc.pid, AgentID: tc.agentID, ProcStart: 0}
+			got := p.SessionVerdict(context.Background())
+			if got.Liveness != tc.wantLiveness || got.Reason != tc.wantReason {
+				t.Fatalf("SessionVerdict = %s/%s, want %s/%s", got.Liveness, got.Reason, tc.wantLiveness, tc.wantReason)
 			}
 		})
 	}

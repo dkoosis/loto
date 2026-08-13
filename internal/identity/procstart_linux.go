@@ -1,6 +1,6 @@
 //go:build linux
 
-package cli
+package identity
 
 import (
 	"os"
@@ -8,13 +8,13 @@ import (
 	"strings"
 )
 
-// procStart returns pid's start-time in clock ticks since boot, read from
+// ProcStart returns pid's start-time in clock ticks since boot, read from
 // /proc/<pid>/stat field 22 (starttime). The second return is false when the
 // value can't be read (pid gone, /proc unavailable) — caller treats false as
 // UNKNOWN and falls back to a plain pid-alive check. The encoding is opaque:
 // it is only ever compared for equality against a value read on the same host
-// (see domain.LockRecord.ProcStart).
-func procStart(pid int) (int64, bool) {
+// (see domain.LockRecord.ProcStart and Peer.ProcStart).
+func ProcStart(pid int) (int64, bool) {
 	if pid <= 0 {
 		return 0, false
 	}

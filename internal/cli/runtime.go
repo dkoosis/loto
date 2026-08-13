@@ -219,6 +219,10 @@ func (r *runtime) liveProbe() domain.HolderLiveProbe {
 // pidVerdict is liveProbe's layer-2 fallback for a local lock with no peer
 // record: PID-0 sentinel → unknown (TTL governs), dead pid → dead, live pid
 // with a recycled start-time (loto-kwlp) → dead, else alive.
+//
+// identity.ProcStart is the same reader the peer oracle now uses for its own
+// start-time witness (loto-uxhg, identity.SessionVerdict) — one implementation
+// for both liveness paths in the codebase.
 func pidVerdict(l domain.LockRecord) domain.Liveness {
 	if l.PID <= 0 {
 		return domain.LivenessUnknown
@@ -227,7 +231,7 @@ func pidVerdict(l domain.LockRecord) domain.Liveness {
 		return domain.LivenessDead
 	}
 	if l.ProcStart != 0 {
-		if cur, ok := procStart(l.PID); ok && cur != l.ProcStart {
+		if cur, ok := identity.ProcStart(l.PID); ok && cur != l.ProcStart {
 			return domain.LivenessDead
 		}
 	}

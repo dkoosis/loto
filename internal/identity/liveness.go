@@ -43,16 +43,33 @@ func (s SessionLiveness) String() string {
 // produced it, so CLI surfaces can print reason= without re-deriving it.
 type LivenessVerdict struct {
 	Liveness SessionLiveness
-	Reason   string // machine-stable token, e.g. "socket+ps-match", "socket-missing"
+	Reason   string // machine-stable token, e.g. "socket+ps-match", "socket-missing", "socket+procstart", "procstart-mismatch"
 	Peer     *Peer  // the record consulted; nil when none exists
 }
+
+// procStartFn is ProcStart, indirected as a test seam. Never nil in
+// production; tests restore it via t.Cleanup, mirroring procArgv.
+var procStartFn = ProcStart //nolint:gochecknoglobals // test seam, matches procArgv's pattern
 
 // SessionVerdict is the oracle's decision procedure over one peer record:
 //
 //	socket missing            → dead   (the session process removes it by dying)
 //	socket pid not running    → dead   (orphaned socket file)
+//	start-time mismatch       → dead   (OS recycled the pid to another process)
+//	start-time match          → live   (proven identical process; skips the ps exec below)
 //	argv identity mismatch    → dead   (OS recycled the pid to another process)
 //	otherwise                 → live
+//
+// The start-time witness runs first, when the record carries one: pid's OS
+// start-time is re-read and compared for EQUALITY (no tolerance — same-host,
+// same-reader values need none) against the one recorded at RecordPeer time.
+// A mismatch means the OS recycled the pid, so this closes the case the argv
+// check cannot: a top-level session records neither --agent-id nor
+// --parent-session-id (see PeerFromEnv), so argv mismatch alone never fires
+// for it. A match proves process identity and short-circuits the ps exec
+// below — argv is a strictly weaker proxy for the same fact. An unreadable
+// start-time (ProcStart == 0, or the verdict-time read fails) is NOT
+// evidence and falls through to the argv check, never straight to dead.
 //
 // The argv check compares the flags recorded at RecordPeer time (--agent-id,
 // --parent-session-id) against the pid's current command line. A flag recorded
@@ -74,6 +91,9 @@ func (p Peer) SessionVerdict(ctx context.Context) LivenessVerdict {
 	if !PIDAlive(p.PID) {
 		return LivenessVerdict{Liveness: SessionDead, Reason: "pid-dead", Peer: &p}
 	}
+	if v, ok := startTimeVerdict(p); ok {
+		return v
+	}
 	argv := procArgv(ctx, p.PID)
 	if argv == "" {
 		return LivenessVerdict{Liveness: SessionLive, Reason: "socket+pid", Peer: &p}
@@ -82,6 +102,26 @@ func (p Peer) SessionVerdict(ctx context.Context) LivenessVerdict {
 		return LivenessVerdict{Liveness: SessionDead, Reason: "argv-mismatch", Peer: &p}
 	}
 	return LivenessVerdict{Liveness: SessionLive, Reason: "socket+ps-match", Peer: &p}
+}
+
+// startTimeVerdict is SessionVerdict's start-time witness, split out to keep
+// SessionVerdict under the cyclop/gocognit branch limit. ok is true only when
+// the start-time proved the verdict one way or the other (mismatch → dead,
+// match → live); ok is false whenever there is no signal — ProcStart == 0 or
+// the verdict-time read failed — and the caller must fall through to argv.
+func startTimeVerdict(p Peer) (v LivenessVerdict, ok bool) {
+	if p.ProcStart == 0 {
+		return LivenessVerdict{}, false
+	}
+	cur, readOK := procStartFn(p.PID)
+	if !readOK {
+		// Unreadable proc table / unsupported platform → NO SIGNAL. Never dead.
+		return LivenessVerdict{}, false
+	}
+	if cur != p.ProcStart {
+		return LivenessVerdict{Liveness: SessionDead, Reason: "procstart-mismatch", Peer: &p}, true
+	}
+	return LivenessVerdict{Liveness: SessionLive, Reason: "socket+procstart", Peer: &p}, true
 }
 
 // mismatch reports whether a flag recorded non-empty no longer matches the

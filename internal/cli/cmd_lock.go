@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/identity"
 	"loto/internal/render"
 	"loto/internal/store"
 )
@@ -203,7 +204,7 @@ func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now t
 	// skip the start-time read so liveness degrades to the TTL lease (loto-j1bo).
 	var procStartVal int64
 	if src == pidDurable {
-		procStartVal, _ = procStart(pid)
+		procStartVal, _ = identity.ProcStart(pid)
 	}
 	recs := make([]domain.LockRecord, 0, len(targets))
 	for _, t := range targets {
