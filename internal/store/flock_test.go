@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -187,5 +188,17 @@ func TestFlockLimitFromEnv_ValidNoWarn(t *testing.T) {
 	}
 	if got := flockLimitFromEnv(nil); got != 2*time.Second {
 		t.Errorf("nil warnW: limit = %v, want 2s", got)
+	}
+}
+
+// TestAcquireOpFlockFn_DefaultsToReal asserts the acquireOpFlockFn seam
+// (loto-qhv) points at the real acquireOpFlock in production — no behaviour
+// change from adding the indirection. A test that swaps the var must always
+// restore it; nothing else may leave it pointed elsewhere between tests.
+func TestAcquireOpFlockFn_DefaultsToReal(t *testing.T) {
+	got := reflect.ValueOf(acquireOpFlockFn).Pointer()
+	want := reflect.ValueOf(acquireOpFlock).Pointer()
+	if got != want {
+		t.Errorf("acquireOpFlockFn = %v, want the real acquireOpFlock (%v)", got, want)
 	}
 }

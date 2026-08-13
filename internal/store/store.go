@@ -101,7 +101,7 @@ func acquireOpenLocks(ctx context.Context, p string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir state dir: %w", err)
 	}
-	flock, err := acquireOpFlock(ctx, opFlockPathFor(p), os.Stderr)
+	flock, err := acquireOpFlockFn(ctx, opFlockPathFor(p), os.Stderr)
 	if err != nil {
 		return nil, err
 	}
