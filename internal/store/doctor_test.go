@@ -24,7 +24,7 @@ func TestDoctorListsStaleLocks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := s.DoctorAudit(ctx, l.Host, deadProbe, SidecarCheck{})
+	report, err := s.DoctorAudit(ctx, l.Host, true, deadProbe, SidecarCheck{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestDoctorSidecarMissingDirIsNoOp(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAudit(ctx, l.Host, liveProbe, SidecarCheck{
+	report, err := s.DoctorAudit(ctx, l.Host, true, liveProbe, SidecarCheck{
 		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
 		RepoTop:    tcRepoTop,
 	})
@@ -259,6 +259,56 @@ func TestDoctorSidecarMissingDirIsNoOp(t *testing.T) {
 	}
 }
 
+// TestDoctorSidecarSkippedWhenHostUnknown is the loto-0yot regression: a
+// caller with no verifiable host identity (hostKnown=false) must not run the
+// sidecar cross-check even when the lock's recorded Host string happens to
+// equal thisHost — hostKnown false means thisHost itself isn't trustworthy,
+// so any equality it participates in is meaningless (mirrors liveProbe's
+// !HostKnown guard from loto-u7e).
+func TestDoctorSidecarSkippedWhenHostUnknown(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	l := mkFileLock(t, "a.go", "alice", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	report, err := s.DoctorAudit(ctx, l.Host, false, liveProbe, SidecarCheck{
+		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
+		RepoTop:    tcRepoTop,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.SidecarFindings) != 0 {
+		t.Fatalf("expected no sidecar findings when hostKnown=false, got %+v", report.SidecarFindings)
+	}
+}
+
+// TestDoctorSidecarSkippedForEmptyHostLock is the exact hazard the bead
+// names: a lock recorded by another hostname-broken machine has Host=="".
+// This caller is also host-unknown, so thisHost=="" too — the old code
+// compared "" == "" and ran the cross-check against a pid from a foreign
+// kernel. hostKnown=false must block that regardless of the string match.
+func TestDoctorSidecarSkippedForEmptyHostLock(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	l := mkFileLock(t, "a.go", "alice", time.Hour)
+	l.Host = ""
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	report, err := s.DoctorAudit(ctx, "", false, liveProbe, SidecarCheck{
+		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
+		RepoTop:    tcRepoTop,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.SidecarFindings) != 0 {
+		t.Fatalf("expected no sidecar findings for host-unknown empty-host lock, got %+v", report.SidecarFindings)
+	}
+}
+
 func TestDoctorSidecarDisabledWhenDirEmpty(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
@@ -266,7 +316,7 @@ func TestDoctorSidecarDisabledWhenDirEmpty(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAudit(ctx, l.Host, liveProbe, SidecarCheck{})
+	report, err := s.DoctorAudit(ctx, l.Host, true, liveProbe, SidecarCheck{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +337,7 @@ func TestDoctorSidecarCwdMismatch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "1.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAudit(ctx, l.Host, liveProbe, SidecarCheck{
+	report, err := s.DoctorAudit(ctx, l.Host, true, liveProbe, SidecarCheck{
 		SidecarDir: dir,
 		RepoTop:    "/Users/me/repo",
 	})
@@ -315,7 +365,7 @@ func TestDoctorSidecarHealthyWhenCwdMatches(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "1.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAudit(ctx, l.Host, liveProbe, SidecarCheck{
+	report, err := s.DoctorAudit(ctx, l.Host, true, liveProbe, SidecarCheck{
 		SidecarDir: dir,
 		RepoTop:    repoTop,
 	})
@@ -334,7 +384,7 @@ func TestDoctorSidecarSkippedForStaleLocks(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAudit(ctx, l.Host, deadProbe, SidecarCheck{
+	report, err := s.DoctorAudit(ctx, l.Host, true, deadProbe, SidecarCheck{
 		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
 		RepoTop:    tcRepoTop,
 	})
@@ -362,7 +412,7 @@ func TestDoctorSidecarSkippedForNoDurablePid(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	report, err := s.DoctorAudit(ctx, l.Host, liveProbe, SidecarCheck{
+	report, err := s.DoctorAudit(ctx, l.Host, true, liveProbe, SidecarCheck{
 		SidecarDir: filepath.Join(t.TempDir(), "does-not-exist"),
 		RepoTop:    tcRepoTop,
 	})
@@ -729,7 +779,7 @@ func TestDoctorAudit_ListsExpiredClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := s.DoctorAudit(ctx, "h", liveProbe, SidecarCheck{})
+	report, err := s.DoctorAudit(ctx, "h", true, liveProbe, SidecarCheck{})
 	if err != nil {
 		t.Fatal(err)
 	}
