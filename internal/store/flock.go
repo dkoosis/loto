@@ -50,6 +50,16 @@ func (h *opFlock) release() {
 	h.f = nil
 }
 
+// acquireOpFlockFn indirects acquireOpFlock so a test can neuter op-flock
+// coordination inside a child process without touching production code
+// paths that don't opt in — loto-qhv's cross-process detection controls
+// (fault=no-flock) swap this to a no-op handle and assert the harness
+// *observes* the resulting TOCTOU/RMW violation, rather than disabling the
+// flock everywhere and hoping. Same shape as commitTxFn/fchmodFn/
+// afterOpenHook/flockContendedFn. Production default is the real function;
+// see TestAcquireOpFlockFn_DefaultsToReal.
+var acquireOpFlockFn = acquireOpFlock
+
 // acquireOpFlock takes a project-wide exclusive flock on path with a bounded
 // wait. Polls with LOCK_NB every 50ms; emits a one-shot wait notice on stderrW
 // after 250ms cumulative wait; returns ErrFlockTimeout after LOTO_FLOCK_TIMEOUT

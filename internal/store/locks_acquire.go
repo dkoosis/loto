@@ -42,7 +42,7 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 
 	sorted := sortedByCanonical(recs)
 
-	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
+	flock, err := acquireOpFlockFn(ctx, s.opFlockPath(), s.stderr)
 	if err != nil {
 		return nil, err
 	}
