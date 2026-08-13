@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -424,5 +425,31 @@ func TestWritePeerCleansTmpOnPublishFailure(t *testing.T) {
 		if strings.HasSuffix(e.Name(), ".tmp") {
 			t.Fatalf("failed publish leaked a temp: %s", e.Name())
 		}
+	}
+}
+
+// TestPeerJSONWithoutProcStartUnmarshalsToZero is the entire compatibility
+// story for the ProcStart field, made a visible test rather than an assumed
+// property: a record written by the pre-uxhg binary — no proc_start key at
+// all — must unmarshal with ProcStart == 0 (unknown) and every other field
+// intact.
+func TestPeerJSONWithoutProcStartUnmarshalsToZero(t *testing.T) {
+	const body = `{
+		"uuid": "` + peerTestUUID + `",
+		"handle": "` + peerHandle + `",
+		"socket": "/tmp/cc-socks/4242.sock",
+		"pid": 4242,
+		"session_id": "sess-1",
+		"seen_at": "2026-08-13T00:00:00Z"
+	}`
+	var p Peer
+	if err := json.Unmarshal([]byte(body), &p); err != nil {
+		t.Fatalf("unmarshal pre-uxhg record shape: %v", err)
+	}
+	if p.ProcStart != 0 {
+		t.Fatalf("ProcStart = %d, want 0 (unknown) for a record with no proc_start key", p.ProcStart)
+	}
+	if p.UUID != peerTestUUID || p.Handle != peerHandle || p.PID != 4242 || p.SessionID != "sess-1" {
+		t.Fatalf("other fields must still parse: %+v", p)
 	}
 }

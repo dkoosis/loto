@@ -46,6 +46,15 @@ type Peer struct {
 	// detect a recycled pid: the occupant's argv must still carry the same
 	// identity flags the recorder's did (loto-ygty).
 	ParentSessionID string `json:"parent_session_id,omitempty"`
+	// ProcStart is the OS start-time of the session process, read at RecordPeer
+	// time from the same reader that will re-read it at verdict time. The value
+	// is opaque and host-local (darwin: wall-clock µs; linux: ticks since boot)
+	// — it is only ever compared for EQUALITY against a value read on this
+	// host, never against a clock. 0 means unknown: the reader failed, the
+	// platform has none, or the record predates this field. Unknown NEVER
+	// escalates to dead (loto-kwlp precedent, internal/cli/runtime.go
+	// pidVerdict).
+	ProcStart int64 `json:"proc_start,omitempty"`
 }
 
 // Named reports whether this peer is addressable by SendMessage today.
@@ -56,12 +65,14 @@ func (p Peer) Named() bool { return p.Name != "" }
 // convenience for callers that only branch; unknown maps to true — a verdict
 // this record cannot support must not read as dead.
 //
-// Caveat, honestly: PID reuse is closed only for peers that recorded an
-// identity flag (--agent-id / --parent-session-id) — subagents. A top-level
-// session records neither (see PeerFromEnv), so mismatch() has nothing to
-// compare and a dead top-level peer under an orphaned socket whose pid the OS
-// recycled still reads LIVE, indefinitely. Closing that needs a proc
-// start-time witness: loto-uxhg.
+// Honest residual: PID reuse is closed for any peer whose record carries a
+// ProcStart (every record written by this binary on darwin or linux) — a
+// recycled pid has a different OS start-time and reads DEAD. It is NOT closed
+// for a record with ProcStart == 0: a record written before the field
+// existed, or on a platform with no start-time reader. Such a peer falls back
+// to the argv flag check, which top-level sessions do not carry, and can read
+// LIVE after its pid is recycled. That population drains as records
+// self-prune and sessions restart; it does not accumulate.
 func (p Peer) Live(ctx context.Context) bool {
 	return p.SessionVerdict(ctx).Liveness != SessionDead
 }
@@ -151,6 +162,7 @@ func PeerFromEnv(ctx context.Context, a *Agent, name string) *Peer {
 	}
 	pid := envPID(socket)
 	argv := procArgv(ctx, pid)
+	procStartVal, _ := ProcStart(pid) // 0,false → 0 → unknown, same as legacy
 	if name == "" {
 		name = os.Getenv("LOTO_PEER_NAME")
 	}
@@ -169,6 +181,7 @@ func PeerFromEnv(ctx context.Context, a *Agent, name string) *Peer {
 		CWD:             cwd,
 		SeenAt:          time.Now().UTC(),
 		ParentSessionID: argvFlag(argv, "parent-session-id"),
+		ProcStart:       procStartVal,
 	}
 }
 

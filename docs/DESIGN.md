@@ -149,16 +149,21 @@ or work elsewhere. Both are one command away.
 
 **One liveness oracle.** "Is the session behind this agent still up?" is
 answered once, in `identity.AgentLive` (loto-ygty): messaging-socket
-existence, then a ps identity check on the socket's pid (`--agent-id` /
-`--parent-session-id` recorded at peer-record time must still match the
-occupant's argv — defeats PID reuse). Verdicts: LIVE (socket + ps check
-out — overrides the lock-row pid probe, so a worktree agent whose stamped
-pid probes dead is not misread, loto-r11w), DEAD (socket gone, pid gone,
-or argv mismatch — fast-reclaim), UNKNOWN (no peer record — TTL is the
-sole authority; never treated as dead). `loto locks`' staleness, `loto
-who`'s pruning, and `loto alive` (the verb kill-class tooling like the
-bdx reaper calls) all consume this one check. A DEAD verdict is necessary
-but never sufficient for killing an agent: kill-class actions also
+existence, then a start-time identity check on the socket's pid — the OS
+start-time recorded at peer-record time must still match the pid's current
+start-time, so a recycled pid reads DEAD (loto-uxhg). Records with no
+recorded start-time (written before the field existed, or on a platform
+with no reader) fall back to matching `--agent-id` / `--parent-session-id`
+against the occupant's argv — which closes PID reuse for subagents only,
+since a top-level session carries neither flag. Verdicts: LIVE (socket +
+start-time or ps check out — overrides the lock-row pid probe, so a
+worktree agent whose stamped pid probes dead is not misread, loto-r11w),
+DEAD (socket gone, pid gone, start-time mismatch, or argv mismatch —
+fast-reclaim), UNKNOWN (no peer record — TTL is the sole authority; never
+treated as dead). `loto locks`' staleness, `loto who`'s pruning, and `loto
+alive` (the verb kill-class tooling like the bdx reaper calls) all consume
+this one check. A DEAD verdict is necessary but never sufficient for
+killing an agent: kill-class actions also
 require an idle/TaskStop signal from the harness.
 
 **Soft-TTL on rows.** A `locks` row carries `expires_at`. Past expiry
