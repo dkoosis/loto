@@ -165,6 +165,47 @@ func crossProcAwaitBarrierAt(startFd, readyFd int) error {
 	return nil
 }
 
+// errCrossProcPathNotValidated is the sentinel behind every env-sourced
+// path rejection below (err113: no dynamic fmt.Errorf without a wrapped
+// sentinel).
+var errCrossProcPathNotValidated = errors.New("crossproc: env-sourced path is not an absolute, clean path")
+
+// crossProcRejectPath builds the error verdict for an env-sourced path that
+// failed validation. Safe to factor into a helper — unlike the path VALUE
+// itself (see the inline-Clean note at each call site below), an error
+// string is JSON-encoded to stdout, never passed to any gosec-tracked sink,
+// so routing it through a function boundary carries no taint consequence.
+func crossProcRejectPath(role, owner, raw string) crossProcVerdict {
+	return crossProcVerdict{
+		Role: role, Outcome: crossProcError, Owner: owner, PID: os.Getpid(), PPID: os.Getppid(),
+		Err: fmt.Sprintf("%s: %q", errCrossProcPathNotValidated, raw),
+	}
+}
+
+// On the inline filepath.Clean+IsAbs check duplicated at every call site
+// below, instead of one shared validator (loto-nwuy):
+//
+// os.Getenv is a gosec taint SOURCE; without validation, gosec's G703
+// (path traversal via taint analysis) follows LOTO_CROSSPROC_DB/TARGET/
+// TARGETS inter-procedurally into chmod.go's safeOpenRegular and doctor.go's
+// quarantine os.RemoveAll/os.Rename sinks — production files this bead does
+// not touch, flagged only because this test binary is the first
+// os.Getenv -> AcquireLocks chain gosec can see in the package.
+//
+// filepath.Clean is gosec's own recognized sanitizer for this analyzer
+// (PathTraversal's Sanitizers list, gosec analyzers/pathtraversal.go) — but
+// ONLY when the Clean call and its use sit in the SAME function body.
+// gosec's interprocedural check for "does a tainted argument flow to a
+// callee's return" (taint.go's doTaintedArgsFlowToReturn ->
+// valueReachableFromParams) is a pure data-flow reachability walk that does
+// NOT special-case an intervening sanitizer call — confirmed empirically: a
+// crossProcValidatePath(v string) (string, error) helper that internally
+// called filepath.Clean and returned it did NOT clear the taint, while
+// inlining the identical Clean+IsAbs check directly at each call site does.
+// So the value used at Open(dbPath)/AcquireLocks(...,target,...) below must
+// be the literal, local result of filepath.Clean(os.Getenv(...)) — never
+// laundered through a second function's return.
+
 // blockerOwners flattens a *MultiConflictError's blockers to deduped owner
 // uuid strings, so a child can report "who blocked me" across the process
 // boundary without shipping typed domain values over JSON.
@@ -251,9 +292,21 @@ func rotateTargets(targets []string, i int) []string {
 // the only question A1 asks is "who wins the write", not "who's dead".
 func crossProcRoleAcquire() crossProcVerdict {
 	const role = crossProcRoleAcquireName
-	dbPath := os.Getenv(envDBPath)
 	owner := os.Getenv(envOwner)
-	targets := strings.Split(os.Getenv(envTargets), ",")
+
+	dbPath := filepath.Clean(os.Getenv(envDBPath))
+	if !filepath.IsAbs(dbPath) {
+		return crossProcRejectPath(role, owner, dbPath)
+	}
+	rawTargets := strings.Split(os.Getenv(envTargets), ",")
+	targets := make([]string, len(rawTargets))
+	for i, rt := range rawTargets {
+		vt := filepath.Clean(rt)
+		if !filepath.IsAbs(vt) {
+			return crossProcRejectPath(role, owner, vt)
+		}
+		targets[i] = vt
+	}
 
 	if err := crossProcAwaitBarrier(); err != nil {
 		return crossProcVerdict{Role: role, Outcome: crossProcError, Owner: owner, PID: os.Getpid(), PPID: os.Getppid(), Err: err.Error()}
@@ -432,9 +485,16 @@ func TestCrossProc_ContendedAcquire(t *testing.T) {
 // not a race (plan §3 A2).
 func crossProcRoleHold() crossProcVerdict {
 	const role = crossProcRoleHoldName
-	dbPath := os.Getenv(envDBPath)
-	target := os.Getenv(envTarget)
 	owner := os.Getenv(envOwner)
+
+	dbPath := filepath.Clean(os.Getenv(envDBPath))
+	if !filepath.IsAbs(dbPath) {
+		return crossProcRejectPath(role, owner, dbPath)
+	}
+	target := filepath.Clean(os.Getenv(envTarget))
+	if !filepath.IsAbs(target) {
+		return crossProcRejectPath(role, owner, target)
+	}
 
 	s, err := Open(dbPath)
 	if err != nil {
@@ -488,9 +548,16 @@ func crossProcRoleHold() crossProcVerdict {
 // (still alive) true instead of faking it.
 func crossProcRoleReclaimAcquire() crossProcVerdict {
 	const role = crossProcRoleReclaimAcquireName
-	dbPath := os.Getenv(envDBPath)
-	target := os.Getenv(envTarget)
 	owner := os.Getenv(envOwner)
+
+	dbPath := filepath.Clean(os.Getenv(envDBPath))
+	if !filepath.IsAbs(dbPath) {
+		return crossProcRejectPath(role, owner, dbPath)
+	}
+	target := filepath.Clean(os.Getenv(envTarget))
+	if !filepath.IsAbs(target) {
+		return crossProcRejectPath(role, owner, target)
+	}
 
 	if err := crossProcAwaitBarrier(); err != nil {
 		return crossProcVerdict{Role: role, Outcome: crossProcError, Owner: owner, PID: os.Getpid(), PPID: os.Getppid(), Err: err.Error()}
@@ -697,9 +764,15 @@ func crossProcRoleReclaimSharedFault() crossProcVerdict {
 	const role = crossProcRoleReclaimSharedFaultName
 	maybeInjectNoFlockFault()
 
-	dbPath := os.Getenv(envDBPath)
-	target := os.Getenv(envTarget)
 	owner := os.Getenv(envOwner)
+	dbPath := filepath.Clean(os.Getenv(envDBPath))
+	if !filepath.IsAbs(dbPath) {
+		return crossProcRejectPath(role, owner, dbPath)
+	}
+	target := filepath.Clean(os.Getenv(envTarget))
+	if !filepath.IsAbs(target) {
+		return crossProcRejectPath(role, owner, target)
+	}
 
 	s, err := Open(dbPath)
 	if err != nil {
@@ -762,9 +835,15 @@ func crossProcRoleReclaimExclusiveFault() crossProcVerdict {
 	const role = crossProcRoleReclaimExclusiveFaultName
 	maybeInjectNoFlockFault()
 
-	dbPath := os.Getenv(envDBPath)
-	target := os.Getenv(envTarget)
 	owner := os.Getenv(envOwner)
+	dbPath := filepath.Clean(os.Getenv(envDBPath))
+	if !filepath.IsAbs(dbPath) {
+		return crossProcRejectPath(role, owner, dbPath)
+	}
+	target := filepath.Clean(os.Getenv(envTarget))
+	if !filepath.IsAbs(target) {
+		return crossProcRejectPath(role, owner, target)
+	}
 
 	s, err := Open(dbPath)
 	if err != nil {
