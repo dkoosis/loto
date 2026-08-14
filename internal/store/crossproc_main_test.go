@@ -66,15 +66,30 @@ type crossProcVerdict struct {
 	PPID      int              `json:"ppid"`
 	ProcStart int64            `json:"proc_start,omitempty"`
 	Err       string           `json:"err,omitempty"`
+	// Blockers carries the conflicting owners' uuids when Outcome is
+	// "conflict" — *MultiConflictError's Blockers flattened to owner strings
+	// so a parent test can assert a loser's error names the winner without
+	// unmarshalling a typed domain error across the process boundary
+	// (loto-qhv Family A, crossproc_acquire_test.go).
+	Blockers []string `json:"blockers,omitempty"`
 }
 
 // crossProcRoleSmokeName is PR 1's one role.
 const crossProcRoleSmokeName = "smoke"
 
-// crossProcRoles is the role dispatch table. PR 1 lands exactly one row —
-// later PRs add Family A/B rows here.
+// crossProcRoles is the role dispatch table. PR 1 landed exactly one row;
+// Family A (loto-qhv build-order item 3, crossproc_acquire_test.go) adds its
+// rows here rather than opening a second TestMain — the role functions
+// themselves are defined in crossproc_acquire_test.go. The two "fault"
+// rows back the A2-control subtest: they swap their own acquireOpFlockFn to
+// a no-op when LOTO_CROSSPROC_FAULT=no-flock, never touching production.
 var crossProcRoles = map[string]func() crossProcVerdict{
-	crossProcRoleSmokeName: crossProcRoleSmoke,
+	crossProcRoleSmokeName:                 crossProcRoleSmoke,
+	crossProcRoleAcquireName:               crossProcRoleAcquire,
+	crossProcRoleHoldName:                  crossProcRoleHold,
+	crossProcRoleReclaimAcquireName:        crossProcRoleReclaimAcquire,
+	crossProcRoleReclaimSharedFaultName:    crossProcRoleReclaimSharedFault,
+	crossProcRoleReclaimExclusiveFaultName: crossProcRoleReclaimExclusiveFault,
 }
 
 // crossProcRoleSmoke reports its own pid/ppid after clearing the barrier —
