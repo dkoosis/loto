@@ -114,9 +114,16 @@ func EmitConflictWithTags(w io.Writer, ce *store.MultiConflictError, tagsByTarge
 	fmt.Fprintf(w, "✗ blocked count=%d\n", len(blockers))
 	for i := range blockers {
 		b := &blockers[i]
-		fmt.Fprintf(w, "⚠ target=%s blocker=%s intent=%q expires_at=%s\n",
+		// branch= names the tree the holder took the lock from (loto-16cf) —
+		// a foreign branch is the "their working tree is not yours" signal.
+		// Omitted when unrecorded (pre-16cf rows, non-git acquire paths).
+		branch := ""
+		if b.Branch != "" {
+			branch = " branch=" + b.Branch
+		}
+		fmt.Fprintf(w, "⚠ target=%s blocker=%s intent=%q expires_at=%s%s\n",
 			relToCwd(b.Target.Canonical, cwd), holders.tag(string(b.OwnerUUID)), b.Intent,
-			b.ExpiresAt.UTC().Format(time.RFC3339))
+			b.ExpiresAt.UTC().Format(time.RFC3339), branch)
 		for _, t := range tagsByTarget[b.Target.Canonical] {
 			emitTagRow(w, t, "  ", cwd, holders)
 		}

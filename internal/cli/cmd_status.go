@@ -193,11 +193,17 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord) {
 	tagsByTarget, _ := rt.Store.ListAliveByTargets(rt.Ctx, canonicals)
 	for i := range all {
 		l := &all[i]
-		fmt.Fprintf(stdout, "✓ target=%s owner=%s mode=%s intent=%q held_since=%s ttl_remaining=%s liveness=%s host=%s pid=%d\n",
+		// branch= names the tree the holder locked from (loto-16cf); omitted
+		// when unrecorded (pre-16cf rows, non-git acquire paths).
+		branch := ""
+		if l.Branch != "" {
+			branch = " branch=" + l.Branch
+		}
+		fmt.Fprintf(stdout, "✓ target=%s owner=%s mode=%s intent=%q held_since=%s ttl_remaining=%s liveness=%s host=%s pid=%d%s\n",
 			relPath(l.Target.Canonical), l.OwnerUUID, l.EffectiveMode(), l.Intent,
 			l.CreatedAt.UTC().Format(time.RFC3339),
 			fmtTTL(ec.RemainingTTL(*l)), ec.Classify(*l),
-			l.Host, l.PID)
+			l.Host, l.PID, branch)
 		render.EmitTagRows(stdout, tagsByTarget[l.Target.Canonical])
 	}
 }
