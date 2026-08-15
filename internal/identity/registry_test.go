@@ -14,6 +14,9 @@ import (
 	"time"
 )
 
+// tcHostOld marks a record written by a long-gone host in GC fixtures.
+const tcHostOld = "old"
+
 func TestEnsureBlankAgentIDIsEphemeral(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
@@ -161,7 +164,7 @@ func TestGCPreservesLockReferencedAgents(t *testing.T) {
 		UUID:      newUUID(),
 		Handle:    "PinnedPanda",
 		CreatedAt: time.Now().Add(-90 * 24 * time.Hour).UTC(),
-		Host:      "old",
+		Host:      tcHostOld,
 	}
 	if err := writeAgent(stale); err != nil {
 		t.Fatal(err)
@@ -235,7 +238,7 @@ func TestGCStaleAgents(t *testing.T) {
 	freshPath := filepath.Join(dir, ".loto", "agents", fresh.UUID+".json")
 
 	// Manually drop a stale record into the registry.
-	stale := &Agent{UUID: newUUID(), Handle: "StaleAgent", CreatedAt: time.Now().Add(-90 * 24 * time.Hour).UTC(), Host: "old"}
+	stale := &Agent{UUID: newUUID(), Handle: "StaleAgent", CreatedAt: time.Now().Add(-90 * 24 * time.Hour).UTC(), Host: tcHostOld}
 	if err := writeAgent(stale); err != nil {
 		t.Fatal(err)
 	}
@@ -1156,5 +1159,86 @@ func TestWedgedSidIsWhatAnMtimeSkipWouldCause(t *testing.T) {
 
 	if _, err := Ensure(context.Background()); err == nil {
 		t.Fatal("Ensure must hard-fail when the session cache points at a missing agent record — this is the wedged-sid state an mtime-skip pin would manufacture")
+	}
+}
+
+// TestGCStaleAgents_RewriteInsideWindowSurvives pins loto-tu5t: a dormant
+// agent that resumes — rewriting its record — between the staleness read and
+// the unlink keeps the fresh record. Before the dev+ino guard, gcStaleAgents
+// judged by the ReadDir entry's stat and then removed BY PATH, so the resumed
+// agent's just-written record was deleted and its identity re-minted. The
+// recheck hook fires exactly where the race would land.
+func TestGCStaleAgents_RewriteInsideWindowSurvives(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+
+	dormant := &Agent{UUID: newUUID(), Handle: "DormantAgent", CreatedAt: time.Now().Add(-90 * 24 * time.Hour).UTC(), Host: tcHostOld}
+	if err := writeAgent(dormant); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, ".loto", "agents", dormant.UUID+".json")
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	// The agent wakes inside the read→unlink window and republishes. writeAgent
+	// publishes by rename, so the record it leaves is a NEW inode.
+	agentPruneRecheckHook = func() {
+		resumed := *dormant
+		resumed.Handle = "ResumedAgent"
+		if err := writeAgent(&resumed); err != nil {
+			t.Errorf("republish inside window: %v", err)
+		}
+	}
+	t.Cleanup(func() { agentPruneRecheckHook = nil })
+
+	if err := gcStaleAgents(time.Now(), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LookupByUUID(dormant.UUID)
+	if err != nil {
+		t.Fatalf("resumed agent's fresh record was reaped: %v", err)
+	}
+	if got.Handle != "ResumedAgent" {
+		t.Errorf("want the republished record, got handle=%q", got.Handle)
+	}
+}
+
+// TestGCStaleAgents_UnreplacedRecordStillReaped is the discrimination control
+// for the test above: with the same hook firing but publishing nothing, the
+// stale record is still removed. Without it the guard could pass by never
+// unlinking anything.
+func TestGCStaleAgents_UnreplacedRecordStillReaped(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+
+	stale := &Agent{UUID: newUUID(), Handle: "StaleAgent", CreatedAt: time.Now().Add(-90 * 24 * time.Hour).UTC(), Host: tcHostOld}
+	if err := writeAgent(stale); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, ".loto", "agents", stale.UUID+".json")
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	agentPruneRecheckHook = func() { called = true }
+	t.Cleanup(func() { agentPruneRecheckHook = nil })
+
+	if err := gcStaleAgents(time.Now(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Error("recheck hook never fired — the guard is not on the unlink path")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("unreplaced stale record must still be reaped: err=%v", err)
 	}
 }
