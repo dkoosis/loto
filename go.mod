@@ -1,16 +1,18 @@
 module loto
 
-go 1.25.0
+go 1.26.4
 
 require (
+	github.com/dkoosis/atomicfile v0.0.0-20260811102456-9091c28d4820
 	github.com/quasilyte/go-ruleguard/dsl v0.3.23
 	github.com/rogpeppe/go-internal v1.14.1
-	golang.org/x/sys v0.45.0
+	golang.org/x/sys v0.47.0
 	modernc.org/sqlite v1.50.0
 )
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/google/renameio/v2 v2.0.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect

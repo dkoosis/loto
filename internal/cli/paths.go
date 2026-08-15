@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/dkoosis/atomicfile"
+
 	"loto/internal/domain"
 )
 
@@ -88,50 +90,12 @@ func pinSlug(repoTop, slug string) {
 	if pinFile == "" {
 		return
 	}
-	dir := filepath.Dir(pinFile)
-	tmp, err := os.CreateTemp(dir, ".loto-slug.*.tmp")
-	if err != nil {
-		return
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.WriteString(slug + "\n"); err != nil {
-		tmp.Close()
-		return
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return
-	}
 	// Sync the bytes before rename, then fsync the parent dir after — without
 	// both, the pin's directory entry can be lost on power loss (loto-cq6 /
-	// gh#131). Best-effort throughout: the caller uses the slug it computed
-	// regardless, so a flush failure must not abort.
-	_ = tmp.Sync()
-	if err := tmp.Close(); err != nil {
-		return
-	}
-	if err := os.Rename(tmpName, pinFile); err != nil {
-		return
-	}
-	_ = syncDir(dir)
-}
-
-// syncDir flushes a directory's metadata so a rename inside it survives power
-// loss. Call after the file's own bytes are fsync'd. (Duplicated from
-// internal/identity rather than shared: that package must import no internal
-// package — see .go-arch-lint.yml — and the helper is small enough to stay
-// under jscpd limits.)
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	if err := d.Sync(); err != nil {
-		d.Close()
-		return err
-	}
-	return d.Close()
+	// gh#131). atomicfile owns that sequence and adds F_FULLFSYNC on darwin.
+	// Best-effort: the caller uses the slug it computed regardless, so a write
+	// failure must not abort.
+	_ = atomicfile.WriteFile(pinFile, []byte(slug+"\n"), 0o600)
 }
 
 func gitCommonDirFile(repoTop, name string) string {
