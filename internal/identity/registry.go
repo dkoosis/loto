@@ -599,10 +599,37 @@ func gcStaleAgents(now time.Time, extraPinned map[string]struct{}) error {
 			continue
 		}
 		if info.ModTime().Before(cutoff) {
-			_ = os.Remove(filepath.Join(registryDir(), e.Name()))
+			pruneAgentRecord(filepath.Join(registryDir(), e.Name()), info)
 		}
 	}
 	return nil
+}
+
+// agentPruneRecheckHook, when non-nil, is invoked inside pruneAgentRecord
+// after the record is judged stale and before the pre-unlink re-stat. Tests
+// use it to simulate a dormant agent that resumes — rewriting its record —
+// inside the read→unlink window; production leaves it nil.
+var agentPruneRecheckHook func() //nolint:gochecknoglobals // test seam, mirrors peerPruneRecheckHook
+
+// pruneAgentRecord unlinks path only if it still holds the same file the
+// staleness read judged. Lifted from prunePeerRecord (loto-gj1z), which was
+// deliberately shaped so this bead could reuse it: writeAgent publishes by
+// rename, so a record rewritten between the ReadDir walk and the Remove
+// occupies a new inode and SameFile refuses the unlink. Without the guard a
+// dormant agent that resumes inside that window loses its fresh record and
+// re-mints an identity (loto-tu5t).
+func pruneAgentRecord(path string, judged os.FileInfo) {
+	if agentPruneRecheckHook != nil {
+		agentPruneRecheckHook()
+	}
+	now, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	if !os.SameFile(judged, now) {
+		return
+	}
+	_ = os.Remove(path)
 }
 
 // GCAgents is the public entry point for the agent-registry GC pass. The
