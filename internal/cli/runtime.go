@@ -43,6 +43,32 @@ func gitRevParseToplevel(parent context.Context) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// gitBranch resolves the holder's current branch for stamping onto lock
+// records at acquire (loto-16cf): a peer's lock taken on another branch tells
+// the reader their working tree is not yours. Detached HEAD records the short
+// SHA. Best-effort by design — any git failure returns "" rather than block
+// an acquire over a missing label.
+func gitBranch(parent context.Context) string {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, gitTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	name := strings.TrimSpace(string(out))
+	if name != "HEAD" {
+		return name
+	}
+	out, err = exec.CommandContext(ctx, "git", "rev-parse", "--short", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // isNotAGitRepo reports whether err is specifically git's own "not a
 // repository" failure, as opposed to an infra failure — missing git binary,
 // ctx timeout/cancellation, permission error — that must not be collapsed

@@ -30,10 +30,12 @@ func seedAgent(t *testing.T, home, uuid, handle string) {
 }
 
 const (
-	aGo  = "a.go"
-	pkgA = "pkg/a"
-	bGo  = "b.go"
-	cGo  = "c.go"
+	aGo        = "a.go"
+	pkgA       = "pkg/a"
+	bGo        = "b.go"
+	cGo        = "c.go"
+	ownerGreen = "Green"
+	ownerRed   = "Red"
 )
 
 var errPermissionDenied error = permDeniedError{}
@@ -79,8 +81,8 @@ func TestEmitConflict_TriageFirst(t *testing.T) {
 	var buf bytes.Buffer
 	EmitConflictWithTags(&buf, &store.MultiConflictError{
 		Blockers: []domain.LockRecord{
-			{Target: domain.Target{Canonical: aGo}, OwnerUUID: "Green", Intent: "x", ExpiresAt: now},
-			{Target: domain.Target{Canonical: cGo}, OwnerUUID: "Red", Intent: "y", ExpiresAt: now},
+			{Target: domain.Target{Canonical: aGo}, OwnerUUID: ownerGreen, Intent: "x", ExpiresAt: now},
+			{Target: domain.Target{Canonical: cGo}, OwnerUUID: ownerRed, Intent: "y", ExpiresAt: now},
 		},
 	}, nil)
 	got := buf.String()
@@ -561,8 +563,8 @@ func TestEmitClaimConflictNamesHolder(t *testing.T) {
 	var buf bytes.Buffer
 	EmitClaimConflict(&buf, &store.ClaimConflictError{
 		Blockers: []domain.ClaimRecord{
-			{PathPrefix: "pkg/z", OwnerUUID: "Red", Intent: "y", ExpiresAt: now},
-			{PathPrefix: pkgA, OwnerUUID: "Green", Intent: "store refactor", ExpiresAt: now},
+			{PathPrefix: "pkg/z", OwnerUUID: ownerRed, Intent: "y", ExpiresAt: now},
+			{PathPrefix: pkgA, OwnerUUID: ownerGreen, Intent: "store refactor", ExpiresAt: now},
 		},
 	})
 	got := buf.String()
@@ -580,5 +582,27 @@ func TestEmitClaimConflictNamesHolder(t *testing.T) {
 	}
 	if !strings.Contains(got, "⚠ prefix=") {
 		t.Errorf("per-blocker rows use ⚠: %q", got)
+	}
+}
+
+// TestEmitConflict_BranchRow pins loto-16cf: a blocker whose record carries a
+// branch renders it as a trailing branch= key; an empty branch (pre-16cf row,
+// non-git acquire) renders no branch= key at all.
+func TestEmitConflict_BranchRow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Date(2026, 5, 10, 18, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	EmitConflictWithTags(&buf, &store.MultiConflictError{
+		Blockers: []domain.LockRecord{
+			{Target: domain.Target{Canonical: aGo}, OwnerUUID: ownerGreen, Intent: "x", ExpiresAt: now, Branch: "fix/thing"},
+			{Target: domain.Target{Canonical: cGo}, OwnerUUID: ownerRed, Intent: "y", ExpiresAt: now},
+		},
+	}, nil)
+	got := buf.String()
+	if !strings.Contains(got, " branch=fix/thing\n") {
+		t.Errorf("branch row missing branch= key:\n%s", got)
+	}
+	if strings.Count(got, "branch=") != 1 {
+		t.Errorf("empty-branch row must omit branch= key:\n%s", got)
 	}
 }

@@ -572,3 +572,51 @@ func TestCollectForeignClaimAdvisories_OwnerTieBreak(t *testing.T) {
 		t.Errorf("want Owner-sorted A before B, got %s then %s", rows[0].Owner, rows[1].Owner)
 	}
 }
+
+// TestLock_StampsHolderBranch pins loto-16cf: acquire stamps the holder's
+// current git branch onto the lock record and status surfaces it as branch=;
+// a detached HEAD records the short SHA instead. Pre-16cf rows (Branch=="")
+// keep rendering without a branch= key — covered by every other test in this
+// file, whose repos have no commits and so stamp "".
+func TestLock_StampsHolderBranch(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+
+	gitIn := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	gitIn("add", ".")
+	gitIn("commit", "-q", "-m", "base")
+	gitIn("checkout", "-q", "-b", "feature/16cf")
+
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock: exit %d", code)
+	}
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdStatus}, &out, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("status: exit %d", code)
+	}
+	if !strings.Contains(out.String(), " branch=feature/16cf") {
+		t.Errorf("status missing branch=feature/16cf:\n%s", out.String())
+	}
+
+	gitIn("checkout", "-q", "--detach")
+	short := gitIn("rev-parse", "--short", "HEAD")
+	if code := Run([]string{tcCmdLock, filepath.Join("internal", "store", "store.go"), "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock detached: exit %d", code)
+	}
+	out.Reset()
+	if code := Run([]string{tcCmdStatus}, &out, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("status: exit %d", code)
+	}
+	if !strings.Contains(out.String(), " branch="+short) {
+		t.Errorf("status missing branch=%s for detached HEAD:\n%s", short, out.String())
+	}
+}

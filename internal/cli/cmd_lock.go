@@ -206,6 +206,7 @@ func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now t
 	if src == pidDurable {
 		procStartVal, _ = identity.ProcStart(pid)
 	}
+	branch := gitBranch(rt.Ctx)
 	recs := make([]domain.LockRecord, 0, len(targets))
 	for _, t := range targets {
 		recs = append(recs, domain.LockRecord{
@@ -218,6 +219,7 @@ func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now t
 			Host:        rt.Host,
 			PID:         pid,
 			ProcStart:   procStartVal,
+			Branch:      branch,
 			Mode:        mode,
 		})
 	}
