@@ -53,7 +53,7 @@ func cmdTag(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "✗ tag text required")
 		return 2
 	}
-	warnIfNoBeadID("tag", text, stderr)
+	warnIfNoBeadID(text, stderr)
 	repoTop, _ := repoTopForCwd(ctx)
 	target, err := resolveCLITarget(repoTop, fs.Arg(0))
 	if err != nil {
@@ -74,17 +74,16 @@ func cmdTag(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // humans tag too, so the free-text field stays — this is a nudge, not a gate.
 //
 // It fires at most once per session (loto-2hl0): a fleet's coordination
-// traffic is dozens of `loto msg` calls, and a nudge repeated on every one of
-// them stops teaching and starts training the reader to skip stderr. kind
-// names the surface so the msg path doesn't say "tag text".
-func warnIfNoBeadID(kind, text string, stderr io.Writer) {
+// traffic is dozens of `loto tag` calls, and a nudge repeated on every one of
+// them stops teaching and starts training the reader to skip stderr.
+func warnIfNoBeadID(text string, stderr io.Writer) {
 	if beadIDPrefix.MatchString(text) {
 		return
 	}
 	if !claimBeadWarn() {
 		return
 	}
-	fmt.Fprintf(stderr, "∇ %s text should open with your bead id (e.g. loto-c6rg: want next)\n", kind)
+	fmt.Fprintln(stderr, "∇ tag text should open with your bead id (e.g. loto-c6rg: want next)")
 }
 
 // beadWarnMarker is the once-per-session witness file. Var so tests can point

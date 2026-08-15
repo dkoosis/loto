@@ -95,7 +95,6 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
-	defer rt.DeferredMailFooter(stdout)
 
 	// Identity-registry hygiene: sessions first, agents second, so records the
 	// session reap unpins are reapable in the same run (loto-6pn6). doctor is

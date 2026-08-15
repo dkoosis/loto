@@ -302,7 +302,7 @@ func PinnedByEnv() bool {
 // ensureForSession resolves a stable identity for one Claude Code session
 // via ~/.loto/session/<sid>.json. Mints + caches on first call. The cache
 // file is created with O_CREATE|O_EXCL so concurrent first-use callers
-// (e.g. SessionStart hook + an immediate `loto inbox`) converge on one
+// (e.g. SessionStart hook + an immediate `loto status`) converge on one
 // identity; the loser drops its candidate agent file and adopts the
 // winner's record (gh#28).
 //

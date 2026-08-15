@@ -30,8 +30,8 @@ func StateDir(repoTop string) string {
 // when $HOME is unset, and only then /tmp. Duplicated rather than shared —
 // identity must import no internal package (.go-arch-lint.yml) — but this
 // keeps the fallback ABSOLUTE. The old bare os.UserHomeDir()-fails case
-// returned a relative ".local/state", silently rooting the state dir (and
-// with it mail.db) at whatever cwd the command happened to run from.
+// returned a relative ".local/state", silently rooting the state dir at
+// whatever cwd the command happened to run from.
 func xdgStateHome() string {
 	if v := os.Getenv("XDG_STATE_HOME"); v != "" {
 		return v

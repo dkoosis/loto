@@ -30,7 +30,6 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
-	defer rt.DeferredMailFooter(stdout)
 
 	repoTop, _ := repoTopForCwd(ctx)
 	fmt.Fprintf(stdout, "project: %s\n", ResolveAndPinProjectSlug(repoTop))

@@ -61,7 +61,6 @@ func cmdRefresh(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	}
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
-	defer rt.DeferredMailFooter(stdout)
 
 	targets, code := refreshTargets(rt, fs.Args(), *all, stderr)
 	if code != 0 {
