@@ -1,0 +1,6 @@
+# Fleet contract (conform bd-config rule): tracked declaration checked by
+# `conform`; `conform --local` verifies the live bd config matches.
+issue-prefix: "loto"
+custom.plan_dir: /Users/vcto/Projects/dk/Project/loto/plans
+sync:
+    remote: "git+https://github.com/dkoosis/loto.git"
