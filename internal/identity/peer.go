@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dkoosis/atomicfile"
 )
 
 // Peer is the Claude Code messaging identity of the process behind a loto
@@ -231,33 +233,10 @@ func writePeer(p *Peer) error {
 	//
 	// prunePeerRecord's dev+ino guard DEPENDS on this publish-by-rename: every
 	// rewrite lands a new inode at path, which is what makes os.SameFile an
-	// exact replacement detector rather than a heuristic (loto-gj1z). Changing
-	// this to write in place would silently reduce that guard to a no-op.
-	tmp, err := os.CreateTemp(dir, p.UUID+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(body); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return err
-	}
-	return syncDir(dir)
+	// exact replacement detector rather than a heuristic (loto-gj1z). Writing
+	// in place would silently reduce that guard to a no-op — atomicfile
+	// publishes by rename (renameio), so the guard holds.
+	return atomicfile.WriteFile(path, body, 0o600)
 }
 
 // readPeerRaw loads one peer record with no side effects. ok=false means

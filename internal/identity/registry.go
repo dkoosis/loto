@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dkoosis/atomicfile"
 )
 
 // handleShape constrains LOTO_HANDLE to the same general PascalCase display
@@ -773,37 +775,18 @@ func writeAgent(a *Agent) error {
 		return err
 	}
 	final := filepath.Join(dir, a.UUID+".json")
-	// Atomic publish: write to a sibling temp, fsync, rename over the final
-	// path. Concurrent readers see either the previous version or the new
-	// one — never a truncated/partial JSON document (gh#50 / loto-200).
-	tmp, err := os.CreateTemp(dir, a.UUID+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(body); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, final); err != nil {
-		return err
-	}
-	// An fsync'd file's directory entry is not itself durable until the
-	// containing dir is fsync'd — power loss between the rename and the dir
-	// metadata flush can lose the new name (loto-cq6 / gh#131).
-	return syncDir(dir)
+	// Atomic publish: sibling temp, fsync, rename over the final path, then
+	// fsync the parent dir — an fsync'd file's directory entry is not itself
+	// durable until the containing dir is (loto-cq6 / gh#131). Concurrent
+	// readers see either the previous version or the new one, never a
+	// truncated JSON document (gh#50 / loto-200). atomicfile owns the whole
+	// sequence and adds F_FULLFSYNC on darwin, where plain fsync leaves data
+	// in the drive's volatile cache.
+	//
+	// pruneAgentRecord's dev+ino guard depends on the rename: each rewrite
+	// lands a new inode, which is what makes os.SameFile an exact replacement
+	// detector (loto-tu5t, mirroring loto-gj1z on the peer side).
+	return atomicfile.WriteFile(final, body, 0o600)
 }
 
 // syncDir flushes a directory's metadata to stable storage so that a rename
