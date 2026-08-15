@@ -106,7 +106,7 @@ linters:
       # bugclasses pack (ccp-sbp, decision nug d7ea466a8172): the ruleguard
       # checker runs the shared machine rules for the recurring cross-repo Go
       # defect classes. Rules live in .golangci-rules/bugclasses.go — a verbatim
-      # copy of the upstream pack, drift-guarded by scripts/check-pack-drift.sh.
+      # copy of the upstream pack; drift-guarding moved into conform (sd-th5.15).
       enabled-checks:
         - ruleguard
       settings:
@@ -176,6 +176,11 @@ linters:
     nolintlint:
       require-explanation: true
       require-specific: true
+    unconvert:
+      # Skip conversions another GOOS needs (syscall.Stat_t.Nlink is uint16 on
+      # darwin, uint64 on linux) — without this, linux CI flags the conversion
+      # darwin requires (sd-th5.15).
+      safe: true
 
   exclusions:
     generated: lax

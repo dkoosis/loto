@@ -18,6 +18,7 @@ func ProcStart(pid int) (int64, bool) {
 	if pid <= 0 {
 		return 0, false
 	}
+	//nolint:gosec // G703: the path is built from a validated positive integer pid — no traversal is possible.
 	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
 	if err != nil {
 		return 0, false
