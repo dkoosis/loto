@@ -91,6 +91,8 @@ var crossProcRoles = map[string]func() crossProcVerdict{
 	crossProcRoleEnsureName:          crossProcRoleEnsure,
 	crossProcRoleReexecName:          crossProcRoleReexec,
 	crossProcRoleSpawnGrandchildName: crossProcRoleSpawnGrandchild,
+	crossProcRoleParkName:            crossProcRolePark,
+	crossProcRoleGCHolderName:        crossProcRoleGCHolder,
 }
 
 // crossProcRoleSmoke reports its own pid/ppid after clearing the barrier —
@@ -210,13 +212,24 @@ type child struct {
 // crossProcBarrier pipe ends, for tests that use one.
 func spawnChild(t *testing.T, role, dir string, env map[string]string, extra ...*os.File) *child {
 	t.Helper()
+	return spawnChildArgs(t, role, dir, env, nil, extra...)
+}
+
+// spawnChildArgs is spawnChild with control over the child's argv tail. The
+// role path in TestMain exits before m.Run(), so testing never parses these
+// arguments — they exist purely so the child's REAL command line carries the
+// identity flags Family C2's argv cases read back out of the proc table
+// (Peer.AgentID / Peer.ParentSessionID vs `ps -o command=`). Callers that
+// don't need an argv tail use spawnChild.
+func spawnChildArgs(t *testing.T, role, dir string, env map[string]string, args []string, extra ...*os.File) *child {
+	t.Helper()
 
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatalf("crossproc: resolve test binary: %v", err)
 	}
 
-	cmd := exec.CommandContext(t.Context(), exe)
+	cmd := exec.CommandContext(t.Context(), exe, args...)
 	cmd.Dir = dir
 	cmd.Env = crossProcChildEnv(role, env)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -297,6 +310,32 @@ func crossProcMustWait(t *testing.T, c *child) crossProcVerdict {
 		t.Fatalf("crossproc: child wait: %v", err)
 	}
 	return v
+}
+
+// crossProcKillAndReap SIGKILLs c's whole process group, reaps it, and
+// returns its pid — now a pid that provably no longer runs, which is what
+// Family C2's dead-holder case needs as an input rather than as a race. The
+// kill is completed and reaped before the caller asserts anything, so "the
+// holder is dead" is a fact by the time any verdict is taken. Reusing the
+// process-group path spawnChild's cleanup already uses means a deliberate
+// kill and a cleanup kill cannot diverge.
+func crossProcKillAndReap(t *testing.T, c *child) int {
+	t.Helper()
+	pid := c.cmd.Process.Pid
+	pgid, err := syscall.Getpgid(pid)
+	if err != nil {
+		t.Fatalf("crossproc: getpgid(%d): %v", pid, err)
+	}
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		t.Fatalf("crossproc: kill process group %d: %v", pgid, err)
+	}
+	// A SIGKILLed child always exits non-zero and prints no verdict line, so
+	// the error here is expected and carries no information worth asserting.
+	_ = c.cmd.Wait()
+	if PIDAlive(pid) {
+		t.Fatalf("crossproc: pid %d still alive after kill+reap", pid)
+	}
+	return pid
 }
 
 // crossProcBarrier is the kernel-mediated release-N-processes-at-once
