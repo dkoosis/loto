@@ -2,7 +2,7 @@
 #
 # Primary: scan check audit report deploy doctor cross
 #   scan   — changed pkgs only (fast inner loop)
-#   check  — full repo: vet + lint + test + build
+#   check  — full repo: vet + lint + arch + test + build + conform
 #   audit  — everything: +race +vuln +dupl +nilcheck
 # Run `make help` for full target list.
 
@@ -20,7 +20,7 @@ include .sandbox/lib/Makefile.cross.mk
 
 .PHONY: help scan check audit deploy report report-human \
         vet lint arch test race demo demo-v vuln dupl nilcheck stress \
-        pack-drift build install tidy clean hooks
+        selfcheck build install tidy clean hooks
 
 BIN_DIR := bin
 BIN     := $(BIN_DIR)/loto
@@ -54,9 +54,13 @@ help: ## Show this help
 		/^## [^-]/ { printf "\n%s\n", substr($$0, 4) } \
 		/^[a-zA-Z0-9_-]+:.*?## / { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-check: vet lint arch pack-drift test ## Full repo: vet + lint + arch + pack-drift + test + build
-	@go build -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/loto
+check: vet lint arch test build selfcheck ## Full repo: vet + lint + arch + test + build + conform
 	@echo "=== check pass ==="
+
+# Dogfood the fleet gate (sd-th5.15): conform is pinned as a go.mod tool
+# dependency (go.sum-verified); bumping the pin is a deliberate PR.
+selfcheck: ## Run conform (fleet SDLC checker) against this repo
+	go tool conform
 
 audit: check race vuln dupl nilcheck demo ## Exhaustive: +race +vuln +dupl +nilcheck +demo
 	@echo "=== audit pass ==="
@@ -92,13 +96,6 @@ arch: ## Enforce layering (.go-arch-lint.yml)
 		exit 1; \
 	fi
 	@go-arch-lint check --json 2>/dev/null | fo wrap archlint | fo --format llm
-
-pack-drift: ## Fail if the copied bugclasses pack has drifted from upstream (network-soft)
-	@# bugclasses pack (ccp-sbp): fail if .golangci-rules/bugclasses.go has
-	@# drifted from the upstream cc-plugins pack. Network-soft — an unreachable
-	@# upstream (cc-plugins is private) warns and passes, so this never breaks an
-	@# offline build.
-	@scripts/check-pack-drift.sh .golangci-rules/bugclasses.go
 
 lint: ## Run golangci-lint (full)
 	@if ! command -v golangci-lint >/dev/null 2>&1; then \

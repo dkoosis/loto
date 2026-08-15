@@ -54,32 +54,26 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: go vet
-        run: go vet ./...
-
-      - name: go test -race
-        run: go test -race -count=1 ./...
-
-      - name: build
-        run: go build ./...
-
-      # Layering gate (loto-vlid). go-arch-lint enforces .go-arch-lint.yml; CI
-      # previously ran no layering check, so a back-edge merged clean whenever
-      # local `make check` was skipped. Linux-only: import-graph analysis is
-      # OS-independent and every PR + push-to-main runs the linux leg. Pinned to
-      # match the local toolchain. Runs go-arch-lint directly (not `make arch`,
-      # which also needs the `fo` formatter) — exits non-zero on any violation.
-      - name: arch (layering)
-        if: matrix.name == 'linux'
+      # Gate tooling — every pin read from one file (.sandbox/project.conf,
+      # conform lint-pin rule). make check pipes vet/lint/test through fo and
+      # runs go-arch-lint (make arch), so all three must be on PATH.
+      - name: gate tools (pinned in .sandbox/project.conf)
         run: |
+          . ./.sandbox/project.conf
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" "$GOLANGCI_LINT_VERSION"
+          go install "github.com/dkoosis/fo/cmd/fo@$FO_VERSION"
           go install github.com/fe3dback/go-arch-lint@v1.15.0
-          "$(go env GOPATH)/bin/go-arch-lint" check
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      # bugclasses pack drift (ccp-sbp): fail if .golangci-rules/bugclasses.go
-      # has drifted from upstream. Network-soft — skips cleanly when upstream is
-      # unreachable (cc-plugins is private; activates once a token or public URL
-      # is wired via PACK_UPSTREAM_URL). Linux-only: it's a file-hash check,
-      # OS-independent, and every PR + push-to-main runs the linux leg.
-      - name: pack-drift
-        if: matrix.name == 'linux'
-        run: make pack-drift
+      # CI = the same gate a developer runs; no verb re-implemented in YAML
+      # (conform ci-gate rule). check runs vet + lint + arch + test + build +
+      # conform (selfcheck, via the go.mod tool pin). This subsumes the old
+      # per-step vet/test/build and the linux-only arch step (loto-vlid) —
+      # arch now runs on every leg, harmless since it is OS-independent.
+      - name: check
+        run: make check
+
+      # The -race gate survives as a make verb, not YAML (was `go test -race`).
+      - name: race
+        run: make race
