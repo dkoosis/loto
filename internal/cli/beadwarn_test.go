@@ -22,8 +22,8 @@ func TestWarnIfNoBeadIDFiresOncePerSession(t *testing.T) {
 	tempBeadWarnMarker(t, true)
 
 	var first, second bytes.Buffer
-	warnIfNoBeadID("msg", "want next", &first)
-	warnIfNoBeadID("msg", "still want next", &second)
+	warnIfNoBeadID("want next", &first)
+	warnIfNoBeadID("still want next", &second)
 
 	if !strings.Contains(first.String(), "bead id") {
 		t.Fatalf("first call must teach the convention: %q", first.String())
@@ -34,24 +34,20 @@ func TestWarnIfNoBeadIDFiresOncePerSession(t *testing.T) {
 }
 
 func TestWarnIfNoBeadIDNamesTheSurface(t *testing.T) {
-	// The convention warning is shared by tag and msg; it must not tell a msg
-	// sender about "tag text" (loto-2hl0).
-	for _, kind := range []string{"tag", "msg"} {
-		t.Run(kind, func(t *testing.T) {
-			tempBeadWarnMarker(t, true)
-			var out bytes.Buffer
-			warnIfNoBeadID(kind, "want next", &out)
-			if !strings.HasPrefix(out.String(), "∇ "+kind+" text") {
-				t.Fatalf("want a %s-flavored warning, got %q", kind, out.String())
-			}
-		})
+	// tag is the only surface carrying free-text coordination now that mail is
+	// retired (loto-3wlb), so the warning names it outright (loto-2hl0).
+	tempBeadWarnMarker(t, true)
+	var out bytes.Buffer
+	warnIfNoBeadID("want next", &out)
+	if !strings.HasPrefix(out.String(), "∇ tag text") {
+		t.Fatalf("want a tag-flavored warning, got %q", out.String())
 	}
 }
 
 func TestWarnIfNoBeadIDSilentWithPrefix(t *testing.T) {
 	tempBeadWarnMarker(t, true)
 	var out bytes.Buffer
-	warnIfNoBeadID("msg", "loto-2hl0: who table", &out)
+	warnIfNoBeadID("loto-2hl0: who table", &out)
 	if out.Len() != 0 {
 		t.Fatalf("a bead-id prefix must not warn; got %q", out.String())
 	}
@@ -63,7 +59,7 @@ func TestWarnIfNoBeadIDAlwaysWarnsWithoutSession(t *testing.T) {
 	tempBeadWarnMarker(t, false)
 	for i := range 2 {
 		var out bytes.Buffer
-		warnIfNoBeadID("tag", "want next", &out)
+		warnIfNoBeadID("want next", &out)
 		if !strings.Contains(out.String(), "bead id") {
 			t.Fatalf("call %d must warn without a session marker: %q", i, out.String())
 		}

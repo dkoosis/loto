@@ -28,7 +28,6 @@ const (
 	tcFlagAll      = "--all"
 	tcFlagShared   = "--shared"
 	tcCmdLane      = "lane"
-	tcCmdInbox     = "inbox"
 	tcCmdVerify    = "verify"
 	tcFlagRef      = "--ref"
 	tcFlagBase     = "--base"

@@ -45,7 +45,6 @@ func cmdUnclaim(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	}
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
-	defer rt.DeferredMailFooter(stdout)
 
 	res, err := rt.Store.ReleaseClaim(rt.Ctx, prefix.Canonical, domain.AgentUUID(rt.Agent.UUID))
 	if err != nil {

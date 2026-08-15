@@ -92,8 +92,7 @@ type runtime struct {
 	Host          string
 	HostKnown     bool // false → this machine has no verifiable host id; liveProbe must not compare hosts (loto-u7e)
 	StateDir      string
-	Slug          string             // project slug of the repo being acted in; addresses @<slug> mail
-	RepoTop       string             // absolute repo toplevel; its basename is the @<dir> mail alias
+	RepoTop       string             // absolute repo toplevel; roots canonical target resolution
 	SessionUUID   domain.SessionUUID // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID
 	SessionPinned bool               // true iff LOTO_SESSION_ID was in env; gates session-scoped semantics
 	AgentPinned   bool               // true iff a non-empty LOTO_AGENT_ID, a usable LOTO_SUBAGENT_ID (SubagentIDPins), or CLAUDE_CODE_SESSION_ID pins an identity; false → Ensure minted a throwaway UUID
@@ -162,7 +161,6 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 		Host:          host,
 		HostKnown:     hostKnown,
 		StateDir:      dir,
-		Slug:          ResolveAndPinProjectSlug(top),
 		RepoTop:       top,
 		SessionUUID:   domain.SessionUUID(sid),
 		SessionPinned: pinned,
@@ -191,9 +189,9 @@ func repoTopForCwd(ctx context.Context) (string, error) {
 	return gitRevParseToplevel(ctx)
 }
 
-// Close releases the per-project store, if one was opened. Mail-only
-// runtimes (openMailRuntime) never open a store — Store is nil, and Close is
-// then a no-op rather than a nil-pointer panic.
+// Close releases the per-project store, if one was opened. A runtime built
+// without a store leaves Store nil, and Close is then a no-op rather than a
+// nil-pointer panic.
 func (r *runtime) Close() error {
 	if r.Store == nil {
 		return nil

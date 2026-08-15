@@ -54,7 +54,7 @@ func TestStateDirRespectsLOTO_BASE(t *testing.T) {
 
 // TestXdgStateHomeAbsoluteWhenHomeUnset guards against the relative-path
 // regression: os.UserHomeDir() failing (empty $HOME) used to return a bare
-// ".local/state", silently rooting the per-project store AND mail.db at
+// ".local/state", silently rooting the per-project store at
 // whatever cwd a command happened to run from (loto-7wi). The fallback must
 // stay absolute regardless of which rung of the cascade answers.
 func TestXdgStateHomeAbsoluteWhenHomeUnset(t *testing.T) {

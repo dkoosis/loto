@@ -41,8 +41,6 @@ components:
     in: internal/render/**
   lane:
     in: internal/lane/**
-  mail:
-    in: internal/mail/**
 
 deps:
   main:
@@ -55,11 +53,6 @@ deps:
       - identity
       - render
       - lane
-      - mail
-  # internal/mail is the host-global mailbox — sqlite over domain.Message only.
-  mail:
-    mayDependOn:
-      - domain
   # internal/lane is pure git plumbing — stdlib only, no internal deps.
   # anyVendorDeps (not an empty mayDependOn) is how go-arch-lint v3 wants a
   # no-internal-deps component declared — same as domain/identity below. It
