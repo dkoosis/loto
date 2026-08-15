@@ -176,11 +176,6 @@ linters:
     nolintlint:
       require-explanation: true
       require-specific: true
-    unconvert:
-      # Skip conversions another GOOS needs (syscall.Stat_t.Nlink is uint16 on
-      # darwin, uint64 on linux) — without this, linux CI flags the conversion
-      # darwin requires (sd-th5.15).
-      safe: true
 
   exclusions:
     generated: lax
@@ -190,6 +185,15 @@ linters:
       - legacy
       - std-error-handling
     rules:
+      # syscall.Stat_t.Nlink is uint16 on darwin, uint32 on linux/arm64, and
+      # uint64 on linux/amd64 — the uint64() conversion two platforms need
+      # reads as identity on linux/amd64. A nolint can't work: nolintlint
+      # flags it as unused on every platform where the conversion is real,
+      # and unconvert's safe mode is a no-op under golangci (sd-th5.15).
+      - linters:
+          - unconvert
+        path: internal/store/locks_acquire\.go
+        text: unnecessary conversion
       # Test files: relax security, complexity, and context requirements
       - linters:
           - gosec
