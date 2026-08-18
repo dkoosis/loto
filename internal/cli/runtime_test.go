@@ -292,8 +292,9 @@ func TestOpenRuntimeGCPinsLockOwners(t *testing.T) {
 // independently probed.
 func TestMemoLiveProbe(t *testing.T) {
 	const owner = "owner-1"
+	const session = "session-1"
 	calls := 0
-	base := domain.LockRecord{Host: "h1", OwnerUUID: owner, PID: 42, ProcStart: 7}
+	base := domain.LockRecord{Host: "h1", OwnerUUID: owner, SessionUUID: session, PID: 42, ProcStart: 7}
 	probe := memoLiveProbe(func(domain.LockRecord) domain.Liveness {
 		calls++
 		return domain.LivenessAlive
@@ -311,16 +312,48 @@ func TestMemoLiveProbe(t *testing.T) {
 	// Each field the underlying probe reads must key the cache separately —
 	// a collision here would answer for the wrong process.
 	distinct := []domain.LockRecord{
-		{Host: "h2", OwnerUUID: owner, PID: 42, ProcStart: 7},
-		{Host: "h1", OwnerUUID: "owner-2", PID: 42, ProcStart: 7},
-		{Host: "h1", OwnerUUID: owner, PID: 43, ProcStart: 7},
-		{Host: "h1", OwnerUUID: owner, PID: 42, ProcStart: 8},
+		{Host: "h2", OwnerUUID: owner, SessionUUID: session, PID: 42, ProcStart: 7},
+		{Host: "h1", OwnerUUID: "owner-2", SessionUUID: session, PID: 42, ProcStart: 7},
+		{Host: "h1", OwnerUUID: owner, SessionUUID: session, PID: 43, ProcStart: 7},
+		{Host: "h1", OwnerUUID: owner, SessionUUID: session, PID: 42, ProcStart: 8},
+		// loto-s0bb: the session is a field the probe reads (peerSpeaksFor), so
+		// it must key the cache too.
+		{Host: "h1", OwnerUUID: owner, SessionUUID: "session-2", PID: 42, ProcStart: 7},
 	}
 	for _, l := range distinct {
 		probe(l)
 	}
 	if want := 1 + len(distinct); calls != want {
 		t.Errorf("distinct holders = %d calls, want %d", calls, want)
+	}
+}
+
+// TestMemoLiveProbe_SiblingSessionsDoNotShareAVerdict is the loto-s0bb
+// regression pin (Codex #248). Sibling sessions of one agent share an owner
+// uuid, and every sibling beacon and every claim carries PID 0 — so on the old
+// key (host, owner, pid, proc-start) two sibling records were one cache entry.
+// liveProbe answers DEAD only for the session the single peer record names and
+// falls through to UNKNOWN for the others, so probing the dead sibling first
+// served its DEAD verdict to a live one: check --gate, guard, and claim
+// acquisition would then hand a live agent's territory to a competing writer.
+func TestMemoLiveProbe_SiblingSessionsDoNotShareAVerdict(t *testing.T) {
+	const owner = "shared-agent"
+	dead := domain.LockRecord{Host: "h1", OwnerUUID: owner, SessionUUID: "dead-session"}
+	live := domain.LockRecord{Host: "h1", OwnerUUID: owner, SessionUUID: "live-session"}
+
+	probe := memoLiveProbe(func(l domain.LockRecord) domain.Liveness {
+		if l.SessionUUID == dead.SessionUUID {
+			return domain.LivenessDead
+		}
+		return domain.LivenessUnknown
+	})
+
+	// Dead sibling first — the order that poisoned the cache.
+	if got := probe(dead); got != domain.LivenessDead {
+		t.Fatalf("dead sibling = %v, want dead", got)
+	}
+	if got := probe(live); got != domain.LivenessUnknown {
+		t.Fatalf("live sibling = %v, want unknown — a dead sibling's verdict was cached for it", got)
 	}
 }
 
