@@ -1,0 +1,14 @@
+usage: loto beacon <target> [<target>...]
+
+Mint a short-TTL shared lease on paths this agent is about to write. Minted by
+the PreToolUse gate, not by hand: it makes an agent's in-flight writes visible
+to peers that never ran 'loto lock'.
+
+Shared mode, no PID, `2m` TTL, refreshed in place on re-mint. Two beacons
+never block each other at acquire — 'loto check --gate' is what denies a
+FOREIGN beacon's path, so a peer is stopped at its own next write.
+
+examples:
+  loto beacon internal/store/locks.go
+  -ttl duration
+    	beacon TTL (default 2m0s)

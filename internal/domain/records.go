@@ -74,6 +74,23 @@ func (l LockRecord) EffectiveMode() string {
 	return ModeExclusive // empty or any non-"shared" value → exclusive
 }
 
+// IsBeacon reports whether this row was minted by the PreToolUse gate on a
+// writing agent's behalf rather than taken by an agent that asked for it
+// (loto-xwod). A beacon is shared-mode with no pid: shared so two siblings'
+// beacons never collide at acquire, pid-less because the minting hook exits
+// milliseconds after the write it announces and a stamped pid would probe dead
+// at once — leaving the TTL as the sole authority, which is the lease a beacon
+// wants.
+//
+// The distinction is not cosmetic. `loto guard` lets a session move its own
+// tree past its OWN siblings' beacons — they only say "an agent of mine is
+// writing here" — while a sibling's real exclusive lock still refuses the move.
+// A checkout under declared, uncommitted territory is precisely what destroyed
+// an agent's work on 2026-08-14.
+func (l LockRecord) IsBeacon() bool {
+	return l.EffectiveMode() == ModeShared && l.PID == 0
+}
+
 // ClaimRecord is a coarse path-prefix territory reservation: "this package is
 // mine this session", distinct from the per-file, per-edit LockRecord
 // (loto-7af9). Claims are TTL-only leases — no PID/liveness fields, no mode;
