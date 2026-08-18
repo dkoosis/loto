@@ -2,12 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
-
-	"os"
 )
 
 const tcFlagCwdUnknown = "--cwd-unknown"
@@ -104,5 +104,44 @@ func TestCheckGate_CwdUnknownRefusesRelativePath(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "✗ unresolvable count=1") {
 		t.Errorf("expected the unresolvable refusal row: %q", out.String())
+	}
+}
+
+// TestCheckCwdUnknown_StagedPathsAreNotRefused pins the provenance carve-out
+// (Codex #247): --staged paths come from `git diff --cached` run with
+// cmd.Dir = repoTop, so their base is the repo root by construction and does
+// not depend on the caller's cwd. Refusing them would make
+// `--cwd-unknown --staged` reject every nonempty commit — the pre-commit hook's
+// exact call shape.
+func TestCheckCwdUnknown_StagedPathsAreNotRefused(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("staged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "add", tcTargetA).CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v: %s", err, out)
+	}
+
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcFlagGate, tcFlagCwdUnknown, "--staged"}, &out, &bytes.Buffer{})
+	if strings.Contains(out.String(), "unresolvable") {
+		t.Fatalf("staged paths carry a known base and must not be refused: %q", out.String())
+	}
+	if code != 0 {
+		t.Fatalf("expected a clean verdict for an unheld staged path, got %d: %q", code, out.String())
+	}
+}
+
+// TestRefuseUnresolvableRelative_FixBlockIsQuoted: the remediation must survive
+// a checkout path with a space or a glob character (Codex #247).
+func TestRefuseUnresolvableRelative_FixBlockIsQuoted(t *testing.T) {
+	var out bytes.Buffer
+	if rc, refused := refuseUnresolvableRelative(&out, []string{"locks.go"}); !refused || rc == 0 {
+		t.Fatalf("expected a refusal, got rc=%d refused=%v", rc, refused)
+	}
+	if !strings.Contains(out.String(), `loto check "$(git rev-parse --show-toplevel)/<path>"`) {
+		t.Errorf("fix block must quote the constructed path: %q", out.String())
 	}
 }

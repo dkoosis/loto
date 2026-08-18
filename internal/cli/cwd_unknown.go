@@ -57,7 +57,11 @@ func refuseUnresolvableRelative(stdout io.Writer, paths []string) (rc int, refus
 	fmt.Fprintln(stdout, "ℹ the caller's working directory is not in the hook payload, so a relative path has no single meaning here")
 	fmt.Fprintln(stdout, "```bash")
 	fmt.Fprintln(stdout, "# re-run the command with absolute paths, or cd and use paths from the repo root")
-	fmt.Fprintf(stdout, "loto check %s\n", filepath.Join("$(git rev-parse --show-toplevel)", "<path>"))
+	// Quoted: a checkout path containing a space or a glob character would
+	// otherwise word-split or expand after the reader substitutes <path>, so
+	// the copy-paste fix would check different arguments than it names
+	// (Codex #247).
+	fmt.Fprintf(stdout, "loto check %q\n", filepath.Join("$(git rev-parse --show-toplevel)", "<path>"))
 	fmt.Fprintln(stdout, "```")
 	return 1, true
 }

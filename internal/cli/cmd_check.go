@@ -51,9 +51,13 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 		return nil, repoTop, *gateFlag, 0, true
 	}
 
-	// loto-tzmv.10: refuse before resolving, never guess. See
-	// refuseUnresolvableRelative.
-	if *cwdUnknown {
+	// loto-tzmv.10: refuse before resolving, never guess. Scoped to paths the
+	// CALLER typed — --staged paths come from `git diff --cached` run with
+	// cmd.Dir = repoTop, so their base is repo root by construction and known
+	// regardless of the caller's cwd. Refusing those would make
+	// `--cwd-unknown --staged` reject every nonempty commit (Codex #247).
+	// See refuseUnresolvableRelative.
+	if *cwdUnknown && !*staged {
 		if rc, refused := refuseUnresolvableRelative(stdout, paths); refused {
 			return nil, repoTop, *gateFlag, rc, true
 		}
