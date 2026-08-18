@@ -93,20 +93,38 @@ type runtime struct {
 	HostKnown     bool // false → this machine has no verifiable host id; liveProbe must not compare hosts (loto-u7e)
 	StateDir      string
 	RepoTop       string             // absolute repo toplevel; roots canonical target resolution
-	SessionUUID   domain.SessionUUID // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID
-	SessionPinned bool               // true iff LOTO_SESSION_ID was in env; gates session-scoped semantics
+	SessionUUID   domain.SessionUUID // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID or CLAUDE_CODE_SESSION_ID
+	SessionPinned bool               // true iff either of those was in env; gates session-scoped semantics
 	AgentPinned   bool               // true iff a non-empty LOTO_AGENT_ID, a usable LOTO_SUBAGENT_ID (SubagentIDPins), or CLAUDE_CODE_SESSION_ID pins an identity; false → Ensure minted a throwaway UUID
 }
 
-// sessionUUID resolves the per-session id. The SessionStart hook exports
-// LOTO_SESSION_ID so every shell-out from one Claude session shares an id
-// distinct from Agent.UUID; release --all then scopes to that session,
-// satisfying NORTH_STAR invariant 5 (per-session identity). Without the env
-// var (single-shot CLI use), mint a fresh id but signal `pinned=false` so
-// callers know not to use it as a release filter — keeps --all working as
-// an agent-scoped fallback for direct invocation.
+// sessionUUID resolves the per-session id. LOTO_SESSION_ID is the explicit
+// override; CLAUDE_CODE_SESSION_ID is the id Claude Code already puts in the
+// environment of every shell-out from one session. Either satisfies NORTH_STAR
+// invariant 5 (per-session identity) and lets release --all scope to a session.
+// With neither (single-shot CLI use), mint a fresh id but signal `pinned=false`
+// so callers know not to use it as a release filter — keeps --all working as an
+// agent-scoped fallback for direct invocation.
+//
+// ‡ The CLAUDE_CODE_SESSION_ID leg is not a convenience, it repairs a broken
+// invariant (loto-2lj5). records.go documents SessionUUID as "one Claude
+// session = one id, shared by every shell-out from that session", but nothing
+// in this repo or in the cc-plugins hooks has ever exported LOTO_SESSION_ID, so
+// the fallback minted a fresh UUID per INVOCATION. Measured in the live
+// dkoosis-sdlc store, three locks taken by one session carried two different
+// session ids and neither was the session's. Everything keyed on session
+// identity was therefore inert: `unlock --session` (SessionPinned was always
+// false), ReleaseBySession, and — the reason this is being fixed now — any
+// attempt to ask whether a peer record speaks for a given record's session.
+//
+// identity.RecordPeer reads the same CLAUDE_CODE_SESSION_ID into Peer.SessionID
+// (peer.go), so the two sides are comparable BY CONSTRUCTION rather than by
+// convention. peerSpeaksFor below depends on exactly that.
 func sessionUUID() (id string, pinned bool) {
 	if v := os.Getenv("LOTO_SESSION_ID"); v != "" {
+		return v, true
+	}
+	if v := os.Getenv("CLAUDE_CODE_SESSION_ID"); v != "" {
 		return v, true
 	}
 	return identity.NewUUID(), false
@@ -242,16 +260,50 @@ func (r *runtime) liveProbe() domain.HolderLiveProbe {
 		if !r.HostKnown || l.Host != r.Host {
 			return domain.LivenessUnknown
 		}
-		switch identity.AgentLive(r.Ctx, string(l.OwnerUUID)).Liveness {
+		v := identity.AgentLive(r.Ctx, string(l.OwnerUUID))
+		switch v.Liveness {
 		case identity.SessionLive:
 			return domain.LivenessAlive
 		case identity.SessionDead:
-			return domain.LivenessDead
+			if peerSpeaksFor(v.Peer, l.SessionUUID) {
+				return domain.LivenessDead
+			}
+			// The peer record belongs to a DIFFERENT session of the same
+			// agent, so its death is no evidence about this record's holder.
+			// Fall through (loto-2lj5).
 		case identity.SessionUnknown:
 			// no peer record — fall through to the pid probe
 		}
 		return pidVerdict(l)
 	}
+}
+
+// peerSpeaksFor reports whether a peer record is evidence about the session
+// that took this record. Peer records are keyed on agent uuid alone
+// (identity.peerPath), but sibling sessions sharing one LOTO_AGENT_ID are a
+// supported, tested configuration (loto-81n) — so one agent uuid can have
+// several live sessions and exactly one peer record. When a sibling dies, that
+// record reads DEAD, and without this check every lock held by the still-live
+// siblings is classified stale: two agents write one file, the one failure
+// loto exists to prevent and the one direction that cannot be recovered from.
+//
+// ‡ Asymmetric by design, and the asymmetry is the safety argument. Only the
+// DEAD verdict is gated. A LIVE verdict from the wrong sibling keeps a lock
+// denying, which over-refuses — annoying, reversible, and strictly the safe
+// direction. Gating both would be tidier and would give up the loto-r11w
+// override, where a worktree/subagent holder whose stamped pid probes dead is
+// still alive because its session socket checks out.
+//
+// Both ids empty means the caller is not a Claude session at all (direct CLI
+// use, legacy rows): nothing to correspond, nothing to contradict, so the
+// verdict stands as before. A mismatch falls through to pidVerdict, which
+// answers from the record's own stamped pid, or UNKNOWN when there is none —
+// and then the TTL is the sole authority, exactly as the bead asks.
+func peerSpeaksFor(p *identity.Peer, session domain.SessionUUID) bool {
+	if p == nil {
+		return false
+	}
+	return p.SessionID == string(session)
 }
 
 // memoLiveProbe wraps a probe so each distinct holder is probed at most once

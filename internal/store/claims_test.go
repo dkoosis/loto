@@ -42,7 +42,7 @@ func TestReleaseBySession_ClaimsScopedToSession(t *testing.T) {
 		mkClaimSession("internal/b", tcAlice, "session-2", time.Hour),
 		mkClaimSession("internal/c", tcBob, "session-1", time.Hour),
 	} {
-		if err := s.ClaimPrefix(ctx, c); err != nil {
+		if err := s.ClaimPrefix(ctx, c, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -80,7 +80,7 @@ func TestReleaseBySession_ClaimsAgentScopedFallback(t *testing.T) {
 		mkClaimSession("internal/b", tcAlice, "session-2", time.Hour),
 		mkClaimSession("internal/c", tcBob, "session-1", time.Hour),
 	} {
-		if err := s.ClaimPrefix(ctx, c); err != nil {
+		if err := s.ClaimPrefix(ctx, c, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -105,7 +105,7 @@ func TestReleaseBySession_ClaimsAgentScopedFallback(t *testing.T) {
 func TestReleaseBySession_ClaimsNothingOwned(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	if err := s.ClaimPrefix(ctx, mkClaimSession("internal/c", tcBob, "session-1", time.Hour)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaimSession("internal/c", tcBob, "session-1", time.Hour), nil); err != nil {
 		t.Fatal(err)
 	}
 	_, got, err := s.ReleaseBySession(ctx, tcAlice, "")
@@ -120,17 +120,17 @@ func TestReleaseBySession_ClaimsNothingOwned(t *testing.T) {
 func TestClaimPrefixBlocksOverlap(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	if err := s.ClaimPrefix(ctx, mkClaim("internal/store", tcAlice, time.Hour)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaim(tcPkgStore, tcAlice, time.Hour), nil); err != nil {
 		t.Fatal(err)
 	}
 	cases := []struct{ name, prefix string }{
-		{"exact", "internal/store"},
+		{"exact", tcPkgStore},
 		{"child", "internal/store/sub"},
 		{"parent", "internal"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := s.ClaimPrefix(ctx, mkClaim(c.prefix, tcBob, time.Hour))
+			err := s.ClaimPrefix(ctx, mkClaim(c.prefix, tcBob, time.Hour), nil)
 			var cce *ClaimConflictError
 			if !errors.As(err, &cce) {
 				t.Fatalf("ClaimPrefix(%q) err=%v; want *ClaimConflictError", c.prefix, err)
@@ -148,13 +148,13 @@ func TestClaimPrefixBlocksOverlap(t *testing.T) {
 func TestClaimPrefixSameOwnerRefresh(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	first := mkClaim("internal/store", tcAlice, time.Minute)
-	if err := s.ClaimPrefix(ctx, first); err != nil {
+	first := mkClaim(tcPkgStore, tcAlice, time.Minute)
+	if err := s.ClaimPrefix(ctx, first, nil); err != nil {
 		t.Fatal(err)
 	}
-	refresh := mkClaim("internal/store", tcAlice, time.Hour)
+	refresh := mkClaim(tcPkgStore, tcAlice, time.Hour)
 	refresh.Intent = "claim-refreshed"
-	if err := s.ClaimPrefix(ctx, refresh); err != nil {
+	if err := s.ClaimPrefix(ctx, refresh, nil); err != nil {
 		t.Fatalf("same-owner re-claim must refresh, got: %v", err)
 	}
 	all, err := s.ListClaims(ctx)
@@ -176,7 +176,7 @@ func TestClaimPrefixSameOwnerRefresh(t *testing.T) {
 		t.Errorf("created_at changed on refresh: %v vs %v", got.CreatedAt, first.CreatedAt)
 	}
 	// Same-owner overlap on a DIFFERENT prefix never blocks either.
-	if err := s.ClaimPrefix(ctx, mkClaim("internal/store/sub", tcAlice, time.Hour)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaim("internal/store/sub", tcAlice, time.Hour), nil); err != nil {
 		t.Fatalf("same-owner nested claim must not block: %v", err)
 	}
 }
@@ -184,13 +184,13 @@ func TestClaimPrefixSameOwnerRefresh(t *testing.T) {
 func TestClaimPrefixSiblingsCoexist(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	if err := s.ClaimPrefix(ctx, mkClaim("internal/store", tcAlice, time.Hour)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaim(tcPkgStore, tcAlice, time.Hour), nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimPrefix(ctx, mkClaim("internal/storefront", tcBob, time.Hour)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaim("internal/storefront", tcBob, time.Hour), nil); err != nil {
 		t.Fatalf("string-prefix sibling must not overlap: %v", err)
 	}
-	if err := s.ClaimPrefix(ctx, mkClaim("internal/render", tcBob, time.Hour)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaim("internal/render", tcBob, time.Hour), nil); err != nil {
 		t.Fatalf("disjoint sibling must not overlap: %v", err)
 	}
 	all, err := s.ListClaims(ctx)
@@ -205,10 +205,10 @@ func TestClaimPrefixSiblingsCoexist(t *testing.T) {
 func TestClaimPrefixReclaimsExpired(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	if err := s.ClaimPrefix(ctx, mkClaim("pkg/a", tcAlice, -time.Second)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaim("pkg/a", tcAlice, -time.Second), nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimPrefix(ctx, mkClaim("pkg/a/deep", tcBob, time.Hour)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaim("pkg/a/deep", tcBob, time.Hour), nil); err != nil {
 		t.Fatalf("expired overlapping claim must be reclaimed, got: %v", err)
 	}
 	all, err := s.ListClaims(ctx)
@@ -226,10 +226,10 @@ func TestClaimPrefixReclaimsExpired(t *testing.T) {
 func TestReleaseClaimOwner(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	if err := s.ClaimPrefix(ctx, mkClaim("internal/store", tcAlice, time.Hour)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaim(tcPkgStore, tcAlice, time.Hour), nil); err != nil {
 		t.Fatal(err)
 	}
-	res, err := s.ReleaseClaim(ctx, "internal/store", tcAlice)
+	res, err := s.ReleaseClaim(ctx, tcPkgStore, tcAlice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestReleaseClaimOwner(t *testing.T) {
 
 func TestReleaseClaimNoClaim(t *testing.T) {
 	s := mustOpen(t)
-	res, err := s.ReleaseClaim(context.Background(), "internal/store", tcAlice)
+	res, err := s.ReleaseClaim(context.Background(), tcPkgStore, tcAlice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,10 +259,10 @@ func TestReleaseClaimNoClaim(t *testing.T) {
 func TestReleaseClaimNotOwner(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	if err := s.ClaimPrefix(ctx, mkClaim("internal/store", tcAlice, time.Hour)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaim(tcPkgStore, tcAlice, time.Hour), nil); err != nil {
 		t.Fatal(err)
 	}
-	res, err := s.ReleaseClaim(ctx, "internal/store", tcBob)
+	res, err := s.ReleaseClaim(ctx, tcPkgStore, tcBob)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,10 +290,10 @@ func TestReleaseClaimNotOwner(t *testing.T) {
 func TestReleaseClaimIgnoresExpiredForeignRow(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	if err := s.ClaimPrefix(ctx, mkClaim("internal/store", tcAlice, -time.Second)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaim(tcPkgStore, tcAlice, -time.Second), nil); err != nil {
 		t.Fatal(err)
 	}
-	res, err := s.ReleaseClaim(ctx, "internal/store", tcBob)
+	res, err := s.ReleaseClaim(ctx, tcPkgStore, tcBob)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,107 @@ func TestClaimsTableEnsuredOnExistingDB(t *testing.T) {
 		t.Fatalf("re-open on pre-claims DB: %v", err)
 	}
 	defer s2.Close()
-	if err := s2.ClaimPrefix(context.Background(), mkClaim("internal/store", tcAlice, time.Hour)); err != nil {
+	if err := s2.ClaimPrefix(context.Background(), mkClaim(tcPkgStore, tcAlice, time.Hour), nil); err != nil {
 		t.Fatalf("claims table not ensured on existing DB: %v", err)
+	}
+}
+
+// --- loto-9acu: acquisition and the gate must agree on one record ----------
+
+// deadOwnerProbe reports every record owned by dead as provably gone, and
+// nothing else. It stands in for the runtime probe's oracle leg — the thing
+// `check --gate` already consults for claims (domain.EvalContext.ClaimIsStale)
+// and that acquisition ignored.
+func deadOwnerProbe(dead domain.AgentUUID) domain.HolderLiveProbe {
+	return func(l domain.LockRecord) domain.Liveness {
+		if l.OwnerUUID == dead {
+			return domain.LivenessDead
+		}
+		return domain.LivenessUnknown
+	}
+}
+
+// The tzmv.9 crash, exactly: a session dies holding a long repo-wide claim.
+// The gate says the territory is free; before this fix ClaimPrefix partitioned
+// on TTL alone and kept refusing an overlapping prefix for the full lease, so
+// the reclaim path the gate advertises was unreachable. The dead row must land
+// in the expired bucket and be deleted inside the winner's txn.
+func TestClaimPrefix_DeadOwnerUnexpiredClaimIsReclaimed(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	// Alice takes a 2h claim over the whole tree, then her session dies.
+	if err := s.ClaimPrefix(ctx, mkClaim("internal", tcAlice, 2*time.Hour), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Bob wants an overlapping prefix. TTL says alice is live; liveness says
+	// she is gone.
+	bob := mkClaim(tcPkgStore, tcBob, time.Hour)
+	if err := s.ClaimPrefix(ctx, bob, deadOwnerProbe(tcAlice)); err != nil {
+		t.Fatalf("acquisition over a provably-dead owner's unexpired claim must succeed, matching what check --gate already reports; got %v", err)
+	}
+
+	got, err := s.ListClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].PathPrefix != tcPkgStore || got[0].OwnerUUID != domain.AgentUUID(tcBob) {
+		t.Fatalf("claims = %+v, want only bob's internal/store — the dead row must be deleted in the acquiring txn, not left to accrete", got)
+	}
+}
+
+// The safety half: a LIVE owner's unexpired claim still blocks, and an
+// UNKNOWN verdict (no witness) leaves TTL as the sole authority. Without this,
+// "thread a liveness probe through acquisition" could pass by making
+// acquisition never refuse anything.
+func TestClaimPrefix_LiveAndUnknownOwnersStillBlock(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		verdict domain.Liveness
+	}{
+		{"live owner blocks", domain.LivenessAlive},
+		{"unknown owner blocks — TTL is the sole authority", domain.LivenessUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := mustOpen(t)
+			ctx := context.Background()
+			if err := s.ClaimPrefix(ctx, mkClaim("internal", tcAlice, 2*time.Hour), nil); err != nil {
+				t.Fatal(err)
+			}
+			probe := func(domain.LockRecord) domain.Liveness { return tc.verdict }
+
+			err := s.ClaimPrefix(ctx, mkClaim(tcPkgStore, tcBob, time.Hour), probe)
+			var cce *ClaimConflictError
+			if !errors.As(err, &cce) {
+				t.Fatalf("ClaimPrefix err=%v; want *ClaimConflictError", err)
+			}
+			if len(cce.Blockers) != 1 || cce.Blockers[0].OwnerUUID != domain.AgentUUID(tcAlice) {
+				t.Fatalf("blockers = %+v, want alice's internal claim", cce.Blockers)
+			}
+		})
+	}
+}
+
+// partitionClaims is the shared predicate, so pin it directly against the
+// record kinds the gate and acquisition each hand it: TTL lapse and provable
+// death must both land a row in the expired bucket, and neither must move a
+// same-owner row into either bucket.
+func TestPartitionClaims_StalenessMatchesTheGate(t *testing.T) {
+	rec := mkClaim(tcPkgStore, tcBob, time.Hour)
+	all := []domain.ClaimRecord{
+		mkClaim("internal", tcAlice, -time.Minute), // TTL lapsed
+		mkClaim("internal/render", "carol", time.Hour),
+		mkClaim("internal/store/sub", "dave", time.Hour), // unexpired, owner dead
+		mkClaim(tcPkgStore, tcBob, time.Hour),            // same owner: neither bucket
+	}
+	ec := domain.EvalContext{Now: time.Now(), Live: deadOwnerProbe("dave")}
+	blockers, expired := partitionClaims(all, rec, ec)
+
+	if len(blockers) != 0 {
+		t.Errorf("blockers = %+v, want none — carol does not overlap internal/store, and bob is the caller", blockers)
+	}
+	if len(expired) != 2 {
+		t.Fatalf("expired = %+v, want 2 (alice by TTL, dave by liveness)", expired)
 	}
 }

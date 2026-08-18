@@ -77,7 +77,9 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		ExpiresAt:   now.Add(*ttl),
 		Host:        rt.Host,
 	}
-	if err := rt.Store.ClaimPrefix(rt.Ctx, rec); err != nil {
+	// memoLiveProbe: the partition evaluates the predicate once per overlapping
+	// row, and several rows commonly share one dead owner (Codex #246).
+	if err := rt.Store.ClaimPrefix(rt.Ctx, rec, memoLiveProbe(rt.liveProbe())); err != nil {
 		var cce *store.ClaimConflictError
 		if errors.As(err, &cce) {
 			render.EmitClaimConflict(stdout, cce)

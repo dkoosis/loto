@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -330,4 +331,124 @@ func TestMemoLiveProbe_NilPassesThrough(t *testing.T) {
 	if got := memoLiveProbe(nil); got != nil {
 		t.Errorf("memoLiveProbe(nil) = %v, want nil", got)
 	}
+}
+
+// --- loto-2lj5: a dead sibling must not condemn a live sibling's lock -------
+
+// writeDeadPeer plants a peer record for uuid whose socket path does not exist.
+// SessionVerdict's first probe is a stat of that socket, so the record reads
+// DEAD with reason=socket-missing — the cheapest honest way to stage "one
+// sibling session has ended" without killing a real process.
+func writeDeadPeer(t *testing.T, uuid, sessionID string) {
+	t.Helper()
+	dir := filepath.Join(os.Getenv("HOME"), ".loto", "peers")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(
+		`{"uuid":%q,"handle":"sibling-1","session_id":%q,"socket":%q,"seen_at":%q}`,
+		uuid, sessionID, filepath.Join(t.TempDir(), "gone.sock"), time.Now().Format(time.RFC3339),
+	)
+	if err := os.WriteFile(filepath.Join(dir, uuid+".json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Peer records are keyed on agent uuid alone (identity.peerPath), but sibling
+// sessions sharing one LOTO_AGENT_ID are supported (loto-81n). So one dead
+// sibling leaves one DEAD peer record standing for every live sibling too, and
+// before loto-2lj5 the oracle handed that verdict straight back for locks the
+// live siblings hold — classifying them stale, which lets two agents write one
+// file. The gate: a DEAD verdict counts only for the session it names.
+func TestLiveProbeDeadSiblingDoesNotCondemnLiveSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		agentUUID = "11111111-2222-3333-4444-555555555555"
+		deadSess  = "session-1-that-died"
+		liveSess  = "session-2-still-running"
+	)
+	writeDeadPeer(t, agentUUID, deadSess)
+
+	rt := &runtime{Ctx: context.Background(), Host: "testhost", HostKnown: true}
+	probe := rt.liveProbe()
+	// PID 0 is the claim-shaped sentinel: no pid witness, so whatever the
+	// oracle leg decides is the whole verdict. That isolates the gate.
+	rec := func(session string) domain.LockRecord {
+		return domain.LockRecord{
+			Host:        "testhost",
+			OwnerUUID:   domain.AgentUUID(agentUUID),
+			SessionUUID: domain.SessionUUID(session),
+		}
+	}
+
+	if got := probe(rec(deadSess)); got != domain.LivenessDead {
+		t.Errorf("lock held by the session the peer record names: got %v, want %v — gating the verdict must not disable reclaim for the session that actually died", got, domain.LivenessDead)
+	}
+	if got := probe(rec(liveSess)); got == domain.LivenessDead {
+		t.Errorf("lock held by a DIFFERENT session of the same agent: got %v, want anything but dead — a sibling's death is no evidence about this holder, and a false dead lets two agents write one file", got)
+	}
+}
+
+// peerSpeaksFor is the whole gate, so pin its edges directly. The both-empty
+// case is load-bearing: direct CLI use and legacy rows carry no session id on
+// either side, and reclaim must keep working there rather than silently
+// falling back to TTL for every pre-existing lock.
+func TestPeerSpeaksFor(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		peer   *identity.Peer
+		record domain.SessionUUID
+		want   bool
+	}{
+		{"no peer record", nil, "s1", false},
+		{"same session", &identity.Peer{SessionID: "s1"}, "s1", true},
+		{"different session", &identity.Peer{SessionID: "s1"}, "s2", false},
+		{"both empty — not a Claude session on either side", &identity.Peer{}, "", true},
+		{"peer has none, record does", &identity.Peer{}, "s1", false},
+		{"record has none, peer does", &identity.Peer{SessionID: "s1"}, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := peerSpeaksFor(tc.peer, tc.record); got != tc.want {
+				t.Errorf("peerSpeaksFor = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The gate above is only meaningful if a record's SessionUUID is actually the
+// session's id. It was not: nothing has ever exported LOTO_SESSION_ID, so
+// sessionUUID minted a fresh UUID per INVOCATION and two locks taken by one
+// Claude session carried different ids. CLAUDE_CODE_SESSION_ID is the id
+// identity.RecordPeer already writes into Peer.SessionID, so sourcing it here
+// is what makes the two sides comparable by construction (loto-2lj5).
+func TestSessionUUIDSourcesTheClaudeSessionID(t *testing.T) {
+	t.Run("explicit override wins", func(t *testing.T) {
+		t.Setenv("LOTO_SESSION_ID", "explicit")
+		t.Setenv("CLAUDE_CODE_SESSION_ID", "cc-session")
+		id, pinned := sessionUUID()
+		if id != "explicit" || !pinned {
+			t.Errorf("sessionUUID = (%q, %v), want (explicit, true)", id, pinned)
+		}
+	})
+
+	t.Run("claude session id pins and is stable across calls", func(t *testing.T) {
+		os.Unsetenv("LOTO_SESSION_ID")
+		t.Setenv("CLAUDE_CODE_SESSION_ID", "cc-session")
+		first, pinned := sessionUUID()
+		if first != "cc-session" || !pinned {
+			t.Errorf("sessionUUID = (%q, %v), want (cc-session, true)", first, pinned)
+		}
+		if second, _ := sessionUUID(); second != first {
+			t.Errorf("two invocations in one session got %q then %q; every shell-out from one session must share an id (records.go SessionUUID contract)", first, second)
+		}
+	})
+
+	t.Run("neither set mints an unpinned throwaway", func(t *testing.T) {
+		os.Unsetenv("LOTO_SESSION_ID")
+		os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+		id, pinned := sessionUUID()
+		if id == "" || pinned {
+			t.Errorf("sessionUUID = (%q, %v), want (a fresh uuid, false) — an unpinned id must never be used as a release filter (loto-pody)", id, pinned)
+		}
+	})
 }

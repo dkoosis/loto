@@ -743,10 +743,10 @@ func TestDoctorRepair_ReleasesOpFlockBeforeVACUUM(t *testing.T) {
 func TestDoctorRepair_SweepsExpiredClaims(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	if err := s.ClaimPrefix(ctx, mkClaim("pkg/dead", tcAlice, -time.Minute)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaim("pkg/dead", tcAlice, -time.Minute), nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimPrefix(ctx, mkClaim("pkg/live", tcBob, time.Hour)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaim("pkg/live", tcBob, time.Hour), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -769,13 +769,13 @@ func TestDoctorAudit_ListsExpiredClaims(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	// Insert out of order to pin the sort.
-	if err := s.ClaimPrefix(ctx, mkClaim("pkg/zeta", tcBob, -time.Minute)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaim("pkg/zeta", tcBob, -time.Minute), nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimPrefix(ctx, mkClaim("pkg/alpha", tcAlice, -time.Minute)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaim("pkg/alpha", tcAlice, -time.Minute), nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimPrefix(ctx, mkClaim("pkg/live", "carol", time.Hour)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaim("pkg/live", "carol", time.Hour), nil); err != nil {
 		t.Fatal(err)
 	}
 
