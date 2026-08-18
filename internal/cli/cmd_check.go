@@ -22,28 +22,49 @@ type checkConflict struct {
 	// false: indeterminate/expiring liveness → advisory warn (does not set exit 1).
 }
 
-func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+// checkPreflight parses check's flags, resolves the repo top, loads the target
+// paths, and applies the pre-resolution refusals that must fire before any
+// store IO. done=true means the caller must return rc immediately — the
+// preflight already emitted whatever the user sees.
+func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) (paths []string, repoTop string, gate bool, rc int, done bool) {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	staged := fs.Bool("staged", false, "read paths from git diff --cached")
-	gate := fs.Bool("gate", false, "read-only deny gate: exit 1 if a foreign live claim or lock/beacon covers any path; never acquires, refreshes, or writes")
+	gateFlag := fs.Bool("gate", false, "read-only deny gate: exit 1 if a foreign live claim or lock/beacon covers any path; never acquires, refreshes, or writes")
+	cwdUnknown := fs.Bool("cwd-unknown", false, "the caller's working directory is not knowable here (e.g. mcp__trixi__agent_shell): refuse relative paths instead of resolving them against the wrong base")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
-		return 2
+		return nil, "", false, 2, true
 	}
 
 	// Resolve repoTop before shelling out to git so `git diff --cached` runs
 	// with cmd.Dir = repoTop (loto-jff, gh#128). Without that pin, the staged
 	// diff inherits process cwd and reads the wrong repo's index in worktree /
 	// nested-launch / scripted-invocation scenarios.
-	repoTop, _ := repoTopForCwd(ctx)
+	repoTop, _ = repoTopForCwd(ctx)
 
 	paths, code := loadCheckTargets(ctx, repoTop, *staged, fs.Args(), stderr)
 	if code != 0 {
-		return code
+		return nil, repoTop, *gateFlag, code, true
 	}
 	if len(paths) == 0 {
 		fmt.Fprintln(stdout, "✓ no paths")
-		return 0
+		return nil, repoTop, *gateFlag, 0, true
+	}
+
+	// loto-tzmv.10: refuse before resolving, never guess. See
+	// refuseUnresolvableRelative.
+	if *cwdUnknown {
+		if rc, refused := refuseUnresolvableRelative(stdout, paths); refused {
+			return nil, repoTop, *gateFlag, rc, true
+		}
+	}
+	return paths, repoTop, *gateFlag, 0, false
+}
+
+func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	paths, repoTop, gate, rc, done := checkPreflight(ctx, args, stdout, stderr)
+	if done {
+		return rc
 	}
 
 	// --gate is a distinct read-only decision surface (loto-vr2,
@@ -54,7 +75,7 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// this point (the plain-check path) untouched, so plain `loto check`
 	// stays byte-identical (hard rule, plan "Plain loto check ... behavior
 	// must stay byte-identical").
-	if *gate {
+	if gate {
 		return runCheckGate(ctx, paths, repoTop, stdout, stderr)
 	}
 
