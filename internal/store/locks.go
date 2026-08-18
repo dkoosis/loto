@@ -104,7 +104,7 @@ type BreakResult struct {
 	Mode   string // mode of the broken row; "" → exclusive (mirrors ReleaseResult.Mode)
 }
 
-const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch,mode`
+const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch,mode,beacon`
 
 func inClause(targets []domain.Target) (string, []any) {
 	ph := make([]byte, 0, len(targets)*2)
@@ -180,9 +180,15 @@ func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	// keeps scan robust against any NULL legacy row; "" → EffectiveMode treats
 	// it as exclusive.
 	var mode sql.NullString
-	if err := r.Scan(&canonical, &owner, &session, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &mode); err != nil {
+	// beacon is NOT NULL DEFAULT 0 in fresh schema and in the in-place ALTER,
+	// so every row has a value; NullBool keeps the scan robust anyway and maps
+	// an absent value to false — "not a beacon", the conservative reading,
+	// since a false beacon makes guard refuse rather than move the tree.
+	var beacon sql.NullBool
+	if err := r.Scan(&canonical, &owner, &session, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &mode, &beacon); err != nil {
 		return l, err
 	}
+	l.Beacon = beacon.Valid && beacon.Bool
 	l.OwnerUUID = domain.AgentUUID(owner)
 	l.SessionUUID = domain.SessionUUID(session)
 	l.Target = domain.Target{Canonical: canonical}

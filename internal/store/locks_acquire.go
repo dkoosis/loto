@@ -90,23 +90,29 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 // insertAllLocks writes the lock rows and their lock_acquired events inside
 // the parent tx. On error the caller (AcquireLocks) releases the tx and runs
 // no compensating filesystem action, so failures here just propagate the error.
+//
+// A beacon that yields to a stronger same-owner row (see insertOrRefreshLock)
+// writes nothing, so it emits no lock_acquired event either — the audit trail
+// records lock acquisitions, not attempts.
 func (s *Store) insertAllLocks(ctx context.Context, tx *sql.Tx, sorted []domain.LockRecord, now time.Time) error {
+	evs := make([]domain.Event, 0, len(sorted))
 	for i := range sorted {
-		if err := insertOrRefreshLock(ctx, tx, sorted[i]); err != nil {
+		written, err := insertOrRefreshLock(ctx, tx, sorted[i])
+		if err != nil {
 			return err
 		}
-	}
-	// Emit lock_acquired events in the same tx (atomic with the row inserts).
-	evs := make([]domain.Event, len(sorted))
-	for i := range sorted {
-		evs[i] = domain.Event{
+		if !written {
+			continue
+		}
+		evs = append(evs, domain.Event{
 			Target:    sorted[i].Target,
 			Kind:      EventLockAcquired,
 			ActorUUID: string(sorted[i].OwnerUUID),
 			Reason:    sorted[i].Intent,
 			CreatedAt: now,
-		}
+		})
 	}
+	// Emit lock_acquired events in the same tx (atomic with the row inserts).
 	return appendEventsTx(ctx, tx, evs)
 }
 
@@ -196,7 +202,10 @@ func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domai
 	return blockers, nil
 }
 
-func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord) error {
+// insertOrRefreshLock upserts one lock row and reports whether the row was
+// actually written. false means the beacon yield below suppressed the update:
+// no error, nothing changed, and the caller must not log an acquisition.
+func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord) (bool, error) {
 	// Map 0 (UNKNOWN) → NULL at the store boundary so an absent start-time is a
 	// SQL null, matching legacy rows. A refresh re-stamps proc_start because the
 	// holder is the same process (same pid, same start-time).
@@ -210,9 +219,20 @@ func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord) e
 	// `WHERE locks.owner_uuid = excluded.owner_uuid` guard is now redundant (the
 	// conflict is keyed on owner) and dropped. Persist EffectiveMode() (not raw
 	// l.Mode) so the column never stores '' (loto-k5el.2 T3).
-	_, err := tx.ExecContext(ctx, `
-INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, mode)
-VALUES (?,?,?,?,?,?,?,?,?,?,?)
+	//
+	// ‡ The DO UPDATE WHERE is the beacon yield (loto-xl4g, Codex #249): an
+	// incoming BEACON never overwrites an existing NON-beacon row of the same
+	// owner. Without it, the gate minting a beacon for an agent that already
+	// ran `loto lock` rewrote that agent's own row to shared / pid 0 / no
+	// branch / 2m — silently downgrading a declared exclusive 30m lease and
+	// then letting `loto guard` waive it as a beacon and move the tree out from
+	// under uncommitted work. A beacon says "an agent of mine is writing here";
+	// a row that already says something stronger needs no weakening. The
+	// converse still applies: an explicit lock upgrades over a beacon, because
+	// then excluded.beacon is 0 and the update runs.
+	res, err := tx.ExecContext(ctx, `
+INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, mode, beacon)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
   intent=excluded.intent,
   expires_at=excluded.expires_at,
@@ -221,10 +241,19 @@ ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
   pid=excluded.pid,
   proc_start=excluded.proc_start,
   branch=excluded.branch,
-  mode=excluded.mode`,
+  mode=excluded.mode,
+  beacon=excluded.beacon
+WHERE excluded.beacon = 0 OR locks.beacon = 1`,
 		l.Target.Canonical, string(l.OwnerUUID), string(l.SessionUUID),
 		l.Intent, l.CreatedAt.UnixNano(), l.ExpiresAt.UnixNano(),
-		l.Host, l.PID, procStart, l.Branch, l.EffectiveMode(),
+		l.Host, l.PID, procStart, l.Branch, l.EffectiveMode(), l.Beacon,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }

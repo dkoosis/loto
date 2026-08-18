@@ -309,6 +309,7 @@ var migrationEnsures = []struct {
 }{
 	{"add locks.proc_start", ensureLocksProcStart},
 	{"upgrade locks mode/pk", ensureLocksModeAndPK},
+	{"add locks.beacon", ensureLocksBeacon},
 	{"upgrade events check", ensureEventsCheckCurrent},
 	{"add claims table", ensureClaimsTable},
 }
@@ -491,6 +492,34 @@ func ensureLocksProcStart(ctx context.Context, db sqlExecQuerier, apply bool) (b
 	}
 	if apply {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE locks ADD COLUMN proc_start INTEGER`); err != nil {
+			return false, err
+		}
+		return false, nil // applied: no longer outstanding
+	}
+	return true, nil
+}
+
+// ensureLocksBeacon adds the locks.beacon column to an existing DB that
+// predates it (loto-dm4i). Pending when the column is absent; not-pending on a
+// fresh DB (CREATE TABLE already declared it) and on every re-Open. Ordered
+// AFTER ensureLocksModeAndPK: that step rebuilds a legacy locks table from a
+// fixed column list which does not name beacon, so adding the column first
+// would lose it again on the rebuild. Existing rows default to 0 — a row taken
+// before beacons existed was asked for by an agent, which is what 0 means.
+// user_version is not bumped: a bump trips MoveCorruptAside and destroys live
+// locks (loto-kwlp precedent).
+func ensureLocksBeacon(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('locks') WHERE name = 'beacon'`,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return false, nil
+	}
+	if apply {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE locks ADD COLUMN beacon INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return false, err
 		}
 		return false, nil // applied: no longer outstanding

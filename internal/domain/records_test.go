@@ -16,18 +16,21 @@ func mk(owner, mode string) LockRecord {
 }
 
 // IsBeacon is what lets `loto guard` tell "an agent of my own session is
-// writing here" apart from "a peer holds this territory" (loto-xwod). Both legs
-// of the AND carry weight: shared mode keeps two siblings' beacons from
-// colliding at acquire, PID 0 keeps the liveness probe from reaping a row whose
-// minting hook has already exited.
+// writing here" apart from "a peer holds this territory" (loto-xwod). The
+// marker is persisted, never inferred: the shared/pid-0 shape a beacon wears is
+// also the shape of an ordinary `loto lock --shared` placed without LOTO_PID,
+// and reading the shape let guard waive that real lease and move the tree
+// (loto-dm4i, Codex #249). The pid-0 shared row below is the regression pin.
 func TestLockRecordIsBeacon(t *testing.T) {
 	withPID := func(l LockRecord, pid int) LockRecord { l.PID = pid; return l }
+	asBeacon := func(l LockRecord) LockRecord { l.Beacon = true; return l }
 	cases := []struct {
 		name string
 		l    LockRecord
 		want bool
 	}{
-		{"shared + pid 0", mk("alice", ModeShared), true},
+		{"marked beacon", asBeacon(mk("alice", ModeShared)), true},
+		{"shared + pid 0 unmarked is a pid-less shared lock", mk("alice", ModeShared), false},
 		{"shared + live pid is a held shared lock", withPID(mk("alice", ModeShared), 4242), false},
 		{"exclusive + pid 0", mk("alice", ModeExclusive), false},
 		{"empty mode reads as exclusive", mk("alice", ""), false},

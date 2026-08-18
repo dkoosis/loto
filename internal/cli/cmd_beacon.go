@@ -148,6 +148,11 @@ func emitBeaconErr(err error, stdout, stderr io.Writer) int {
 // siblings of one Claude session share a session id while holding distinct
 // owner uuids, and that is the discriminator `loto guard` uses to let a session
 // move its own tree (loto-xwod AC).
+//
+// ‡ Beacon: true is what marks the row — not the shared/pid-0 shape, which an
+// ordinary `loto lock --shared` placed without LOTO_PID wears too (loto-dm4i).
+// The same flag drives the store's yield rule: a beacon never overwrites a
+// stronger same-owner lock the agent asked for by hand (loto-xl4g).
 func buildBeaconRecords(targets []domain.Target, rt *runtime, now time.Time, ttl time.Duration) []domain.LockRecord {
 	recs := make([]domain.LockRecord, 0, len(targets))
 	for _, t := range targets {
@@ -161,6 +166,7 @@ func buildBeaconRecords(targets []domain.Target, rt *runtime, now time.Time, ttl
 			Host:        rt.Host,
 			PID:         0,
 			Mode:        domain.ModeShared,
+			Beacon:      true,
 		})
 	}
 	return recs

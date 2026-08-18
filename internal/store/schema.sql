@@ -25,6 +25,14 @@ CREATE TABLE IF NOT EXISTS locks (
   -- shared holders coexist on one target — meaningless for the old binary lock,
   -- mandatory for shared mode.
   mode             TEXT NOT NULL DEFAULT 'exclusive',
+  -- beacon: 1 = minted by the PreToolUse gate on a writing agent's behalf,
+  -- 0 = a lease an agent asked for. The row shape cannot carry this: a beacon
+  -- is shared with pid 0, and so is an ordinary `loto lock --shared` placed
+  -- without LOTO_PID, so the old shape test read a real shared lease as a
+  -- beacon and let guard's same-session carve-out waive it (loto-dm4i,
+  -- Codex #249). Added in-place to existing DBs via the guarded ALTER in
+  -- migrate(); declared here so fresh DBs match without it.
+  beacon           INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (target_canonical, owner_uuid)
 );
 -- No standalone target_canonical index: the composite PK's automatic index has
