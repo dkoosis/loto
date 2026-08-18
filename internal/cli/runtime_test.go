@@ -284,3 +284,50 @@ func TestOpenRuntimeGCPinsLockOwners(t *testing.T) {
 		t.Fatalf("openRuntimeGC must not reap a live lock's own owner agent (gh#125/loto-ffg): %v", err)
 	}
 }
+
+// TestMemoLiveProbe pins the per-invocation probe cache (Codex #246): one
+// holder is probed once no matter how many (target × record) pairs the gate
+// evaluates it for, and records that differ in any field the probe reads stay
+// independently probed.
+func TestMemoLiveProbe(t *testing.T) {
+	const owner = "owner-1"
+	calls := 0
+	base := domain.LockRecord{Host: "h1", OwnerUUID: owner, PID: 42, ProcStart: 7}
+	probe := memoLiveProbe(func(domain.LockRecord) domain.Liveness {
+		calls++
+		return domain.LivenessAlive
+	})
+
+	for range 5 {
+		if got := probe(base); got != domain.LivenessAlive {
+			t.Fatalf("probe = %v, want alive", got)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("repeat probes of one holder = %d calls, want 1", calls)
+	}
+
+	// Each field the underlying probe reads must key the cache separately —
+	// a collision here would answer for the wrong process.
+	distinct := []domain.LockRecord{
+		{Host: "h2", OwnerUUID: owner, PID: 42, ProcStart: 7},
+		{Host: "h1", OwnerUUID: "owner-2", PID: 42, ProcStart: 7},
+		{Host: "h1", OwnerUUID: owner, PID: 43, ProcStart: 7},
+		{Host: "h1", OwnerUUID: owner, PID: 42, ProcStart: 8},
+	}
+	for _, l := range distinct {
+		probe(l)
+	}
+	if want := 1 + len(distinct); calls != want {
+		t.Errorf("distinct holders = %d calls, want %d", calls, want)
+	}
+}
+
+// TestMemoLiveProbe_NilPassesThrough: a nil probe means "no liveness oracle,
+// TTL is the sole authority" — wrapping must not conjure a non-nil closure
+// that would flip EvalContext.IsStale's nil check.
+func TestMemoLiveProbe_NilPassesThrough(t *testing.T) {
+	if got := memoLiveProbe(nil); got != nil {
+		t.Errorf("memoLiveProbe(nil) = %v, want nil", got)
+	}
+}

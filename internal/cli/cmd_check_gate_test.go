@@ -34,6 +34,14 @@ func gateEC(now time.Time) domain.EvalContext {
 	return domain.EvalContext{Now: now, Live: nil}
 }
 
+// deadProbe / aliveProbe stand in for runtime.liveProbe in unit tests: the
+// probe owns all environmental policy, so pinning its verdict is the only way
+// to exercise the liveness leg of the claim predicate (loto-tzmv.9). They
+// answer unconditionally because a claim carries no PID — a pid-gated stub
+// would return UNKNOWN for every claim and silently skip the leg under test.
+func deadProbe(domain.LockRecord) domain.Liveness  { return domain.LivenessDead }
+func aliveProbe(domain.LockRecord) domain.Liveness { return domain.LivenessAlive }
+
 func TestGateDecide_ForeignLiveClaimDenies(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcPrefixStore + "/new.go"} // kuv.10 class: not on disk
@@ -192,6 +200,7 @@ func TestGateDecideAny(t *testing.T) {
 		name   string
 		locks  []domain.LockRecord
 		claims []domain.ClaimRecord
+		live   domain.HolderLiveProbe // nil = TTL is the sole authority
 		want   int
 	}{
 		{
@@ -234,6 +243,27 @@ func TestGateDecideAny(t *testing.T) {
 			want: 0,
 		},
 		{
+			// loto-tzmv.9: an unexpired claim whose owner is provably dead must
+			// stop denying. Before the fix this row denied for the claim's full
+			// 2h TTL, freezing every tree-move in the repo behind one crash.
+			name: "unexpired claim from a dead owner allows",
+			claims: []domain.ClaimRecord{
+				{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "crashed", ExpiresAt: now.Add(time.Hour)},
+			},
+			live: deadProbe,
+			want: 0,
+		},
+		{
+			// The other half of the same predicate: liveness must not weaken a
+			// live owner's claim.
+			name: "unexpired claim from a live owner denies",
+			claims: []domain.ClaimRecord{
+				{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "working", ExpiresAt: now.Add(time.Hour)},
+			},
+			live: aliveProbe,
+			want: 1,
+		},
+		{
 			name: "one foreign lock plus one foreign claim denies both",
 			locks: []domain.LockRecord{
 				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
@@ -246,7 +276,9 @@ func TestGateDecideAny(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			rows := gateDecideAny(c.locks, c.claims, gateMyUUID, gateEC(now))
+			ec := gateEC(now)
+			ec.Live = c.live
+			rows := gateDecideAny(c.locks, c.claims, gateMyUUID, ec)
 			if len(rows) != c.want {
 				t.Fatalf("gateDecideAny() = %d rows, want %d: %+v", len(rows), c.want, rows)
 			}
@@ -433,16 +465,30 @@ func TestGateCLI_NoIdentityFailsOpenWithoutOpeningStore(t *testing.T) {
 	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
 	t.Setenv("LOTO_BASE", brokenLOTOBase(t))
 
-	var out bytes.Buffer
-	code := Run([]string{tcCmdCheck, tcFlagGate, tcTargetA}, &out, &bytes.Buffer{})
+	var out, errb bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcFlagGate, tcTargetA}, &out, &errb)
 	if code != 0 {
-		t.Fatalf("expected exit 0 (unpinned fail-open), got %d: %q", code, out.String())
+		t.Fatalf("expected exit 0 (unpinned fail-open), got %d: %q", code, errb.String())
 	}
-	if !strings.Contains(out.String(), "identity=unpinned gate=fail-open") {
-		t.Errorf("expected unpinned fail-open row: %q", out.String())
+	assertFailOpenStream(t, &out, &errb, "identity=unpinned gate=fail-open")
+	if strings.Contains(errb.String(), "store=unreachable") {
+		t.Errorf("must not have attempted to open the store: %q", errb.String())
 	}
-	if strings.Contains(out.String(), "store=unreachable") {
-		t.Errorf("must not have attempted to open the store: %q", out.String())
+}
+
+// assertFailOpenStream pins loto-tzmv.8: a fail-open notice must reach STDERR
+// and must never appear on stdout. A PreToolUse hook exiting 0 with stdout
+// output does not surface that output to the model, so a stdout-only notice
+// means an ungated session believes it is gated. The stream is part of the
+// contract, not a formatting detail — assert it on every fail-open branch so
+// it cannot silently regress.
+func assertFailOpenStream(t *testing.T, stdout, stderr *bytes.Buffer, want string) {
+	t.Helper()
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("expected %q on stderr, got stderr=%q stdout=%q", want, stderr.String(), stdout.String())
+	}
+	if strings.Contains(stdout.String(), "fail-open") {
+		t.Errorf("fail-open notice leaked to stdout (hooks exiting 0 hide stdout from the model): %q", stdout.String())
 	}
 }
 
@@ -467,14 +513,12 @@ func TestGateCLI_SetButEmptyAgentIDFailsOpen(t *testing.T) {
 	os.Unsetenv("LOTO_SUBAGENT_ID")
 	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
 
-	var out bytes.Buffer
-	code := Run([]string{tcCmdCheck, tcFlagGate, tcStoreStoreGo}, &out, &bytes.Buffer{})
+	var out, errb bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcFlagGate, tcStoreStoreGo}, &out, &errb)
 	if code != 0 {
-		t.Fatalf("expected exit 0 (ephemeral identity fails open), got %d: %q", code, out.String())
+		t.Fatalf("expected exit 0 (ephemeral identity fails open), got %d: %q", code, errb.String())
 	}
-	if !strings.Contains(out.String(), "identity=unpinned gate=fail-open") {
-		t.Errorf("expected unpinned fail-open row: %q", out.String())
-	}
+	assertFailOpenStream(t, &out, &errb, "identity=unpinned gate=fail-open")
 }
 
 // TestGateCLI_MalformedSubagentIDFailsOpen: a traversal-shaped
@@ -489,14 +533,12 @@ func TestGateCLI_MalformedSubagentIDFailsOpen(t *testing.T) {
 	t.Setenv("LOTO_SUBAGENT_ID", "../escape")
 	t.Setenv("LOTO_BASE", brokenLOTOBase(t)) // proves no store IO happens
 
-	var out bytes.Buffer
-	code := Run([]string{tcCmdCheck, tcFlagGate, tcTargetA}, &out, &bytes.Buffer{})
+	var out, errb bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcFlagGate, tcTargetA}, &out, &errb)
 	if code != 0 {
-		t.Fatalf("expected exit 0 (malformed subagent id fails open), got %d: %q", code, out.String())
+		t.Fatalf("expected exit 0 (malformed subagent id fails open), got %d: %q", code, errb.String())
 	}
-	if !strings.Contains(out.String(), "identity=unpinned gate=fail-open") {
-		t.Errorf("expected unpinned fail-open row: %q", out.String())
-	}
+	assertFailOpenStream(t, &out, &errb, "identity=unpinned gate=fail-open")
 }
 
 // TestGateCLI_StoreUnreachableFailsOpen: a pinned identity with a broken
@@ -506,14 +548,12 @@ func TestGateCLI_StoreUnreachableFailsOpen(t *testing.T) {
 	pinAgent(t)
 	t.Setenv("LOTO_BASE", brokenLOTOBase(t))
 
-	var out bytes.Buffer
-	code := Run([]string{tcCmdCheck, tcFlagGate, tcTargetA}, &out, &bytes.Buffer{})
+	var out, errb bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcFlagGate, tcTargetA}, &out, &errb)
 	if code != 3 {
-		t.Fatalf("expected exit 3, got %d: %q", code, out.String())
+		t.Fatalf("expected exit 3, got %d: %q", code, errb.String())
 	}
-	if !strings.Contains(out.String(), "⚠ store=unreachable gate=fail-open") {
-		t.Errorf("expected store-unreachable fail-open row: %q", out.String())
-	}
+	assertFailOpenStream(t, &out, &errb, "⚠ store=unreachable gate=fail-open")
 }
 
 // TestGateCLI_SymmetricRootDeniedBySubagentClaim: root's session-pinned

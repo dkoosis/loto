@@ -17,7 +17,12 @@ if command -v loto >/dev/null 2>&1; then
   if [ "$LOTO_GUARD_OVERRIDE" = "1" ]; then
     echo "pre-commit: LOTO_GUARD_OVERRIDE=1 — skipping loto staged-lock guard" >&2
   else
-    _loto_gate_out=$(loto check --gate --staged 2>&1)
+    # stderr deliberately NOT merged into the capture (loto-tzmv.8, Codex
+    # #246): the capture is echoed only on exit 1, so `2>&1` swallowed every
+    # fail-open notice — the one signal saying the gate did not run. Letting
+    # stderr pass straight through means the ⚠ row reaches the committer on
+    # exits 0 and 3 too, which is the point of moving it off stdout.
+    _loto_gate_out=$(loto check --gate --staged)
     _loto_gate_exit=$?
     if [ "$_loto_gate_exit" -eq 1 ]; then
       echo "$_loto_gate_out" >&2
