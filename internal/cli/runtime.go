@@ -254,6 +254,39 @@ func (r *runtime) liveProbe() domain.HolderLiveProbe {
 	}
 }
 
+// memoLiveProbe wraps a probe so each distinct holder is probed at most once
+// per CLI invocation (Codex #246). The gate evaluates its predicate per
+// (target × record), and a probe is not free: identity.AgentLive reads a peer
+// record off disk and the pid fallback can shell out to `ps`. One repo-root
+// claim over a 300-file staged set therefore paid 300 identical probes on the
+// pre-commit hot path.
+//
+// The key carries everything the probe reads — host, owner, pid, proc-start —
+// so two records that differ in any of them stay independently probed. The
+// cache lives for one command run, well inside the window where a holder's
+// liveness could meaningfully change, and a gate that answered ALIVE for one
+// target and DEAD for the next in the same verdict would be incoherent anyway.
+func memoLiveProbe(p domain.HolderLiveProbe) domain.HolderLiveProbe {
+	if p == nil {
+		return nil
+	}
+	type key struct {
+		host, owner string
+		pid         int
+		procStart   int64
+	}
+	seen := map[key]domain.Liveness{}
+	return func(l domain.LockRecord) domain.Liveness {
+		k := key{host: l.Host, owner: string(l.OwnerUUID), pid: l.PID, procStart: l.ProcStart}
+		if v, ok := seen[k]; ok {
+			return v
+		}
+		v := p(l)
+		seen[k] = v
+		return v
+	}
+}
+
 // pidVerdict is liveProbe's layer-2 fallback for a local lock with no peer
 // record: PID-0 sentinel → unknown (TTL governs), dead pid → dead, live pid
 // with a recycled start-time (loto-kwlp) → dead, else alive.

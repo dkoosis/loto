@@ -205,7 +205,9 @@ func runCheckGate(ctx context.Context, paths []string, repoTop string, stdout, s
 		return gateInfraUnreachable(stderr, err)
 	}
 
-	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
+	// memoized: gateDecide evaluates the predicate per (target × record), so a
+	// wide staged set would otherwise re-probe one holder hundreds of times.
+	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe())}
 	rows := gateDecide(targets, locks, claims, rt.Agent.UUID, ec)
 	if len(rows) == 0 {
 		fmt.Fprintln(stdout, "✓ no conflicts")
