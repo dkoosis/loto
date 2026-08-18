@@ -313,6 +313,9 @@ var migrationEnsures = []struct {
 	{"upgrade events check", ensureEventsCheckCurrent},
 	{"add claims table", ensureClaimsTable},
 	{"add territory_tags table", ensureTerritoryTagsTable},
+	{"add locks.epoch", ensureLocksEpoch},
+	{"add path_epochs table", ensurePathEpochsTable},
+	{"add candidate_claims table", ensureCandidateClaimsTable},
 }
 
 // schemaCurrent reports whether a re-migrate would be a pure no-op — the gate
@@ -547,6 +550,66 @@ func ensureLocksBeacon(ctx context.Context, db sqlExecQuerier, apply bool) (bool
 			`UPDATE locks SET beacon = 1 WHERE mode = 'shared' AND pid = 0 AND branch = '' AND intent = ?`,
 			legacyBeaconIntent,
 		); err != nil {
+			return false, err
+		}
+		return false, nil // applied: no longer outstanding
+	}
+	return true, nil
+}
+
+// ensureLocksEpoch adds locks.epoch to an existing DB that predates it
+// (loto-ovno.2). Legacy rows default to 0 — indistinguishable from a
+// first-ever grant at that path, which is the correct reading: nothing had
+// captured a candidate envelope against a row that predates epochs existing.
+func ensureLocksEpoch(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('locks') WHERE name = 'epoch'`,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return false, nil
+	}
+	if apply {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE locks ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return false, err
+		}
+		return false, nil // applied: no longer outstanding
+	}
+	return true, nil
+}
+
+// ensurePathEpochsTable adds the durable per-path epoch counter to an
+// existing DB (loto-ovno.2). Follows ensureClaimsTable's precedent: probe
+// sqlite_master, apply the DDL, never bump user_version.
+func ensurePathEpochsTable(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	return ensureTableBySentinelName(ctx, db, apply, "path_epochs", pathEpochsDDL)
+}
+
+// ensureCandidateClaimsTable adds the durable candidate-claim table to an
+// existing DB (loto-ovno.2). Same precedent as ensurePathEpochsTable.
+func ensureCandidateClaimsTable(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	return ensureTableBySentinelName(ctx, db, apply, "candidate_claims", candidateClaimsDDL)
+}
+
+// ensureTableBySentinelName is the shared body ensureClaimsTable /
+// ensureTerritoryTagsTable each hand-duplicated: probe sqlite_master for
+// tableName, apply ddl if apply and absent, never touch user_version. Factored
+// out here rather than duplicated a third and fourth time — two new tables in
+// one bead is where the copy-paste stopped paying for itself.
+func ensureTableBySentinelName(ctx context.Context, db sqlExecQuerier, apply bool, tableName, ddl string) (bool, error) {
+	var name string
+	err := db.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, tableName).Scan(&name)
+	if err == nil {
+		return false, nil // already present
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if apply {
+		if _, err := db.ExecContext(ctx, ddl); err != nil {
 			return false, err
 		}
 		return false, nil // applied: no longer outstanding

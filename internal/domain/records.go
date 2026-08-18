@@ -64,6 +64,19 @@ type LockRecord struct {
 	// rather than inferred, because the row shape does not separate the two —
 	// see IsBeacon.
 	Beacon bool
+	// Epoch is the generation counter of the AUTHORIZATION to write this path,
+	// not of the row (git-gate.md "Ownership epoch semantics", loto-ovno.2).
+	// Renew/heartbeat (RefreshLocks, or a same-owner re-acquire of a still-live
+	// row) preserves it — the holder never invalidated its own outstanding
+	// candidates by proving it is still alive. Release+reacquire, transfer to a
+	// new owner, a stale-owner reclaim, and a force-break each increment it —
+	// every one of those is, mechanically, a fresh INSERT rather than an UPDATE
+	// of the existing row (the prior row is gone by the time this one lands),
+	// which is the single condition the store increments on. A candidate
+	// envelope pins the epoch it captured per path; admission (a later bead)
+	// compares that against the CURRENT epoch here to tell "the same
+	// uninterrupted authorization" from "someone else has held this since."
+	Epoch int64
 }
 
 const (
@@ -122,6 +135,63 @@ type ClaimRecord struct {
 // liveness refinement — the lease boundary is the whole story.
 func (c ClaimRecord) Expired(now time.Time) bool {
 	return !now.Before(c.ExpiresAt)
+}
+
+// CandidateClaim is a durable, per-path territory hold on behalf of a
+// candidate awaiting promotion (git-gate.md "Claim lifecycle", loto-ovno.2).
+// It is minted when admission (a later bead) converts an accepted candidate's
+// live session lease into this — and it MUST survive that conversion, unlike a
+// LockRecord: the admitting/promoting process can exit while the candidate is
+// still pending review, and the claim has to keep blocking overlapping
+// acquisitions until the candidate is promoted, rejected, or withdrawn.
+//
+// One row per (PathCanonical, CandidateID) — a candidate's write-set claims
+// every path it touches, mirroring LockRecord's per-file granularity (never a
+// prefix; a candidate's write-set is exact files from lane.Commit).
+//
+// Deliberately carries no TTL. A candidate under review has no natural
+// deadline — review takes as long as it takes — so unlike LockRecord (TTL +
+// liveness) or ClaimRecord (TTL only), this record's SOLE staleness authority
+// is CandidateClaimIsDead: was the process that minted it provably killed
+// without ever resolving it. See PID/ProcStart below.
+type CandidateClaim struct {
+	PathCanonical string
+	CandidateID   string
+	OwnerUUID     AgentUUID
+	SessionUUID   SessionUUID
+	CreatedAt     time.Time
+	Host          string
+	// PID/ProcStart identify the process that minted (or most recently
+	// touched) this claim — NOT necessarily the original proposer's editing
+	// session. "claim liveness for the promotion claim uses PID+proc-start
+	// reclaim" (git-gate.md): if that process is provably dead with the claim
+	// still unresolved, the claim is abandoned territory, reclaimable the same
+	// way a crashed lock holder's row is.
+	PID       int
+	ProcStart int64
+}
+
+// CandidateClaimIsDead reports whether the process that minted cc is provably
+// gone — the sole staleness authority for a durable candidate claim (no TTL;
+// see CandidateClaim's doc). Lifted into LockRecord shape to reuse the exact
+// probe every other liveness verdict in this store consults, rather than
+// growing a third "is this holder alive" definition (ClaimIsStale already
+// makes this argument for TTL-bearing claims; the same reasoning applies here
+// one level further — no TTL branch at all, since none exists to lapse). A nil
+// probe or an UNKNOWN verdict both answer false: without a positive DEAD
+// verdict, a claim is never reclaimed out from under a candidate still under
+// review.
+func (c EvalContext) CandidateClaimIsDead(cc CandidateClaim) bool {
+	if c.Live == nil {
+		return false
+	}
+	return c.Live(LockRecord{
+		OwnerUUID:   cc.OwnerUUID,
+		SessionUUID: cc.SessionUUID,
+		Host:        cc.Host,
+		PID:         cc.PID,
+		ProcStart:   cc.ProcStart,
+	}) == LivenessDead
 }
 
 // Event is an append-only audit row. SubjectUUID is the affected agent (for
