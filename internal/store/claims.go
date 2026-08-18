@@ -307,20 +307,5 @@ func scanClaimsRows(rows *sql.Rows) ([]domain.ClaimRecord, error) {
 // the claims-table existence check for schemaCurrent (ErrNoRows → pending).
 // user_version intentionally NOT bumped (loto-kwlp precedent).
 func ensureClaimsTable(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
-	var name string
-	err := db.QueryRowContext(ctx,
-		`SELECT name FROM sqlite_master WHERE type='table' AND name='claims'`).Scan(&name)
-	if err == nil {
-		return false, nil // already present
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return false, err
-	}
-	if apply {
-		if _, err := db.ExecContext(ctx, claimsDDL); err != nil {
-			return false, err
-		}
-		return false, nil // applied: no longer outstanding
-	}
-	return true, nil
+	return ensureTableBySentinelName(ctx, db, apply, "claims", claimsDDL)
 }

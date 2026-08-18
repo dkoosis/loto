@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS locks (
   -- Codex #249). Added in-place to existing DBs via the guarded ALTER in
   -- migrate(); declared here so fresh DBs match without it.
   beacon           INTEGER NOT NULL DEFAULT 0,
+  -- epoch: generation counter of the AUTHORIZATION to write this path, not of
+  -- this row (loto-ovno.2). A renewal (same live owner re-acquiring) leaves it
+  -- untouched; a fresh grant after release/reclaim/force-break bumps it via
+  -- path_epochs below. Legacy rows default to 0 — indistinguishable from a
+  -- first-ever grant, which is the correct reading (nothing captured an
+  -- envelope against them). Added in-place via the guarded ALTER in migrate();
+  -- declared here so fresh DBs match without it.
+  epoch            INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (target_canonical, owner_uuid)
 );
 -- No standalone target_canonical index: the composite PK's automatic index has
@@ -109,3 +117,39 @@ CREATE TABLE IF NOT EXISTS territory_tags (
   acked_by_uuid TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_territory_tags_live ON territory_tags(expires_at, acked_at);
+
+-- path_epochs: the durable, per-path generation counter locks.epoch snapshots
+-- at grant time (loto-ovno.2). Survives lock release/reclaim/break — the whole
+-- point is a value that outlives the row it eventually seeds, so a LATER
+-- acquire at the same path can keep counting up rather than starting over.
+-- One row per path ever locked; never deleted (bounded by the repo's distinct
+-- file count, not by lock churn). Added to existing DBs via
+-- ensurePathEpochsTable in migrate() (no user_version bump); declared here so
+-- fresh DBs match.
+CREATE TABLE IF NOT EXISTS path_epochs (
+  path_canonical TEXT PRIMARY KEY,
+  epoch          INTEGER NOT NULL
+);
+
+-- candidate_claims: a durable, per-path territory hold on behalf of a
+-- candidate awaiting promotion (loto-ovno.2; git-gate.md "Claim lifecycle").
+-- One row per (path, candidate) — a candidate's write-set claims every path it
+-- touches, mirroring locks' per-file granularity, never claims' prefix
+-- granularity. No TTL: liveness is PID+proc_start of the process that minted
+-- it (domain.EvalContext.CandidateClaimIsDead) — a candidate under review has
+-- no natural deadline, so unlike locks or claims this record's only staleness
+-- authority is "was the minting process provably killed." Added to existing
+-- DBs via ensureCandidateClaimsTable in migrate() (no user_version bump);
+-- declared here so fresh DBs match.
+CREATE TABLE IF NOT EXISTS candidate_claims (
+  path_canonical TEXT NOT NULL,
+  candidate_id   TEXT NOT NULL,
+  owner_uuid     TEXT NOT NULL,
+  session_uuid   TEXT NOT NULL DEFAULT '',
+  created_at     INTEGER NOT NULL,
+  host           TEXT NOT NULL DEFAULT '',
+  pid            INTEGER NOT NULL DEFAULT 0,
+  proc_start     INTEGER,
+  PRIMARY KEY (path_canonical, candidate_id)
+);
+CREATE INDEX IF NOT EXISTS idx_candidate_claims_candidate ON candidate_claims(candidate_id);

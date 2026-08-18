@@ -65,6 +65,19 @@ type MultiConflictError struct {
 	Blockers []domain.LockRecord
 }
 
+// CandidateClaimConflictError reports the durable candidate claims blocking a
+// lease acquisition (loto-ovno.2 part 3) — a distinct type from
+// MultiConflictError rather than a lossy reuse, since a CandidateClaim is not
+// a LockRecord: it names a candidate awaiting promotion, not a peer holding a
+// lock, and a caller needs to say something different about each.
+type CandidateClaimConflictError struct {
+	Blockers []domain.CandidateClaim
+}
+
+func (e *CandidateClaimConflictError) Error() string {
+	return fmt.Sprintf("candidate claim conflict: %d blocker(s)", len(e.Blockers))
+}
+
 func (e *MultiConflictError) Error() string {
 	return fmt.Sprintf("multi-target lock conflict: %d blocker(s)", len(e.Blockers))
 }
@@ -104,7 +117,7 @@ type BreakResult struct {
 	Mode   string // mode of the broken row; "" → exclusive (mirrors ReleaseResult.Mode)
 }
 
-const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch,mode,beacon`
+const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch,mode,beacon,epoch`
 
 func inClause(targets []domain.Target) (string, []any) {
 	ph := make([]byte, 0, len(targets)*2)
@@ -185,7 +198,7 @@ func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	// an absent value to false — "not a beacon", the conservative reading,
 	// since a false beacon makes guard refuse rather than move the tree.
 	var beacon sql.NullBool
-	if err := r.Scan(&canonical, &owner, &session, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &mode, &beacon); err != nil {
+	if err := r.Scan(&canonical, &owner, &session, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &mode, &beacon, &l.Epoch); err != nil {
 		return l, err
 	}
 	l.Beacon = beacon.Valid && beacon.Bool

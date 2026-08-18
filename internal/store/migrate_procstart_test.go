@@ -61,7 +61,7 @@ func TestMigrate_AddsProcStartInPlace(t *testing.T) {
 	}
 
 	// proc_start column now exists and is NULL for the legacy row → unknown (0).
-	got, err := s.LockAt(context.Background(), domain.Target{Canonical: "a.go"})
+	got, err := s.LockAt(context.Background(), domain.Target{Canonical: tcAGo})
 	if err != nil || got == nil {
 		t.Fatalf("LockAt: %v / %v", got, err)
 	}

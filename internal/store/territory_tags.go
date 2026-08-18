@@ -227,20 +227,5 @@ func gcTerritoryTagsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 // Follows ensureClaimsTable verbatim: probe sqlite_master, apply the DDL,
 // never bump user_version.
 func ensureTerritoryTagsTable(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
-	var name string
-	err := db.QueryRowContext(ctx,
-		`SELECT name FROM sqlite_master WHERE type='table' AND name='territory_tags'`).Scan(&name)
-	if err == nil {
-		return false, nil // already present
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return false, err
-	}
-	if apply {
-		if _, err := db.ExecContext(ctx, territoryTagsDDL); err != nil {
-			return false, err
-		}
-		return false, nil // applied: no longer outstanding
-	}
-	return true, nil
+	return ensureTableBySentinelName(ctx, db, apply, "territory_tags", territoryTagsDDL)
 }

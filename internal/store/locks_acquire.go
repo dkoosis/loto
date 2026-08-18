@@ -62,6 +62,18 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 	}
 	now := time.Now()
 
+	// Acquisition-time overlap block (loto-ovno.2 part 3, git-gate.md "Claim
+	// lifecycle"): a new lease must not land on a path an unresolved candidate
+	// claim already covers, or the candidate's captured preimage is guaranteed
+	// stale the moment this acquire's holder edits — a rejection this cheap
+	// check could have caught at lock time instead. Checked before the
+	// ordinary lock-conflict scan; both reads are equally cheap, and failing
+	// on the claim first means a caller sees "a candidate is pending here"
+	// rather than a same-shaped-but-unrelated lock-conflict message.
+	if err := blockOnCandidateClaims(ctx, tx, sorted); err != nil {
+		return nil, err
+	}
+
 	blockers, err := collectAllBlockers(ctx, tx, all, sorted, now, live)
 	if err != nil {
 		return nil, err
@@ -97,7 +109,16 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 func (s *Store) insertAllLocks(ctx context.Context, tx *sql.Tx, sorted, all []domain.LockRecord, ec domain.EvalContext) error {
 	evs := make([]domain.Event, 0, len(sorted))
 	for i := range sorted {
-		written, err := insertOrRefreshLock(ctx, tx, sorted[i], beaconMaySupersede(sorted[i], all, ec))
+		epoch, err := resolveEpoch(ctx, tx, sorted[i], all, ec)
+		if err != nil {
+			return err
+		}
+		// Written back onto the shared backing array so the caller's returned
+		// records (AcquireLocks' `return sorted, nil`) carry the epoch the row
+		// was actually persisted under, not the zero value the caller built it
+		// with — a caller minting a candidate envelope's LeaseEpoch reads this.
+		sorted[i].Epoch = epoch
+		written, err := insertOrRefreshLock(ctx, tx, sorted[i], beaconMaySupersede(sorted[i], all, ec), epoch)
 		if err != nil {
 			return err
 		}
@@ -114,6 +135,34 @@ func (s *Store) insertAllLocks(ctx context.Context, tx *sql.Tx, sorted, all []do
 	}
 	// Emit lock_acquired events in the same tx (atomic with the row inserts).
 	return appendEventsTx(ctx, tx, evs)
+}
+
+// blockOnCandidateClaims refuses the whole batch if ANY target overlaps an
+// unresolved candidate claim, sorted deterministically by (path, candidate)
+// for a stable error. No liveness reclaim happens here: the store's job is to
+// say a claim exists, not to decide it is abandoned — that judgment (via
+// domain.EvalContext.CandidateClaimIsDead) belongs to whichever later bead
+// actively reclaims stale candidate claims, kept separate from every ordinary
+// caller's lock acquisition path on purpose.
+func blockOnCandidateClaims(ctx context.Context, tx *sql.Tx, sorted []domain.LockRecord) error {
+	paths := make([]string, len(sorted))
+	for i := range sorted {
+		paths[i] = sorted[i].Target.Canonical
+	}
+	claims, err := candidateClaimsForPathsTx(ctx, tx, paths)
+	if err != nil {
+		return err
+	}
+	if len(claims) == 0 {
+		return nil
+	}
+	sort.Slice(claims, func(i, j int) bool {
+		if claims[i].PathCanonical != claims[j].PathCanonical {
+			return claims[i].PathCanonical < claims[j].PathCanonical
+		}
+		return claims[i].CandidateID < claims[j].CandidateID
+	})
+	return &CandidateClaimConflictError{Blockers: claims}
 }
 
 func validateAllFileTargets(sorted []domain.LockRecord) error {
@@ -236,8 +285,11 @@ func beaconMaySupersede(l domain.LockRecord, all []domain.LockRecord, ec domain.
 // insertOrRefreshLock upserts one lock row and reports whether the row was
 // actually written. false means the beacon yield below suppressed the update:
 // no error, nothing changed, and the caller must not log an acquisition.
-// supersede comes from beaconMaySupersede and lifts the yield.
-func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, supersede bool) (bool, error) {
+// supersede comes from beaconMaySupersede and lifts the yield. epoch is the
+// value resolveEpoch already decided — preserved on the UPDATE branch
+// (deliberately absent from the SET list below) and only ever supplied fresh
+// on the INSERT branch (loto-ovno.2).
+func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, supersede bool, epoch int64) (bool, error) {
 	// Map 0 (UNKNOWN) → NULL at the store boundary so an absent start-time is a
 	// SQL null, matching legacy rows. A refresh re-stamps proc_start because the
 	// holder is the same process (same pid, same start-time).
@@ -270,8 +322,8 @@ func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, s
 	// refreshed, and peers read it as free — `loto beacon` would report success
 	// over a row announcing the file is available while the agent is mid-edit.
 	res, err := tx.ExecContext(ctx, `
-INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, mode, beacon)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, mode, beacon, epoch)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
   intent=excluded.intent,
   expires_at=excluded.expires_at,
@@ -287,7 +339,7 @@ WHERE ? = 1
    OR locks.beacon = 1`,
 		l.Target.Canonical, string(l.OwnerUUID), string(l.SessionUUID),
 		l.Intent, l.CreatedAt.UnixNano(), l.ExpiresAt.UnixNano(),
-		l.Host, l.PID, procStart, l.Branch, l.EffectiveMode(), l.Beacon,
+		l.Host, l.PID, procStart, l.Branch, l.EffectiveMode(), l.Beacon, epoch,
 		supersede,
 	)
 	if err != nil {
