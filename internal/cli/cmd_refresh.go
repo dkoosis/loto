@@ -89,7 +89,7 @@ func cmdRefresh(ctx context.Context, args []string, stdout, stderr io.Writer) in
 // drift toward expiry.
 func refreshTargets(rt *runtime, args []string, all bool, stderr io.Writer) ([]domain.Target, int) {
 	if !all {
-		targets, invalid := validateLockTargets(args, rt.RepoTop)
+		targets, invalid := validateLockTargets(args, rt.RepoTop, false)
 		if len(invalid) > 0 {
 			render.EmitInvalid(stderr, invalid)
 			return nil, 2

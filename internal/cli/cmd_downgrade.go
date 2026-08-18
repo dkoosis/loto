@@ -33,7 +33,7 @@ func cmdDowngrade(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		return 2
 	}
 	repoTop, _ := repoTopForCwd(ctx)
-	targets, invalid := validateLockTargets(fs.Args(), repoTop)
+	targets, invalid := validateLockTargets(fs.Args(), repoTop, false)
 	if len(invalid) > 0 {
 		render.EmitInvalid(stderr, invalid)
 		return 2

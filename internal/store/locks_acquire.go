@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"sort"
 	"syscall"
@@ -167,16 +169,34 @@ func blockOnCandidateClaims(ctx context.Context, tx *sql.Tx, sorted []domain.Loc
 
 func validateAllFileTargets(sorted []domain.LockRecord) error {
 	for i := range sorted {
-		if err := validateFileTarget(sorted[i].Target.Canonical); err != nil {
+		if err := validateFileTarget(sorted[i]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateFileTarget(p string) error {
+// validateFileTarget checks rec's target path exists as a regular,
+// non-multi-linked, non-symlink file — EXCEPT for a beacon (loto-z5nb): a
+// beacon announces a write about to happen, and a Write tool call creating a
+// brand-new path is exactly the case AcquireLocks previously had nothing to
+// protect. domain.Canonicalize already tolerates a non-existent path
+// (paths.go normalizeRepoPath); this was the one place downstream that still
+// demanded the file pre-exist, which silently made a beacon for a new file
+// store nothing and left two siblings racing to create the same path
+// completely unprotected.
+//
+// The carve-out is narrow: ENOENT only, and only for a beacon. A beacon whose
+// path DOES exist — or a plain `loto lock` on any missing path — still runs
+// every check below unchanged; a symlink or non-regular file is refused
+// whether or not the caller is beaconing.
+func validateFileTarget(rec domain.LockRecord) error {
+	p := rec.Target.Canonical
 	lst, err := os.Lstat(p)
 	if err != nil {
+		if rec.IsBeacon() && errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		return fmt.Errorf("validate %s: %w", p, err)
 	}
 	if lst.Mode()&os.ModeSymlink != 0 {
