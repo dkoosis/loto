@@ -111,6 +111,43 @@ func TestBeaconReplacesOwnLapsedLock(t *testing.T) {
 	}
 }
 
+// TestBeaconReplacesDeadSiblingsLock is the third leg of the yield (Codex
+// #252). Sibling sessions sharing one LOTO_AGENT_ID are supported (loto-81n),
+// so an UNEXPIRED explicit lock under this owner uuid can belong to a sibling
+// that has since died. collectAllBlockers skips same-owner rows, so yielding to
+// it leaves the dead row as the only thing peers see — they probe it DEAD,
+// reclaim it, and write the file concurrently with the session that just tried
+// to beacon it. The yield asks the probe, not the clock.
+func TestBeaconReplacesDeadSiblingsLock(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	sibling := mkFileLockSession(t, "a.go", tcAlice, "dead-session", time.Hour)
+	sibling.Mode = domain.ModeExclusive
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{sibling}, liveProbe); err != nil {
+		t.Fatalf("acquire sibling lock: %v", err)
+	}
+
+	beacon := beaconOf(sibling, 2*time.Minute)
+	beacon.SessionUUID = "live-session"
+	// deadOwnerProbe stands in for the runtime oracle reporting the sibling's
+	// session gone while this session keeps editing.
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{beacon}, deadOwnerProbe(tcAlice)); err != nil {
+		t.Fatalf("beacon over dead sibling's lock: %v", err)
+	}
+
+	got, err := s.LockForOwnerAt(ctx, sibling.Target, tcAlice)
+	if err != nil || got == nil {
+		t.Fatalf("LockForOwnerAt: %v / %+v", err, got)
+	}
+	if !got.IsBeacon() {
+		t.Error("a dead sibling's lease must not block the beacon; peers reclaim that row and write concurrently")
+	}
+	if got.SessionUUID != beacon.SessionUUID {
+		t.Errorf("session = %q, want the minting session %q", got.SessionUUID, beacon.SessionUUID)
+	}
+}
+
 // TestLegacyBeaconRowsBackfilled pins the migration's one carve-out (Codex
 // #252). The release before this one minted beacons as shared / pid-0 rows with
 // a fixed intent and no marker. Defaulting those to beacon=0 would promote them

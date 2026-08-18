@@ -519,9 +519,15 @@ const legacyBeaconIntent = "beacon: agent is writing this file"
 // for by an agent, which is what 0 means — but the release immediately before
 // this one DID mint beacons, as shared / pid-0 rows carrying a fixed intent.
 // Defaulting those to 0 would promote them to apparent explicit leases that
-// guard refuses to move past, and the new yield rule would then decline to
-// overwrite them. The triple predicate identifies them exactly; anything else
-// keeps the default.
+// guard refuses to move past.
+//
+// The predicate names every persisted field a beacon fixes and a hand-taken
+// lock does not: shared, pid 0, no branch, and that intent. Branch is in there
+// because intent alone is user-supplied — `loto lock --shared -t "<the beacon
+// text>"` is possible, if perverse — while buildLockRecords stamps the holder's
+// git branch (loto-16cf) and buildBeaconRecords deliberately does not. Wrongly
+// marking a real lease would let a tree move waive it, so the backfill errs
+// toward leaving rows alone.
 func ensureLocksBeacon(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	var n int
 	if err := db.QueryRowContext(ctx,
@@ -537,7 +543,7 @@ func ensureLocksBeacon(ctx context.Context, db sqlExecQuerier, apply bool) (bool
 			return false, err
 		}
 		if _, err := db.ExecContext(ctx,
-			`UPDATE locks SET beacon = 1 WHERE mode = 'shared' AND pid = 0 AND intent = ?`,
+			`UPDATE locks SET beacon = 1 WHERE mode = 'shared' AND pid = 0 AND branch = '' AND intent = ?`,
 			legacyBeaconIntent,
 		); err != nil {
 			return false, err
