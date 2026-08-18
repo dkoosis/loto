@@ -117,14 +117,15 @@ type runtime struct {
 // false), ReleaseBySession, and — the reason this is being fixed now — any
 // attempt to ask whether a peer record speaks for a given record's session.
 //
-// identity.RecordPeer reads the same CLAUDE_CODE_SESSION_ID into Peer.SessionID
-// (peer.go), so the two sides are comparable BY CONSTRUCTION rather than by
-// convention. peerSpeaksFor below depends on exactly that.
+// identity.PeerFromEnv fills Peer.SessionID from identity.SessionIDFromEnv —
+// the same function called here — so the two sides are comparable BY
+// CONSTRUCTION rather than by convention. peerSpeaksFor below depends on
+// exactly that, and the convention version had already drifted: the peer read
+// CLAUDE_CODE_SESSION_ID alone while this preferred LOTO_SESSION_ID, so with
+// the documented override set every DEAD verdict was discarded and PID-less
+// locks and claims stayed blockers until their TTL (loto-37xm, Codex #248).
 func sessionUUID() (id string, pinned bool) {
-	if v := os.Getenv("LOTO_SESSION_ID"); v != "" {
-		return v, true
-	}
-	if v := os.Getenv("CLAUDE_CODE_SESSION_ID"); v != "" {
+	if v := identity.SessionIDFromEnv(); v != "" {
 		return v, true
 	}
 	return identity.NewUUID(), false
