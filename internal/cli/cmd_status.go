@@ -70,8 +70,40 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	printStatusClaims(stdout, rt, claims, *mine, time.Now())
+	now := time.Now()
+	printStatusClaims(stdout, rt, claims, *mine, now)
+	printStatusTerritoryTags(stdout, rt, *mine, now)
 	return 0
+}
+
+// printStatusTerritoryTags renders every live note pinned to this repo's
+// territory (loto-z3y1). This section is what keeps anyone from wanting an
+// inbox verb: "what is pinned on this ground" already has a door, and it is
+// the same door that answers "who holds what".
+//
+// ‡ Suppressed at zero, unlike the locks and claims sections. Those print an
+// explicit empty header because silence there would read as a crash — status
+// is ABOUT holdings. A repo with no notes is the overwhelmingly common case,
+// and a permanent "✓ no territory-tags" line would tax every status call to
+// report the absence of a feature most repos never use.
+//
+// --mine filters to notes this agent wrote, matching the flag's meaning in the
+// sections above. Self-authored notes are NOT excluded here: status answers
+// "what is pinned", where your own note is part of the answer, unlike the
+// footer which answers "what should I know".
+func printStatusTerritoryTags(stdout io.Writer, rt *runtime, mine bool, now time.Time) {
+	notes := liveTerritoryTags(rt, now)
+	if mine {
+		kept := notes[:0]
+		for _, n := range notes {
+			if n.TaggerUUID == rt.Agent.UUID {
+				kept = append(kept, n)
+			}
+		}
+		notes = kept
+	}
+	sortTerritoryTags(notes)
+	render.EmitTerritoryTagRows(stdout, notes, "territory-tags", "")
 }
 
 // printStatusClaims renders the claims section after locks (loto-7af9): live

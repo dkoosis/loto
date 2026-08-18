@@ -80,3 +80,24 @@ CREATE TABLE IF NOT EXISTS claims (
 );
 CREATE INDEX IF NOT EXISTS idx_claims_expires ON claims(expires_at);
 
+
+-- territory_tags: a note pinned to repo territory — an unlocked file path or a
+-- directory prefix — for the agent who arrives there next (loto-z3y1). Added to
+-- existing DBs via ensureTerritoryTagsTable in migrate() (no user_version
+-- bump); declared here so fresh DBs match.
+--
+-- Deliberately NOT the `tags` table. A tag's lifetime is parasitic on a host
+-- lock, enforced in six queries including a hard DELETE ... WHERE NOT EXISTS
+-- (lock) — which would silently eat every hostless row on the first
+-- doctor --repair. These two lifetimes are structurally unable to collide here.
+CREATE TABLE IF NOT EXISTS territory_tags (
+  id            TEXT PRIMARY KEY,
+  path_prefix   TEXT NOT NULL,
+  tagger_uuid   TEXT NOT NULL,
+  text          TEXT NOT NULL CHECK (length(text) <= 4096),
+  created_at    INTEGER NOT NULL,
+  expires_at    INTEGER NOT NULL,
+  acked_at      INTEGER,
+  acked_by_uuid TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_territory_tags_live ON territory_tags(expires_at, acked_at);

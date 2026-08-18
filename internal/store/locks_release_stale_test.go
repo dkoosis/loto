@@ -153,7 +153,7 @@ func TestReleaseLocks_AllSharedStale_DeletedNoRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, "carol", deadProbe)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, tcCarol, deadProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestReleaseLocks_MixedLiveStaleShared_NotOwner(t *testing.T) {
 	}
 	bobAlive := hostPidProbe(tcHost, func(pid int, _ int64) bool { return pid == 102 })
 
-	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, "carol", bobAlive)
+	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, tcCarol, bobAlive)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestConcurrentReleaseReclaimVsAcquire(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fresh := peerOn(stale, "carol", domain.ModeExclusive)
+	fresh := peerOn(stale, tcCarol, domain.ModeExclusive)
 	now := time.Now()
 	fresh.CreatedAt = now
 	fresh.ExpiresAt = now.Add(time.Hour)
@@ -372,7 +372,7 @@ func TestConcurrentReleaseReclaimVsAcquire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if final == nil || final.OwnerUUID != "carol" {
+	if final == nil || final.OwnerUUID != tcCarol {
 		t.Fatalf("final state must be the acquirer's row, got %+v", final)
 	}
 	// loto-zssw: whoever wins the race, the file's mode is never a party to it.
@@ -425,7 +425,7 @@ func TestReleaseLocks_MixedBatch_AckedTagSurvivesReclaimGC(t *testing.T) {
 		TargetCanonical: domain.Canonical(dead.Target.Canonical),
 		LockOwnerUUID:   tcBob,
 		LockCreatedAt:   deadRow.CreatedAt.UnixNano(),
-		TaggerUUID:      "carol",
+		TaggerUUID:      tcCarol,
 		Text:            tcPing,
 	})
 	if err != nil {

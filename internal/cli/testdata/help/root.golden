@@ -10,8 +10,8 @@ commands:
   guard    Wrap checkout|switch|restore; refuses under a live peer (make hooks installs it)
   status   Show lock state; --mine to filter to yours, --collisions for ≥2-owner targets
   doctor   Detect and optionally repair stale locks
-  tag      Leave a note on a target locked by another agent
-  ack      Dismiss a tag by ID
+  tag      Leave a note on a locked target, or pin one to unlocked territory
+  ack      Dismiss a tag or territory tag by ID
   whoami   Print agent identity
   who      Map handles to Claude Code peer names — the address SendMessage needs
   alive    Liveness verdict per agent; exit 1 if any is dead, 0 if none provably is

@@ -12,6 +12,7 @@ import (
 
 	"loto/internal/domain"
 	"loto/internal/identity"
+	"loto/internal/render"
 	"loto/internal/store"
 )
 
@@ -29,12 +30,16 @@ func renderDoctorReport(stdout io.Writer, report *store.DoctorReport) {
 		}
 		return sidecarFindings[i].Reason < sidecarFindings[j].Reason
 	})
-	if len(staleLocks) == 0 && len(report.ExpiredClaims) == 0 && len(sidecarFindings) == 0 && report.IntegrityOK {
+	// A note that lapsed with nobody having read it is a finding, so a box whose
+	// only trouble is one of those must not print ✓ healthy (loto-z3y1 D2).
+	if len(staleLocks) == 0 && len(report.ExpiredClaims) == 0 && len(sidecarFindings) == 0 &&
+		len(report.ExpiredTerritoryTags) == 0 && report.IntegrityOK {
 		fmt.Fprintln(stdout, "✓ healthy")
 		return
 	}
-	fmt.Fprintf(stdout, "✗ stale_locks=%d expired_claims=%d sidecar_findings=%d integrity=%s\n",
-		len(staleLocks), len(report.ExpiredClaims), len(sidecarFindings), report.IntegrityDetail)
+	fmt.Fprintf(stdout, "✗ stale_locks=%d expired_claims=%d expired_territory_tags=%d sidecar_findings=%d integrity=%s\n",
+		len(staleLocks), len(report.ExpiredClaims), len(report.ExpiredTerritoryTags),
+		len(sidecarFindings), report.IntegrityDetail)
 	for i := range staleLocks {
 		l := &staleLocks[i]
 		fmt.Fprintf(stdout, "✗ stale target=%s owner=%s expires_at=%s host=%s pid=%d\n",
@@ -47,6 +52,11 @@ func renderDoctorReport(stdout io.Writer, report *store.DoctorReport) {
 		fmt.Fprintf(stdout, "✗ expired_claim prefix=%s owner=%s expires_at=%s\n",
 			c.PathPrefix, c.OwnerUUID, c.ExpiresAt.UTC().Format(time.RFC3339))
 	}
+	// ⚠ rather than ✗: the note is not broken state, it is undelivered word,
+	// and --repair will sweep it. The text rides along so the row is actionable
+	// — a count alone tells the reader something was lost without telling them
+	// what, which is the worst of both.
+	render.EmitExpiredTerritoryTags(stdout, report.ExpiredTerritoryTags, time.Now())
 	for i := range sidecarFindings {
 		f := &sidecarFindings[i]
 		if f.Detail != "" {

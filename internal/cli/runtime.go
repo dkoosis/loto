@@ -217,19 +217,29 @@ func (r *runtime) Close() error {
 	return r.Store.Close()
 }
 
-// DeferredTagFooter prints the caller-as-holder's pending external tags after
-// the primary command output. Opted-in commands (lock, unlock, status, doctor)
+// DeferredTagFooter prints, after the primary command output, both kinds of
+// note the caller ought to see: pending external tags on locks it holds, and
+// territory tags pinned to ground it now holds (loto-z3y1).
+//
+// Opted-in commands (lock, unlock, refresh, claim, unclaim, status, doctor)
 // register this via `defer`; check is excluded deliberately — its output is a
-// pinned machine surface for trixi's PreToolUse hook.
+// pinned machine surface for trixi's PreToolUse hook, and it gets its own
+// advisory block instead.
+//
+// ‡ The `defer` placement is what makes the territory half work at all: the
+// footer runs AFTER the command's mutation has committed, so a just-acquired
+// lock is already a row by the time we ask what ground the caller holds.
+// Extending the body reaches all seven verbs without touching one call site.
 //
 // Tags whose host lock disappeared mid-command (release, break) are filtered by
 // the JOIN inside ListAliveForOwner.
 func (r *runtime) DeferredTagFooter(w io.Writer) {
 	tags, err := r.Store.ListAliveForOwner(r.Ctx, domain.AgentUUID(r.Agent.UUID))
-	if err != nil || len(tags) == 0 {
-		return
+	if err == nil && len(tags) > 0 {
+		render.EmitTagFooter(w, tags, r.Agent.UUID)
 	}
-	render.EmitTagFooter(w, tags, r.Agent.UUID)
+	now := time.Now()
+	emitTerritoryTagFooter(w, territoryTagsForHeldGround(r, liveTerritoryTags(r, now), now))
 }
 
 // liveProbe returns the HolderLiveProbe every staleness predicate consumes:
