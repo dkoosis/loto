@@ -70,6 +70,13 @@ func TestPeerFromEnvNilWithoutSocket(t *testing.T) {
 	}
 }
 
+// tcClaudeSess / tcLotoSess are the two session ids the precedence test and
+// its peer-record sibling compare (loto-37xm).
+const (
+	tcClaudeSess = "claude-sess"
+	tcLotoSess   = "loto-sess"
+)
+
 // TestSessionIDFromEnvPrecedence pins the shared precedence (loto-37xm, Codex
 // #248). The peer record written here and the session id stamped on lock and
 // claim rows are COMPARED — runtime.peerSpeaksFor asks whether a peer record
@@ -85,8 +92,8 @@ func TestSessionIDFromEnvPrecedence(t *testing.T) {
 		claudeSess string
 		want       string
 	}{
-		{"explicit override wins", "loto-sess", "claude-sess", "loto-sess"},
-		{"claude session when no override", "", "claude-sess", "claude-sess"},
+		{"explicit override wins", tcLotoSess, tcClaudeSess, tcLotoSess},
+		{"claude session when no override", "", tcClaudeSess, tcClaudeSess},
 		{"neither set", "", "", ""},
 	}
 	for _, tc := range tests {
@@ -106,16 +113,16 @@ func TestPeerFromEnvUsesSessionOverride(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/4242.sock")
 	t.Setenv("CLAUDE_PID", "4242")
 	t.Setenv("LOTO_PEER_NAME", "")
-	t.Setenv("CLAUDE_CODE_SESSION_ID", "claude-sess")
-	t.Setenv("LOTO_SESSION_ID", "loto-sess")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", tcClaudeSess)
+	t.Setenv("LOTO_SESSION_ID", tcLotoSess)
 
 	p := PeerFromEnv(context.Background(), &Agent{UUID: "u", Handle: "H"}, "")
 	if p == nil {
 		t.Fatal("want a peer record")
 	}
-	if p.SessionID != "loto-sess" {
+	if p.SessionID != tcLotoSess {
 		t.Fatalf("Peer.SessionID = %q, want %q — the peer and the lock rows must name one session",
-			p.SessionID, "loto-sess")
+			p.SessionID, tcLotoSess)
 	}
 }
 
