@@ -20,6 +20,9 @@ excludeFiles:
 #   internal/store → internal/domain
 #   internal/identity → ∅
 #   internal/domain → ∅ (pure functions, no internal deps)
+#   internal/gate → {domain, lane} (loto-ovno; NOT store — an envelope is a
+#     pure function of git object state + caller-supplied data, never a
+#     store lookup, so this edge is a design invariant, not an oversight)
 #
 # Keep simple. Fail fast on back-edges (e.g., domain importing store).
 
@@ -41,6 +44,8 @@ components:
     in: internal/render/**
   lane:
     in: internal/lane/**
+  gate:
+    in: internal/gate/**
 
 deps:
   main:
@@ -59,6 +64,15 @@ deps:
   # still forbids every internal component edge (no mayDependOn ref present).
   lane:
     anyVendorDeps: true
+  # internal/gate is the git-gate envelope layer (loto-ovno). It reads git
+  # object state directly and internal/lane's WriteSet shape for the
+  # deletion round-trip test — deliberately NOT store: an envelope is a pure
+  # function of git state + caller data, never a store lookup (design.md
+  # under this package's own doc comment).
+  gate:
+    mayDependOn:
+      - domain
+      - lane
   render:
     mayDependOn:
       - domain
