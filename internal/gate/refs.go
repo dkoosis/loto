@@ -1,0 +1,111 @@
+package gate
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+// RefUpdate is one line of a git-update-ref transaction (git-update-ref(1),
+// "Transactional updates" / the --stdin protocol). Verb selects the git
+// subcommand-shaped line: "create" (ref must not already exist — the natural
+// double-admission guard for a fresh candidate id), "update" (unconditional or
+// old-value-checked), or "delete".
+// Verb values RefUpdate accepts — the three git-update-ref --stdin commands
+// this helper speaks.
+const (
+	VerbCreate = "create"
+	VerbUpdate = "update"
+	VerbDelete = "delete"
+)
+
+type RefUpdate struct {
+	Verb   string // VerbCreate, VerbUpdate, or VerbDelete
+	Ref    string // e.g. "refs/loto/candidates/<id>"
+	NewSHA string // required for create/update; ignored for delete
+	OldSHA string // optional compare-and-swap value for update/delete; "" = unconditional
+}
+
+// ErrEmptyTransaction guards against calling UpdateRefsTx with nothing to do —
+// an accidental empty transaction would otherwise silently no-op rather than
+// signal the caller built its update list wrong.
+var ErrEmptyTransaction = errors.New("gate: empty ref transaction")
+
+// errUnknownRefVerb is wrapped with the offending verb/ref via %w — a caller
+// bug (a typo'd Verb field), not a runtime condition worth its own exported
+// sentinel.
+var errUnknownRefVerb = errors.New("gate: unknown ref update verb")
+
+// UpdateRefsTx runs one atomic multi-ref transaction via
+// `git update-ref --stdin`: every listed update applies, or none does
+// (git-gate.md "one atomic `update-ref --stdin` transaction... after a crash,
+// refs alone reconstruct state"). This is what lets admission write the
+// candidate ref and the proposal ref together — a crash between the two would
+// otherwise leave a candidate ref pointing at an envelope whose proposal
+// commit nothing keeps reachable, or vice versa.
+func UpdateRefsTx(ctx context.Context, repoTop string, updates []RefUpdate) error {
+	if len(updates) == 0 {
+		return ErrEmptyTransaction
+	}
+	var stdin bytes.Buffer
+	stdin.WriteString("start\n")
+	for _, u := range updates {
+		switch u.Verb {
+		case VerbCreate:
+			fmt.Fprintf(&stdin, "create %s %s\n", u.Ref, u.NewSHA)
+		case VerbUpdate:
+			if u.OldSHA != "" {
+				fmt.Fprintf(&stdin, "update %s %s %s\n", u.Ref, u.NewSHA, u.OldSHA)
+			} else {
+				fmt.Fprintf(&stdin, "update %s %s\n", u.Ref, u.NewSHA)
+			}
+		case VerbDelete:
+			if u.OldSHA != "" {
+				fmt.Fprintf(&stdin, "delete %s %s\n", u.Ref, u.OldSHA)
+			} else {
+				fmt.Fprintf(&stdin, "delete %s\n", u.Ref)
+			}
+		default:
+			return fmt.Errorf("%w: %q for %s", errUnknownRefVerb, u.Verb, u.Ref)
+		}
+	}
+	stdin.WriteString("commit\n")
+
+	cmd := exec.CommandContext(ctx, "git", "update-ref", "--stdin")
+	cmd.Dir = repoTop
+	cmd.Stdin = &stdin
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("gate: update-ref --stdin: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// WriteCandidateRefs is the accepted-candidate write: candidateRef(id) → the
+// envelope blob, proposalRef(id) → the proposal commit, in ONE atomic
+// transaction. Both use "create" — a fresh candidate id must not already have
+// refs; a collision here means a caller reused an id, and failing loudly beats
+// silently overwriting whichever candidate got there first.
+func WriteCandidateRefs(ctx context.Context, repoTop, candidateID, envelopeSHA, proposalSHA string) error {
+	return UpdateRefsTx(ctx, repoTop, []RefUpdate{
+		{Verb: VerbCreate, Ref: candidateRef(candidateID), NewSHA: envelopeSHA},
+		{Verb: VerbCreate, Ref: proposalRef(candidateID), NewSHA: proposalSHA},
+	})
+}
+
+// candidateRef and proposalRef are the two ref trees an accepted candidate
+// occupies, kept structurally distinct (never nested under one another —
+// git's loose-ref storage can't have both a ref file AT a path and a ref file
+// inside a same-named directory). candidateRef points at the envelope BLOB —
+// so "a candidate ref without its envelope" (git-gate.md) cannot even arise
+// structurally, the ref IS the envelope pointer. proposalRef points at the
+// PROPOSAL COMMIT, which candidateRef's blob does not itself keep reachable
+// (a blob's content is opaque bytes to git, not an object reference) — without
+// this second ref, the commit becomes GC-eligible the moment its lane branch
+// moves past it in a later wave.
+func candidateRef(id string) string { return "refs/loto/candidates/" + id }
+func proposalRef(id string) string  { return "refs/loto/proposals/" + id }

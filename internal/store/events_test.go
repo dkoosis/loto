@@ -101,7 +101,7 @@ func TestAppendEvents_AssignsIDs(t *testing.T) {
 	ctx := context.Background()
 	evs := []domain.Event{
 		{Target: domain.Target{Canonical: tcAGo}, Kind: EventLockAcquired, ActorUUID: tcAlice, CreatedAt: time.Now()},
-		{Target: domain.Target{Canonical: "b.go"}, Kind: EventLockAcquired, ActorUUID: tcAlice, CreatedAt: time.Now()},
+		{Target: domain.Target{Canonical: tcBGo}, Kind: EventLockAcquired, ActorUUID: tcAlice, CreatedAt: time.Now()},
 	}
 	if err := s.AppendEvents(ctx, evs); err != nil {
 		t.Fatal(err)

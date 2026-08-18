@@ -23,6 +23,11 @@ const (
 	EventAcquireRollbackStart = "acquire_rollback_started"
 	EventLockDowngraded       = "lock_downgraded"
 	EventLockRefreshed        = "lock_refreshed"
+	// EventGateBypass is emitted every time LOTO_GATE=off bypasses admission
+	// (loto-ovno.4, git-gate.md "The gate can never become the outage"). No
+	// Target — a bypass is a session-scoped fact, not a per-path one — so
+	// TargetCanonical is written empty. ActorUUID names who bypassed.
+	EventGateBypass = "gate_bypass"
 )
 
 var ErrNoLockAtTarget = errors.New("no lock at target")
