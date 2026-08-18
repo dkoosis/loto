@@ -53,7 +53,7 @@ CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);
 CREATE TABLE IF NOT EXISTS events (
   id               TEXT PRIMARY KEY,
   target_canonical TEXT NOT NULL,
-  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started','lock_downgraded','lock_refreshed')),
+  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started','lock_downgraded','lock_refreshed','gate_bypass')),
   actor_uuid       TEXT NOT NULL,
   subject_uuid     TEXT,
   reason           TEXT NOT NULL DEFAULT '',

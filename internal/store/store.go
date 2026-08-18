@@ -688,14 +688,14 @@ func ensureEventsCheckCurrent(ctx context.Context, db sqlExecQuerier, apply bool
 		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&ddl); err != nil {
 		return false, err
 	}
-	if strings.Contains(ddl, "'lock_refreshed'") {
+	if strings.Contains(ddl, "'gate_bypass'") {
 		return false, nil // already current
 	}
 	const rebuild = `
 CREATE TABLE events_new (
   id               TEXT PRIMARY KEY,
   target_canonical TEXT NOT NULL,
-  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started','lock_downgraded','lock_refreshed')),
+  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started','lock_downgraded','lock_refreshed','gate_bypass')),
   actor_uuid       TEXT NOT NULL,
   subject_uuid     TEXT,
   reason           TEXT NOT NULL DEFAULT '',

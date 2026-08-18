@@ -78,9 +78,16 @@ deps:
       - domain
       - store
       - identity
+  # store → gate (loto-ovno.4, not loto-ovno.3's own edge): admission's
+  # accept-side actions (write the envelope + proposal refs, convert a lease to
+  # a durable candidate claim) genuinely need both persistence AND git-ref
+  # plumbing in one place. gate ITSELF still imports nothing from store — this
+  # edge runs one direction only, and Admit()/Capture() stay exactly as
+  # store-independent as the comment above them says.
   store:
     mayDependOn:
       - domain
+      - gate
   identity:
     anyVendorDeps: true
   domain:

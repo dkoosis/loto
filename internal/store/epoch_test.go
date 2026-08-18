@@ -215,7 +215,7 @@ func TestAcquireLocks_EpochsAreIndependentPerPath(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	a := mkFileLock(t, tcAGo, tcAlice, time.Hour)
-	b := mkFileLock(t, "b.go", tcAlice, time.Hour)
+	b := mkFileLock(t, tcBGo, tcAlice, time.Hour)
 
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
 		t.Fatal(err)
@@ -288,8 +288,8 @@ func TestInsertCandidateClaims_ThenListRoundTrips(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	claims := []domain.CandidateClaim{
-		mkCandidateClaim(tcAGo, "cand-1", tcAlice),
-		mkCandidateClaim("b.go", "cand-1", tcAlice),
+		mkCandidateClaim(tcAGo, tcCand1, tcAlice),
+		mkCandidateClaim(tcBGo, tcCand1, tcAlice),
 	}
 	if err := s.InsertCandidateClaims(ctx, claims); err != nil {
 		t.Fatal(err)
@@ -301,7 +301,7 @@ func TestInsertCandidateClaims_ThenListRoundTrips(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("want 2 claims, got %+v", got)
 	}
-	if got[0].PathCanonical != tcAGo || got[1].PathCanonical != "b.go" {
+	if got[0].PathCanonical != tcAGo || got[1].PathCanonical != tcBGo {
 		t.Errorf("want path-sorted order, got %+v", got)
 	}
 }
@@ -322,12 +322,12 @@ func TestReleaseCandidateClaims_DeletesOnlyThatCandidate(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	if err := s.InsertCandidateClaims(ctx, []domain.CandidateClaim{
-		mkCandidateClaim(tcAGo, "cand-1", tcAlice),
-		mkCandidateClaim("b.go", "cand-2", tcAlice),
+		mkCandidateClaim(tcAGo, tcCand1, tcAlice),
+		mkCandidateClaim(tcBGo, "cand-2", tcAlice),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReleaseCandidateClaims(ctx, "cand-1"); err != nil {
+	if err := s.ReleaseCandidateClaims(ctx, tcCand1); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.ListCandidateClaims(ctx)
@@ -351,8 +351,8 @@ func TestCandidateClaimsForPaths_FiltersByPath(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	if err := s.InsertCandidateClaims(ctx, []domain.CandidateClaim{
-		mkCandidateClaim(tcAGo, "cand-1", tcAlice),
-		mkCandidateClaim("b.go", "cand-1", tcAlice),
+		mkCandidateClaim(tcAGo, tcCand1, tcAlice),
+		mkCandidateClaim(tcBGo, tcCand1, tcAlice),
 		mkCandidateClaim("c.go", "cand-2", tcAlice),
 	}); err != nil {
 		t.Fatal(err)
@@ -382,7 +382,7 @@ func TestAcquireLocks_BlockedByOverlappingCandidateClaim(t *testing.T) {
 	ctx := context.Background()
 	l := mkFileLock(t, tcAGo, tcAlice, time.Hour)
 	if err := s.InsertCandidateClaims(ctx, []domain.CandidateClaim{
-		mkCandidateClaim(l.Target.Canonical, "cand-1", tcBob),
+		mkCandidateClaim(l.Target.Canonical, tcCand1, tcBob),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestAcquireLocks_BlockedByOverlappingCandidateClaim(t *testing.T) {
 	if !errors.As(err, &cce) {
 		t.Fatalf("want CandidateClaimConflictError, got %v", err)
 	}
-	if len(cce.Blockers) != 1 || cce.Blockers[0].CandidateID != "cand-1" {
+	if len(cce.Blockers) != 1 || cce.Blockers[0].CandidateID != tcCand1 {
 		t.Errorf("blockers = %+v, want cand-1", cce.Blockers)
 	}
 }
@@ -407,7 +407,7 @@ func TestAcquireLocks_BlockedEvenBySameOwnersOwnCandidateClaim(t *testing.T) {
 	ctx := context.Background()
 	l := mkFileLock(t, tcAGo, tcAlice, time.Hour)
 	if err := s.InsertCandidateClaims(ctx, []domain.CandidateClaim{
-		mkCandidateClaim(l.Target.Canonical, "cand-1", tcAlice),
+		mkCandidateClaim(l.Target.Canonical, tcCand1, tcAlice),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +424,7 @@ func TestAcquireLocks_NotBlockedByCandidateClaimOnDifferentPath(t *testing.T) {
 	ctx := context.Background()
 	elsewhere := mkFileLock(t, "elsewhere.go", tcBob, time.Hour)
 	if err := s.InsertCandidateClaims(ctx, []domain.CandidateClaim{
-		mkCandidateClaim(elsewhere.Target.Canonical, "cand-1", tcBob),
+		mkCandidateClaim(elsewhere.Target.Canonical, tcCand1, tcBob),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -442,11 +442,11 @@ func TestAcquireLocks_UnblockedAfterCandidateClaimReleased(t *testing.T) {
 	ctx := context.Background()
 	l := mkFileLock(t, tcAGo, tcAlice, time.Hour)
 	if err := s.InsertCandidateClaims(ctx, []domain.CandidateClaim{
-		mkCandidateClaim(l.Target.Canonical, "cand-1", tcBob),
+		mkCandidateClaim(l.Target.Canonical, tcCand1, tcBob),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReleaseCandidateClaims(ctx, "cand-1"); err != nil {
+	if err := s.ReleaseCandidateClaims(ctx, tcCand1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
@@ -464,7 +464,7 @@ func TestAcquireLocks_CandidateClaimBlockAbortsWholeBatch(t *testing.T) {
 	clean := mkFileLock(t, "clean.go", tcAlice, time.Hour)
 	blocked := mkFileLock(t, "blocked.go", tcAlice, time.Hour)
 	if err := s.InsertCandidateClaims(ctx, []domain.CandidateClaim{
-		mkCandidateClaim(blocked.Target.Canonical, "cand-1", tcBob),
+		mkCandidateClaim(blocked.Target.Canonical, tcCand1, tcBob),
 	}); err != nil {
 		t.Fatal(err)
 	}
