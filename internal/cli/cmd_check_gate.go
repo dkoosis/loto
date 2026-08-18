@@ -187,6 +187,11 @@ func gateInfraUnreachable(stderr io.Writer, err error) int {
 // hook that exits 0 after writing to stdout leaves the model blind to the fact
 // that the gate never ran.
 func runCheckGate(ctx context.Context, paths []string, repoTop string, stdout, stderr io.Writer) int {
+	// Before any verdict: say so if this binary predates the hook that called
+	// it (loto-tzmv.7). A stale gate answers ✓ with the confidence of a current
+	// one, which is how the 2026-08-12 rot went unnoticed for 8 days.
+	warnIfContractStale(stderr)
+
 	targets, invalid := resolveCheckTargets(repoTop, paths)
 	if len(invalid) > 0 {
 		printCheckInvalid(stdout, invalid)

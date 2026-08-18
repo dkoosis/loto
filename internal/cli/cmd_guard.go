@@ -95,6 +95,7 @@ func cmdGuard(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // to stderr by this function, matching gateInfraUnreachable's stream choice
 // (loto-tzmv.8 — a silent fail-open reads as protection that isn't there).
 func guardPeerRows(ctx context.Context, stderr io.Writer) (rows []render.GateDenyRow, failOpen bool) {
+	warnIfContractStale(stderr)
 	if !identity.PinnedByEnv() {
 		fmt.Fprintln(stderr, "⚠ identity=unpinned guard=fail-open")
 		return nil, true
