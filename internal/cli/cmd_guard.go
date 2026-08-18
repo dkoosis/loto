@@ -68,10 +68,10 @@ func cmdGuard(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	gitArgs := fs.Args()[1:]
 	override := os.Getenv(guardOverrideEnv) == "1"
 
-	rows, failOpen := guardPeerRows(ctx, stdout)
+	rows, failOpen := guardPeerRows(ctx, stderr)
 	switch {
 	case failOpen:
-		// Infra/identity trouble already reported to stdout by
+		// Infra/identity trouble already reported to stderr by
 		// guardPeerRows; the guard never blocks on its own IO trouble
 		// (same fail-open contract as `check --gate`).
 	case len(rows) > 0 && !override:
@@ -92,27 +92,28 @@ func cmdGuard(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // git operation, since that would turn a loto outage into a repo-wide
 // checkout freeze. failOpen=true means the caller must proceed regardless of
 // rows (rows is nil in that case); the fail-open reason is already written
-// to stdout by this function, matching gateInfraUnreachable's stream choice.
-func guardPeerRows(ctx context.Context, stdout io.Writer) (rows []render.GateDenyRow, failOpen bool) {
+// to stderr by this function, matching gateInfraUnreachable's stream choice
+// (loto-tzmv.8 — a silent fail-open reads as protection that isn't there).
+func guardPeerRows(ctx context.Context, stderr io.Writer) (rows []render.GateDenyRow, failOpen bool) {
 	if !identity.PinnedByEnv() {
-		fmt.Fprintln(stdout, "⚠ identity=unpinned guard=fail-open")
+		fmt.Fprintln(stderr, "⚠ identity=unpinned guard=fail-open")
 		return nil, true
 	}
 	rt, err := openRuntime(ctx)
 	if err != nil {
-		fmt.Fprintf(stdout, "⚠ store=unreachable guard=fail-open err=%q\n", err)
+		fmt.Fprintf(stderr, "⚠ store=unreachable guard=fail-open err=%q\n", err)
 		return nil, true
 	}
 	defer rt.Close()
 
 	locks, err := rt.Store.ListLocks(rt.Ctx)
 	if err != nil {
-		fmt.Fprintf(stdout, "⚠ store=unreachable guard=fail-open err=%q\n", err)
+		fmt.Fprintf(stderr, "⚠ store=unreachable guard=fail-open err=%q\n", err)
 		return nil, true
 	}
 	claims, err := rt.Store.ListClaims(rt.Ctx)
 	if err != nil {
-		fmt.Fprintf(stdout, "⚠ store=unreachable guard=fail-open err=%q\n", err)
+		fmt.Fprintf(stderr, "⚠ store=unreachable guard=fail-open err=%q\n", err)
 		return nil, true
 	}
 	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}

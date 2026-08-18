@@ -82,7 +82,10 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 	}
 	for i := range claims {
 		c := &claims[i]
-		if !domain.ClaimCoversTarget(*c, t.Canonical, myUUID, ec.Now) {
+		// ClaimCoversTarget settles overlap + foreign + TTL; ec.ClaimIsStale adds
+		// the owner-liveness leg so the path-scoped gate and the repo-wide
+		// gateDecideAny apply one standard of "live" to claims (loto-tzmv.9).
+		if !domain.ClaimCoversTarget(*c, t.Canonical, myUUID, ec.Now) || ec.ClaimIsStale(*c) {
 			continue
 		}
 		key := "claim|" + t.Canonical + "|" + c.PathPrefix + "|" + string(c.OwnerUUID)
@@ -122,7 +125,10 @@ func gateDecideAny(locks []domain.LockRecord, claims []domain.ClaimRecord, myUUI
 	}
 	for i := range claims {
 		c := &claims[i]
-		if string(c.OwnerUUID) == myUUID || c.Expired(ec.Now) {
+		// loto-tzmv.9: claims get the SAME liveness standard locks get above.
+		// Filtering on Expired alone let a crashed session's claim deny every
+		// tree-move in the repo for its full 2h TTL, with no reclaim path.
+		if string(c.OwnerUUID) == myUUID || ec.ClaimIsStale(*c) {
 			continue
 		}
 		rows = append(rows, render.GateDenyRow{
@@ -144,11 +150,13 @@ func gateDecideAny(locks []domain.LockRecord, claims []domain.ClaimRecord, myUUI
 
 // gateInfraUnreachable renders the shared infra-fail-open row: `loto check
 // --gate` never blocks the caller's loop on its own IO trouble (gate-design
-// "Rules: fail-open, everywhere"). Always stdout, never stderr — the CLI
-// contract (plan) pins this row to stdout for both the store-open failure
-// and any subsequent store read failure.
-func gateInfraUnreachable(stdout io.Writer, err error) int {
-	fmt.Fprintf(stdout, "⚠ store=unreachable gate=fail-open err=%q\n", err)
+// "Rules: fail-open, everywhere"). Always STDERR, never stdout (loto-tzmv.8):
+// a PreToolUse hook exiting 0 with stdout output does not surface that output
+// to the model, so a stdout notice announces "the gate did not run" into a
+// channel nobody reads. Fail-open must be loud or it is not honest. The exit
+// code is unchanged — the stream moved, the verdict did not.
+func gateInfraUnreachable(stderr io.Writer, err error) int {
+	fmt.Fprintf(stderr, "⚠ store=unreachable gate=fail-open err=%q\n", err)
 	return 3
 }
 
@@ -159,9 +167,11 @@ func gateInfraUnreachable(stdout io.Writer, err error) int {
 // nothing, so opening the store here would false-deny every path on a bare
 // human-shell invocation), then read-only query ListLocks/ListClaims and
 // render gateDecide's verdict. Never acquires, refreshes, or chmods — pure
-// read (plan CLI contract). All output goes to stdout, including invalid/
-// infra rows, so a hook consuming this surface has one stream to read.
-func runCheckGate(ctx context.Context, paths []string, repoTop string, stdout io.Writer) int {
+// read (plan CLI contract). Verdict rows (✓ no conflicts, deny rows, invalid
+// rows) go to stdout; FAIL-OPEN notices go to stderr (loto-tzmv.8), because a
+// hook that exits 0 after writing to stdout leaves the model blind to the fact
+// that the gate never ran.
+func runCheckGate(ctx context.Context, paths []string, repoTop string, stdout, stderr io.Writer) int {
 	targets, invalid := resolveCheckTargets(repoTop, paths)
 	if len(invalid) > 0 {
 		printCheckInvalid(stdout, invalid)
@@ -176,23 +186,23 @@ func runCheckGate(ctx context.Context, paths []string, repoTop string, stdout io
 	// — all hinge on the same "does Ensure resolve a real owner" question, so the
 	// gate probe can't drift from resolution (loto-ai5, loto-s3l).
 	if !identity.PinnedByEnv() {
-		fmt.Fprintln(stdout, "⚠ identity=unpinned gate=fail-open")
+		fmt.Fprintln(stderr, "⚠ identity=unpinned gate=fail-open")
 		return 0
 	}
 
 	rt, err := openRuntime(ctx)
 	if err != nil {
-		return gateInfraUnreachable(stdout, err)
+		return gateInfraUnreachable(stderr, err)
 	}
 	defer rt.Close()
 
 	locks, err := rt.Store.ListLocks(rt.Ctx)
 	if err != nil {
-		return gateInfraUnreachable(stdout, err)
+		return gateInfraUnreachable(stderr, err)
 	}
 	claims, err := rt.Store.ListClaims(rt.Ctx)
 	if err != nil {
-		return gateInfraUnreachable(stdout, err)
+		return gateInfraUnreachable(stderr, err)
 	}
 
 	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}

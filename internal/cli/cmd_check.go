@@ -55,7 +55,7 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// stays byte-identical (hard rule, plan "Plain loto check ... behavior
 	// must stay byte-identical").
 	if *gate {
-		return runCheckGate(ctx, paths, repoTop, stdout)
+		return runCheckGate(ctx, paths, repoTop, stdout, stderr)
 	}
 
 	rt, err := openRuntime(ctx)

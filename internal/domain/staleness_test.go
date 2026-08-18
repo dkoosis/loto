@@ -168,3 +168,80 @@ func TestClassifyAndRemainingTTL(t *testing.T) {
 		}
 	})
 }
+
+// ownerAliveProbe / ownerDeadProbe mirror the production probe's uuid-keyed
+// session oracle, which answers for a PID-0 subject where the pid fallback
+// cannot. Claims carry no PID, so a pid-gated stub (aliveOn/deadOn) would
+// return UNKNOWN for every claim and silently skip the leg under test.
+func ownerAliveProbe(LockRecord) Liveness { return LivenessAlive }
+func ownerDeadProbe(LockRecord) Liveness  { return LivenessDead }
+
+// TestClaimIsStale pins loto-tzmv.9: claims are judged by the same standard as
+// locks — TTL lapse OR a provably dead owner — so a crashed session's claim
+// stops denying immediately instead of freezing the repo for its full lease.
+func TestClaimIsStale(t *testing.T) {
+	now := time.Now()
+	const host = "h1"
+	cases := []struct {
+		name  string
+		claim ClaimRecord
+		live  HolderLiveProbe
+		want  bool
+	}{
+		{
+			name:  "expired: TTL alone settles it",
+			claim: ClaimRecord{ExpiresAt: now.Add(-time.Minute), Host: host},
+			want:  true,
+		},
+		{
+			name:  "unexpired, owner dead: liveness accelerates staleness",
+			claim: ClaimRecord{ExpiresAt: now.Add(2 * time.Hour), Host: host},
+			live:  ownerDeadProbe,
+			want:  true,
+		},
+		{
+			name:  "unexpired, owner alive: still held",
+			claim: ClaimRecord{ExpiresAt: now.Add(2 * time.Hour), Host: host},
+			live:  ownerAliveProbe,
+			want:  false,
+		},
+		{
+			name:  "unexpired, no probe: TTL is the sole authority",
+			claim: ClaimRecord{ExpiresAt: now.Add(2 * time.Hour), Host: host},
+			want:  false,
+		},
+		{
+			name:  "expired, owner alive: liveness never extends the lease",
+			claim: ClaimRecord{ExpiresAt: now.Add(-time.Minute), Host: host},
+			live:  ownerAliveProbe,
+			want:  true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ec := EvalContext{Now: now, Live: c.live}
+			if got := ec.ClaimIsStale(c.claim); got != c.want {
+				t.Errorf("ClaimIsStale(%+v) = %v, want %v", c.claim, got, c.want)
+			}
+		})
+	}
+}
+
+// TestClaimIsStale_AgreesWithIsStale pins the "one predicate, two record
+// kinds" rule: for the fields a claim carries, its verdict must equal the lock
+// verdict on the same owner/host/expiry. A second definition of "live"
+// drifting in is exactly the bug tzmv.9 fixed.
+func TestClaimIsStale_AgreesWithIsStale(t *testing.T) {
+	now := time.Now()
+	const host = "h1"
+	for _, probe := range []HolderLiveProbe{nil, ownerAliveProbe, ownerDeadProbe} {
+		for _, exp := range []time.Time{now.Add(-time.Minute), now.Add(time.Hour)} {
+			ec := EvalContext{Now: now, Live: probe}
+			claim := ClaimRecord{OwnerUUID: "owner-1", Host: host, ExpiresAt: exp}
+			lock := LockRecord{OwnerUUID: "owner-1", Host: host, ExpiresAt: exp}
+			if got, want := ec.ClaimIsStale(claim), ec.IsStale(lock); got != want {
+				t.Errorf("ClaimIsStale=%v but IsStale=%v for exp=%v", got, want, exp)
+			}
+		}
+	}
+}

@@ -37,6 +37,27 @@ func (c EvalContext) IsStale(l LockRecord) bool {
 	return c.Live != nil && c.Live(l) == LivenessDead
 }
 
+// ClaimIsStale applies the SAME staleness standard to a claim that IsStale
+// applies to a lock: TTL lapse OR the owner provably dead (loto-tzmv.9).
+// Claims carry no PID or start-time, so the subject handed to the probe is the
+// claim lifted into lock shape — owner, session, host, expiry — with a PID-0
+// sentinel. That keeps the probe's uuid-keyed session oracle in play while the
+// pid fallback correctly reads UNKNOWN, so TTL remains the sole authority
+// exactly when there is no better witness.
+//
+// This is deliberately NOT a second definition of "live": the claim gate
+// previously filtered on Expired alone, so one crashed session's 2h claim
+// froze every tree-move in the repo for its full lease with no reclaim path.
+// One predicate, two record kinds — drift here is the bug.
+func (c EvalContext) ClaimIsStale(cl ClaimRecord) bool {
+	return c.IsStale(LockRecord{
+		OwnerUUID:   cl.OwnerUUID,
+		SessionUUID: cl.SessionUUID,
+		Host:        cl.Host,
+		ExpiresAt:   cl.ExpiresAt,
+	})
+}
+
 // Liveness is the display-tier refinement of IsStale: it splits a non-stale
 // lock into ALIVE (owner session probed live) vs UNKNOWN (no durable liveness
 // handle — PID-0 sentinel or cross-host — so TTL is the sole authority). DEAD
