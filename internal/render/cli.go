@@ -235,6 +235,48 @@ func EmitTagFooter(w io.Writer, tags []store.Tag, ownerUUID string) {
 	}
 }
 
+// EmitTerritoryTagRows renders notes pinned to territory. `ℹ` and not `✓`/`✗`:
+// a note is neither a pass nor a failure, it is a neutral fact about ground
+// (.claude/rules/design.md). Empty input emits nothing — a repo with no notes
+// keeps byte-identical output to one that never had the feature.
+//
+// header != "" prints the count line above the rows; the inline callers that
+// already named their target pass "" and get rows only.
+func EmitTerritoryTagRows(w io.Writer, notes []store.TerritoryTag, header, indent string) {
+	if len(notes) == 0 {
+		return
+	}
+	cwd := getCwd()
+	holders := &holderMemo{}
+	if header != "" {
+		fmt.Fprintf(w, "%sℹ %s count=%d\n", indent, header, len(notes))
+	}
+	for _, n := range notes {
+		fmt.Fprintf(w, "%sℹ territory-tag id=%s from=%s prefix=%s expires_at=%s text=%q\n",
+			indent, n.ID, holders.tag(n.TaggerUUID), relToCwd(n.PathPrefix, cwd),
+			time.Unix(0, n.ExpiresAt).UTC().Format(time.RFC3339), n.Text)
+	}
+}
+
+// EmitExpiredTerritoryTags renders notes that lapsed with nobody having acked
+// them — doctor's report, and the only place an expired note is ever shown
+// (loto-z3y1 D2). `⚠` because it IS a finding: a note nobody read is the
+// mail-lost failure this feature was meant to end, and reporting it is what
+// keeps the failure from being silent. The text rides along so the row is
+// actionable rather than a count.
+func EmitExpiredTerritoryTags(w io.Writer, notes []store.TerritoryTag, now time.Time) {
+	if len(notes) == 0 {
+		return
+	}
+	cwd := getCwd()
+	holders := &holderMemo{}
+	for _, n := range notes {
+		age := now.Sub(time.Unix(0, n.ExpiresAt)).Round(time.Hour)
+		fmt.Fprintf(w, "⚠ expired_territory_tag id=%s prefix=%s from=%s expired_ago=%s text=%q\n",
+			n.ID, relToCwd(n.PathPrefix, cwd), holders.tag(n.TaggerUUID), age, n.Text)
+	}
+}
+
 // EmitTagRows renders just the per-tag lines (no count header). Use for inline
 // blocks beneath a per-file status line where the surrounding context already
 // names the target. Empty input emits nothing.

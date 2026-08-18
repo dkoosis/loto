@@ -1,6 +1,12 @@
-usage: loto tag <file> <text...>
+usage: loto tag <file-or-prefix> <text...>
 
-Leave a note on a target locked by another agent.
+Leave a note on a target locked by another agent, or — when nobody holds it —
+pin one to the territory for whoever arrives there next.
+
+Which one you get is decided by the ground, not a flag: a locked target takes
+today's per-holder tag; an unlocked path or a directory prefix becomes a
+territory tag with a TTL (72h default, 30d max, --ttl to change). The two
+confirmations read differently, so a mistyped path shows up immediately.
 
 Convention: open the text with your bead id, then a <=3-word ask.
 The bead id resolves epic/gh-issue via beads metadata — don't duplicate them.
@@ -8,3 +14,4 @@ The bead id resolves epic/gh-issue via beads metadata — don't duplicate them.
 examples:
   loto tag internal/store/store.go loto-c6rg: want next
   loto tag a.go loto-5rwc: ETA?
+  loto tag internal/store loto-abc: rebase before you touch claims.go

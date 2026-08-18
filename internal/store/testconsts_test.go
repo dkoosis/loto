@@ -3,6 +3,7 @@ package store
 const (
 	tcAlice = "alice"
 	tcBob   = "bob"
+	tcCarol = "carol"
 	tcTest  = "test"
 	tcChmod = "chmod"
 	tcXGo   = "x.go"

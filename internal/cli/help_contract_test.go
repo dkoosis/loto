@@ -10,9 +10,12 @@ import (
 func TestTagHelpTeachesContract(t *testing.T) {
 	_, stderr, _ := executeCommand(tcCmdTag, "-h")
 	for _, want := range []string{
-		"usage: loto tag <file> <text...>",
+		"usage: loto tag <file-or-prefix> <text...>",
 		"loto-c6rg: want next", // example demonstrating <bead-id>: <=3-word ask
 		"bead id",              // convention: open with requester's bead id
+		// Both grounds must be taught, or a caller learns only half the verb
+		// and keeps reaching for the retired mail surface (loto-z3y1).
+		"territory tag",
 	} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("tag -h missing %q; got:\n%s", want, stderr)

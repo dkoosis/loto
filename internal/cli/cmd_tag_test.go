@@ -79,16 +79,25 @@ func TestCmdTag_NoWarnWhenTextHasBeadIDPrefix(t *testing.T) {
 	}
 }
 
-func TestCmdTag_RejectsUnlockedTarget(t *testing.T) {
+// TestCmdTag_UnlockedTargetPinsTerritoryTag replaces the refusal that stood
+// here ("not locked — acquire it yourself"), which served the tag's old
+// contract exactly and served the caller not at all: with mail retired, the one
+// thing they could not do was leave word for whoever arrives next (loto-z3y1).
+func TestCmdTag_UnlockedTargetPinsTerritoryTag(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 	var out, errBuf bytes.Buffer
-	code := Run([]string{tcCmdTag, tcTargetA, "ping"}, &out, &errBuf)
-	if code != 3 {
-		t.Fatalf("expected exit 3, got %d; err=%q", code, errBuf.String())
+	code := Run([]string{tcCmdTag, tcTargetA, "loto-abc:", "ping"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d; err=%q", code, errBuf.String())
 	}
-	if !strings.Contains(errBuf.String(), "not locked") {
-		t.Fatalf("expected 'not locked' message, got %q", errBuf.String())
+	if !strings.Contains(out.String(), "✓ territory-tag id=tt-") {
+		t.Fatalf("want the territory-tag confirmation, got %q", out.String())
+	}
+	// The two confirmations must not be confusable — that visible difference is
+	// what catches a mistyped path at the moment it happens.
+	if strings.Contains(out.String(), "✓ tag id=") {
+		t.Errorf("territory tag must not render as a held tag: %q", out.String())
 	}
 }
 

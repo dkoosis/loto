@@ -29,10 +29,17 @@ type DoctorReport struct {
 	StaleLocks []domain.LockRecord
 	// ExpiredClaims are the TTL-lapsed territory reservations that --repair
 	// would sweep (gcClaimsTx), in (prefix, owner) order (loto-ebkc D3).
-	ExpiredClaims   []domain.ClaimRecord
-	SidecarFindings []SidecarFinding
-	IntegrityOK     bool
-	IntegrityDetail string
+	ExpiredClaims []domain.ClaimRecord
+	// ExpiredTerritoryTags are notes that lapsed with nobody having acked them
+	// (loto-z3y1 D2). Reported here and nowhere else: a note that vanishes
+	// unread is the mail-lost failure returning, and doctor is loto's
+	// territory-health surface, so "a note expired unread on this ground" is a
+	// fact about territory. Reported, not resurrected — no retry, no
+	// re-delivery, no author notification (that would need an address).
+	ExpiredTerritoryTags []TerritoryTag
+	SidecarFindings      []SidecarFinding
+	IntegrityOK          bool
+	IntegrityDetail      string
 }
 
 // SidecarCheck cross-checks held locks against the CC session sidecar to
@@ -75,6 +82,11 @@ func (s *Store) DoctorAudit(ctx context.Context, thisHost string, hostKnown bool
 	if err := s.collectExpiredClaims(ctx, r, ec.Now); err != nil {
 		return nil, err
 	}
+	expiredNotes, err := s.ExpiredTerritoryTags(ctx, ec.Now.UnixNano())
+	if err != nil {
+		return nil, err
+	}
+	r.ExpiredTerritoryTags = expiredNotes
 	if err := s.runIntegrityCheck(ctx, r); err != nil {
 		return nil, err
 	}
@@ -203,6 +215,9 @@ func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live d
 		return err
 	}
 	if err := gcClaimsTx(ctx, tx, now); err != nil {
+		return err
+	}
+	if err := gcTerritoryTagsTx(ctx, tx, now); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

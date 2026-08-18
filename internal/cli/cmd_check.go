@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/render"
 )
 
 func init() { register("check", cmdCheck) } //nolint:gochecknoinits // command registry pattern
@@ -116,8 +117,15 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// non-error plain-check exit — including the common no-conflict early
 	// return below, which never reaches the bottom of this function.
 	claimAdvisories := foreignClaimAdvisoriesFor(rt, targets, ec.Now)
+	// Territory tags covering the REQUESTED targets (loto-z3y1). Computed here
+	// for the same reason the claim advisory is: the no-conflict early return
+	// below never reaches the bottom of this function, and a note that only
+	// surfaced on the conflict path would miss every quiet check — which is
+	// most of them. Plain check only: `check --gate` stays byte-identical.
+	territoryNotes := territoryTagsForTargets(liveTerritoryTags(rt, ec.Now), targets, ec.Now)
 	emitAfter := func(code int) int {
 		emitForeignClaimAdvisories(stdout, claimAdvisories)
+		render.EmitTerritoryTagRows(stdout, territoryNotes, "territory-tags", "")
 		return code
 	}
 
