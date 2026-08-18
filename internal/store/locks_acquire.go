@@ -221,15 +221,25 @@ func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord) (
 	// l.Mode) so the column never stores '' (loto-k5el.2 T3).
 	//
 	// ‡ The DO UPDATE WHERE is the beacon yield (loto-xl4g, Codex #249): an
-	// incoming BEACON never overwrites an existing NON-beacon row of the same
-	// owner. Without it, the gate minting a beacon for an agent that already
-	// ran `loto lock` rewrote that agent's own row to shared / pid 0 / no
-	// branch / 2m — silently downgrading a declared exclusive 30m lease and
+	// incoming BEACON never overwrites an existing LIVE NON-beacon row of the
+	// same owner. Without it, the gate minting a beacon for an agent that
+	// already ran `loto lock` rewrote that agent's own row to shared / pid 0 /
+	// no branch / 2m — silently downgrading a declared exclusive 30m lease and
 	// then letting `loto guard` waive it as a beacon and move the tree out from
 	// under uncommitted work. A beacon says "an agent of mine is writing here";
 	// a row that already says something stronger needs no weakening. The
 	// converse still applies: an explicit lock upgrades over a beacon, because
 	// then excluded.beacon is 0 and the update runs.
+	//
+	// ‡ The expiry leg is the yield's own escape hatch (Codex #252). Yielding
+	// to a LAPSED lease protects nothing: collectAllBlockers skips same-owner
+	// rows, so an expired explicit row of this agent's is neither reclaimed nor
+	// refreshed, and every peer reads it as stale and free — `loto beacon`
+	// would report success over a row that announces the file is available
+	// while the agent is mid-edit. Comparing against excluded.created_at (the
+	// mint instant, stamped in the same batch) keeps the whole decision inside
+	// the one transaction. Liveness needs no probe here: the row's owner is the
+	// process doing the minting.
 	res, err := tx.ExecContext(ctx, `
 INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, mode, beacon)
 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
@@ -243,7 +253,9 @@ ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
   branch=excluded.branch,
   mode=excluded.mode,
   beacon=excluded.beacon
-WHERE excluded.beacon = 0 OR locks.beacon = 1`,
+WHERE excluded.beacon = 0
+   OR locks.beacon = 1
+   OR locks.expires_at <= excluded.created_at`,
 		l.Target.Canonical, string(l.OwnerUUID), string(l.SessionUUID),
 		l.Intent, l.CreatedAt.UnixNano(), l.ExpiresAt.UnixNano(),
 		l.Host, l.PID, procStart, l.Branch, l.EffectiveMode(), l.Beacon,

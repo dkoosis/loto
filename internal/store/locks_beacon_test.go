@@ -71,6 +71,96 @@ func TestBeaconYieldsToOwnExplicitLock(t *testing.T) {
 	}
 }
 
+// TestBeaconReplacesOwnLapsedLock is the other half of the yield (Codex #252).
+// Yielding to a LAPSED explicit lease protects nothing: collectAllBlockers
+// skips same-owner rows, so the expired row is neither reclaimed nor refreshed,
+// and every peer reads it as stale and free — the store would keep announcing
+// the file is available while the agent is mid-edit, which is the exact
+// condition `loto beacon` exists to deny.
+func TestBeaconReplacesOwnLapsedLock(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	lapsed := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	lapsed.Mode = domain.ModeExclusive
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{lapsed}, liveProbe); err != nil {
+		t.Fatalf("acquire explicit lock: %v", err)
+	}
+	// Age the row out in place — the wall-clock lapse a running agent would hit,
+	// without sleeping through a TTL in a test.
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE locks SET expires_at = ? WHERE target_canonical = ?`,
+		time.Now().Add(-time.Minute).UnixNano(), lapsed.Target.Canonical); err != nil {
+		t.Fatal(err)
+	}
+
+	beacon := beaconOf(lapsed, 2*time.Minute)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{beacon}, liveProbe); err != nil {
+		t.Fatalf("beacon over own lapsed lock: %v", err)
+	}
+
+	got, err := s.LockForOwnerAt(ctx, lapsed.Target, tcAlice)
+	if err != nil || got == nil {
+		t.Fatalf("LockForOwnerAt: %v / %+v", err, got)
+	}
+	if !got.IsBeacon() {
+		t.Error("a lapsed same-owner lease must not block the beacon; peers still read the dead row as free")
+	}
+	if !got.ExpiresAt.After(time.Now()) {
+		t.Errorf("expires_at = %v, want a live lease — the beacon did not take", got.ExpiresAt)
+	}
+}
+
+// TestLegacyBeaconRowsBackfilled pins the migration's one carve-out (Codex
+// #252). The release before this one minted beacons as shared / pid-0 rows with
+// a fixed intent and no marker. Defaulting those to beacon=0 would promote them
+// to apparent explicit leases that guard refuses to move past — and the yield
+// rule would then decline to overwrite them for as long as their TTL held.
+func TestLegacyBeaconRowsBackfilled(t *testing.T) {
+	dir := t.TempDir()
+	p := dir + "/loto.db"
+	s, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	legacyBeacon := beaconOf(mkFileLock(t, "a.go", tcAlice, time.Hour), time.Hour)
+	explicit := mkFileLock(t, "b.go", tcAlice, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{legacyBeacon, explicit}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	// Rewind to the pre-column shape: the marker did not exist, so both rows
+	// looked the same on disk apart from mode/pid/intent.
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE locks DROP COLUMN beacon`); err != nil {
+		t.Fatalf("drop beacon column: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := Open(p)
+	if err != nil {
+		t.Fatalf("re-open on pre-beacon DB: %v", err)
+	}
+	defer s2.Close()
+
+	got, err := s2.LockForOwnerAt(ctx, legacyBeacon.Target, tcAlice)
+	if err != nil || got == nil {
+		t.Fatalf("LockForOwnerAt(legacy beacon): %v / %+v", err, got)
+	}
+	if !got.IsBeacon() {
+		t.Error("a legacy beacon row must migrate as a beacon, not as an explicit lease")
+	}
+	got, err = s2.LockForOwnerAt(ctx, explicit.Target, tcAlice)
+	if err != nil || got == nil {
+		t.Fatalf("LockForOwnerAt(explicit): %v / %+v", err, got)
+	}
+	if got.IsBeacon() {
+		t.Error("the backfill must not sweep in an ordinary lock")
+	}
+}
+
 // A beacon over a beacon is the refresh path: same owner, same target, in-place
 // TTL bump on every gated write. That must keep working — it is how a beacon
 // stays alive across an agent's run of edits.
