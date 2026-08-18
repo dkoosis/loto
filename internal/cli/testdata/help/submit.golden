@@ -1,0 +1,20 @@
+usage: loto submit <file> [<file>...] --bead <id> [-m "<msg>"]
+
+Package your held locks' current edits into a candidate for the git-gate
+pipeline: lease check -> lane.Commit -> envelope capture -> admission.
+
+On accept: writes refs/loto/candidates/<id> + refs/loto/proposals/<id>, and
+converts each lease into a durable candidate claim. On reject: nothing is
+written to git or the store — fix the reported reason and resubmit. This is
+the first point where the whole front half of the gate is observable in one
+command (loto-ovno.5).
+
+examples:
+  loto submit internal/store/store.go --bead loto-ovno.5
+  loto submit a.go b.go --bead loto-abc -m "two-file candidate"
+  -bead string
+    	bead id this candidate serves (required)
+  -m string
+    	commit message; defaults to the bead id
+  -message string
+    	commit message; defaults to the bead id

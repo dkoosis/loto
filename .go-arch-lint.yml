@@ -15,7 +15,7 @@ excludeFiles:
 
 # Layering invariants for loto v2:
 #   cmd/loto → internal/cli (only)
-#   internal/cli → {domain, store, identity, render}
+#   internal/cli → {domain, store, identity, render, lane, gate}
 #   internal/render → {domain, store, identity}
 #   internal/store → internal/domain
 #   internal/identity → ∅
@@ -58,6 +58,10 @@ deps:
       - identity
       - render
       - lane
+      # loto-ovno.5: submit is the CLI vertical slice over the gate —
+      # lease check -> lane.Commit -> envelope capture -> admission — so it
+      # calls gate directly, same one-way edge shape as store -> gate above.
+      - gate
   # internal/lane is pure git plumbing — stdlib only, no internal deps.
   # anyVendorDeps (not an empty mayDependOn) is how go-arch-lint v3 wants a
   # no-internal-deps component declared — same as domain/identity below. It

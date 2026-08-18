@@ -6,6 +6,10 @@ import (
 	"io"
 )
 
+// lockStaleReason tags a blocked target whose lock/claim liveness expired
+// (shared between "loto lane" and "loto submit" blocked-target reporting).
+const lockStaleReason = "lock-stale"
+
 type cmd func(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 var registry = map[string]cmd{} //nolint:gochecknoglobals // command registry pattern
@@ -56,5 +60,6 @@ commands:
 lane choreography (engine verbs; used by the /team fleet harness):
   lane     Commit an exact write-set to a lane ref by plumbing; needs every write-set lock held
   verify   Run a command against a commit in a throwaway worktree; exit 1 fail, 3 infra
-  beacon   Mint a short-TTL shared lease on paths this agent is about to write (PreToolUse gate)`)
+  beacon   Mint a short-TTL shared lease on paths this agent is about to write (PreToolUse gate)
+  submit   Package held-lock edits into a git-gate candidate: commit, capture, admit`)
 }
