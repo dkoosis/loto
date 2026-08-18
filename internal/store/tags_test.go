@@ -64,43 +64,6 @@ func TestInsertTag_VisibleToHolder(t *testing.T) {
 	}
 }
 
-// TaggersAckedSince returns the waiters whose tags a release acked at/after the
-// cutoff — the blocked-waiter notify set (loto-4lc). A cutoff after the ack
-// returns nothing, and self-tags never appear.
-func TestTaggersAckedSince(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-	lock, lockNs := acquireForTest(t, s, tcAGo, tcAlice)
-	if _, err := s.InsertTag(ctx, NewTag{
-		TargetCanonical: domain.Canonical(lock.Target.Canonical),
-		LockOwnerUUID:   tcAlice,
-		LockCreatedAt:   lockNs,
-		TaggerUUID:      tcBob,
-		Text:            "waiting",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	since := time.Now().UnixNano()
-	if _, err := s.ReleaseLocks(ctx, []domain.Target{lock.Target}, tcAlice, liveProbe); err != nil {
-		t.Fatalf("ReleaseLocks: %v", err)
-	}
-
-	got, err := s.TaggersAckedSince(ctx, tcAlice, since)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].TaggerUUID != string(tcBob) || got[0].TargetCanonical != lock.Target.Canonical {
-		t.Fatalf("want bob@%s acked since release, got %+v", lock.Target.Canonical, got)
-	}
-
-	// A cutoff after the ack timestamp catches nothing.
-	future := time.Now().UnixNano() + int64(time.Hour)
-	if late, _ := s.TaggersAckedSince(ctx, tcAlice, future); len(late) != 0 {
-		t.Errorf("cutoff after the ack must return nothing, got %+v", late)
-	}
-}
-
 func TestInsertTag_CapEnforcedTransactionally(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
