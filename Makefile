@@ -95,7 +95,12 @@ arch: ## Enforce layering (.go-arch-lint.yml)
 		echo "go-arch-lint not installed; 'go install github.com/fe3dback/go-arch-lint@v1.15.0'"; \
 		exit 1; \
 	fi
-	@go-arch-lint check --json 2>/dev/null | fo wrap archlint | fo --format llm
+	@go-arch-lint check --json 2>/dev/null | tee /tmp/loto-archcheck.json | fo wrap archlint | fo --format llm
+	@jq -e '.Payload.ArchHasWarnings == false' /tmp/loto-archcheck.json >/dev/null || { \
+		echo "✗ go-arch-lint found warnings the fo summary above did not render (loto-lu52 — fo's archlint wrapper drops ArchWarningsNotMatched into an empty SARIF results array):"; \
+		jq '.Payload | {ArchWarningsNotMatched, ArchWarningsDeps, ArchWarningsDeepScan}' /tmp/loto-archcheck.json; \
+		exit 1; \
+	}
 
 lint: ## Run golangci-lint (full)
 	@if ! command -v golangci-lint >/dev/null 2>&1; then \
