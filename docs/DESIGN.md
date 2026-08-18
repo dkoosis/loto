@@ -34,7 +34,7 @@ It is held only for the duration of an `acquire` or `release` operation
 — milliseconds — so two overlapping `loto lock` invocations don't race on
 the SQLite write. It is *never* held across user work, never held by an
 editor, never visible in a blocker report. Work-hold semantics live in
-the `locks` row + chmod, not in this flock. Forestalls the recurring
+the `locks` row, not in this flock. Forestalls the recurring
 misread that op-flock is a foreground hold.
 
 ‡ **Coordination layers**, weakest to strongest. Shipped today are the
@@ -44,7 +44,8 @@ on the roadmap.
 | Layer | Mechanism | Truth source | Status | Use case |
 |------|-----------|--------------|--------|----------|
 | Tag (record-tier) | `locks` row with non-zero, unexpired `expires_at` | row + TTL (lazy GC) | **shipped (v2)** | "I'm holding this across two events (PreToolUse → PostToolUse) — no foreground process" |
-| **Enforcement (chmod)** | strip-write on each target on acquire; restore on release | filesystem mode bits | **shipped** | defeats naive writers + editors that honor perms; bypassable by `chmod +w` / `sudo` |
+| **Enforcement (chmod)** | strip-write on acquire; restore on release | filesystem mode bits | **retired** (loto-zssw) | locked out the HOLDER too — see "why chmod enforcement is gone" |
+| Harness gate | PreToolUse hook refuses a write over a peer's live lock/claim/beacon | `locks` + `claims` rows | **shipped** | stops the peer without touching the holder's own filesystem |
 | Op-flock (internal) | project-wide flock on `lock-op.flock`, held only during an op | flock | **shipped** | serializes overlapping `loto lock` / `loto unlock` invocations |
 | File flock (foreground) | flock(2) exclusive held by the editing process | flock | **deferred** (`loto with <cmd>`) | "I am editing this specific file right now" |
 | Global lock | flock(2) on a project-wide handle | flock | **deferred** | "Sweep across the whole tree; everyone else stand down" |
@@ -68,7 +69,7 @@ probes are skipped for off-host rows (we can't observe them; TTL is the
 only signal). Reclamation happens in three layers:
 
 1. **Lazy GC on acquire** — every `loto lock` sweeps expired rows before
-   evaluating its own request, chmod-restoring as it deletes.
+   evaluating its own request.
 2. **`loto doctor --repair`** — manual sweep for stale-but-still-held
    inconsistencies, orphaned `.lock`/`.tag` files, layout drift.
 3. **SessionEnd hook** — eager `loto release --all-mine` on session exit.
@@ -97,11 +98,10 @@ Conflicts(a, l):                        -- incoming a vs existing holder l
 Invariants:
 - **I1** shared + shared on one target coexist (any number of readers).
 - **I2** exclusive on either side conflicts (sole writer).
-- **I3** the owner-write bit is stripped **iff** the lock is exclusive; shared
-  locks are advisory-only and never touch file mode.
+- **I3** no lock of any mode touches file permissions (loto-zssw). The mode
+  field governs conflict resolution and nothing on disk.
 - **I4** `downgrade` flips exclusive → shared in place — no unlock/relock, no new
-  `created_at`, the hold is continuous — and restores the write bit. Already-shared
-  is a no-op. There is **no** shared → exclusive upgrade (a non-goal).
+  `created_at`, the hold is continuous. Already-shared is a no-op. There is **no** shared → exclusive upgrade (a non-goal).
 - **I5** under the composite PK, a per-owner lookup uses `LockForOwnerAt`; a
   release/downgrade always resolves the caller's **own** row, never a peer's.
 - **I6** `check --staged` is **liveness-gated**: a *provably-live* exclusive peer
@@ -123,8 +123,8 @@ CLI: `loto lock <t> --shared` takes a read lease (default is exclusive);
 4. release   → loto unlock <file>...        # per-target best-effort, or auto on session end
 ```
 
-Multi-file lock is all-or-nothing: any blocker aborts the set, no chmod
-side effects, no rows inserted. Unlock is per-target best-effort
+Multi-file lock is all-or-nothing: any blocker aborts the set, no rows
+inserted. Unlock is per-target best-effort
 (missing and not-owner are distinct outcomes — gh#46).
 
 Output is Claude-optimized KV: deterministic order, one record per line,
@@ -181,17 +181,25 @@ extended every live lease it owns. For the file-flock
 tier (deferred), flock will remain authoritative for *currently* held;
 TTL just bounds *advisory* signals on the record tier.
 
-**Filesystem enforcement on lock.** Acquiring a lock strips owner-write
-bits (`mode &^ 0222`); releasing restores owner-write (`mode | 0200`).
-Group/other-write bits are not preserved across a lock cycle — lossy by
-design, no `original_mode` column, no migration. Defeats naive writers
-and editors that honor perms; trivially bypassable by `chmod +w`. That's
-fine: trust model = trust the operator.
+**Why chmod enforcement is gone (loto-zssw).** Until 2026-08, acquiring a
+lock stripped owner-write (`mode &^ 0222`) and releasing restored it
+(`mode | 0200`). The holder edits through the same filesystem as everyone
+else, so the strip locked out the agent whose whole operating loop is
+lock → edit → unlock. On 2026-08-12 a holder's own `>` redirect failed
+silently inside a `&&` chain and a stale `NORTH_STAR.md` body reached
+main; files were also observed orphaned at `0444` with no row to explain
+them after a session died mid-hold.
+
+Peer protection now lives entirely at the harness gate, one layer up,
+where refusing a peer costs the holder nothing. `loto doctor --repair`
+carries a one-way migration that re-adds owner-write to chmod-era
+stragglers; its candidate set is the current lock rows plus the retained
+audit trail, so it drains itself as events rotate.
 
 **Pre-commit hook (deferred).** A pre-commit `loto check --staged` that
 refuses commits over another agent's held paths was prototyped in
 loto-ux3 and cut in the v2 entrypoint switch (commit 3d5f3de). The
-record-tier + chmod enforcement already catches most edits before they
+record tier plus the harness gate already catch most edits before they
 land; revisit if mistakes cluster at commit time.
 
 **`loto doctor`.** One command for diagnostics: dead-PID holders,
@@ -225,8 +233,8 @@ the same project. Each has a worktree under `~/Projects/foo-wt-<handle>/`.
 project-state ($XDG_STATE_HOME/loto/projects/foo/loto.db):
 
   locks (held):
-    internal/store/store.go    ← BlueOak     (held 4m, expires 26m, mode 0444)
-    cmd/foo/main.go            ← RedRiver    (held 30s, expires 29m30s, mode 0444)
+    internal/store/store.go    ← BlueOak     (held 4m, expires 26m, exclusive)
+    cmd/foo/main.go            ← RedRiver    (held 30s, expires 29m30s, exclusive)
 
   agents (active):
     BlueOak       last_seen: 12s ago    branch: store-refactor
@@ -236,8 +244,9 @@ project-state ($XDG_STATE_HOME/loto/projects/foo/loto.db):
     SilverPine    last_seen: 11s ago    branch: bug-loto-7wp.5
 ```
 
-When AmberFox reads `internal/store/store.go`, no lock needed — the
-file is `0444`, still readable. loto coordinates writes only. When
+When AmberFox reads `internal/store/store.go`, no lock needed — a lock
+never gates a read, and never changes the file. loto coordinates writes
+only. When
 AmberFox tries to *edit* it: `loto lock internal/store/store.go` returns
 a blocker row showing BlueOak holds it for ~26 more minutes with a clear
 intent. AmberFox's Claude sees that and picks different work.
@@ -265,14 +274,15 @@ missed; `loto doctor --repair` mops up the rest.
    conflict, `2` usage, `3` IO/system).
 5. **Identity is per-session, not per-process.** Many shells, one handle.
 6. **Reads are free.** loto coordinates writes. ✗ never gate reads.
-   chmod enforcement strips write only — files remain readable at `0444`.
+   A lock is a row, not a mode change — the file on disk is untouched.
 7. **Cleanup is layered.** SessionEnd hook (eager) + lazy GC on next
    acquire (passive) + `loto doctor --repair` (manual). Each layer assumes
-   the others may fail. Lazy GC chmod-restores stale rows before deletion.
+   the others may fail.
 8. **No silent dispossession — of locks or of bytes.** Any forced release
    writes a system event observable via `loto status` / `loto doctor`.
-   Orphan-mode files (stripped on disk, no DB row) are flagged by
-   `doctor` but never restored without explicit `--restore-orphan-mode`.
+   Chmod-era residue (read-only on disk, no DB row) is flagged by `doctor`
+   but never restored without explicit `--restore-orphan-mode`, since a
+   read-only file with no row may simply be one the user meant to protect.
 9. **A clean verdict is a claim, not a default.** The gate may decline to
    answer (fail-open, exit 3, `⚠` to stderr); it may never answer `✓ no
    conflicts` on a path it could not resolve. A false clean is strictly
@@ -361,7 +371,7 @@ If you find yourself writing one of these, stop and reconsider:
 - A code path that trusts a `locks` row for a *correctness* decision **outside the record-tier carve-out** (foreground holds: flock is truth; record-tier acquires: TTL is truth — anything else, stop)
 - A schema migration tool for the on-disk layout (we wipe on `user_version` mismatch via `MoveCorruptAside` — three lines, no NULL-tolerance complexity)
 - A `--unsafe-disable-flock` flag
-- An `original_mode` column to round-trip lock cycles losslessly (rejected by chmod-policy: lossy `mode | 0200` restore is the chosen trade)
+- An `original_mode` column to round-trip lock cycles losslessly (moot since loto-zssw: loto changes no mode at all)
 - A heartbeat, keepalive, or any background liveness pinger
 
 If a feature can't be expressed as "what does the next single `loto`

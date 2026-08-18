@@ -186,7 +186,13 @@ func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live d
 	}
 	now := time.Now()
 	ec := domain.EvalContext{Now: now, Live: live}
-	reclaimed, err := reclaimStaleLocks(ctx, tx, all, ec, byAgent, now)
+	if err := reclaimStaleLocks(ctx, tx, all, ec, byAgent, now); err != nil {
+		return err
+	}
+	// Read the migration's candidate paths INSIDE the tx, before commit — the
+	// events table is rotated by rotateEventsTx below, and a path whose last
+	// event just aged out is exactly the one still sitting at 0444.
+	candidates, err := chmodEraCandidates(ctx, tx, all)
 	if err != nil {
 		return err
 	}
@@ -202,16 +208,12 @@ func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live d
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	// Run the bounded chmod restore under the still-held flock (loto-4qt), then
-	// release the flock, THEN emit the detached audit off the critical section.
-	// Holding the op-flock across the detached audit's own write tx would extend
-	// the hold for up to busy_timeout under cross-process contention and stall
-	// peers on the chmod-failure path (loto-3qev) — mirrors AcquireLocks'
-	// restoreThenReleaseFlock split. The deferred release (above) is the
-	// idempotent backstop. VACUUM also runs after release (loto-3bl0): it's
-	// post-commit, uses a fresh pool conn with SQLite's own locking, and needs
-	// no op-flock.
-	failEvents := restoreReclaimed(reclaimed, byAgent, now)
+	// The chmod-era migration runs under the still-held flock, then the flock is
+	// released BEFORE the detached audit so its write tx can't extend the hold
+	// for up to busy_timeout under contention (loto-3qev). VACUUM also runs after
+	// release (loto-3bl0): it's post-commit, uses a fresh pool conn with SQLite's
+	// own locking, and needs no op-flock.
+	failEvents := restoreChmodEraFiles(candidates, byAgent, now)
 	flock.release()
 	if len(failEvents) > 0 {
 		_ = s.appendAuditDetached(failEvents)
@@ -222,47 +224,98 @@ func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live d
 	return nil
 }
 
-// reclaimStaleLocks deletes every stale lock row and returns the canonicals
-// whose owner-write bit is due a post-commit restore. Shared locks never
-// stripped owner-write on acquire, so they must not be "restored" here
-// (shouldRestoreOwnerWrite, loto-ihh5).
-func reclaimStaleLocks(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, ec domain.EvalContext, byAgent string, now time.Time) ([]string, error) {
-	var reclaimed []string
+// reclaimStaleLocks deletes every stale lock row.
+func reclaimStaleLocks(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, ec domain.EvalContext, byAgent string, now time.Time) error {
 	for i := range all {
 		if !ec.IsStale(all[i]) {
 			continue
 		}
 		if err := reclaimStaleTx(ctx, tx, all[i], byAgent, now); err != nil {
-			return nil, err
-		}
-		if shouldRestoreOwnerWrite(all[i].Mode) {
-			reclaimed = append(reclaimed, all[i].Target.Canonical)
+			return err
 		}
 	}
-	return reclaimed, nil
+	return nil
 }
 
-// restoreReclaimed re-adds owner-write to every reclaimed target after
-// DoctorRepair's tx commits and returns the mode_restore_failed events for any
-// chmod that failed. Callers pre-filter via shouldRestoreOwnerWrite: only
-// exclusive-mode reclaims land here (shared never stripped, loto-ihh5).
+// chmodEraCandidates lists every path loto may have left read-only before it
+// retired chmod enforcement (loto-zssw): the targets of current lock rows, plus
+// every target named in the retained audit trail.
 //
-// This is the chmod-only half — the CALLER runs it under the held op-flock
-// (loto-4qt) and emits the returned events AFTER releasing the flock, so the
-// detached audit's write tx can't extend the flock hold (loto-3qev). Returning
-// the events instead of writing them here is what keeps the audit off the flock
-// critical section; the detached audit (s.appendAuditDetached) still uses its
-// own bounded ctx so a cancellation can't scale busy_timeout to ~1ms and drop
-// the mode_restore_failed trail (loto-1qed). Mirrors AcquireLocks'
-// restoreReclaimedSkippingRestripped.
-func restoreReclaimed(reclaimed []string, byAgent string, now time.Time) []domain.Event {
+// ‡ This is a one-way migration with a natural end, not a permanent scan. Until
+// 2026-08 acquire stripped write bits and release restored them, so an
+// interrupted session could leave a file at 0444 with no row to explain it —
+// observed in the wild, and the reason `doctor` grew an orphan mode. Nothing
+// strips a bit any more, so once every stragger is repaired the pass finds
+// only files that already carry owner-write and does nothing but stat them.
+// The candidate set drains itself: the events table is retention-bounded, so a
+// week after the upgrade it names no chmod-era path at all.
+//
+// Deliberately NOT a repo walk. loto has no repo to walk from here — the store
+// is cross-repo — and a walk would be unbounded where this is bounded by rows
+// loto already keeps.
+func chmodEraCandidates(ctx context.Context, tx *sql.Tx, all []domain.LockRecord) ([]string, error) {
+	seen := make(map[string]bool, len(all))
+	var out []string
+	add := func(p string) {
+		if p == "" || seen[p] {
+			return
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	for i := range all {
+		add(all[i].Target.Canonical)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT target_canonical FROM events WHERE target_canonical != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		add(p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// restoreChmodEraFiles re-adds owner-write to every candidate that is still
+// sitting write-less on disk, and returns the mode_restore_failed events for
+// any that refused.
+//
+// Returning the events rather than writing them here is what keeps the audit
+// off the flock critical section (loto-3qev); the caller emits them after
+// releasing. A missing file, a symlink, or a path outside this machine is not
+// an error — the candidate list is historical and most of it is gone.
+func restoreChmodEraFiles(candidates []string, byAgent string, now time.Time) []domain.Event {
 	var failEvents []domain.Event
-	for _, p := range reclaimed {
+	for _, p := range candidates {
+		if !lacksOwnerWrite(p) {
+			continue
+		}
 		if rerr := restoreWrite(p); rerr != nil {
 			failEvents = append(failEvents, modeRestoreFailedEvent(p, byAgent, now, rerr))
 		}
 	}
 	return failEvents
+}
+
+// lacksOwnerWrite reports whether path is a regular file the owner cannot
+// write. Anything else — missing, a directory, a symlink, unstatable — answers
+// false, because the migration's job is to undo a bit loto set and it never set
+// one on those.
+func lacksOwnerWrite(path string) bool {
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	return fi.Mode().Perm()&0o200 == 0
 }
 
 // tagsRetentionAge: acked tags older than this are hard-deleted by doctor
@@ -304,6 +357,12 @@ func gcClaimsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 // ScanOrphanModes returns paths that are read-only on disk but have no
 // matching lock row. Caller supplies the candidate paths (typically all
 // regular files under the repo, or a curated subset).
+//
+// ‡ Sibling of restoreChmodEraFiles, and the split between them is about
+// evidence. This one walks the REPO, so a read-only file it finds may simply
+// be one the user meant to protect — hence the explicit --restore-orphan-mode
+// gate. restoreChmodEraFiles walks paths LOTO ITSELF LOCKED, where a missing
+// write bit is chmod-era residue and nothing else, so it runs unprompted.
 func (s *Store) ScanOrphanModes(ctx context.Context, paths []string) ([]string, error) {
 	if len(paths) == 0 {
 		return nil, nil

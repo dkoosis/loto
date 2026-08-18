@@ -190,7 +190,7 @@ func TestDemo_00_Index(t *testing.T) {
 		"16  cross-repo note  lock domain is per-project — by design",
 		"── safety invariants ──",
 		"17  multi-file atomic  lock a+b+c all-or-nothing; one blocker aborts the set",
-		"18  reads are free     locked file is 0444 — peers can still read",
+		"18  reads are free     a lock coordinates writes; reads are never gated",
 		"19  force-break        unlock --force takes over; no silent dispossession",
 		"20  lazy GC            expired row reaped on next acquire, no doctor needed",
 	}
@@ -620,7 +620,7 @@ func TestDemo_16_CrossRepoNote(t *testing.T) {
 
 // TestDemo_17_MultiFileAtomic — NS invariant: multi-file lock is all-or-nothing.
 //
-// Any blocker aborts the set: no chmod side effects, no rows inserted.
+// Any blocker aborts the set: no rows inserted.
 // This is what makes mid-sweep refactors safe — the changed file set lands
 // or doesn't, never partially.
 func TestDemo_17_MultiFileAtomic(t *testing.T) {
@@ -652,7 +652,7 @@ func TestDemo_17_MultiFileAtomic(t *testing.T) {
 	mustContain(t, out, "✗ blocked")
 	beat(t)
 	say(t, "key invariant: a.go and c.go are NOT held by "+alice.handle+" either.")
-	say(t, "the whole batch aborted. no chmod side effects, no partial state.")
+	say(t, "the whole batch aborted. no partial state.")
 	beat(t)
 	_, out = alice.do(t, "status", "--mine")
 	mustContain(t, out, "no locks")
@@ -660,10 +660,13 @@ func TestDemo_17_MultiFileAtomic(t *testing.T) {
 
 // TestDemo_18_ReadsAreFree — NS invariant #6: loto coordinates writes only.
 //
-// A locked file is stripped to 0444. Peers can still read it — they just
-// can't write. This is what makes "look before you leap" cheap.
+// A lock is a declaration, not a padlock: the file's mode never changes, and
+// nothing about reading it is gated. loto retired chmod enforcement in
+// loto-zssw — the holder edits through the same filesystem as everyone else,
+// so stripping the write bit locked the HOLDER out of its own operating loop.
+// Peers are stopped one layer up, at the harness gate.
 func TestDemo_18_ReadsAreFree(t *testing.T) {
-	head(t, 18, "reads are free — locked file stays readable at 0444")
+	head(t, 18, "reads are free — a lock coordinates writes, nothing else")
 	repo := withTempProject(t)
 	rel := "shared.go"
 	full := filepath.Join(repo, rel)
@@ -682,9 +685,16 @@ func TestDemo_18_ReadsAreFree(t *testing.T) {
 		t.Fatal(err)
 	}
 	mode := st.Mode().Perm()
-	t.Logf("    %-10s   mode: %#o (owner-write stripped)", "fs", mode)
-	if mode&0o200 != 0 {
-		t.Fatalf("expected owner-write stripped, got %#o", mode)
+	t.Logf("    %-10s   mode: %#o (unchanged — loto does not touch mode bits)", "fs", mode)
+	if mode&0o200 == 0 {
+		t.Fatalf("locking must not strip owner-write (loto-zssw), got %#o", mode)
+	}
+	beat(t)
+
+	say(t, alice.handle+" — the holder — edits the file it just locked.")
+	beat(t)
+	if err := os.WriteFile(full, []byte("package x // edited\n"), 0o644); err != nil {
+		t.Fatalf("holder must be able to write its own locked file: %v", err)
 	}
 	beat(t)
 
@@ -696,22 +706,16 @@ func TestDemo_18_ReadsAreFree(t *testing.T) {
 	}
 	t.Logf("    %-10s   read %d bytes: %q", bob.handle, len(data), strings.TrimSpace(string(data)))
 	beat(t)
-	say(t, "now bob tries to WRITE without a lock. filesystem refuses (mode 0444).")
+	say(t, bob.handle+"'s WRITE is refused by the harness gate, not the filesystem —")
+	say(t, "see demo 9. loto coordinates writes only. reads stay free.")
 	beat(t)
-	if err := os.WriteFile(full, []byte("clobber\n"), 0o644); err == nil {
-		t.Fatalf("expected write to fail while locked")
-	} else {
-		t.Logf("    %-10s   write blocked: %v", bob.handle, err)
-	}
-	beat(t)
-	say(t, "loto coordinates writes only. reads stay free — review, grep, snipe, all safe.")
 }
 
 // TestDemo_19_ForceBreak — NS invariant #8: no silent dispossession.
 //
 // A peer can break another agent's lock with `unlock --force -t "why"`.
-// The break is auditable: tag travels with the release, write mode is
-// restored, and the new owner can claim cleanly.
+// The break is auditable: the tag travels with the release, and the new owner
+// can claim cleanly.
 func TestDemo_19_ForceBreak(t *testing.T) {
 	head(t, 19, "force-break — taking over with an audit trail")
 	repo := withTempProject(t)
@@ -727,16 +731,6 @@ func TestDemo_19_ForceBreak(t *testing.T) {
 	beat(t)
 	bob.do(t, "unlock", "stuck.go", "--force", "-t", "alice afk 30m, taking over for hotfix")
 	beat(t)
-	say(t, "filesystem mode restored — file is writable again.")
-	full := filepath.Join(repo, "stuck.go")
-	st, err := os.Stat(full)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Mode().Perm()&0o200 == 0 {
-		t.Fatalf("expected owner-write restored after force-break, got %#o", st.Mode().Perm())
-	}
-	t.Logf("    %-10s   mode: %#o", "fs", st.Mode().Perm())
 	beat(t)
 	say(t, bob.handle+" can now claim. no silent dispossession — the break left a tag.")
 	beat(t)

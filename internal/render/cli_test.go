@@ -38,18 +38,6 @@ const (
 	ownerRed   = "Red"
 )
 
-var errPermissionDenied error = permDeniedError{}
-
-type permDeniedError struct{}
-
-func (permDeniedError) Error() string { return "permission denied" }
-
-var errAuditWriteFailed error = auditWriteError{}
-
-type auditWriteError struct{}
-
-func (auditWriteError) Error() string { return "audit-write failed: database is closed" }
-
 func TestEmitLockSuccess_SortedDeterministic(t *testing.T) {
 	var buf bytes.Buffer
 	EmitLockSuccess(&buf, []domain.LockRecord{
@@ -166,83 +154,16 @@ func TestEmitReleaseResults_MixedOutcomes(t *testing.T) {
 // a restore-failed release whose mode_restore_failed audit event was also lost
 // must surface the audit hole to the operator (gh#107), not just the restore
 // error. Pre-fix, ReleaseResult.AuditErr was populated but never rendered.
-func TestEmitReleaseResults_SurfacesAuditHole(t *testing.T) {
-	var buf bytes.Buffer
-	exit := EmitReleaseResults(&buf, []store.ReleaseResult{
-		{
-			Target:     domain.Target{Canonical: aGo},
-			State:      store.StateRestoreFailed,
-			RestoreErr: errPermissionDenied,
-			AuditErr:   errAuditWriteFailed,
-		},
-	})
-	if exit != 1 {
-		t.Errorf("restore-failed → exit 1, got %d", exit)
-	}
-	got := buf.String()
-	if !strings.Contains(got, "state=restore-failed") {
-		t.Errorf("missing restore-failed state: %s", got)
-	}
-	if !strings.Contains(got, "audit-hole=") {
-		t.Errorf("AuditErr must surface as audit-hole (gh#107): %s", got)
-	}
-}
-
 // TestEmitReleaseResults_RestoreFailedCountsAsUnlocked covers loto-qv91: a
 // restore-failed release deleted the lock row in-tx (a successful unlock) but
 // the chmod restore failed. The first-line triage count must count it as
 // unlocked, not drop it to 0, while still surfacing the restore failures via a
 // distinct restore-failed field. Pre-fix the header read "✓ unlocked count=0"
 // for an all-restore-failed slice — actively misleading to the Claude consumer.
-func TestEmitReleaseResults_RestoreFailedCountsAsUnlocked(t *testing.T) {
-	var buf bytes.Buffer
-	exit := EmitReleaseResults(&buf, []store.ReleaseResult{
-		{Target: domain.Target{Canonical: aGo}, State: store.StateRestoreFailed, RestoreErr: errPermissionDenied},
-		{Target: domain.Target{Canonical: bGo}, State: store.StateRestoreFailed, RestoreErr: errPermissionDenied},
-		{Target: domain.Target{Canonical: cGo}, State: store.StateRestoreFailed, RestoreErr: errPermissionDenied},
-	})
-	if exit != 1 {
-		t.Errorf("restore-failed → exit 1, got %d", exit)
-	}
-	got := buf.String()
-	if !strings.Contains(got, "✓ unlocked count=3") {
-		t.Errorf("restore-failed rows are unlocked (row deleted), header must report count=3: %s", got)
-	}
-	if !strings.Contains(got, "restore-failed=3") {
-		t.Errorf("restore failures must surface as a distinct first-line field: %s", got)
-	}
-}
-
 // TestEmitBreakResults_SurfacesRestoreAndAuditHoles covers loto-c6rg on the
 // break path: unlock --force results carry RestoreErr/AuditErr that the prior
 // inline renderer dropped — a forced break that left a file read-only or lost
 // its audit event was silently reported as a clean "✓ broken".
-func TestEmitBreakResults_SurfacesRestoreAndAuditHoles(t *testing.T) {
-	var out, errBuf bytes.Buffer
-	exit := EmitBreakResults(&out, &errBuf, []store.BreakResult{
-		{Target: domain.Target{Canonical: aGo}}, // clean break
-		{
-			Target:     domain.Target{Canonical: bGo},
-			RestoreErr: errPermissionDenied,
-			AuditErr:   errAuditWriteFailed,
-		},
-		{Target: domain.Target{Canonical: cGo}, Err: store.ErrNoLockAtTarget},
-	})
-	if exit != 1 {
-		t.Errorf("restore-failed or no-lock → exit 1, got %d", exit)
-	}
-	if !strings.Contains(out.String(), "✓ broken target=a.go") {
-		t.Errorf("clean break must still report success on stdout: %s", out.String())
-	}
-	gotErr := errBuf.String()
-	if !strings.Contains(gotErr, "state=restore-failed") || !strings.Contains(gotErr, "audit-hole=") {
-		t.Errorf("break restore-failure + audit hole must surface on stderr (gh#107): %s", gotErr)
-	}
-	if !strings.Contains(gotErr, "no lock at target=c.go") {
-		t.Errorf("missing no-lock line: %s", gotErr)
-	}
-}
-
 func TestRelToCwd_AbsolutePathBecomesRelative(t *testing.T) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -344,26 +265,6 @@ func TestEmitConflictWithTags_AppendsTagRows(t *testing.T) {
 	}
 }
 
-func TestEmitChmodFailure_FailedQuotedAndCountsErrOnly(t *testing.T) {
-	var buf bytes.Buffer
-	EmitChmodFailure(&buf, &store.ChmodFailureError{
-		Failures: []store.ChmodFailure{
-			{Target: domain.Target{Canonical: aGo}, Err: errPermissionDenied},
-			{Target: domain.Target{Canonical: bGo}, RolledBack: true},
-		},
-	})
-	got := buf.String()
-	if !strings.HasPrefix(got, "✗ chmod-failed count=1\n") {
-		t.Errorf("count should only include rows with Err != nil, got: %s", got)
-	}
-	if !strings.Contains(got, `err="permission denied"`) {
-		t.Errorf("err should be quoted: %s", got)
-	}
-	if !strings.Contains(got, "state=restored") {
-		t.Errorf("missing restored row: %s", got)
-	}
-}
-
 // TestEmitReleaseResults_ReclaimedStale covers the D1 surface (loto-ebkc): a
 // plain unlock that reclaimed all-stale foreign holders reports success —
 // count-first triage with a distinct reclaimed= field, a ✓ per-row line naming
@@ -391,28 +292,6 @@ func TestEmitReleaseResults_ReclaimedStale(t *testing.T) {
 // but must not masquerade as the caller's own unlock — it counts under
 // reclaimed= (Owner discriminates: only reclaimed rows carry a dead owner into
 // restore-failed) and the ⚠ row names that dead owner.
-func TestEmitReleaseResults_ReclaimRestoreFailed_KeepsAttribution(t *testing.T) {
-	var buf bytes.Buffer
-	exit := EmitReleaseResults(&buf, []store.ReleaseResult{
-		{
-			Target:     domain.Target{Canonical: aGo},
-			State:      store.StateRestoreFailed,
-			Owner:      "DeadOwl",
-			RestoreErr: errPermissionDenied,
-		},
-	})
-	if exit != 1 {
-		t.Errorf("restore-failed → exit 1, got %d", exit)
-	}
-	got := buf.String()
-	if !strings.HasPrefix(got, "✓ unlocked count=0 reclaimed=1 restore-failed=1\n") {
-		t.Errorf("failed reclaim must count as reclaimed, not own unlock: %s", got)
-	}
-	if !strings.Contains(got, "owner=DeadOwl") {
-		t.Errorf("restore-failed reclaim row must keep dead-owner attribution: %s", got)
-	}
-}
-
 func TestEmitReleaseResults_EmptyInput_EmitsInfoGlyph(t *testing.T) {
 	var buf bytes.Buffer
 	exit := EmitReleaseResults(&buf, nil)

@@ -157,11 +157,6 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 			render.EmitConflictWithTags(stdout, mce, fetchTagsForBlockers(rt, mce.Blockers))
 			return 1
 		}
-		var cfe *store.ChmodFailureError
-		if errors.As(err, &cfe) {
-			render.EmitChmodFailure(stdout, cfe)
-			return 3
-		}
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}

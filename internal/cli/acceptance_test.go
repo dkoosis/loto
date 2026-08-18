@@ -2,9 +2,7 @@ package cli
 
 import (
 	"bytes"
-	"errors"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -140,24 +138,29 @@ func TestConcurrentLock_SerializedByOpFlock(t *testing.T) {
 	if exits[0] != 0 || exits[1] != 0 {
 		t.Errorf("exits: %v", exits)
 	}
+	// Both rows survived: the op-flock serialized the writes rather than letting
+	// one call lose its row. Mode bits are no longer part of the contract — loto
+	// retired chmod enforcement in loto-zssw and the harness gate carries peer
+	// protection now.
+	var status bytes.Buffer
+	if code := Run([]string{tcCmdStatus, tcFlagMine}, &status, io.Discard); code != 0 {
+		t.Fatalf("status exit %d: %s", code, status.String())
+	}
 	for _, n := range []string{tcTargetA, tcTargetB} {
-		st, err := os.Stat(filepath.Join(repo, n))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if st.Mode().Perm()&0o222 != 0 {
-			t.Errorf("%s not stripped: %o", n, st.Mode().Perm())
+		if !strings.Contains(status.String(), n) {
+			t.Errorf("%s missing from status after concurrent lock: %s", n, status.String())
 		}
 	}
 }
 
-// TestLockedFile_WriteByThirdPartyReturnsEACCES pins the chmod-strip enforcement:
-// after lock, a non-loto writer (third-party tool, hostile script) must hit EACCES.
-// This is the whole point of the lockout primitive.
-func TestLockedFile_WriteByThirdPartyReturnsEACCES(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses chmod write bits; EACCES is unreachable")
-	}
+// TestLockedFile_HolderCanWrite is loto-zssw's acceptance criterion, and it
+// inverts the test that used to stand here. Until 2026-08 acquire stripped the
+// write bits, so a third-party writer hit EACCES — and so did the HOLDER, whose
+// whole operating loop is lock → edit → unlock. On 2026-08-12 that contradiction
+// ate a NORTH_STAR.md edit silently inside a && chain and a stale body reached
+// main. Peer protection moved to the harness gate; the filesystem stays out of
+// it.
+func TestLockedFile_HolderCanWrite(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)
 	p := filepath.Join(repo, tcTargetX)
@@ -167,12 +170,15 @@ func TestLockedFile_WriteByThirdPartyReturnsEACCES(t *testing.T) {
 	if code := Run([]string{tcCmdLock, tcTargetX, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
 		t.Fatal("lock")
 	}
-	err := os.WriteFile(p, []byte("clobber"), 0o644)
-	if err == nil {
-		t.Fatal("expected EACCES, got nil")
+	if err := os.WriteFile(p, []byte("edited"), 0o644); err != nil {
+		t.Fatalf("holder must be able to write its own locked file: %v", err)
 	}
-	if !errors.Is(err, fs.ErrPermission) {
-		t.Errorf("expected fs.ErrPermission, got %v", err)
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "edited" {
+		t.Errorf("write did not land: %q", got)
 	}
 }
 

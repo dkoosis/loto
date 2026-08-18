@@ -11,10 +11,14 @@ import (
 )
 
 const (
-	EventLockAcquired         = "lock_acquired"
-	EventLockReleased         = "lock_released"
-	EventLockBroken           = "lock_broken"
-	EventLockReclaimedStale   = "lock_reclaimed_stale"
+	EventLockAcquired       = "lock_acquired"
+	EventLockReleased       = "lock_released"
+	EventLockBroken         = "lock_broken"
+	EventLockReclaimedStale = "lock_reclaimed_stale"
+	// EventModeRestoreFailed is emitted only by doctor's chmod-era migration
+	// now (loto-zssw); EventAcquireRollbackStart is emitted by nothing at all.
+	// Both stay declared: the schema's event_kind CHECK still names them, and
+	// rows written before the strip retired are still readable.
 	EventModeRestoreFailed    = "mode_restore_failed"
 	EventAcquireRollbackStart = "acquire_rollback_started"
 	EventLockDowngraded       = "lock_downgraded"
@@ -65,43 +69,20 @@ func (e *MultiConflictError) Error() string {
 	return fmt.Sprintf("multi-target lock conflict: %d blocker(s)", len(e.Blockers))
 }
 
-// ChmodFailure describes a single target's chmod outcome during a failed
-// multi-acquire. RolledBack=true means the strip was successfully reversed.
-type ChmodFailure struct {
-	Target     domain.Target
-	Err        error
-	RolledBack bool
-}
-
-type ChmodFailureError struct {
-	Failures []ChmodFailure
-}
-
-func (e *ChmodFailureError) Error() string {
-	return fmt.Sprintf("chmod failed on %d target(s)", len(e.Failures))
-}
-
-type chmodRestoreErr struct {
-	path string
-	err  error
-}
-
 // ReleaseOutcome distinguishes the per-target result of a multi-target release.
 type ReleaseOutcome int
 
 const (
-	// StateUnlocked: row deleted and chmod restore succeeded.
+	// StateUnlocked: row deleted.
 	StateUnlocked ReleaseOutcome = iota
 	// StateNoLock: no row at target — caller wasn't holding it.
 	StateNoLock
 	// StateNotOwner: row exists but owned by another agent.
 	StateNotOwner
-	// StateRestoreFailed: row deleted, chmod restore failed.
-	StateRestoreFailed
 	// StateReclaimedStale: caller held no row, and EVERY foreign holder was
 	// stale — all reclaimed (rows deleted, lock_reclaimed_stale audited per
-	// holder, owner-write restored for exclusive). One live foreign holder
-	// vetoes the whole target back to StateNotOwner (loto-ebkc).
+	// holder). One live foreign holder vetoes the whole target back to
+	// StateNotOwner (loto-ebkc).
 	StateReclaimedStale
 )
 
@@ -111,43 +92,16 @@ type ReleaseResult struct {
 	State  ReleaseOutcome
 	// Owner is the vetoing live holder (StateNotOwner) or the first reclaimed
 	// dead holder in created_at,owner order (StateReclaimedStale).
-	Owner      string
-	Mode       string // mode of the released row; "" → exclusive (loto-k5el.2)
-	RestoreErr error  // populated when State == StateRestoreFailed
-	// AuditErr is populated when the per-target mode_restore_failed audit
-	// event could not be persisted (tx contention, SQLITE_BUSY, ctx tail).
-	// The lock row is already gone; AuditErr signals the audit trail has a
-	// hole at this target so callers can re-emit or alert (gh#107).
-	AuditErr error
+	Owner string
+	Mode  string // mode of the released row; "" → exclusive (loto-k5el.2)
 }
 
 // BreakResult is the per-target outcome from BreakLocks. Err is nil on success;
-// ErrNoLockAtTarget or an AuthorizeBreak error otherwise. RestoreErr is set
-// independently when the lock row was deleted but post-commit chmod-restore
-// failed — the break itself succeeded but the file is left read-only, mirroring
-// ReleaseResult.StateRestoreFailed semantics. Restore failures are also audited
-// via mode_restore_failed events.
+// ErrNoLockAtTarget or an AuthorizeBreak error otherwise.
 type BreakResult struct {
-	Target     domain.Target
-	Err        error
-	Mode       string // mode of the broken row; "" → exclusive (mirrors ReleaseResult.Mode)
-	RestoreErr error
-	// AuditErr is populated when the per-target mode_restore_failed audit
-	// event could not be persisted alongside RestoreErr. See ReleaseResult.AuditErr (gh#107).
-	AuditErr error
-}
-
-// shouldRestoreOwnerWrite is THE skip-ModeShared-on-restore guard: every path
-// that deletes a `locks` row and then considers restoreWrite must consult it.
-// Shared locks never strip the owner-write bit on acquire (locks_acquire.go),
-// so "restoring" it would spuriously flip a possibly-deliberately-read-only
-// file writable — and do so while surviving co-holders may still hold the
-// shared lock. Empty mode is a legacy row → exclusive (domain.EffectiveMode
-// semantics), which DID strip and must restore. Reference behavior:
-// restoreAndAuditReleases (locks_release.go). Reused by the break path here;
-// doctor-reclaim and acquire-reclaim paths adopt it next (loto-ihh5, loto-22ka).
-func shouldRestoreOwnerWrite(mode string) bool {
-	return mode != domain.ModeShared
+	Target domain.Target
+	Err    error
+	Mode   string // mode of the broken row; "" → exclusive (mirrors ReleaseResult.Mode)
 }
 
 const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch,mode`

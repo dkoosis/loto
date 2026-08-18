@@ -142,9 +142,10 @@ func TestReleaseBySession_EmptyResult(t *testing.T) {
 	}
 }
 
-// TestReleaseBySession_RestoresChmod verifies that released locks get their
-// chmod restored (owner-write re-added).
-func TestReleaseBySession_RestoresChmod(t *testing.T) {
+// TestReleaseBySession_LeavesModeUntouched is loto-zssw's session-release leg:
+// acquire strips nothing, so release restores nothing, and the file's mode is
+// the same on both sides of the lock's whole life.
+func TestReleaseBySession_LeavesModeUntouched(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 
@@ -152,10 +153,9 @@ func TestReleaseBySession_RestoresChmod(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	// Verify stripped.
 	st, _ := os.Stat(l.Target.Canonical)
-	if st.Mode().Perm()&0o200 != 0 {
-		t.Fatalf("precondition: acquire should strip write, got %o", st.Mode().Perm())
+	if st.Mode().Perm() != 0o644 {
+		t.Fatalf("acquire must not touch mode bits, got %o", st.Mode().Perm())
 	}
 
 	results, _, err := s.ReleaseBySession(ctx, tcAlice, "session-1")
@@ -166,8 +166,8 @@ func TestReleaseBySession_RestoresChmod(t *testing.T) {
 		t.Fatalf("want StateUnlocked, got %+v", results)
 	}
 	st, _ = os.Stat(l.Target.Canonical)
-	if st.Mode().Perm()&0o200 == 0 {
-		t.Fatalf("release must restore owner-write, got %o", st.Mode().Perm())
+	if st.Mode().Perm() != 0o644 {
+		t.Fatalf("release must not touch mode bits, got %o", st.Mode().Perm())
 	}
 }
 

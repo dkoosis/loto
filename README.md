@@ -38,9 +38,10 @@ loto lock internal/store/store.go -t "fix bug"
 ```
 
 Enforcement is layered: the row + TTL is authoritative across CC hook
-events (PreToolUse → PostToolUse), and chmod-strip on acquire defeats
-naive writers and editors that honor perms. See `docs/NORTH_STAR.md` for
-the full design contract.
+events (PreToolUse → PostToolUse), and the PreToolUse gate refuses a
+peer's write over a held path. loto itself never changes a file's
+permissions — see `docs/NORTH_STAR.md` for why that changed, and for the
+full design contract.
 
 ## installation
 
@@ -71,7 +72,8 @@ Output is Claude-optimized KV — one record per line, fixed glyphs (`✓` /
 | Layer | Mechanism | Truth source | Status |
 |------|-----------|--------------|--------|
 | Tag (record-tier) | `locks` row with non-zero, unexpired `expires_at` | row + TTL (lazy GC) | shipped |
-| Enforcement (chmod) | strip-write on acquire; restore on release | filesystem mode bits | shipped |
+| Enforcement (chmod) | strip-write on acquire; restore on release | filesystem mode bits | retired (loto-zssw) |
+| Harness gate | PreToolUse hook refuses a write over a peer's held path | `locks` + `claims` rows | shipped |
 | Op-flock (internal) | flock on `lock-op.flock`, held only during an op | flock | shipped |
 | File flock (foreground) | flock(2) exclusive held by the editing process | flock | deferred |
 | Global lock | flock(2) on a project-wide handle | flock | deferred |
@@ -155,7 +157,7 @@ from them is exactly where it can bite:
 | Lock belongs to a *worker* | identity is per-**session** (invariant 5 below); subagents of one session collapse to one "worker" |
 | Hasp — each exposed worker locks | one owner per session, no hasp; same owner re-locks its own path without conflict |
 | Only the applier removes it | honored per-owner — but `unlock --all` under a shared session sweeps siblings' locks |
-| Lock means stop, physically | chmod-strip approximates it; advisory at root, and CC hooks fire on Bash only (agent_shell edits bypass the gate) |
+| Lock means stop, physically | the harness gate approximates it; advisory at root, and it only reaches tools the hook matches |
 
 The gap between the metaphor and the code is the standing design backlog, not
 an accident of naming.
