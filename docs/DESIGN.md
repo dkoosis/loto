@@ -273,6 +273,26 @@ missed; `loto doctor --repair` mops up the rest.
    writes a system event observable via `loto status` / `loto doctor`.
    Orphan-mode files (stripped on disk, no DB row) are flagged by
    `doctor` but never restored without explicit `--restore-orphan-mode`.
+9. **A clean verdict is a claim, not a default.** The gate may decline to
+   answer (fail-open, exit 3, `⚠` to stderr); it may never answer `✓ no
+   conflicts` on a path it could not resolve. A false clean is strictly
+   worse than no check, because it reads as protection (loto-tzmv.10).
+
+### path resolution differs per calling tool
+
+The base a relative path resolves against is a property of the *caller*,
+not of loto, and the two shell call sites do not agree:
+
+| caller | relative path | why |
+|---|---|---|
+| `Bash` | payload cwd + any leading `cd` in the same command | the process is fresh per call, so the payload's cwd is the shell's cwd |
+| `mcp__trixi__agent_shell` | **unresolvable — refuse** | the shell keeps its own persistent cwd, set by a `cd` that may have run three tool calls ago and absent from the payload |
+
+A caller that cannot vouch for the base passes `--cwd-unknown`; loto then
+refuses relative tokens (`✗ unresolvable`) rather than guessing. Absolute
+paths carry their own base and are unaffected. The declaration is the
+caller's because only the caller knows its own tool shape — loto must not
+sniff a tool name, or the rule drifts between the two call sites.
 
 ## what we are *not* building
 

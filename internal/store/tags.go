@@ -129,45 +129,6 @@ func (s *Store) ListAliveForOwner(ctx context.Context, ownerUUID domain.AgentUUI
 	return scanTags(rows)
 }
 
-// TagNotify identifies a waiter to notify on lock release: the tagger who left
-// a breadcrumb, and the freed path (loto-4lc).
-type TagNotify struct {
-	TaggerUUID      string
-	TargetCanonical string
-}
-
-// TaggersAckedSince returns the distinct (tagger, target) pairs on ownerUUID's
-// locks that were acked at or after sinceNs — i.e. the waiters whose breadcrumbs
-// this agent's just-finished release consumed. Reading by ack-timestamp AFTER the
-// release closes the race a read-before-release would open: a tag committed in
-// the gap is still acked by the release (acked_at >= sinceNs) and so is caught
-// here (loto-4lc, Codex #223 P1). Self-tags are excluded. Queries the tags table
-// directly (no lock JOIN) because the release has already deleted the host lock.
-func (s *Store) TaggersAckedSince(ctx context.Context, ownerUUID domain.AgentUUID, sinceNs int64) ([]TagNotify, error) {
-	owner := string(ownerUUID)
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT tagger_uuid, target_canonical
-		FROM tags
-		WHERE lock_owner_uuid = ?
-		  AND tagger_uuid <> ?
-		  AND acked_at IS NOT NULL
-		  AND acked_at >= ?
-		ORDER BY target_canonical, tagger_uuid`, owner, owner, sinceNs)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []TagNotify
-	for rows.Next() {
-		var n TagNotify
-		if err := rows.Scan(&n.TaggerUUID, &n.TargetCanonical); err != nil {
-			return nil, err
-		}
-		out = append(out, n)
-	}
-	return out, rows.Err()
-}
-
 // ListAliveByTargets is the batched form of ListAliveForTarget: one query for
 // many canonical paths, grouped into a map. Callers that surface tags across a
 // list of files (status, lock conflict) should prefer this — it folds an N+1
