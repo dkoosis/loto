@@ -117,14 +117,15 @@ type runtime struct {
 // false), ReleaseBySession, and — the reason this is being fixed now — any
 // attempt to ask whether a peer record speaks for a given record's session.
 //
-// identity.RecordPeer reads the same CLAUDE_CODE_SESSION_ID into Peer.SessionID
-// (peer.go), so the two sides are comparable BY CONSTRUCTION rather than by
-// convention. peerSpeaksFor below depends on exactly that.
+// identity.PeerFromEnv fills Peer.SessionID from identity.SessionIDFromEnv —
+// the same function called here — so the two sides are comparable BY
+// CONSTRUCTION rather than by convention. peerSpeaksFor below depends on
+// exactly that, and the convention version had already drifted: the peer read
+// CLAUDE_CODE_SESSION_ID alone while this preferred LOTO_SESSION_ID, so with
+// the documented override set every DEAD verdict was discarded and PID-less
+// locks and claims stayed blockers until their TTL (loto-37xm, Codex #248).
 func sessionUUID() (id string, pinned bool) {
-	if v := os.Getenv("LOTO_SESSION_ID"); v != "" {
-		return v, true
-	}
-	if v := os.Getenv("CLAUDE_CODE_SESSION_ID"); v != "" {
+	if v := identity.SessionIDFromEnv(); v != "" {
 		return v, true
 	}
 	return identity.NewUUID(), false
@@ -323,23 +324,40 @@ func peerSpeaksFor(p *identity.Peer, session domain.SessionUUID) bool {
 // claim over a 300-file staged set therefore paid 300 identical probes on the
 // pre-commit hot path.
 //
-// The key carries everything the probe reads — host, owner, pid, proc-start —
-// so two records that differ in any of them stay independently probed. The
-// cache lives for one command run, well inside the window where a holder's
-// liveness could meaningfully change, and a gate that answered ALIVE for one
-// target and DEAD for the next in the same verdict would be incoherent anyway.
+// The key carries everything the probe reads — host, owner, SESSION, pid,
+// proc-start — so two records that differ in any of them stay independently
+// probed. The cache lives for one command run, well inside the window where a
+// holder's liveness could meaningfully change, and a gate that answered ALIVE
+// for one target and DEAD for the next in the same verdict would be incoherent
+// anyway.
+//
+// ‡ The session leg is not decoration (loto-s0bb, Codex #248). liveProbe reads
+// l.SessionUUID through peerSpeaksFor: one agent uuid can carry several live
+// sibling sessions and exactly one peer record, so the SAME (host, owner, pid,
+// proc-start) yields DEAD for the session the record names and UNKNOWN for its
+// siblings. Sibling beacons and every claim share PID 0, which made them
+// collide on the old key: probe the dead sibling first and its DEAD verdict was
+// served to a live one, so check --gate, guard, and claim acquisition would all
+// hand a live agent's territory to a competing writer. That is the one loto
+// failure with no recovery — a false UNKNOWN only delays a reclaim.
 func memoLiveProbe(p domain.HolderLiveProbe) domain.HolderLiveProbe {
 	if p == nil {
 		return nil
 	}
 	type key struct {
-		host, owner string
-		pid         int
-		procStart   int64
+		host, owner, session string
+		pid                  int
+		procStart            int64
 	}
 	seen := map[key]domain.Liveness{}
 	return func(l domain.LockRecord) domain.Liveness {
-		k := key{host: l.Host, owner: string(l.OwnerUUID), pid: l.PID, procStart: l.ProcStart}
+		k := key{
+			host:      l.Host,
+			owner:     string(l.OwnerUUID),
+			session:   string(l.SessionUUID),
+			pid:       l.PID,
+			procStart: l.ProcStart,
+		}
 		if v, ok := seen[k]; ok {
 			return v
 		}

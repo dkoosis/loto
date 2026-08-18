@@ -70,6 +70,62 @@ func TestPeerFromEnvNilWithoutSocket(t *testing.T) {
 	}
 }
 
+// tcClaudeSess / tcLotoSess are the two session ids the precedence test and
+// its peer-record sibling compare (loto-37xm).
+const (
+	tcClaudeSess = "claude-sess"
+	tcLotoSess   = "loto-sess"
+)
+
+// TestSessionIDFromEnvPrecedence pins the shared precedence (loto-37xm, Codex
+// #248). The peer record written here and the session id stamped on lock and
+// claim rows are COMPARED — runtime.peerSpeaksFor asks whether a peer record
+// speaks for the session that took a record — so both must resolve the id the
+// same way. They did not: this constructor read CLAUDE_CODE_SESSION_ID alone
+// while the runtime preferred LOTO_SESSION_ID, so with the documented override
+// set every DEAD verdict was discarded and PID-less locks and claims stayed
+// blockers until their full TTL.
+func TestSessionIDFromEnvPrecedence(t *testing.T) {
+	tests := []struct {
+		name       string
+		override   string
+		claudeSess string
+		want       string
+	}{
+		{"explicit override wins", tcLotoSess, tcClaudeSess, tcLotoSess},
+		{"claude session when no override", "", tcClaudeSess, tcClaudeSess},
+		{"neither set", "", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LOTO_SESSION_ID", tc.override)
+			t.Setenv("CLAUDE_CODE_SESSION_ID", tc.claudeSess)
+			if got := SessionIDFromEnv(); got != tc.want {
+				t.Fatalf("SessionIDFromEnv() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The peer record must carry that same id, not CLAUDE_CODE_SESSION_ID raw —
+// the half of loto-37xm that a caller can observe.
+func TestPeerFromEnvUsesSessionOverride(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/4242.sock")
+	t.Setenv("CLAUDE_PID", "4242")
+	t.Setenv("LOTO_PEER_NAME", "")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", tcClaudeSess)
+	t.Setenv("LOTO_SESSION_ID", tcLotoSess)
+
+	p := PeerFromEnv(context.Background(), &Agent{UUID: "u", Handle: "H"}, "")
+	if p == nil {
+		t.Fatal("want a peer record")
+	}
+	if p.SessionID != tcLotoSess {
+		t.Fatalf("Peer.SessionID = %q, want %q — the peer and the lock rows must name one session",
+			p.SessionID, tcLotoSess)
+	}
+}
+
 func TestPeerFromEnvNameSources(t *testing.T) {
 	// A subagent's peer name is readable from its own argv; a top-level
 	// session's is not, and must record empty rather than guess.
@@ -90,6 +146,7 @@ func TestPeerFromEnvNameSources(t *testing.T) {
 			t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/4242.sock")
 			t.Setenv("CLAUDE_PID", "4242")
 			t.Setenv("LOTO_PEER_NAME", tc.envName)
+			t.Setenv("LOTO_SESSION_ID", "") // no override → the Claude id below
 			t.Setenv("CLAUDE_CODE_SESSION_ID", "sess-1")
 			prev := procArgv
 			procArgv = func(context.Context, int) string { return tc.argv }

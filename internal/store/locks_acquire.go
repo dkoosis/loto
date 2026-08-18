@@ -70,7 +70,7 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 		return nil, &MultiConflictError{Blockers: blockers}
 	}
 
-	if err := s.insertAllLocks(ctx, tx, sorted, now); err != nil {
+	if err := s.insertAllLocks(ctx, tx, sorted, all, domain.EvalContext{Now: now, Live: live}); err != nil {
 		return nil, err
 	}
 	if err := rotateEventsTx(ctx, tx, now); err != nil {
@@ -90,23 +90,29 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 // insertAllLocks writes the lock rows and their lock_acquired events inside
 // the parent tx. On error the caller (AcquireLocks) releases the tx and runs
 // no compensating filesystem action, so failures here just propagate the error.
-func (s *Store) insertAllLocks(ctx context.Context, tx *sql.Tx, sorted []domain.LockRecord, now time.Time) error {
+//
+// A beacon that yields to a stronger same-owner row (see insertOrRefreshLock)
+// writes nothing, so it emits no lock_acquired event either — the audit trail
+// records lock acquisitions, not attempts.
+func (s *Store) insertAllLocks(ctx context.Context, tx *sql.Tx, sorted, all []domain.LockRecord, ec domain.EvalContext) error {
+	evs := make([]domain.Event, 0, len(sorted))
 	for i := range sorted {
-		if err := insertOrRefreshLock(ctx, tx, sorted[i]); err != nil {
+		written, err := insertOrRefreshLock(ctx, tx, sorted[i], beaconMaySupersede(sorted[i], all, ec))
+		if err != nil {
 			return err
 		}
-	}
-	// Emit lock_acquired events in the same tx (atomic with the row inserts).
-	evs := make([]domain.Event, len(sorted))
-	for i := range sorted {
-		evs[i] = domain.Event{
+		if !written {
+			continue
+		}
+		evs = append(evs, domain.Event{
 			Target:    sorted[i].Target,
 			Kind:      EventLockAcquired,
 			ActorUUID: string(sorted[i].OwnerUUID),
 			Reason:    sorted[i].Intent,
-			CreatedAt: now,
-		}
+			CreatedAt: ec.Now,
+		})
 	}
+	// Emit lock_acquired events in the same tx (atomic with the row inserts).
 	return appendEventsTx(ctx, tx, evs)
 }
 
@@ -196,7 +202,42 @@ func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domai
 	return blockers, nil
 }
 
-func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord) error {
+// beaconMaySupersede reports whether an incoming BEACON is allowed to overwrite
+// the same-owner row already at its target — true when there is no such row, or
+// when the row is stale by the one staleness predicate (TTL lapsed OR holder
+// provably dead).
+//
+// ‡ Same owner does not mean same holder (Codex #252). Sibling sessions sharing
+// one LOTO_AGENT_ID are a supported, tested configuration (loto-81n), so an
+// unexpired explicit lock under this owner uuid can belong to a sibling that has
+// since died. collectAllBlockers skips every same-owner row, so nothing else in
+// this transaction will reclaim it: yield to it and the dead sibling's row is
+// what peers see, they probe it DEAD and reclaim it, and one of them writes the
+// file concurrently with the session that just tried to beacon it. Asking the
+// probe — the same one `check --gate` and `guard` consult — is what keeps every
+// consumer on one verdict.
+//
+// The probe is called at most once per target here, and only for beacons that
+// actually collide with an existing row.
+func beaconMaySupersede(l domain.LockRecord, all []domain.LockRecord, ec domain.EvalContext) bool {
+	if !l.IsBeacon() {
+		return true // not a beacon: the yield does not apply at all
+	}
+	for i := range all {
+		ex := &all[i]
+		if ex.OwnerUUID != l.OwnerUUID || !domain.SameCanonical(ex.Target, l.Target) {
+			continue
+		}
+		return ec.IsStale(*ex)
+	}
+	return true // no same-owner row to yield to
+}
+
+// insertOrRefreshLock upserts one lock row and reports whether the row was
+// actually written. false means the beacon yield below suppressed the update:
+// no error, nothing changed, and the caller must not log an acquisition.
+// supersede comes from beaconMaySupersede and lifts the yield.
+func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, supersede bool) (bool, error) {
 	// Map 0 (UNKNOWN) → NULL at the store boundary so an absent start-time is a
 	// SQL null, matching legacy rows. A refresh re-stamps proc_start because the
 	// holder is the same process (same pid, same start-time).
@@ -210,9 +251,27 @@ func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord) e
 	// `WHERE locks.owner_uuid = excluded.owner_uuid` guard is now redundant (the
 	// conflict is keyed on owner) and dropped. Persist EffectiveMode() (not raw
 	// l.Mode) so the column never stores '' (loto-k5el.2 T3).
-	_, err := tx.ExecContext(ctx, `
-INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, mode)
-VALUES (?,?,?,?,?,?,?,?,?,?,?)
+	//
+	// ‡ The DO UPDATE WHERE is the beacon yield (loto-xl4g, Codex #249): an
+	// incoming BEACON never overwrites an existing LIVE NON-beacon row of the
+	// same owner. Without it, the gate minting a beacon for an agent that
+	// already ran `loto lock` rewrote that agent's own row to shared / pid 0 /
+	// no branch / 2m — silently downgrading a declared exclusive 30m lease and
+	// then letting `loto guard` waive it as a beacon and move the tree out from
+	// under uncommitted work. A beacon says "an agent of mine is writing here";
+	// a row that already says something stronger needs no weakening. The
+	// converse still applies: an explicit lock upgrades over a beacon, because
+	// then excluded.beacon is 0 and the update runs.
+	//
+	// ‡ supersede is the yield's escape hatch, decided by beaconMaySupersede
+	// under the same staleness predicate every other consumer uses (Codex
+	// #252). Yielding to a STALE lease protects nothing: collectAllBlockers
+	// skips same-owner rows, so a stale explicit row is neither reclaimed nor
+	// refreshed, and peers read it as free — `loto beacon` would report success
+	// over a row announcing the file is available while the agent is mid-edit.
+	res, err := tx.ExecContext(ctx, `
+INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, mode, beacon)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
   intent=excluded.intent,
   expires_at=excluded.expires_at,
@@ -221,10 +280,22 @@ ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
   pid=excluded.pid,
   proc_start=excluded.proc_start,
   branch=excluded.branch,
-  mode=excluded.mode`,
+  mode=excluded.mode,
+  beacon=excluded.beacon
+WHERE ? = 1
+   OR excluded.beacon = 0
+   OR locks.beacon = 1`,
 		l.Target.Canonical, string(l.OwnerUUID), string(l.SessionUUID),
 		l.Intent, l.CreatedAt.UnixNano(), l.ExpiresAt.UnixNano(),
-		l.Host, l.PID, procStart, l.Branch, l.EffectiveMode(),
+		l.Host, l.PID, procStart, l.Branch, l.EffectiveMode(), l.Beacon,
+		supersede,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }

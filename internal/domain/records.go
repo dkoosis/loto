@@ -59,6 +59,11 @@ type LockRecord struct {
 	// string reads as exclusive — preserves the pre-mode binary-lock semantics
 	// for legacy rows (loto-k5el.2). Normalize via EffectiveMode().
 	Mode string
+	// Beacon marks a row the PreToolUse gate minted on a writing agent's
+	// behalf, as opposed to a lease an agent asked for. Persisted (locks.beacon)
+	// rather than inferred, because the row shape does not separate the two —
+	// see IsBeacon.
+	Beacon bool
 }
 
 const (
@@ -76,19 +81,25 @@ func (l LockRecord) EffectiveMode() string {
 
 // IsBeacon reports whether this row was minted by the PreToolUse gate on a
 // writing agent's behalf rather than taken by an agent that asked for it
-// (loto-xwod). A beacon is shared-mode with no pid: shared so two siblings'
-// beacons never collide at acquire, pid-less because the minting hook exits
-// milliseconds after the write it announces and a stamped pid would probe dead
-// at once — leaving the TTL as the sole authority, which is the lease a beacon
-// wants.
+// (loto-xwod). It reads the persisted flag and nothing else.
 //
 // The distinction is not cosmetic. `loto guard` lets a session move its own
 // tree past its OWN siblings' beacons — they only say "an agent of mine is
 // writing here" — while a sibling's real exclusive lock still refuses the move.
 // A checkout under declared, uncommitted territory is precisely what destroyed
 // an agent's work on 2026-08-14.
+//
+// ‡ The flag is persisted because the shape cannot carry it (loto-dm4i, Codex
+// #249). A beacon is shared with PID 0 — shared so two siblings' beacons never
+// collide at acquire, pid-less because the minting hook exits milliseconds
+// after the write it announces. But an ordinary `loto lock --shared` placed
+// without LOTO_PID stores exactly that shape too: PID 0 is the documented
+// "no durable liveness handle" sentinel, not a beacon marker. Reading the
+// shape therefore classified a real shared lease as a beacon, and guard's
+// same-session carve-out then waived it and moved the tree — the failure the
+// carve-out was written to avoid, pointed the other way.
 func (l LockRecord) IsBeacon() bool {
-	return l.EffectiveMode() == ModeShared && l.PID == 0
+	return l.Beacon
 }
 
 // ClaimRecord is a coarse path-prefix territory reservation: "this package is

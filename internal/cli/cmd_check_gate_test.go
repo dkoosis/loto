@@ -111,7 +111,7 @@ func TestGateDecide_SiblingBeaconDeniesWrite(t *testing.T) {
 	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
 		{Target: target, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession,
-			Mode: domain.ModeShared, PID: 0, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
+			Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
 	}
 	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 1 || rows[0].HolderUUID != gateFoeUUID {
@@ -126,7 +126,7 @@ func TestGateDecide_OwnBeaconAllowsWrite(t *testing.T) {
 	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
 		{Target: target, OwnerUUID: gateMyUUID, SessionUUID: gateMySession,
-			Mode: domain.ModeShared, PID: 0, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
+			Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
 	}
 	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 0 {
@@ -168,7 +168,7 @@ func TestGateDecide_PID0ForeignBeaconWithinTTLDenies(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateFoeUUID, Mode: domain.ModeShared, PID: 0, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
+		{Target: target, OwnerUUID: gateFoeUUID, Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
 	}
 	ec := gateEC(now)
 	if ec.Classify(locks[0]) != domain.LivenessUnknown {
@@ -310,10 +310,24 @@ func TestGateDecideAny(t *testing.T) {
 			name: "sibling beacon allows this session's tree-move",
 			locks: []domain.LockRecord{
 				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession,
-					Mode: domain.ModeShared, PID: 0, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
+					Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
 			session: gateMySession,
 			want:    0,
+		},
+		{
+			// loto-dm4i: the carve-out keys on the persisted marker, never on the
+			// shape. An ordinary `loto lock --shared` placed without LOTO_PID is
+			// shared with PID 0 — byte-identical to a beacon — but it is a lease
+			// a sibling asked for, so the tree-move must still refuse. Reading
+			// the shape waived exactly this row and moved the tree.
+			name: "sibling's pid-less shared lock is not a beacon and still denies",
+			locks: []domain.LockRecord{
+				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession,
+					Mode: domain.ModeShared, PID: 0, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
+			},
+			session: gateMySession,
+			want:    1,
 		},
 		{
 			// The carve-out is beacons only. A sibling's real exclusive lock is a
@@ -331,7 +345,7 @@ func TestGateDecideAny(t *testing.T) {
 			name: "another session's beacon denies the tree-move",
 			locks: []domain.LockRecord{
 				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateFoeSession,
-					Mode: domain.ModeShared, PID: 0, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
+					Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
 			session: gateMySession,
 			want:    1,
@@ -342,7 +356,7 @@ func TestGateDecideAny(t *testing.T) {
 			name: "beacon carve-out needs a known session",
 			locks: []domain.LockRecord{
 				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: "",
-					Mode: domain.ModeShared, PID: 0, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
+					Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
 			session: "",
 			want:    1,

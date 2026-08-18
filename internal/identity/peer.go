@@ -179,12 +179,33 @@ func PeerFromEnv(ctx context.Context, a *Agent, name string) *Peer {
 		AgentID:         argvFlag(argv, "agent-id"),
 		Socket:          socket,
 		PID:             pid,
-		SessionID:       os.Getenv("CLAUDE_CODE_SESSION_ID"),
+		SessionID:       SessionIDFromEnv(),
 		CWD:             cwd,
 		SeenAt:          time.Now().UTC(),
 		ParentSessionID: argvFlag(argv, "parent-session-id"),
 		ProcStart:       procStartVal,
 	}
+}
+
+// SessionIDFromEnv resolves the per-session id from the environment, empty
+// when neither variable is set. LOTO_SESSION_ID is the explicit override;
+// CLAUDE_CODE_SESSION_ID is the id Claude Code puts in the environment of
+// every shell-out from one session.
+//
+// ‡ This is the ONE precedence, shared by the peer record written here and by
+// the session id stamped on lock and claim rows (cli.sessionUUID). The two
+// sides are compared — runtime.peerSpeaksFor asks whether a peer record speaks
+// for the session that took a given record — so a peer written from a
+// different variable than the record silently breaks that comparison. It did:
+// this constructor read CLAUDE_CODE_SESSION_ID alone while the runtime
+// preferred LOTO_SESSION_ID, so with the documented override set no DEAD
+// verdict was ever accepted and PID-less locks and claims stayed blockers
+// until their full TTL (loto-37xm, Codex #248).
+func SessionIDFromEnv() string {
+	if v := os.Getenv("LOTO_SESSION_ID"); v != "" {
+		return v
+	}
+	return os.Getenv("CLAUDE_CODE_SESSION_ID")
 }
 
 // envPID resolves the session process id. CLAUDE_PID is the direct answer;
