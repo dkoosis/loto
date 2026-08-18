@@ -81,15 +81,11 @@ const crossProcRoleSmokeName = "smoke"
 // Family A (loto-qhv build-order item 3, crossproc_acquire_test.go) adds its
 // rows here rather than opening a second TestMain — the role functions
 // themselves are defined in crossproc_acquire_test.go. The two "fault"
-// rows back the A2-control subtest: they swap their own acquireOpFlockFn to
-// a no-op when LOTO_CROSSPROC_FAULT=no-flock, never touching production.
 var crossProcRoles = map[string]func() crossProcVerdict{
-	crossProcRoleSmokeName:                 crossProcRoleSmoke,
-	crossProcRoleAcquireName:               crossProcRoleAcquire,
-	crossProcRoleHoldName:                  crossProcRoleHold,
-	crossProcRoleReclaimAcquireName:        crossProcRoleReclaimAcquire,
-	crossProcRoleReclaimSharedFaultName:    crossProcRoleReclaimSharedFault,
-	crossProcRoleReclaimExclusiveFaultName: crossProcRoleReclaimExclusiveFault,
+	crossProcRoleSmokeName:          crossProcRoleSmoke,
+	crossProcRoleAcquireName:        crossProcRoleAcquire,
+	crossProcRoleHoldName:           crossProcRoleHold,
+	crossProcRoleReclaimAcquireName: crossProcRoleReclaimAcquire,
 }
 
 // crossProcRoleSmoke reports its own pid/ppid after clearing the barrier —

@@ -9,10 +9,9 @@ import (
 
 var errNotRegular = errors.New("not a regular file")
 
-// errMultiLinked is returned by stripWrite when the open fd's inode has
-// more than one hardlink. validateFileTarget rejects Nlink>1 up front, but
-// a racing process can add a link between validation and the fchmod
-// (loto-ta02); re-checking on the open fd closes that TOCTOU.
+// errMultiLinked is returned by restoreWrite when the open fd's inode has
+// more than one hardlink. A racing process can add a link between the Lstat
+// and the fchmod (loto-ta02); re-checking on the open fd closes that TOCTOU.
 var errMultiLinked = errors.New("multiple hardlinks")
 
 // fchmodFn is a package-private indirection so tests can inject EPERM
@@ -21,10 +20,10 @@ var fchmodFn = func(f *os.File, mode os.FileMode) error {
 	return f.Chmod(mode)
 }
 
-// afterOpenHook is a package-private indirection that fires inside both
-// stripWrite and restoreWrite right after the fd is opened, before the fd is
-// re-stat'd. Tests inject a racing hardlink here to exercise the
-// validate→chmod TOCTOU deterministically. Production default is a no-op.
+// afterOpenHook is a package-private indirection that fires inside restoreWrite
+// right after the fd is opened, before the fd is re-stat'd. Tests inject a
+// racing hardlink here to exercise the validate→chmod TOCTOU
+// deterministically. Production default is a no-op.
 var afterOpenHook = func(string) {}
 
 // safeOpenRegular opens path with O_NOFOLLOW and verifies the result is a
@@ -55,9 +54,9 @@ func safeOpenRegular(path string) (*os.File, error) {
 	return f, nil
 }
 
-// permAfterNlinkCheck stats an open fd and re-checks Nlink on it — the shared
-// validate→chmod TOCTOU guard both stripWrite and restoreWrite need. A racing
-// process can add a hardlink between validateFileTarget's Lstat and the fchmod,
+// permAfterNlinkCheck stats an open fd and re-checks Nlink on it — the
+// validate→chmod TOCTOU guard restoreWrite needs. A racing process can add a
+// hardlink between the Lstat and the fchmod,
 // which would otherwise redirect the mode change onto an attacker-chosen name
 // sharing the inode (loto-ta02). Binding the check to the open fd closes that
 // window. op names the caller for the PathError; returns the inode's current
@@ -73,29 +72,17 @@ func permAfterNlinkCheck(f *os.File, path, op string) (os.FileMode, error) {
 	return st.Mode().Perm(), nil
 }
 
-// stripWrite removes all write bits (owner/group/other) from path.
-// Refuses symlinks and non-regular files to prevent TOCTOU swap.
-func stripWrite(path string) error {
-	f, err := safeOpenRegular(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	afterOpenHook(path)
-	perm, err := permAfterNlinkCheck(f, path, "stripwrite")
-	if err != nil {
-		return err
-	}
-	return fchmodFn(f, perm&^0o222)
-}
-
-// restoreWrite adds owner-write to path. Missing-file is a no-op
-// (the file may have been deleted while held). Refuses symlinks and
-// non-regular files.
+// restoreWrite adds owner-write to path. Missing-file is a no-op (the file may
+// have been deleted since). Refuses symlinks and non-regular files.
 //
-// restoreWrite intentionally restores ONLY owner-write (mode | 0o200).
-// loto does not preserve exact pre-lock modes; a file at 0o400 round-trips
-// to 0o600. Documented trade per spec §"chmod policy (no stored mode)".
+// ‡ Sole surviving caller: doctor's chmod-era migration (loto-zssw). loto no
+// longer strips a write bit anywhere — peer protection is carried entirely by
+// the harness gate — so this exists to undo bits an older loto set and left
+// behind when a session died between acquire and release.
+//
+// It restores ONLY owner-write (mode | 0o200). loto never stored the pre-lock
+// mode, so a file that was deliberately 0o400 round-trips to 0o600. That was
+// the trade when the strip shipped; it is now paid once, at migration.
 func restoreWrite(path string) error {
 	f, err := safeOpenRegular(path)
 	if err != nil {

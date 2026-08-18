@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 
@@ -148,49 +147,6 @@ func mkFileLock(t *testing.T, name, agent string, expIn time.Duration) domain.Lo
 		ExpiresAt:   now.Add(expIn),
 		Host:        "h",
 		PID:         1,
-	}
-}
-
-func TestBreakLocks_RestoreErrSurfaced(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-	l := mkFileLock(t, "a.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-
-	// Inject chmod failure for the restore phase only (post-strip). The strip
-	// during AcquireLocks already ran via the realPath fchmodFn; flip it now so the
-	// post-commit restoreWrite returns EPERM.
-	orig := fchmodFn
-	defer func() { fchmodFn = orig }()
-	fchmodFn = func(f *os.File, mode os.FileMode) error {
-		if f.Name() == l.Target.Canonical {
-			return &os.PathError{Op: tcChmod, Path: f.Name(), Err: syscall.EPERM}
-		}
-		return orig(f, mode)
-	}
-
-	results, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "restore-fail", liveProbe)
-	if err != nil {
-		t.Fatalf("BreakLocks: %v", err)
-	}
-	if results[0].Err != nil {
-		t.Fatalf("break itself should succeed, got Err=%v", results[0].Err)
-	}
-	if results[0].RestoreErr == nil {
-		t.Fatal("expected RestoreErr to surface chmod-restore failure")
-	}
-	// Audit event also emitted.
-	evs, _ := s.EventsForTarget(ctx, l.Target)
-	gotRestoreFailed := false
-	for _, e := range evs {
-		if e.Kind == EventModeRestoreFailed {
-			gotRestoreFailed = true
-		}
-	}
-	if !gotRestoreFailed {
-		t.Errorf("expected mode_restore_failed event, got %+v", evs)
 	}
 }
 
@@ -444,18 +400,19 @@ func TestAcquireLocks_MultiFile_AtomicSuccess(t *testing.T) {
 		t.Fatalf("AcquireLocks: %v", err)
 	}
 
+	// loto-zssw: the rows are the whole effect — no mode bits move.
 	for _, p := range []string{a, b} {
 		st, err := os.Stat(p)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if st.Mode().Perm()&0o222 != 0 {
-			t.Errorf("%s: expected stripped write, got %o", p, st.Mode().Perm())
+		if st.Mode().Perm() != 0o644 {
+			t.Errorf("%s: acquire must not touch mode bits, got %o", p, st.Mode().Perm())
 		}
 	}
 }
 
-func TestAcquireLocks_MultiFile_ConflictAbortsNoChmod(t *testing.T) {
+func TestAcquireLocks_MultiFile_ConflictAbortsAtomically(t *testing.T) {
 	dir := t.TempDir()
 	a := filepath.Join(dir, "a.go")
 	b := filepath.Join(dir, "b.go")
@@ -508,201 +465,10 @@ func TestAcquireLocks_MultiFile_ConflictAbortsNoChmod(t *testing.T) {
 	}
 }
 
-func TestAcquireLocks_ChmodFailureRollsBack(t *testing.T) {
-	dir := t.TempDir()
-	a := filepath.Join(dir, "a.go")
-	b := filepath.Join(dir, "b.go")
-	for _, p := range []string{a, b} {
-		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	orig := fchmodFn
-	defer func() { fchmodFn = orig }()
-	fchmodFn = func(f *os.File, mode os.FileMode) error {
-		if f.Name() == b {
-			return &os.PathError{Op: tcChmod, Path: f.Name(), Err: syscall.EPERM}
-		}
-		return orig(f, mode)
-	}
-
-	now := time.Now()
-	mk := func(p string) domain.LockRecord {
-		return domain.LockRecord{
-			Target:      domain.Target{Canonical: p},
-			OwnerUUID:   tcAlice,
-			SessionUUID: "s1",
-			CreatedAt:   now,
-			ExpiresAt:   now.Add(time.Hour),
-			Host:        "h",
-			PID:         1,
-		}
-	}
-	_, err := s.AcquireLocks(ctx, []domain.LockRecord{mk(a), mk(b)}, liveProbe)
-	var cfe *ChmodFailureError
-	if !errors.As(err, &cfe) {
-		t.Fatalf("want *ChmodFailureError, got %v", err)
-	}
-
-	stA, _ := os.Stat(a)
-	if stA.Mode().Perm()&0o200 == 0 {
-		t.Errorf("a not restored: %o", stA.Mode().Perm())
-	}
-	locks, _ := s.ListLocks(ctx)
-	if len(locks) != 0 {
-		t.Errorf("expected 0 locks, got %d", len(locks))
-	}
-}
-
-func TestAcquireLocks_RollbackRestoreFailureLeavesBreadcrumb(t *testing.T) {
-	dir := t.TempDir()
-	a := filepath.Join(dir, "a.go")
-	b := filepath.Join(dir, "b.go")
-	for _, p := range []string{a, b} {
-		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	orig := fchmodFn
-	defer func() { fchmodFn = orig }()
-	fchmodFn = func(f *os.File, mode os.FileMode) error {
-		switch {
-		case f.Name() == b:
-			return &os.PathError{Op: tcChmod, Path: f.Name(), Err: syscall.EPERM}
-		case f.Name() == a && mode.Perm()&0o200 != 0:
-			return &os.PathError{Op: tcChmod, Path: f.Name(), Err: syscall.EPERM}
-		}
-		return orig(f, mode)
-	}
-
-	now := time.Now()
-	mk := func(p string) domain.LockRecord {
-		return domain.LockRecord{
-			Target:      domain.Target{Canonical: p},
-			OwnerUUID:   tcAlice,
-			SessionUUID: "s1",
-			CreatedAt:   now,
-			ExpiresAt:   now.Add(time.Hour),
-			Host:        "h",
-			PID:         1,
-		}
-	}
-	_, err := s.AcquireLocks(ctx, []domain.LockRecord{mk(a), mk(b)}, liveProbe)
-	var cfe *ChmodFailureError
-	if !errors.As(err, &cfe) {
-		t.Fatalf("want *ChmodFailureError, got %v", err)
-	}
-
-	var aFailure *ChmodFailure
-	for i := range cfe.Failures {
-		if cfe.Failures[i].Target.Canonical == a {
-			aFailure = &cfe.Failures[i]
-		}
-	}
-	if aFailure == nil || aFailure.RolledBack {
-		t.Fatalf("expected a.go failure with RolledBack=false, got %+v", aFailure)
-	}
-
-	var n int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM events WHERE target_canonical=? AND event_kind='mode_restore_failed'`, a,
-	).Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	if n != 1 {
-		t.Errorf("want 1 mode_restore_failed event for %s, got %d", a, n)
-	}
-}
-
 // Regression for gh#122: post-commit restore-failure audit must land even
 // when the caller's ctx is already cancelled. Pre-fix, AppendEvents
 // opened a fresh tx under the cancelled ctx → busy_timeout scaled to ~1ms
 // → audit silently dropped, leaving orphan-mode files with zero trail.
-func TestAcquireLocks_AuditSurvivesCancelledCtx(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "x.go")
-	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	s := mustOpen(t)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	rec := domain.LockRecord{
-		Target:      domain.Target{Canonical: p},
-		OwnerUUID:   tcAlice,
-		SessionUUID: "s1",
-		CreatedAt:   time.Now(),
-		ExpiresAt:   time.Now().Add(time.Hour),
-		Host:        "h",
-		PID:         1,
-	}
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	cancel()
-	// Drive the rollback path: rotateEventsTx etc. are committed, but a
-	// future Commit-failure path mirrors restoreAllAndAudit directly.
-	s.restoreAllAndAudit(ctx, []string{p}, tcAlice, time.Now())
-
-	var n int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM events WHERE target_canonical=? AND event_kind=?`,
-		p, EventAcquireRollbackStart,
-	).Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	if n == 0 {
-		t.Fatalf("acquire_rollback_started audit dropped under cancelled ctx (gh#122)")
-	}
-}
-
-func TestReleaseLock_RestoresWriteMode(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-	l := mkFileLock(t, "r.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	if st, _ := os.Stat(l.Target.Canonical); st.Mode().Perm()&0o200 != 0 {
-		t.Fatalf("precondition: acquire should strip write, got %o", st.Mode().Perm())
-	}
-	results, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcAlice, liveProbe)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if results[0].State != StateUnlocked {
-		t.Fatalf("expected StateUnlocked, got %+v", results)
-	}
-	st, _ := os.Stat(l.Target.Canonical)
-	if st.Mode().Perm()&0o200 == 0 {
-		t.Fatalf("release must restore owner-write, got %o", st.Mode().Perm())
-	}
-}
-
-func TestBreakLock_RestoresWriteMode(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-	live := deadProbe // stale
-	l := mkFileLock(t, "b.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "stale", live)
-	if err != nil || res[0].Err != nil {
-		t.Fatalf("break: %v / %v", err, res[0].Err)
-	}
-	st, _ := os.Stat(l.Target.Canonical)
-	if st.Mode().Perm()&0o200 == 0 {
-		t.Fatalf("break must restore owner-write, got %o", st.Mode().Perm())
-	}
-}
-
 func TestReleaseLocks_NoLockVsNotOwner(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
@@ -724,48 +490,6 @@ func TestReleaseLocks_NoLockVsNotOwner(t *testing.T) {
 	}
 	if res[0].State != StateNotOwner {
 		t.Fatalf("expected StateNotOwner, got %+v", res)
-	}
-}
-
-func TestAcquireLocks_LazyGCRestoresMode(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	// Alice acquires (liveProbe probe), then her lock goes stale (probe deadProbe).
-	a := mkFileLock(t, "shared.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	// Verify stripped.
-	st, _ := os.Stat(a.Target.Canonical)
-	if st.Mode().Perm()&0o200 != 0 {
-		t.Fatalf("acquire should strip owner-write, got %o", st.Mode().Perm())
-	}
-
-	// Bob comes along; Alice is deadProbe → lazy GC reclaims her row, Bob acquires.
-	b := a
-	b.OwnerUUID = tcBob
-	b.SessionUUID = tcBob
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, deadProbe); err != nil {
-		t.Fatalf("Bob acquire after stale reclaim: %v", err)
-	}
-	// Bob now holds; file should still be stripped (he owns it).
-	st, _ = os.Stat(a.Target.Canonical)
-	if st.Mode().Perm()&0o200 != 0 {
-		t.Fatalf("Bob's lock should keep write stripped, got %o", st.Mode().Perm())
-	}
-
-	// Sanity: if Bob releases, mode comes back.
-	results, err := s.ReleaseLocks(ctx, []domain.Target{b.Target}, tcBob, liveProbe)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(results) != 1 || results[0].State != StateUnlocked {
-		t.Fatalf("expected StateUnlocked, got %+v", results)
-	}
-	st, _ = os.Stat(a.Target.Canonical)
-	if st.Mode().Perm()&0o200 == 0 {
-		t.Fatalf("release should restore owner-write, got %o", st.Mode().Perm())
 	}
 }
 
@@ -808,43 +532,11 @@ func TestReleaseLocks_DistinguishesMissingFromNotOwner(t *testing.T) {
 	if results[2].Owner != tcBob {
 		t.Errorf("results[2].Owner = %q, want %q", results[2].Owner, tcBob)
 	}
-	stA, _ := os.Stat(a.Target.Canonical)
-	if stA.Mode().Perm()&0o200 == 0 {
-		t.Errorf("a.go not restored: %o", stA.Mode().Perm())
-	}
-	stC, _ := os.Stat(c.Target.Canonical)
-	if stC.Mode().Perm()&0o222 != 0 {
-		t.Errorf("c.go should remain stripped: %o", stC.Mode().Perm())
-	}
-}
-
-func TestReleaseLocks_RestoreFailureIsReported(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	rec := mkFileLock(t, "x.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := fchmodFn
-	defer func() { fchmodFn = orig }()
-	fchmodFn = func(f *os.File, mode os.FileMode) error {
-		if f.Name() == rec.Target.Canonical && mode.Perm()&0o200 != 0 {
-			return &os.PathError{Op: "chmod", Path: f.Name(), Err: syscall.EPERM}
+	for _, l := range []domain.LockRecord{a, c} {
+		st, _ := os.Stat(l.Target.Canonical)
+		if st.Mode().Perm() != 0o644 {
+			t.Errorf("%s: release must not touch mode bits, got %o", l.Target.Canonical, st.Mode().Perm())
 		}
-		return orig(f, mode)
-	}
-
-	results, err := s.ReleaseLocks(ctx, []domain.Target{rec.Target}, tcAlice, liveProbe)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(results) != 1 || results[0].State != StateRestoreFailed {
-		t.Fatalf("want StateRestoreFailed, got %+v", results)
-	}
-	if results[0].RestoreErr == nil {
-		t.Error("RestoreErr nil")
 	}
 }
 

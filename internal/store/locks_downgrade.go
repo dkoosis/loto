@@ -86,18 +86,7 @@ func (s *Store) DowngradeLocks(ctx context.Context, targets []domain.Target, own
 		}
 	}
 
-	// Restore the owner-write bit under the still-held flock (loto-4qt), release
-	// it, THEN emit the detached audit off the critical section (loto-3qev). The
-	// deferred release above is the idempotent backstop.
-	failEvents, failIdx := restoreDowngrades(results, owner, now)
 	flock.release()
-	if len(failEvents) > 0 {
-		if auditErr := s.appendAuditDetached(failEvents); auditErr != nil {
-			for _, i := range failIdx {
-				results[i].AuditErr = auditErr
-			}
-		}
-	}
 	return results, nil
 }
 
@@ -152,33 +141,9 @@ func (s *Store) commitDowngrades(ctx context.Context, flip []domain.Target, owne
 	return tx.Commit()
 }
 
-// restoreDowngrades restores the owner-write bit for every target that now holds
-// shared (Err == nil — both just-flipped and already-shared reconcile), records
-// per-result RestoreErr, and returns the mode_restore_failed events plus the
-// parallel result indices for the caller's detached audit. Chmod-only half: the
-// CALLER runs it under the held op-flock (loto-4qt) and audits after releasing
-// the flock (loto-3qev). Mirrors restoreBreaks.
-func restoreDowngrades(results []DowngradeResult, owner string, now time.Time) ([]domain.Event, []int) {
-	var failEvents []domain.Event
-	var failIdx []int
-	for i := range results {
-		if results[i].Err != nil {
-			continue
-		}
-		if rerr := restoreWrite(results[i].Target.Canonical); rerr != nil {
-			results[i].RestoreErr = rerr
-			failEvents = append(failEvents, modeRestoreFailedEvent(results[i].Target.Canonical, owner, now, rerr))
-			failIdx = append(failIdx, i)
-		}
-	}
-	return failEvents, failIdx
-}
-
 // downgradeLock flips the single exclusive lock held by owner on target to
 // shared. Thin n=1 wrapper over DowngradeLocks preserving the original
-// error-returning contract: ErrNoLockAtTarget when no lock is held, a
-// *ChmodFailureError when the row reached shared but the post-commit write-bit
-// restore failed (loto-k5el.2).
+// error-returning contract: ErrNoLockAtTarget when no lock is held.
 func (s *Store) downgradeLock(ctx context.Context, target domain.Target, owner domain.AgentUUID) error { //nolint:unparam // owner scopes the downgrade contract; test-only wrapper currently exercised with a single owner
 	results, err := s.DowngradeLocks(ctx, []domain.Target{target}, owner)
 	if err != nil {
@@ -187,11 +152,6 @@ func (s *Store) downgradeLock(ctx context.Context, target domain.Target, owner d
 	r := results[0]
 	if r.Err != nil {
 		return r.Err
-	}
-	if r.RestoreErr != nil {
-		return &ChmodFailureError{Failures: []ChmodFailure{
-			{Target: target, Err: r.RestoreErr, RolledBack: false},
-		}}
 	}
 	return nil
 }

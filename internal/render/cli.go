@@ -241,29 +241,6 @@ func emitTagRow(w io.Writer, t store.Tag, indent, cwd string, holders *holderMem
 		indent, t.ID, at, holders.tag(t.TaggerUUID), relToCwd(string(t.TargetCanonical), cwd), t.Text)
 }
 
-func EmitChmodFailure(w io.Writer, cfe *store.ChmodFailureError) {
-	cwd := getCwd()
-	failed := 0
-	for _, f := range cfe.Failures {
-		if f.Err != nil {
-			failed++
-		}
-	}
-	fmt.Fprintf(w, "✗ chmod-failed count=%d\n", failed)
-	sorted := append([]store.ChmodFailure(nil), cfe.Failures...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })
-	// store.rollbackStripped invariant: RolledBack=true ⟺ Err==nil.
-	// So Err!=nil → rolled-back=no; Err==nil → state=restored.
-	for _, f := range sorted {
-		path := relToCwd(f.Target.Canonical, cwd)
-		if f.Err != nil {
-			fmt.Fprintf(w, "✗ target=%s err=%q rolled-back=no\n", path, f.Err.Error())
-		} else {
-			fmt.Fprintf(w, "✓ target=%s state=restored\n", path)
-		}
-	}
-}
-
 // InvalidTarget describes a pre-store rejection (bad path, wrong kind, dup).
 type InvalidTarget struct {
 	Path   string
@@ -281,7 +258,7 @@ func EmitInvalid(w io.Writer, items []InvalidTarget) {
 }
 
 // EmitReleaseResults renders per-target outcomes and returns the suggested
-// exit code: 0 if no not-owner / restore-failed rows, 1 otherwise.
+// exit code: 0 if no not-owner rows, 1 otherwise.
 // Renders canonical-sorted regardless of input order (caller passes input order;
 // render owns deterministic output).
 func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
@@ -307,25 +284,17 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 			// Name the holder like EmitClaimConflict/EmitConflictWithTags do —
 			// a bare UUID here forked the release-surface convention (loto-a8t).
 			fmt.Fprintf(w, "✗ target=%s state=not-owner owner=%s\n", path, holders.tag(r.Owner))
-		case store.StateRestoreFailed:
-			writeRestoreFailed(w, "target", path, r.Owner, r.RestoreErr, r.AuditErr)
 		}
 	}
 	return exit
 }
 
 // writeReleaseTriageLine emits the count-first triage line and returns the
-// suggested exit code. A restore-failed release deleted the lock row in-tx
-// (locks_release.go) — a successful unlock with a failed chmod restore — so it
-// counts toward the unlocked total, with the failures surfaced as a distinct
-// first-line field (and per-row ⚠ lines). Reclaimed-stale rows likewise
-// deleted rows, but count under their own reclaimed= field (loto-ebkc): the
-// caller released nothing it owned, and a reclaim is a success (exit 0). A
-// restore-failed RECLAIM (Owner set — only reclaimed rows carry a dead owner
-// into restore-failed) counts under reclaimed=, not the caller's own total.
+// suggested exit code. Reclaimed-stale rows deleted rows just like an own
+// release, but count under their own reclaimed= field (loto-ebkc): the caller
+// released nothing it owned, and a reclaim is a success (exit 0).
 func writeReleaseTriageLine(w io.Writer, sorted []store.ReleaseResult) int {
 	successCount := 0
-	restoreFailed := 0
 	reclaimed := 0
 	exit := 0
 	for _, r := range sorted {
@@ -334,14 +303,6 @@ func writeReleaseTriageLine(w io.Writer, sorted []store.ReleaseResult) int {
 			successCount++
 		case store.StateReclaimedStale:
 			reclaimed++
-		case store.StateRestoreFailed:
-			if r.Owner != "" {
-				reclaimed++
-			} else {
-				successCount++
-			}
-			restoreFailed++
-			exit = 1
 		case store.StateNotOwner:
 			exit = 1
 		case store.StateNoLock:
@@ -352,50 +313,19 @@ func writeReleaseTriageLine(w io.Writer, sorted []store.ReleaseResult) int {
 	if reclaimed > 0 {
 		fmt.Fprintf(w, " reclaimed=%d", reclaimed)
 	}
-	if restoreFailed > 0 {
-		fmt.Fprintf(w, " restore-failed=%d", restoreFailed)
-	}
 	fmt.Fprintln(w)
 	return exit
 }
 
-// writeRestoreFailed renders a post-unlock write-mode restore failure. When the
-// mode_restore_failed audit event was itself lost, it appends the audit-hole
-// signal so the operator can re-emit or alert (gh#107). label distinguishes a
-// plain unlock ("target") from a forced break ("broken target"). A non-empty
-// owner marks a failed RECLAIM (loto-ebkc review P3): the dead holder stays
-// named so the row doesn't read as the caller's own unlock going sour.
-func writeRestoreFailed(w io.Writer, label, path, owner string, restoreErr, auditErr error) {
-	ownerField := ""
-	if owner != "" {
-		ownerField = " owner=" + owner
-	}
-	if auditErr != nil {
-		fmt.Fprintf(w, "⚠ %s=%s state=restore-failed%s err=%q audit-hole=%q\n",
-			label, path, ownerField, errString(restoreErr), errString(auditErr))
-		return
-	}
-	fmt.Fprintf(w, "⚠ %s=%s state=restore-failed%s err=%q\n", label, path, ownerField, errString(restoreErr))
-}
-
 // EmitBreakResults renders per-target outcomes of `unlock --force` (BreakLocks).
-// Clean breaks go to outW; problems — missing lock, authorize/break errors, a
-// post-break write-mode restore failure, and a lost mode_restore_failed audit
-// event — go to errW. Returns the suggested exit code. Surfaces RestoreErr and
-// AuditErr (gh#107), which the prior inline renderer dropped: a forced break
-// that left the file read-only, or whose audit event was lost, was silently
-// reported as a clean "✓ broken".
+// Clean breaks go to outW; problems — missing lock, authorize/break errors — go
+// to errW. Returns the suggested exit code.
 func EmitBreakResults(outW, errW io.Writer, results []store.BreakResult) int {
 	cwd := getCwd()
 	exit := 0
 	for _, r := range results {
 		path := relToCwd(r.Target.Canonical, cwd)
 		switch {
-		case r.Err == nil && r.RestoreErr != nil:
-			writeRestoreFailed(errW, "broken target", path, "", r.RestoreErr, r.AuditErr)
-			if exit < 1 {
-				exit = 1
-			}
 		case r.Err == nil:
 			fmt.Fprintf(outW, "✓ broken target=%s\n", path)
 		case errors.Is(r.Err, store.ErrNoLockAtTarget):
@@ -409,11 +339,4 @@ func EmitBreakResults(outW, errW io.Writer, results []store.BreakResult) int {
 		}
 	}
 	return exit
-}
-
-func errString(e error) string {
-	if e == nil {
-		return ""
-	}
-	return e.Error()
 }

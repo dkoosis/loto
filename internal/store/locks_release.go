@@ -55,12 +55,7 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, agent
 		return nil, err
 	}
 
-	// Chmod restore is outside the tx — locks ARE released. Failures surface
-	// per-target AND batch into one audit event call (NORTH_STAR.md: every path
-	// that removes a `locks` row also tries restore + audits failure). The
-	// bounded chmod runs under the still-held flock; we release BEFORE the
-	// detached audit so its write tx can't extend the flock hold (loto-3qev).
-	s.restoreReleasesThenAudit(flock, results, byAgent)
+	flock.release()
 	return results, nil
 }
 
@@ -214,62 +209,6 @@ func vetoingHolder(holders []domain.LockRecord, ec domain.EvalContext) string {
 	return string(holders[0].OwnerUUID) // unreachable when a veto occurred; deterministic fallback
 }
 
-// restoreReleasesThenAudit runs the bounded chmod restore under the still-held
-// op-flock, releases the flock, then emits any mode_restore_failed audit off the
-// critical section (loto-3qev). Mirrors AcquireLocks' restoreThenReleaseFlock:
-// holding the flock across the detached audit's own write tx would extend the
-// hold for up to busy_timeout under contention and stall peers on the
-// chmod-failure path. The deferred flock.release() at the call site is the
-// idempotent backstop.
-func (s *Store) restoreReleasesThenAudit(flock *opFlock, results []ReleaseResult, byAgent string) {
-	failEvents, failIdx := restoreReleases(results, byAgent)
-	flock.release()
-	s.auditReleaseFailures(results, failEvents, failIdx)
-}
-
-// restoreReleases runs the chmod restore for every released or reclaimed
-// EXCLUSIVE target, recording per-target StateRestoreFailed/RestoreErr, and
-// returns the mode_restore_failed events plus the parallel result indices.
-// Reclaimed targets ride the same pass: their rows are gone from the DB just
-// like an own-release, so the file must come back writable under the same
-// flock window. Chmod-only half of restoreReleasesThenAudit — runs under the
-// held flock (loto-3qev).
-func restoreReleases(results []ReleaseResult, byAgent string) ([]domain.Event, []int) {
-	now := time.Now()
-	var failEvents []domain.Event
-	var failIdx []int
-	for i := range results {
-		if results[i].State != StateUnlocked && results[i].State != StateReclaimedStale {
-			continue
-		}
-		if !shouldRestoreOwnerWrite(results[i].Mode) {
-			continue // shared lock never stripped the bit — nothing to restore
-		}
-		if rerr := restoreWrite(results[i].Target.Canonical); rerr != nil {
-			results[i].State = StateRestoreFailed
-			results[i].RestoreErr = rerr
-			failEvents = append(failEvents, modeRestoreFailedEvent(results[i].Target.Canonical, byAgent, now, rerr))
-			failIdx = append(failIdx, i)
-		}
-	}
-	return failEvents, failIdx
-}
-
-// auditReleaseFailures emits the mode_restore_failed events off the flock
-// critical section (loto-3qev); on audit-write failure it fans the error out to
-// each affected result so the audit hole is observable (gh#107).
-func (s *Store) auditReleaseFailures(results []ReleaseResult, failEvents []domain.Event, failIdx []int) {
-	if len(failEvents) > 0 {
-		if auditErr := s.appendAuditDetached(failEvents); auditErr != nil {
-			// Fan audit-write failure out to each affected result so callers
-			// see the audit hole — silent loss was gh#107.
-			for _, i := range failIdx {
-				results[i].AuditErr = auditErr
-			}
-		}
-	}
-}
-
 // ackTagsForReleaseTx marks every pending tag whose host lock is in the
 // release set as acked. Run inside the release tx BEFORE deleteOwnedTx so the
 // host-lock subquery still matches; running it after would silently orphan
@@ -364,7 +303,6 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 		return nil, nil, err
 	}
 
-	// Build results and do chmod restore outside the tx.
 	results := make([]ReleaseResult, len(canonicals))
 	for i, c := range canonicals {
 		results[i] = ReleaseResult{
@@ -373,7 +311,7 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 			Mode:   c.Mode,
 		}
 	}
-	s.restoreReleasesThenAudit(flock, results, byAgent)
+	flock.release()
 	return results, claimPrefixes, nil
 }
 

@@ -13,7 +13,6 @@ import (
 	"errors"
 	"os"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -40,7 +39,7 @@ func countEvents(t *testing.T, s *Store, target domain.Target, kind string) int 
 }
 
 // Matrix row 1: foreign TTL-expired exclusive → reclaimed, audited with the
-// dead owner as subject, owner-write restored.
+// dead owner as subject.
 func TestReleaseLocks_ForeignExpiredExclusive_Reclaimed(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
@@ -48,10 +47,6 @@ func TestReleaseLocks_ForeignExpiredExclusive_Reclaimed(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if st, _ := os.Stat(l.Target.Canonical); st.Mode().Perm()&0o200 != 0 {
-		t.Fatalf("precondition: acquire should strip write, got %o", st.Mode().Perm())
-	}
-
 	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, deadProbe)
 	if err != nil {
 		t.Fatalf("ReleaseLocks: %v", err)
@@ -110,10 +105,6 @@ func TestReleaseLocks_ForeignLiveExclusive_NotOwner(t *testing.T) {
 	if got, _ := s.LockAt(ctx, l.Target); got == nil {
 		t.Fatal("live foreign row must survive a plain unlock")
 	}
-	st, _ := os.Stat(l.Target.Canonical)
-	if st.Mode().Perm()&0o200 != 0 {
-		t.Errorf("file must stay stripped under the surviving lock, got %o", st.Mode().Perm())
-	}
 	if n := countEvents(t, s, l.Target, EventLockReclaimedStale); n != 0 {
 		t.Errorf("no reclaim event expected, got %d", n)
 	}
@@ -144,7 +135,7 @@ func TestReleaseLocks_TTLExpiredPidAlive_Reclaimed(t *testing.T) {
 
 // Matrix row 4: all foreign shared holders stale → every row deleted and NO
 // chmod restore — shared never stripped, and the file may be deliberately
-// read-only (shouldRestoreOwnerWrite).
+// read-only.
 func TestReleaseLocks_AllSharedStale_DeletedNoRestore(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
@@ -384,9 +375,10 @@ func TestConcurrentReleaseReclaimVsAcquire(t *testing.T) {
 	if final == nil || final.OwnerUUID != "carol" {
 		t.Fatalf("final state must be the acquirer's row, got %+v", final)
 	}
+	// loto-zssw: whoever wins the race, the file's mode is never a party to it.
 	st, _ := os.Stat(stale.Target.Canonical)
-	if st.Mode().Perm()&0o222 != 0 {
-		t.Errorf("acquirer's exclusive lock must leave the file stripped, got %o", st.Mode().Perm())
+	if st.Mode().Perm() != 0o644 {
+		t.Errorf("no participant may touch mode bits, got %o", st.Mode().Perm())
 	}
 }
 
@@ -461,42 +453,6 @@ func TestReleaseLocks_MixedBatch_AckedTagSurvivesReclaimGC(t *testing.T) {
 	err = s.db.QueryRowContext(ctx, `SELECT 1 FROM tags WHERE id = ?`, goneID).Scan(&one)
 	if !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("dead holder's pending tag should be GC'd, got err=%v", err)
-	}
-}
-
-// TestReleaseLocks_ReclaimRestoreFailure_KeepsOwner pins the store half of the
-// review P3: when a reclaim's chmod restore fails, the result degrades to
-// StateRestoreFailed but MUST keep the dead holder's Owner so render can
-// attribute the failed reclaim instead of reporting a bare own-unlock failure.
-func TestReleaseLocks_ReclaimRestoreFailure_KeepsOwner(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-	l := mkFileLock(t, "a.go", tcAlice, -time.Minute)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := fchmodFn
-	defer func() { fchmodFn = orig }()
-	fchmodFn = func(f *os.File, mode os.FileMode) error {
-		if f.Name() == l.Target.Canonical && mode.Perm()&0o200 != 0 {
-			return &os.PathError{Op: tcChmod, Path: f.Name(), Err: syscall.EPERM}
-		}
-		return orig(f, mode)
-	}
-
-	res, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, tcBob, deadProbe)
-	if err != nil {
-		t.Fatalf("ReleaseLocks: %v", err)
-	}
-	if res[0].State != StateRestoreFailed {
-		t.Fatalf("want StateRestoreFailed, got %+v", res)
-	}
-	if res[0].Owner != tcAlice {
-		t.Errorf("failed reclaim must keep dead-owner attribution, got Owner=%q", res[0].Owner)
-	}
-	if res[0].RestoreErr == nil {
-		t.Error("RestoreErr nil")
 	}
 }
 

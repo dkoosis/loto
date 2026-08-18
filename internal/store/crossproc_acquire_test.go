@@ -18,57 +18,13 @@
 // SIGKILLed and reaped BEFORE any reclaimer starts (so "the holder is dead"
 // is a fact, not a race), then N processes race the stale reclaim.
 //
-// A2-control, as literally specified in the plan (a bare `fault=no-flock`
-// rerun of the four-way single-target A2 race), is NOT implemented — it is
-// unreachable, with or without the flock:
-//   - every cross-process AcquireLocks call is already fully serialized by
-//     SQLite's `_txlock=immediate` (plan §1.1) — a second writer's beginTx
-//     cannot even start until the first commits, so two reclaimers never
-//     touch the filesystem concurrently for the same target;
-//   - a winner's own reclaimed-and-restripped target is always skipped by
-//     restoreReclaimedSkippingRestripped's restripped-guard (unconditional,
-//     independent of the flock) — restoreWrite is only ever reachable for a
-//     target reclaimed at SHARED mode;
-//   - any peer that could exploit a shared-then-restore window by acquiring
-//     the SAME target EXCLUSIVE is itself blocked by EvalContext.Conflicts
-//     against a fresh, already-consistent DB read — independent of the
-//     flock.
-//
-// Building the literal control would be either always-failing (misreporting
-// a real invariant as broken) or vacuous (plan §6, "worse than none").
-//
-// What IS implemented, as testCrossProcA2ControlNoFlock (t.Run
-// "control/fault=no-flock" under TestCrossProc_StaleReclaimSingleWinner): a
-// two-actor choreography that reaches the flock's actual load-bearing job
-// (plan §1.1 item 4). S reclaims H's real-dead stale EXCLUSIVE row while
-// acquiring the SAME target SHARED — stripAll skips a shared acquire, so
-// restoreReclaimedSkippingRestripped's post-commit restore genuinely fires.
-// S's own row is deliberately backdated (ExpiresAt already elapsed at
-// insert), mirroring TestAcquireLocks_HoldsFlockAcrossRestore's in-process
-// precedent (locks_acquire_flock_test.go:31): it makes S's own freshly
-// committed row immediately TTL-stale too, so E can reclaim past it without
-// ever needing S to look dead. E then acquires EXCLUSIVE on the same
-// target. With acquireOpFlockFn neutered in both children
-// (LOTO_CROSSPROC_FAULT=no-flock), nothing stops E's whole acquire — strip,
-// insert, commit — from landing strictly between S's commit and S's
-// restore, so S's lagging restore silently re-adds owner-write under E's
-// now-live exclusive row.
-//
-// Proof the flock is genuinely load-bearing here, on the SUCCESS path (the
-// question this control's validity turns on): locks_acquire.go:45 acquires
-// the flock and line 49 defers its release as the failure-path backstop
-// only; the success path (line 134) calls restoreThenReleaseFlock, whose
-// body (locks_acquire.go:172-174) runs restoreReclaimedSkippingRestripped —
-// the real chmod restore — BEFORE flock.release(). So production holds the
-// flock across the restore; only the fault removes that.
-//
-// Verified (not shipped, per plan §6 "vacuous controls" discipline) by
-// running the identical S/E choreography WITHOUT the fault: E's own
-// acquireOpFlockFn call blocks on S's still-held real flock (S holds it
-// until its restore completes, same lines) and times out rather than ever
-// landing an exclusive acquire, so E cannot win and the asserted state
-// (owner-writable target + live exclusive row) cannot arise. Red here is
-// attributable to the fault, not to the choreography.
+// A2-control was a fault-injection subtest that ran the same race with
+// acquireOpFlockFn neutered, to prove the op-flock was load-bearing across
+// acquire's post-commit chmod restore. It is gone with the restore itself
+// (loto-zssw): acquire no longer touches file modes, so there is no window
+// between commit and restore for a peer to land in, and the choreography had
+// no signal left to synchronize on. The flock's remaining job — serializing
+// the tx — is already covered by A1.
 package store
 
 import (
@@ -88,11 +44,9 @@ import (
 )
 
 const (
-	crossProcRoleAcquireName               = "acquire"
-	crossProcRoleHoldName                  = "hold"
-	crossProcRoleReclaimAcquireName        = "reclaim-acquire"
-	crossProcRoleReclaimSharedFaultName    = "reclaim-shared-fault"
-	crossProcRoleReclaimExclusiveFaultName = "reclaim-exclusive-fault"
+	crossProcRoleAcquireName        = "acquire"
+	crossProcRoleHoldName           = "hold"
+	crossProcRoleReclaimAcquireName = "reclaim-acquire"
 )
 
 // Role functions (crossProcRoleAcquire, crossProcRoleHold,
@@ -106,26 +60,8 @@ const (
 	envDBPath  = "LOTO_CROSSPROC_DB"
 	envOwner   = "LOTO_CROSSPROC_OWNER"
 	envTargets = "LOTO_CROSSPROC_TARGETS" // A1: comma-separated, per-child rotated order
-	envTarget  = "LOTO_CROSSPROC_TARGET"  // A2 + A2-control: single target
-	envFault   = "LOTO_CROSSPROC_FAULT"   // A2-control only: "no-flock"
+	envTarget  = "LOTO_CROSSPROC_TARGET"  // A2: single target
 )
-
-// crossProcFaultNoFlock gates maybeInjectNoFlockFault — the ONE fault this
-// file injects, and only inside the two A2-control roles' own child
-// process. Production's acquireOpFlockFn default is never touched.
-const crossProcFaultNoFlock = "no-flock"
-
-// maybeInjectNoFlockFault swaps this process's own acquireOpFlockFn to a
-// no-op handle when LOTO_CROSSPROC_FAULT=no-flock — the production seam
-// PR #236 (loto-qhv items 1-2) added to flock.go, exercised here rather
-// than in production.
-func maybeInjectNoFlockFault() {
-	if os.Getenv(envFault) == crossProcFaultNoFlock {
-		acquireOpFlockFn = func(context.Context, string, io.Writer) (*opFlock, error) {
-			return &opFlock{}, nil // f is nil: opFlock.release() is a no-op on it (flock.go).
-		}
-	}
-}
 
 // crossProcA2Host is the Host every A2 actor (H and the reclaimers) stamps
 // on its LockRecord and every A2 probe evaluates liveness from — matching
@@ -249,17 +185,9 @@ func containsOnly(vals []string, want string) bool {
 	return true
 }
 
-func assertOwnerWriteStripped(t *testing.T, path string) {
-	t.Helper()
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("crossproc: stat %s: %v", path, err)
-	}
-	if fi.Mode().Perm()&0o200 != 0 {
-		t.Errorf("%s: owner-write bit set (mode=%o), want stripped", path, fi.Mode().Perm())
-	}
-}
-
+// assertOwnerWritePresent is the surviving half of the pair (loto-zssw): loto
+// no longer strips a write bit anywhere, so every target a cross-process race
+// touches must come out of it writable — including one that lost the race.
 func assertOwnerWritePresent(t *testing.T, path string) {
 	t.Helper()
 	fi, err := os.Stat(path)
@@ -471,7 +399,7 @@ func TestCrossProc_ContendedAcquire(t *testing.T) {
 	}
 
 	for _, tp := range targets {
-		assertOwnerWriteStripped(t, tp)
+		assertOwnerWritePresent(t, tp)
 	}
 	assertOwnerWritePresent(t, decoy)
 }
@@ -741,243 +669,5 @@ func TestCrossProc_StaleReclaimSingleWinner(t *testing.T) {
 		t.Errorf("lock_reclaimed_stale events=%d, want exactly 1 (2-4 is the TOCTOU signature)", reclaimCount)
 	}
 
-	assertOwnerWriteStripped(t, target)
-
-	t.Run("control/fault=no-flock", testCrossProcA2ControlNoFlock)
-}
-
-// ---- A2-control: fault=no-flock (see file header for why this shape, not
-// the plan's literal bare rerun) ----
-
-// crossProcRoleReclaimSharedFault is the A2-control's "S": with the
-// op-flock neutered in this process, reclaim H's real-dead stale EXCLUSIVE
-// row while acquiring the SAME target in SHARED mode — stripAll skips it
-// (shared never strips), so restoreReclaimedSkippingRestripped's
-// post-commit restore fires. See the file header for the full design and
-// the flock-hold-across-restore proof this depends on.
-//
-// fchmodFn is hooked so the instant S is about to add owner-write back to
-// the target, S signals the parent over fd 3 and blocks reading fd 4 — a
-// deterministic stand-in for the flock's own contended-wakeup signal,
-// unavailable here precisely because the fault has neutered it.
-func crossProcRoleReclaimSharedFault() crossProcVerdict {
-	const role = crossProcRoleReclaimSharedFaultName
-	maybeInjectNoFlockFault()
-
-	owner := os.Getenv(envOwner)
-	dbPath := filepath.Clean(os.Getenv(envDBPath))
-	if !filepath.IsAbs(dbPath) {
-		return crossProcRejectPath(role, owner, dbPath)
-	}
-	target := filepath.Clean(os.Getenv(envTarget))
-	if !filepath.IsAbs(target) {
-		return crossProcRejectPath(role, owner, target)
-	}
-
-	s, err := Open(dbPath)
-	if err != nil {
-		return crossProcVerdict{Role: role, Outcome: crossProcError, Owner: owner, PID: os.Getpid(), PPID: os.Getppid(), Err: fmt.Sprintf("open: %v", err)}
-	}
-	defer s.Close()
-
-	aboutToRestoreW := os.NewFile(3, "crossproc-about-to-restore")
-	proceedR := os.NewFile(4, "crossproc-proceed")
-
-	origFchmod := fchmodFn
-	defer func() { fchmodFn = origFchmod }()
-	signaled := false
-	fchmodFn = func(f *os.File, mode os.FileMode) error {
-		if !signaled && f.Name() == target && mode&0o200 != 0 {
-			signaled = true
-			if _, werr := aboutToRestoreW.Write([]byte{1}); werr != nil {
-				return fmt.Errorf("crossproc: signal about-to-restore: %w", werr)
-			}
-			_ = aboutToRestoreW.Close()
-			buf := make([]byte, 1)
-			if _, rerr := proceedR.Read(buf); rerr != nil && !errors.Is(rerr, io.EOF) {
-				return fmt.Errorf("crossproc: await proceed: %w", rerr)
-			}
-		}
-		return origFchmod(f, mode)
-	}
-
-	now := time.Now()
-	rec := domain.LockRecord{
-		Target:      domain.Target{Canonical: target},
-		OwnerUUID:   domain.AgentUUID(owner),
-		SessionUUID: domain.SessionUUID(owner),
-		Intent:      "crossproc-a2-control-shared",
-		CreatedAt:   now,
-		// Deliberately already elapsed — mirrors
-		// TestAcquireLocks_HoldsFlockAcrossRestore's
-		// alice.ExpiresAt = time.Now().Add(-time.Hour): makes S's OWN
-		// freshly committed row immediately TTL-stale too, so E can
-		// reclaim past it without needing S to look dead.
-		ExpiresAt: now.Add(-time.Hour),
-		Host:      crossProcA2Host,
-		PID:       os.Getpid(),
-		Mode:      domain.ModeShared,
-	}
-	probe := crossProcRealPidProbe(crossProcA2Host)
-	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{rec}, probe); err != nil {
-		return crossProcVerdict{Role: role, Outcome: crossProcError, Owner: owner, PID: os.Getpid(), PPID: os.Getppid(), Err: fmt.Sprintf("acquire: %v", err)}
-	}
-	return crossProcVerdict{Role: role, Outcome: crossProcWon, Owner: owner, PID: os.Getpid(), PPID: os.Getppid()}
-}
-
-// crossProcRoleReclaimExclusiveFault is the A2-control's "E": with the
-// op-flock neutered in this process, acquire the same target EXCLUSIVELY.
-// The parent spawns E only after S has signalled "about to restore", so
-// E's whole acquire (validate, tx, strip, insert, commit) runs — and,
-// absent the flock, is allowed to run — strictly between S's commit and
-// S's restore.
-func crossProcRoleReclaimExclusiveFault() crossProcVerdict {
-	const role = crossProcRoleReclaimExclusiveFaultName
-	maybeInjectNoFlockFault()
-
-	owner := os.Getenv(envOwner)
-	dbPath := filepath.Clean(os.Getenv(envDBPath))
-	if !filepath.IsAbs(dbPath) {
-		return crossProcRejectPath(role, owner, dbPath)
-	}
-	target := filepath.Clean(os.Getenv(envTarget))
-	if !filepath.IsAbs(target) {
-		return crossProcRejectPath(role, owner, target)
-	}
-
-	s, err := Open(dbPath)
-	if err != nil {
-		return crossProcVerdict{Role: role, Outcome: crossProcError, Owner: owner, PID: os.Getpid(), PPID: os.Getppid(), Err: fmt.Sprintf("open: %v", err)}
-	}
-	defer s.Close()
-
-	now := time.Now()
-	rec := domain.LockRecord{
-		Target:      domain.Target{Canonical: target},
-		OwnerUUID:   domain.AgentUUID(owner),
-		SessionUUID: domain.SessionUUID(owner),
-		Intent:      "crossproc-a2-control-exclusive",
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(time.Hour),
-		Host:        crossProcA2Host,
-		PID:         os.Getpid(),
-	}
-	probe := crossProcRealPidProbe(crossProcA2Host)
-	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{rec}, probe); err != nil {
-		return crossProcVerdict{Role: role, Outcome: crossProcError, Owner: owner, PID: os.Getpid(), PPID: os.Getppid(), Err: fmt.Sprintf("acquire: %v", err)}
-	}
-	return crossProcVerdict{Role: role, Outcome: crossProcWon, Owner: owner, PID: os.Getpid(), PPID: os.Getppid()}
-}
-
-// testCrossProcA2ControlNoFlock is the A2-control body — see the file
-// header for the full design and the flock-hold-across-restore proof. H
-// (the existing "hold" role) supplies a genuinely dead real holder, exactly
-// as in the parent test; S and E then run the two-actor choreography that
-// reaches the flock's actual load-bearing job. If production's flock
-// discipline somehow still applied here, the target would end stripped and
-// this control has lost its teeth.
-func testCrossProcA2ControlNoFlock(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "loto.db")
-	seed, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("crossproc: materialize schema: %v", err)
-	}
-	if err := seed.Close(); err != nil {
-		t.Fatalf("crossproc: close seed store: %v", err)
-	}
-
-	target := filepath.Join(dir, "control.go")
-	if err := os.WriteFile(target, []byte("package x\n"), 0o644); err != nil {
-		t.Fatalf("crossproc: write target: %v", err)
-	}
-
-	// H: real holder, killed and reaped before S ever spawns — same fact
-	// A2's main scenario establishes, reusing the "hold" role as-is.
-	hReadyR, hReadyW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("crossproc: H ready pipe: %v", err)
-	}
-	t.Cleanup(func() { _ = hReadyR.Close() })
-	hChild := spawnChild(t, crossProcRoleHoldName, map[string]string{
-		envDBPath: dbPath,
-		envTarget: target,
-		envOwner:  "control-h",
-	}, hReadyW)
-	_ = hReadyW.Close()
-	hBuf := make([]byte, 1)
-	if _, err := io.ReadFull(hReadyR, hBuf); err != nil {
-		t.Fatalf("crossproc: await H ready: %v", err)
-	}
-	if pgid, err := syscall.Getpgid(hChild.cmd.Process.Pid); err == nil {
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	}
-	_ = hChild.cmd.Wait()
-
-	aboutToRestoreR, aboutToRestoreW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("crossproc: about-to-restore pipe: %v", err)
-	}
-	defer aboutToRestoreR.Close()
-	proceedR, proceedW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("crossproc: proceed pipe: %v", err)
-	}
-	defer proceedW.Close()
-
-	sChild := spawnChild(t, crossProcRoleReclaimSharedFaultName, map[string]string{
-		envDBPath: dbPath,
-		envTarget: target,
-		envOwner:  "control-s",
-		envFault:  crossProcFaultNoFlock,
-	}, aboutToRestoreW, proceedR)
-
-	sBuf := make([]byte, 1)
-	if _, err := io.ReadFull(aboutToRestoreR, sBuf); err != nil {
-		t.Fatalf("crossproc: await S about-to-restore: %v", err)
-	}
-
-	eChild := spawnChild(t, crossProcRoleReclaimExclusiveFaultName, map[string]string{
-		envDBPath: dbPath,
-		envTarget: target,
-		envOwner:  "control-e",
-		envFault:  crossProcFaultNoFlock,
-	})
-
-	eV := crossProcMustWait(t, eChild)
-	if eV.Outcome != crossProcWon {
-		t.Fatalf("E outcome=%q, want won (err=%q) — control setup is broken, not demonstrating the fault", eV.Outcome, eV.Err)
-	}
-
-	_ = proceedW.Close() // let S's blocked restore proceed now that E has landed.
-
-	sV := crossProcMustWait(t, sChild)
-	if sV.Outcome != crossProcWon {
-		t.Fatalf("S outcome=%q, want won (err=%q)", sV.Outcome, sV.Err)
-	}
-
-	s, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("crossproc: reopen: %v", err)
-	}
-	defer s.Close()
-	ctx := context.Background()
-	locks, err := s.ListLocks(ctx)
-	if err != nil {
-		t.Fatalf("crossproc: ListLocks: %v", err)
-	}
-	if len(locks) != 1 || string(locks[0].OwnerUUID) != "control-e" {
-		t.Fatalf("locks=%+v, want exactly E's (control-e) exclusive row", locks)
-	}
-
-	// The control: with the flock neutered, S's lagging restore must land
-	// AFTER E's exclusive acquire — a reclaimed target ending
-	// owner-writable while a live exclusive row exists.
-	fi, err := os.Stat(target)
-	if err != nil {
-		t.Fatalf("crossproc: stat target: %v", err)
-	}
-	if fi.Mode().Perm()&0o200 == 0 {
-		t.Fatalf("detection control lost its teeth: fault=no-flock injected but target ended read-only under E's live exclusive row — the violation was not observed")
-	}
+	assertOwnerWritePresent(t, target)
 }

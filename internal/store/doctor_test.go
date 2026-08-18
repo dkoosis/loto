@@ -558,7 +558,7 @@ func TestDoctorRepair_RestoresWriteMode(t *testing.T) {
 	}
 }
 
-func TestDoctorRepair_SharedReclaimLeavesModeUntouched(t *testing.T) {
+func TestDoctorRepair_ReclaimLeavesModeUntouched(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	l := mkFileLock(t, "ro.md", "alice", time.Hour)
@@ -578,12 +578,14 @@ func TestDoctorRepair_SharedReclaimLeavesModeUntouched(t *testing.T) {
 	if got != nil {
 		t.Fatalf("stale shared lock should be reclaimed, got %+v", got)
 	}
+	// The chmod-era migration runs on every repair; a target that already
+	// carries owner-write must come back untouched, not "restored" to 0o600.
 	st, err := os.Stat(l.Target.Canonical)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode().Perm() != 0o444 {
-		t.Fatalf("repair must not touch mode of shared-reclaimed target: want 0444, got %o", st.Mode().Perm())
+	if st.Mode().Perm() != 0o644 {
+		t.Fatalf("repair must not touch a writable target's mode: want 0644, got %o", st.Mode().Perm())
 	}
 }
 
@@ -788,5 +790,93 @@ func TestDoctorAudit_ListsExpiredClaims(t *testing.T) {
 	}
 	if report.ExpiredClaims[0].PathPrefix != "pkg/alpha" || report.ExpiredClaims[1].PathPrefix != "pkg/zeta" {
 		t.Errorf("expired claims must be (prefix, owner)-sorted, got %+v", report.ExpiredClaims)
+	}
+}
+
+// TestDoctorRepair_ChmodEraMigration is loto-zssw's migration leg. Until 2026-08
+// acquire stripped write bits and release restored them, so a session that died
+// mid-hold left files at 0444 with nothing to explain them. `doctor --repair`
+// undoes that for every path loto itself locked — the current rows plus the
+// retained audit trail — and touches nothing else.
+func TestDoctorRepair_ChmodEraMigration(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	// held: a live row whose file the old loto left read-only.
+	held := mkFileLock(t, "held.go", "alice", time.Hour)
+	// released: locked then released, so only the audit trail names it.
+	released := mkFileLock(t, "released.go", "alice", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{held, released}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReleaseLocks(ctx, []domain.Target{released.Target}, "alice", liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	// stranger: never known to loto, and deliberately read-only. Must be left
+	// alone — the migration is bounded by rows loto keeps, not a repo walk.
+	stranger := filepath.Join(t.TempDir(), "stranger.go")
+	if err := os.WriteFile(stranger, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{held.Target.Canonical, released.Target.Canonical} {
+		if err := os.Chmod(p, 0o444); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := s.DoctorRepair(ctx, "doctor", liveProbe); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, p := range []string{held.Target.Canonical, released.Target.Canonical} {
+		st, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm()&0o200 == 0 {
+			t.Errorf("%s: chmod-era straggler not restored, perm=%o", p, st.Mode().Perm())
+		}
+	}
+	st, err := os.Stat(stranger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o444 {
+		t.Errorf("a path loto never locked must be left alone, perm=%o", st.Mode().Perm())
+	}
+}
+
+// TestDoctorRepair_ChmodEraMigrationIsIdempotent pins the drain: once every
+// straggler carries owner-write, a second repair finds nothing to do and emits
+// no audit noise. The pass costs a stat per candidate and nothing more.
+func TestDoctorRepair_ChmodEraMigrationIsIdempotent(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	l := mkFileLock(t, "a.go", "alice", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(l.Target.Canonical, 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	orig := fchmodFn
+	defer func() { fchmodFn = orig }()
+	fchmodFn = func(f *os.File, mode os.FileMode) error {
+		if f.Name() == l.Target.Canonical {
+			calls++
+		}
+		return orig(f, mode)
+	}
+
+	for i := range 2 {
+		if err := s.DoctorRepair(ctx, "doctor", liveProbe); err != nil {
+			t.Fatalf("repair %d: %v", i, err)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("migration must fire once and then drain, got %d chmod calls", calls)
 	}
 }

@@ -174,20 +174,16 @@ func TestLock_MultiTarget_HappyPath(t *testing.T) {
 		t.Errorf("missing triage line: %q", out.String())
 	}
 	for _, n := range []string{tcTargetA, tcTargetB} {
-		st, err := os.Stat(filepath.Join(repo, n))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if st.Mode().Perm()&0o222 != 0 {
-			t.Errorf("%s not stripped: %o", n, st.Mode().Perm())
+		if !strings.Contains(out.String(), n) {
+			t.Errorf("%s missing from success rows: %q", n, out.String())
 		}
 	}
 }
 
 // TestLock_NonPositiveTTL_Rejected pins D2 (loto-ebkc): `lock --ttl 0` or a
-// negative TTL used to be accepted, minting an instantly-stale lock whose
-// exclusive write-strip left the file read-only with a lease any peer could
-// immediately reclaim. Mirror the claim verb's guard (cmd_claim.go).
+// negative TTL used to be accepted, minting an instantly-stale lock any peer
+// could reclaim the moment it was taken. Mirror the claim verb's guard
+// (cmd_claim.go).
 func TestLock_NonPositiveTTL_Rejected(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)

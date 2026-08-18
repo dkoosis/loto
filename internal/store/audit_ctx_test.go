@@ -13,13 +13,14 @@ import (
 	"loto/internal/domain"
 )
 
-// Regression for loto-rmyg: on a tx.Commit() failure, AcquireLocks calls
-// restoreAllAndAudit while the parent tx still holds the SQLite write lock
-// (its rollback is deferred). The detached audit then opens a SECOND write tx
-// that self-contends against the held lock, stalling ~2s on busy_timeout and
-// dropping the acquire_rollback_started breadcrumb. The fix releases the
-// parent tx (cleanup) before the restore-audit, so the breadcrumb lands fast.
-func TestAcquireLocks_CommitFailureBreadcrumbLandsWithoutSelfContention(t *testing.T) {
+// TestAcquireLocks_CommitFailureIsFastAndLeavesNothing pins loto-rmyg: a
+// commit failure must return promptly and leave no residue. The original bug
+// was self-contention — the failing tx stayed open (its rollback is deferred)
+// while a detached audit opened a SECOND write tx against the held lock,
+// stalling ~2s on busy_timeout. Since loto-zssw retired the write-strip there
+// is no rollback audit at all, and the only thing left to guard is that the
+// call does not stall and writes nothing.
+func TestAcquireLocks_CommitFailureIsFastAndLeavesNothing(t *testing.T) {
 	s := mustOpen(t)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.go")
@@ -58,56 +59,51 @@ func TestAcquireLocks_CommitFailureBreadcrumbLandsWithoutSelfContention(t *testi
 		t.Errorf("AcquireLocks stalled %v on commit failure — detached audit self-contends with the still-open tx (loto-rmyg)", elapsed)
 	}
 
-	// The acquire_rollback_started breadcrumb must be durably written — it is
-	// the only post-crash pointer at orphan-mode files.
-	var n int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM events WHERE event_kind=?`, EventAcquireRollbackStart,
-	).Scan(&n); err != nil {
-		t.Fatal(err)
+	// No row landed, and — since loto-zssw retired the write-strip — no file
+	// mode was touched either, so a failed acquire leaves nothing behind to
+	// clean up.
+	if got, err := s.LockAt(context.Background(), rec.Target); err != nil || got != nil {
+		t.Errorf("commit failure must leave no lock row, got %+v (err %v)", got, err)
 	}
-	if n != 1 {
-		t.Errorf("acquire_rollback_started breadcrumb dropped on commit failure (loto-rmyg): want 1, got %d", n)
-	}
-
-	// Owner-write must be restored on the stripped file.
 	st, err := os.Stat(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode().Perm()&0o200 == 0 {
-		t.Errorf("write bit not restored after commit-failure rollback, got %o", st.Mode().Perm())
+	if st.Mode().Perm() != 0o644 {
+		t.Errorf("acquire must not touch mode bits, got %o", st.Mode().Perm())
 	}
 }
 
-// Regression for loto-1qed: DoctorRepair's post-commit restore-failure audit
-// was the one restore path still riding the caller's cancellable ctx
-// (restoreAndAudit -> appendModeRestoreFailedEvent -> AppendEvent(ctx)). A
-// cancellation landing right after commit scaled busy_timeout to ~1ms and the
-// mode_restore_failed event was silently dropped. The fix routes it through
-// appendAuditDetached, matching the acquire/release/break paths.
-func TestDoctorRepair_RestoreAuditSurvivesCancelledCtx(t *testing.T) {
+// TestDoctorRepair_MigrationAuditSurvivesCancelledCtx pins loto-1qed against
+// the one chmod path that outlived the strip: doctor's chmod-era migration
+// (loto-zssw). The migration runs post-commit, so a cancellation landing right
+// after commit used to scale busy_timeout to ~1ms and drop the
+// mode_restore_failed event silently. It must route through
+// appendAuditDetached, which carries its own bounded ctx.
+func TestDoctorRepair_MigrationAuditSurvivesCancelledCtx(t *testing.T) {
 	s := mustOpen(t)
 	var stderr bytes.Buffer
 	s.setStderr(&stderr)
 
+	// A file left read-only by the pre-zssw loto, with a lock row naming it —
+	// exactly the wild state the migration exists to repair.
 	l := mkFileLock(t, "dr.go", tcAlice, time.Hour)
 	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{l}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(l.Target.Canonical, 0o444); err != nil {
 		t.Fatal(err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// The main repair tx runs and commits on a live ctx. When the post-commit
-	// restore fires (fchmod with the write bit set), cancel the caller ctx and
-	// fail the restore — mirroring a Ctrl-C landing right after commit.
 	orig := fchmodFn
 	defer func() { fchmodFn = orig }()
 	fchmodFn = func(f *os.File, mode os.FileMode) error {
 		if f.Name() == l.Target.Canonical && mode.Perm()&0o200 != 0 {
 			cancel()
-			return &os.PathError{Op: opFchmod, Path: f.Name(), Err: syscall.EPERM}
+			return &os.PathError{Op: "fchmod", Path: f.Name(), Err: syscall.EPERM}
 		}
 		return orig(f, mode)
 	}

@@ -32,9 +32,6 @@ func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, agent d
 		return []BreakResult{}, nil
 	}
 
-	// Hold the op-flock across the tx AND the post-commit restoreWrite so
-	// concurrent AcquireLocks can't observe a row+file pair where one side
-	// of the chmod has lagged (gh#... loto-4qt).
 	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
 	if err != nil {
 		return nil, err
@@ -91,15 +88,7 @@ func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, agent d
 		return nil, err
 	}
 
-	// Run the bounded chmod restore under the still-held flock (loto-4qt),
-	// release the flock, THEN emit the detached audit off the critical section.
-	// Holding the op-flock across the detached audit's own write tx would extend
-	// the hold for up to busy_timeout under contention and stall peers on the
-	// chmod-failure path (loto-3qev) — mirrors AcquireLocks' split. The deferred
-	// release (above) is the idempotent backstop.
-	failEvents, failIdx := restoreBreaks(results, byAgent, now)
 	flock.release()
-	s.auditBreakFailures(results, failEvents, failIdx)
 	return results, nil
 }
 
@@ -163,45 +152,6 @@ func authorizeHolders(holders []domain.LockRecord, ec domain.EvalContext, force 
 		}
 	}
 	return nil
-}
-
-// restoreBreaks runs the bounded chmod restore for every successfully-broken
-// EXCLUSIVE target, recording per-target RestoreErr, and returns the
-// mode_restore_failed events plus the parallel result indices. It is the
-// chmod-only half: the CALLER runs it under the held op-flock (loto-4qt) and
-// emits the returned events via auditBreakFailures AFTER releasing the flock,
-// so the detached audit's write tx can't extend the flock hold (loto-3qev).
-func restoreBreaks(results []BreakResult, byAgent string, now time.Time) ([]domain.Event, []int) {
-	var failEvents []domain.Event
-	var failIdx []int
-	for i := range results {
-		if results[i].Err != nil {
-			continue
-		}
-		if !shouldRestoreOwnerWrite(results[i].Mode) {
-			continue // shared lock never stripped the bit — nothing to restore
-		}
-		if rerr := restoreWrite(results[i].Target.Canonical); rerr != nil {
-			results[i].RestoreErr = rerr
-			failEvents = append(failEvents, modeRestoreFailedEvent(results[i].Target.Canonical, byAgent, now, rerr))
-			failIdx = append(failIdx, i)
-		}
-	}
-	return failEvents, failIdx
-}
-
-// auditBreakFailures emits the mode_restore_failed events off the flock critical
-// section (loto-3qev); on audit-write failure it fans the error out to each
-// affected result so the audit hole is observable (gh#107).
-func (s *Store) auditBreakFailures(results []BreakResult, failEvents []domain.Event, failIdx []int) {
-	if len(failEvents) > 0 {
-		if auditErr := s.appendAuditDetached(failEvents); auditErr != nil {
-			// Fan audit-write failure out to each affected result (gh#107).
-			for _, i := range failIdx {
-				results[i].AuditErr = auditErr
-			}
-		}
-	}
 }
 
 // loadLocksByTargetTx groups every holder per target. A target under the
