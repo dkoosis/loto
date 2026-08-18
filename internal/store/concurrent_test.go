@@ -123,7 +123,7 @@ func TestConcurrentOverlappingClaim(t *testing.T) {
 			}
 			ready.Done()
 			start.Wait()
-			err := s.ClaimPrefix(context.Background(), rec)
+			err := s.ClaimPrefix(context.Background(), rec, nil)
 			switch {
 			case err == nil:
 				wins.Add(1)

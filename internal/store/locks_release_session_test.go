@@ -22,7 +22,7 @@ func TestReleaseBySession_ReleasesLocksAndClaimsAtomically(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{la}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimPrefix(ctx, mkClaimSession("internal/store", tcAlice, "session-1", time.Hour)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaimSession(tcPkgStore, tcAlice, "session-1", time.Hour), nil); err != nil {
 		t.Fatal(err)
 	}
 	// Sibling session-2 territory that must survive.
@@ -30,7 +30,7 @@ func TestReleaseBySession_ReleasesLocksAndClaimsAtomically(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{lb}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClaimPrefix(ctx, mkClaimSession("internal/render", tcAlice, "session-2", time.Hour)); err != nil {
+	if err := s.ClaimPrefix(ctx, mkClaimSession("internal/render", tcAlice, "session-2", time.Hour), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -41,7 +41,7 @@ func TestReleaseBySession_ReleasesLocksAndClaimsAtomically(t *testing.T) {
 	if len(results) != 1 || results[0].Target.Canonical != la.Target.Canonical {
 		t.Fatalf("locks released = %v, want just a.go", results)
 	}
-	if len(claims) != 1 || claims[0] != "internal/store" {
+	if len(claims) != 1 || claims[0] != tcPkgStore {
 		t.Fatalf("claims released = %v, want [internal/store]", claims)
 	}
 	// session-2's lock and claim both survive.

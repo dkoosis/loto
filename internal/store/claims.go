@@ -70,7 +70,17 @@ type ClaimReleaseResult struct {
 // in-tx predicate — NOT the (path_prefix, owner_uuid) PK, which would happily
 // admit cross-owner duplicates — is the real guard (loto-7af9). Claims strip
 // no write bits, so there is no chmod half and no claim events in v1.
-func (s *Store) ClaimPrefix(ctx context.Context, rec domain.ClaimRecord) error {
+//
+// live is the same HolderLiveProbe AcquireLocks takes, and threading it here is
+// what makes acquisition agree with the gate (loto-9acu). PR #246 gave
+// `check --gate` a liveness leg for claims (domain.EvalContext.ClaimIsStale),
+// but this path still partitioned on TTL alone — so in the exact crash tzmv.9
+// targets, a session dying while holding a 2h repo-wide claim, the gate
+// reported the territory free while `loto claim` on an overlapping prefix kept
+// naming the dead owner as a blocker until the full lease lapsed. Two
+// definitions of "live claim" in one codebase, and the reclaim path the gate
+// advertises was unreachable. A nil probe means TTL governs, exactly as before.
+func (s *Store) ClaimPrefix(ctx context.Context, rec domain.ClaimRecord, live domain.HolderLiveProbe) error {
 	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
 	if err != nil {
 		return err
@@ -87,7 +97,7 @@ func (s *Store) ClaimPrefix(ctx context.Context, rec domain.ClaimRecord) error {
 	if err != nil {
 		return err
 	}
-	blockers, expired := partitionClaims(all, rec, time.Now())
+	blockers, expired := partitionClaims(all, rec, domain.EvalContext{Now: time.Now(), Live: live})
 	if len(blockers) > 0 {
 		return &ClaimConflictError{Blockers: blockers}
 	}
@@ -110,13 +120,19 @@ func (s *Store) ClaimPrefix(ctx context.Context, rec domain.ClaimRecord) error {
 // blockers and expired-reclaim candidates. Same-owner rows never land in
 // either bucket — a same-owner overlap never blocks, and the exact row
 // refreshes via upsert. Blockers come back sorted prefix then created_at.
-func partitionClaims(all []domain.ClaimRecord, rec domain.ClaimRecord, now time.Time) (blockers, expired []domain.ClaimRecord) {
+//
+// The staleness test is ec.ClaimIsStale, the SAME predicate `check --gate`
+// consumes — not ClaimRecord.Expired, which reads TTL alone (loto-9acu). One
+// predicate over both surfaces is the point: a claim the gate treats as
+// reclaimable must not still be refused here, and the drift between them was
+// the bug tzmv.9 set out to close.
+func partitionClaims(all []domain.ClaimRecord, rec domain.ClaimRecord, ec domain.EvalContext) (blockers, expired []domain.ClaimRecord) {
 	for i := range all {
 		ex := &all[i]
 		if !domain.PrefixOverlaps(ex.PathPrefix, rec.PathPrefix) || ex.OwnerUUID == rec.OwnerUUID {
 			continue
 		}
-		if ex.Expired(now) {
+		if ec.ClaimIsStale(*ex) {
 			expired = append(expired, *ex)
 			continue
 		}
