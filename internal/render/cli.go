@@ -101,6 +101,20 @@ func EmitLockSuccess(w io.Writer, recs []domain.LockRecord) {
 	}
 }
 
+// EmitBeaconSuccess renders the minted-beacon block. Distinct from
+// EmitLockSuccess on purpose: a beacon is machinery the gate minted, not a
+// claim an agent made, and nothing will ever release it by hand — so the TTL
+// is the one piece of state worth printing beside the path.
+func EmitBeaconSuccess(w io.Writer, recs []domain.LockRecord, ttl time.Duration) {
+	cwd := getCwd()
+	sorted := append([]domain.LockRecord(nil), recs...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })
+	fmt.Fprintf(w, "✓ beacon count=%d ttl=%s\n", len(sorted), ttl)
+	for i := range sorted {
+		fmt.Fprintf(w, "✓ target=%s mode=%s\n", relToCwd(sorted[i].Target.Canonical, cwd), sorted[i].EffectiveMode())
+	}
+}
+
 // EmitConflictWithTags renders the conflict block and, for each blocker,
 // appends pending tags from tagsByTarget[canonical] as `ℹ tag …` rows beneath
 // the `⚠ target=…` line. Pass nil to suppress tag surfacing.

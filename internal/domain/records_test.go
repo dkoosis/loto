@@ -15,6 +15,32 @@ func mk(owner, mode string) LockRecord {
 	}
 }
 
+// IsBeacon is what lets `loto guard` tell "an agent of my own session is
+// writing here" apart from "a peer holds this territory" (loto-xwod). Both legs
+// of the AND carry weight: shared mode keeps two siblings' beacons from
+// colliding at acquire, PID 0 keeps the liveness probe from reaping a row whose
+// minting hook has already exited.
+func TestLockRecordIsBeacon(t *testing.T) {
+	withPID := func(l LockRecord, pid int) LockRecord { l.PID = pid; return l }
+	cases := []struct {
+		name string
+		l    LockRecord
+		want bool
+	}{
+		{"shared + pid 0", mk("alice", ModeShared), true},
+		{"shared + live pid is a held shared lock", withPID(mk("alice", ModeShared), 4242), false},
+		{"exclusive + pid 0", mk("alice", ModeExclusive), false},
+		{"empty mode reads as exclusive", mk("alice", ""), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.l.IsBeacon(); got != c.want {
+				t.Fatalf("IsBeacon() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 func TestConflicts_TruthTable(t *testing.T) {
 	ec := EvalContext{Now: time.Now()}
 	cases := []struct {

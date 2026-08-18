@@ -117,7 +117,7 @@ func guardPeerRows(ctx context.Context, stderr io.Writer) (rows []render.GateDen
 		return nil, true
 	}
 	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe())}
-	return gateDecideAny(locks, claims, rt.Agent.UUID, ec), false
+	return gateDecideAny(locks, claims, rt.Agent.UUID, rt.SessionUUID, ec), false
 }
 
 // execRealGit runs the wrapped verb against the actual git binary. `-c

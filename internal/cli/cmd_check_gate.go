@@ -111,11 +111,26 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 // not Classify==Alive) and the same wave carve-out (myUUID excluded) —
 // deliberately reuses gateDecide's semantics rather than drifting a second
 // definition of "foreign" and "live".
-func gateDecideAny(locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ec domain.EvalContext) []render.GateDenyRow {
+func gateDecideAny(locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, mySession domain.SessionUUID, ec domain.EvalContext) []render.GateDenyRow {
 	var rows []render.GateDenyRow
 	for i := range locks {
 		l := &locks[i]
 		if string(l.OwnerUUID) == myUUID || ec.IsStale(*l) {
+			continue
+		}
+		// A beacon minted by a SIBLING of this same Claude session does not
+		// refuse this session's tree-move (loto-xwod). Subagents of one session
+		// are distinct loto owners by design — that is exactly what lets one
+		// sibling's beacon deny another sibling's WRITE — but they are one
+		// session as far as `git checkout` is concerned, and a session has to be
+		// able to move the tree it is working in.
+		//
+		// Narrow on purpose: only beacons, and only same-session ones. A
+		// sibling's real exclusive lock still refuses the move, because a
+		// checkout under declared uncommitted territory is the 2026-08-14
+		// incident itself. An empty mySession (no CLAUDE_CODE_SESSION_ID, direct
+		// CLI use) matches nothing rather than everything.
+		if l.IsBeacon() && mySession != "" && l.SessionUUID == mySession {
 			continue
 		}
 		rows = append(rows, render.GateDenyRow{
