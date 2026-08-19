@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"time"
 
 	"loto/internal/domain"
@@ -109,7 +110,7 @@ func validateLockTargets(args []string, repoTop string, allowMissing bool) ([]do
 			continue
 		}
 		seen[t.Canonical] = true
-		if reason := statFileTargetReason(t.Canonical, allowMissing); reason != "" {
+		if reason := statFileTargetReason(repoTop, t.Canonical, allowMissing); reason != "" {
 			invalid = append(invalid, render.InvalidTarget{Path: t.Canonical, Reason: reason})
 			continue
 		}
@@ -125,8 +126,21 @@ func validateLockTargets(args []string, repoTop string, allowMissing bool) ([]do
 // validateLockTargets purely to keep that loop's branching under the
 // complexity gate (gocognit) — no behavior change from the inline version it
 // replaces.
-func statFileTargetReason(canonical string, allowMissing bool) string {
-	lst, err := os.Lstat(canonical)
+//
+// ‡ canonical is REPO-relative (resolveCLITarget -> normalizeRepoPath), so it
+// must be stat'd under repoTop, not against the process CWD. Statting it bare
+// silently means "repoTop/<cwd-suffix>/<canonical>" whenever loto runs from a
+// subdirectory — which used to surface as a spurious `not-found` on `loto
+// lock`, and with the allowMissing carve-out below would instead SILENTLY
+// admit a beacon while skipping the symlink and regular-file checks the path
+// would actually have failed (Codex #258 P1). repoTop is empty only outside a
+// git repo, where CWD-relative is the only meaning available.
+func statFileTargetReason(repoTop, canonical string, allowMissing bool) string {
+	probe := canonical
+	if repoTop != "" {
+		probe = filepath.Join(repoTop, canonical)
+	}
+	lst, err := os.Lstat(probe)
 	if err != nil {
 		if allowMissing && errors.Is(err, fs.ErrNotExist) {
 			return ""
