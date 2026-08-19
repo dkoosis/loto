@@ -145,7 +145,7 @@ func checkDiffMatchesWriteSet(ctx context.Context, repoTop string, env Envelope)
 	}
 	actual := strings.Split(strings.TrimSpace(out), "\n")
 	if len(actual) == 1 && actual[0] == "" {
-		actual = nil
+		actual = []string{}
 	}
 	sort.Strings(actual)
 	declared := append([]string(nil), env.WriteSet...)
@@ -236,6 +236,12 @@ func blobRefsEqual(a, b *BlobRef) bool {
 // string slices — a single merge-style pass rather than building two maps for
 // what is, in practice, a handful of paths per candidate.
 func diffStringSets(a, b []string) (onlyA, onlyB []string) {
+	if a == nil {
+		a = []string{}
+	}
+	if b == nil {
+		b = []string{}
+	}
 	i, j := 0, 0
 	for i < len(a) && j < len(b) {
 		switch {
