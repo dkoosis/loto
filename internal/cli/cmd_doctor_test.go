@@ -2,13 +2,19 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"loto/internal/domain"
+	"loto/internal/store"
 )
+
+const tcFlagDryRun = "--dry-run"
 
 func TestDoctorHealthyEmpty(t *testing.T) {
 	withTempProject(t)
@@ -30,7 +36,7 @@ func TestDoctorDryRunDoesNotMutate(t *testing.T) {
 		t.Fatal("lock failed")
 	}
 	var out bytes.Buffer
-	if code := Run([]string{tcCmdDoctor, "--dry-run"}, &out, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdDoctor, tcFlagDryRun}, &out, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("doctor --dry-run exit %d", code)
 	}
 	if !strings.Contains(out.String(), "dry-run") {
@@ -211,7 +217,7 @@ func TestDoctor_ExpiredClaims_ListedAndRepaired(t *testing.T) {
 
 	// Dry-run names the claims sweep too, not just lock reclaims.
 	out.Reset()
-	if code := Run([]string{tcCmdDoctor, "--dry-run"}, &out, io.Discard); code != 0 {
+	if code := Run([]string{tcCmdDoctor, tcFlagDryRun}, &out, io.Discard); code != 0 {
 		t.Fatalf("doctor --dry-run exit %d: %s", code, out.String())
 	}
 	if !strings.Contains(out.String(), "would_gc_claims=1") {
@@ -228,5 +234,146 @@ func TestDoctor_ExpiredClaims_ListedAndRepaired(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "✓ healthy") {
 		t.Errorf("expired claim must be swept by --repair: %q", out.String())
+	}
+}
+
+// --- acceptance residue (loto-ovno.12) --------------------------------------
+
+// seedClaim reproduces the state a killed acceptance leaves behind: take a
+// real lease, convert it to a durable claim through the same guarded store
+// call AcceptCandidate uses — and stop there, writing no refs. That is exactly
+// the window loto-ovno.12 closes.
+func seedClaim(t *testing.T, candidateID, path string) {
+	t.Helper()
+	if code := Run([]string{tcCmdLock, path, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("lock")
+	}
+	rt, err := openRuntime(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Store.Close()
+	target, err := resolveCLITarget(rt.RepoTop, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := domain.AgentUUID(rt.Agent.UUID)
+	locks, err := rt.Store.LocksForOwnerAt(rt.Ctx, []domain.Target{target}, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, ok := locks[target.Canonical]
+	if !ok {
+		t.Fatalf("no lease on %s after lock", target.Canonical)
+	}
+	claims := []domain.CandidateClaim{{
+		PathCanonical: target.Canonical, CandidateID: candidateID,
+		OwnerUUID: owner, SessionUUID: rt.SessionUUID,
+		CreatedAt: time.Now(), Host: rt.Host, PID: 1,
+	}}
+	guard := store.ClaimGuard{
+		Owner: owner,
+		Epoch: map[string]int64{target.Canonical: held.Epoch},
+		Live:  rt.liveProbe(),
+	}
+	if err := rt.Store.InsertCandidateClaims(rt.Ctx, claims, guard); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func claimPaths(t *testing.T) []string {
+	t.Helper()
+	rt, err := openRuntime(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Store.Close()
+	claims, err := rt.Store.ListCandidateClaims(rt.Ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]string, len(claims))
+	for i := range claims {
+		out[i] = claims[i].PathCanonical
+	}
+	return out
+}
+
+func TestDoctorReportsClaimResidue(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	seedClaim(t, "cand-dead", tcTargetA)
+
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdDoctor}, &out, io.Discard); code != 0 {
+		t.Fatalf("doctor exit %d: %q", code, out.String())
+	}
+	if !strings.Contains(out.String(), "claim-residue candidate=cand-dead") {
+		t.Errorf("missing residue row: %q", out.String())
+	}
+	// Reporting alone must not delete anything.
+	if got := claimPaths(t); len(got) != 1 {
+		t.Errorf("doctor without --repair must not release, got %v", got)
+	}
+}
+
+func TestDoctorRepairReleasesClaimResidue(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	seedClaim(t, "cand-dead", tcTargetA)
+
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdDoctor, tcFlagRepair}, &out, io.Discard); code != 0 {
+		t.Fatalf("doctor --repair exit %d: %q", code, out.String())
+	}
+	if !strings.Contains(out.String(), "claim-residue-released candidates=1 paths=1") {
+		t.Errorf("missing release line: %q", out.String())
+	}
+	if got := claimPaths(t); len(got) != 0 {
+		t.Errorf("residue survived --repair: %v", got)
+	}
+}
+
+// The decisive half: a claim whose candidate ref EXISTS is a live candidate
+// under review, and --repair must leave it alone. Without this the repair pass
+// would clear the very protection acceptance just established.
+func TestDoctorRepairKeepsClaimsWithLiveCandidateRef(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	seedClaim(t, "cand-live", tcTargetA)
+	// A candidates ref may point at any object; doctor only asks whether the
+	// ref exists, matching AcceptCandidate's write-refs-last ordering.
+	if err := os.WriteFile(filepath.Join(repo, "envelope.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	blob := submitGitT(t, repo, "hash-object", "-w", "envelope.json")
+	submitGitT(t, repo, "update-ref", "refs/loto/candidates/cand-live", blob)
+
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdDoctor, tcFlagRepair}, &out, io.Discard); code != 0 {
+		t.Fatalf("doctor --repair exit %d: %q", code, out.String())
+	}
+	if strings.Contains(out.String(), "claim-residue") {
+		t.Errorf("a claim with a live candidate ref is not residue: %q", out.String())
+	}
+	if got := claimPaths(t); len(got) != 1 {
+		t.Errorf("live candidate's claims must survive --repair, got %v", got)
+	}
+}
+
+func TestDoctorDryRunCountsResidueWithoutReleasing(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	seedClaim(t, "cand-dead", tcTargetA)
+
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdDoctor, tcFlagDryRun}, &out, io.Discard); code != 0 {
+		t.Fatalf("doctor --dry-run exit %d", code)
+	}
+	if !strings.Contains(out.String(), "would_release_residue=1") {
+		t.Errorf("missing dry-run count: %q", out.String())
+	}
+	if got := claimPaths(t); len(got) != 1 {
+		t.Errorf("dry-run must not release, got %v", got)
 	}
 }

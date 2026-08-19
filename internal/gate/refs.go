@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -107,5 +108,40 @@ func WriteCandidateRefs(ctx context.Context, repoTop, candidateID, envelopeSHA, 
 // (a blob's content is opaque bytes to git, not an object reference) — without
 // this second ref, the commit becomes GC-eligible the moment its lane branch
 // moves past it in a later wave.
-func candidateRef(id string) string { return "refs/loto/candidates/" + id }
+// candidateRefPrefix is the one spelling of the candidates namespace — the
+// ref builder and the ref lister must not drift apart, or a residue scan
+// silently matches nothing.
+const candidateRefPrefix = "refs/loto/candidates/"
+
+func candidateRef(id string) string { return candidateRefPrefix + id }
 func proposalRef(id string) string  { return "refs/loto/proposals/" + id }
+
+// ListCandidateIDs returns the candidate id of every refs/loto/candidates/*
+// ref in the repo, sorted, so a caller can tell an accepted candidate from
+// acceptance residue.
+//
+// ‡ An error is never an empty list. AcceptCandidate writes the claims first
+// and the refs last, so "this candidate has no ref" is exactly the signal that
+// its acceptance never completed — which makes a failed ref read indisputably
+// dangerous to treat as "no refs exist": every live candidate's claims would
+// read as residue and a repair pass would delete them. Callers must abort on
+// the error rather than fall back to the zero value.
+func ListCandidateIDs(ctx context.Context, repoTop string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(refname)", candidateRefPrefix)
+	cmd.Dir = repoTop
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("gate: for-each-ref %s: %w: %s", candidateRefPrefix, err, strings.TrimSpace(stderr.String()))
+	}
+	var ids []string
+	for line := range strings.SplitSeq(strings.TrimSpace(stdout.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		ids = append(ids, strings.TrimPrefix(line, candidateRefPrefix))
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
