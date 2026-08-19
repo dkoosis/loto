@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"os/exec"
@@ -13,9 +14,10 @@ import (
 )
 
 const (
-	tcCmdSubmit = "submit"
-	tcFlagBead  = "--bead"
-	tcBeadOvno5 = "loto-ovno.5"
+	tcCmdSubmit   = "submit"
+	tcIntentRaced = "raced"
+	tcFlagBead    = "--bead"
+	tcBeadOvno5   = "loto-ovno.5"
 )
 
 func submitGitT(t *testing.T, dir string, args ...string) string {
@@ -149,7 +151,7 @@ func TestSubmit_RendersAdmissionRejection(t *testing.T) {
 		if _, err := rt.Store.ReleaseLocks(rt.Ctx, []domain.Target{aTarget}, domain.AgentUUID(a.UUID), rt.liveProbe()); err != nil {
 			t.Fatal(err)
 		}
-		if code := Run([]string{tcCmdLock, tcTargetA, "-t", "raced"}, io.Discard, io.Discard); code != 0 {
+		if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentRaced}, io.Discard, io.Discard); code != 0 {
 			t.Fatal("re-lock inside the hook")
 		}
 	}
@@ -216,7 +218,7 @@ func TestSubmit_RejectionLeavesNoLaneRef(t *testing.T) {
 		if _, err := rt.Store.ReleaseLocks(rt.Ctx, []domain.Target{aTarget}, domain.AgentUUID(a.UUID), rt.liveProbe()); err != nil {
 			t.Fatal(err)
 		}
-		if code := Run([]string{tcCmdLock, tcTargetA, "-t", "raced"}, io.Discard, io.Discard); code != 0 {
+		if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentRaced}, io.Discard, io.Discard); code != 0 {
 			t.Fatal("re-lock inside the hook")
 		}
 	}
@@ -283,4 +285,67 @@ func runOKSubmit(t *testing.T, argv ...string) string {
 		t.Fatalf("%v exit=%d out=%q err=%q", argv, code, out.String(), errBuf.String())
 	}
 	return out.String()
+}
+
+// TestSubmit_LeaseLostBetweenAdmissionAndClaim is loto-ovno.10 end-to-end:
+// admission judges on an epoch map read before AcceptCandidate takes the
+// op-flock, so a lease released and regranted in THAT window used to produce a
+// live peer lock and a candidate claim on the same path. The submit must lose,
+// and lose as a rejection — exit 1 with a reason, not an internal error.
+func TestSubmit_LeaseLostBetweenAdmissionAndClaim(t *testing.T) {
+	repo := withTempProject(t)
+	submitGitT(t, repo, "add", "-A")
+	submitGitT(t, repo, "commit", "-q", "-m", "base")
+	a := pinAgent(t)
+
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("lock")
+	}
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Perturb AFTER admission accepts — submitAfterLeaseCheck fires too early
+	// to exercise this window, which is the whole point of the second seam.
+	t.Cleanup(func() { submitBeforeAccept = nil })
+	submitBeforeAccept = func(rt *runtime) {
+		aTarget, err := resolveCLITarget(rt.RepoTop, tcTargetA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rt.Store.ReleaseLocks(rt.Ctx, []domain.Target{aTarget}, domain.AgentUUID(a.UUID), rt.liveProbe()); err != nil {
+			t.Fatal(err)
+		}
+		if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentRaced}, io.Discard, io.Discard); code != 0 {
+			t.Fatal("re-lock inside the hook")
+		}
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSubmit, tcTargetA, tcFlagBead, tcBeadOvno5}, &out, &errBuf)
+	if code != 1 {
+		t.Fatalf("want exit 1 (rejection), got %d: out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "stale-lease-epoch") ||
+		!strings.Contains(out.String(), "lease-epoch-changed") {
+		t.Errorf("missing rejection detail: %q", out.String())
+	}
+	// Neither half of the corruption may survive: no claim beside the new
+	// lease, and no refs for a candidate that never landed.
+	rt, err := openRuntime(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Store.Close()
+	claims, err := rt.Store.ListCandidateClaims(rt.Ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 0 {
+		t.Errorf("a lost race must claim nothing, got %+v", claims)
+	}
+	if refs := submitGitT(t, repo, "for-each-ref", "--format=%(refname)",
+		"refs/loto/candidates/", "refs/loto/proposals/"); refs != "" {
+		t.Errorf("a lost race must write no candidate refs, got %q", refs)
+	}
 }

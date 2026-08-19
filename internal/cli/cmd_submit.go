@@ -14,6 +14,7 @@ import (
 	"loto/internal/identity"
 	"loto/internal/lane"
 	"loto/internal/render"
+	"loto/internal/store"
 )
 
 func init() { register("submit", cmdSubmit) } //nolint:gochecknoinits // command registry pattern
@@ -301,8 +302,24 @@ func submitAccept(rt *runtime, repoTop string, env gate.Envelope, owner domain.A
 	submitter := domain.CandidateClaim{
 		OwnerUUID: owner, SessionUUID: rt.SessionUUID, Host: rt.Host, PID: pid, ProcStart: procStart,
 	}
-	envSHA, err := rt.Store.AcceptCandidate(rt.Ctx, repoTop, env, submitter)
+	if submitBeforeAccept != nil {
+		submitBeforeAccept(rt)
+	}
+	// The liveness probe is memoized for the same reason the lock path
+	// memoizes it: the guard evaluates the predicate once per write-set path
+	// inside a tx that must not stall on repeated process probes.
+	envSHA, err := rt.Store.AcceptCandidate(rt.Ctx, repoTop, env, submitter, memoLiveProbe(rt.liveProbe()))
 	if err != nil {
+		// A lost lease is a REJECTION, not an internal failure: the gate
+		// admitted this candidate on an epoch map read before AcceptCandidate
+		// took the op-flock, and the store refused it on the live state
+		// (loto-ovno.10). Same taxonomy class as an admission-time epoch
+		// mismatch — the proposer's remedy is identical, re-lock and resubmit.
+		var stale *store.LeaseRevalidationError
+		if errors.As(err, &stale) {
+			emitSubmitLeaseLost(stdout, candidateID, stale)
+			return 1
+		}
 		fmt.Fprintf(stderr, "✗ accept: %v\n", err)
 		return 3
 	}
@@ -382,6 +399,25 @@ func emitSubmitCaptureRejected(w io.Writer, candidateID string, err error) {
 	fmt.Fprintf(w, "✗ candidate-rejected count=1 id=%s reason=%s\n", candidateID, reason)
 	fmt.Fprintf(w, "✗ %v\n", err)
 }
+
+// emitSubmitLeaseLost renders a claim-time lease-revalidation refusal with the
+// same triage-first shape as an admission rejection, one ✗ row per path.
+func emitSubmitLeaseLost(w io.Writer, candidateID string, e *store.LeaseRevalidationError) {
+	fmt.Fprintf(w, "✗ candidate-rejected count=%d id=%s reason=%s\n",
+		len(e.Conflicts), candidateID, gate.ReasonStaleLeaseEpoch)
+	for _, c := range e.Conflicts {
+		fmt.Fprintf(w, "✗ target=%s reason=%s\n", c.Path, c.Reason)
+	}
+	fmt.Fprintln(w, "```bash")
+	fmt.Fprintln(w, `loto lock <target>... -t "why"`)
+	fmt.Fprintln(w, "```")
+}
+
+// submitBeforeAccept is a test seam, the twin of submitAfterLeaseCheck one
+// step later: it fires after admission accepts and before AcceptCandidate
+// takes the op-flock — the exact window loto-ovno.10 closes. Nil in
+// production.
+var submitBeforeAccept func(*runtime) //nolint:gochecknoglobals // test seam, production-nil
 
 // identityProcStart is a package-var indirection so tests can stub the
 // platform-specific proc-start reader without touching a real process table —

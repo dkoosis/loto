@@ -284,14 +284,14 @@ func mkCandidateClaim(path, candidateID, owner string) domain.CandidateClaim {
 	}
 }
 
-func TestInsertCandidateClaims_ThenListRoundTrips(t *testing.T) {
+func TestInsertCandidateClaimsUnguarded_ThenListRoundTrips(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	claims := []domain.CandidateClaim{
 		mkCandidateClaim(tcAGo, tcCand1, tcAlice),
 		mkCandidateClaim(tcBGo, tcCand1, tcAlice),
 	}
-	if err := s.InsertCandidateClaims(ctx, claims); err != nil {
+	if err := s.insertCandidateClaimsUnguarded(ctx, claims); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.ListCandidateClaims(ctx)
@@ -306,10 +306,10 @@ func TestInsertCandidateClaims_ThenListRoundTrips(t *testing.T) {
 	}
 }
 
-func TestInsertCandidateClaims_EmptyIsNoop(t *testing.T) {
+func TestInsertCandidateClaimsUnguarded_EmptyIsNoop(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	if err := s.InsertCandidateClaims(ctx, nil); err != nil {
+	if err := s.insertCandidateClaimsUnguarded(ctx, nil); err != nil {
 		t.Fatalf("empty insert must not error: %v", err)
 	}
 	got, err := s.ListCandidateClaims(ctx)
@@ -321,7 +321,7 @@ func TestInsertCandidateClaims_EmptyIsNoop(t *testing.T) {
 func TestReleaseCandidateClaims_DeletesOnlyThatCandidate(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	if err := s.InsertCandidateClaims(ctx, []domain.CandidateClaim{
+	if err := s.insertCandidateClaimsUnguarded(ctx, []domain.CandidateClaim{
 		mkCandidateClaim(tcAGo, tcCand1, tcAlice),
 		mkCandidateClaim(tcBGo, "cand-2", tcAlice),
 	}); err != nil {
@@ -350,7 +350,7 @@ func TestReleaseCandidateClaims_UnknownIDIsNoop(t *testing.T) {
 func TestCandidateClaimsForPaths_FiltersByPath(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	if err := s.InsertCandidateClaims(ctx, []domain.CandidateClaim{
+	if err := s.insertCandidateClaimsUnguarded(ctx, []domain.CandidateClaim{
 		mkCandidateClaim(tcAGo, tcCand1, tcAlice),
 		mkCandidateClaim(tcBGo, tcCand1, tcAlice),
 		mkCandidateClaim("c.go", "cand-2", tcAlice),
@@ -381,7 +381,7 @@ func TestAcquireLocks_BlockedByOverlappingCandidateClaim(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	l := mkFileLock(t, tcAGo, tcAlice, time.Hour)
-	if err := s.InsertCandidateClaims(ctx, []domain.CandidateClaim{
+	if err := s.insertCandidateClaimsUnguarded(ctx, []domain.CandidateClaim{
 		mkCandidateClaim(l.Target.Canonical, tcCand1, tcBob),
 	}); err != nil {
 		t.Fatal(err)
@@ -406,7 +406,7 @@ func TestAcquireLocks_BlockedEvenBySameOwnersOwnCandidateClaim(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	l := mkFileLock(t, tcAGo, tcAlice, time.Hour)
-	if err := s.InsertCandidateClaims(ctx, []domain.CandidateClaim{
+	if err := s.insertCandidateClaimsUnguarded(ctx, []domain.CandidateClaim{
 		mkCandidateClaim(l.Target.Canonical, tcCand1, tcAlice),
 	}); err != nil {
 		t.Fatal(err)
@@ -423,7 +423,7 @@ func TestAcquireLocks_NotBlockedByCandidateClaimOnDifferentPath(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	elsewhere := mkFileLock(t, "elsewhere.go", tcBob, time.Hour)
-	if err := s.InsertCandidateClaims(ctx, []domain.CandidateClaim{
+	if err := s.insertCandidateClaimsUnguarded(ctx, []domain.CandidateClaim{
 		mkCandidateClaim(elsewhere.Target.Canonical, tcCand1, tcBob),
 	}); err != nil {
 		t.Fatal(err)
@@ -441,7 +441,7 @@ func TestAcquireLocks_UnblockedAfterCandidateClaimReleased(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	l := mkFileLock(t, tcAGo, tcAlice, time.Hour)
-	if err := s.InsertCandidateClaims(ctx, []domain.CandidateClaim{
+	if err := s.insertCandidateClaimsUnguarded(ctx, []domain.CandidateClaim{
 		mkCandidateClaim(l.Target.Canonical, tcCand1, tcBob),
 	}); err != nil {
 		t.Fatal(err)
@@ -463,7 +463,7 @@ func TestAcquireLocks_CandidateClaimBlockAbortsWholeBatch(t *testing.T) {
 	ctx := context.Background()
 	clean := mkFileLock(t, "clean.go", tcAlice, time.Hour)
 	blocked := mkFileLock(t, "blocked.go", tcAlice, time.Hour)
-	if err := s.InsertCandidateClaims(ctx, []domain.CandidateClaim{
+	if err := s.insertCandidateClaimsUnguarded(ctx, []domain.CandidateClaim{
 		mkCandidateClaim(blocked.Target.Canonical, tcCand1, tcBob),
 	}); err != nil {
 		t.Fatal(err)

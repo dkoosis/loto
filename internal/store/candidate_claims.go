@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"sort"
 	"time"
 
 	"loto/internal/domain"
@@ -28,18 +30,101 @@ CREATE INDEX IF NOT EXISTS idx_candidate_claims_candidate ON candidate_claims(ca
 
 const candidateClaimCols = `path_canonical, candidate_id, owner_uuid, session_uuid, created_at, host, pid, proc_start`
 
-// InsertCandidateClaims writes one row per path in claims, all in one tx — a
-// candidate's write-set is claimed atomically or not at all, so a crash
-// mid-write can never leave some paths claimed and others free for a
-// concurrent acquire to slip into (the exact hole part 3 of loto-ovno.2
-// closes at the OTHER end, in AcquireLocks).
+// ClaimLeaseConflict is one write-set path whose lease no longer backs the
+// candidate at claim-insert time.
+type ClaimLeaseConflict struct {
+	Path   string
+	Reason string
+}
+
+// Conflict reasons a claim-time revalidation can report. Each maps onto the
+// git-gate.md stale-lease-epoch rejection class — they differ only in WHICH
+// way the authorization stopped holding, which is what the proposer needs to
+// read to know whether to re-lock or give up.
+const (
+	ClaimLeaseGone         = "lease-gone"
+	ClaimLeaseStale        = "lease-stale"
+	ClaimLeaseNotExclusive = "lease-not-exclusive"
+	ClaimLeaseEpochChanged = "lease-epoch-changed"
+)
+
+// LeaseRevalidationError reports that the leases a candidate was admitted
+// under no longer hold at the moment its claims would land. Conflicts is
+// sorted by path so the same state renders byte-identically.
+type LeaseRevalidationError struct {
+	Conflicts []ClaimLeaseConflict
+}
+
+func (e *LeaseRevalidationError) Error() string {
+	if len(e.Conflicts) == 1 {
+		return fmt.Sprintf("loto: lease revalidation failed: %s: %s",
+			e.Conflicts[0].Path, e.Conflicts[0].Reason)
+	}
+	return fmt.Sprintf("loto: lease revalidation failed on %d paths (first: %s: %s)",
+		len(e.Conflicts), e.Conflicts[0].Path, e.Conflicts[0].Reason)
+}
+
+// ClaimGuard is the lease state a candidate's claims must still find true at
+// insert time. Owner and Epoch come from the envelope the gate admitted; Live
+// is the same liveness probe the lock path uses, so "my lease is still good"
+// means exactly what it means everywhere else in loto.
+type ClaimGuard struct {
+	Owner domain.AgentUUID
+	Epoch map[string]int64
+	Live  domain.HolderLiveProbe
+}
+
+// InsertCandidateClaims revalidates guard against the live lock table and
+// writes one row per path in claims — both inside ONE tx under the project
+// op-flock, which is the whole point (loto-ovno.10, Codex #259 P1).
 //
-// No overlap check here: that is the ACQUISITION side's job (a new lease must
-// not overlap an unresolved claim), not the claim side's. Two candidates
-// legitimately claiming disjoint paths is the whole point of concurrent
-// candidates; a later bead (admission, loto-ovno.4) is what decides whether
-// THIS candidate was even eligible to reach here.
-func (s *Store) InsertCandidateClaims(ctx context.Context, claims []domain.CandidateClaim) error {
+// ‡ The check cannot live in the CLI. runSubmit reads each path's epoch, calls
+// gate.Admit, and only then asks the store to claim; nothing held the flock
+// across that gap, so a lease that expired, was force-broken, or was regranted
+// inside the window let AcquireLocks commit a PEER's lock first while
+// admission was still judging on the stale epoch map — leaving a live peer
+// lock AND this candidate's claim on the same path. Holding the same flock
+// AcquireLocks holds, and re-reading the leases in the same tx that inserts,
+// makes the two operations serialize: whichever gets the flock second sees the
+// other's committed effect and loses cleanly.
+//
+// A crash mid-write can still never leave some paths claimed and others free
+// (one tx), and no overlap check runs here: refusing a new lease that overlaps
+// an unresolved claim is the ACQUISITION side's job (blockOnCandidateClaims).
+// Two candidates legitimately claiming disjoint paths is the whole point of
+// concurrent candidates.
+func (s *Store) InsertCandidateClaims(ctx context.Context, claims []domain.CandidateClaim, guard ClaimGuard) error {
+	if len(claims) == 0 {
+		return nil
+	}
+	flock, err := acquireOpFlockFn(ctx, s.opFlockPath(), s.stderr)
+	if err != nil {
+		return err
+	}
+	defer flock.release()
+
+	tx, cleanup, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	if err := revalidateClaimLeasesTx(ctx, tx, claims, guard, time.Now()); err != nil {
+		return err
+	}
+
+	if err := insertCandidateClaimRowsTx(ctx, tx, claims); err != nil {
+		return err
+	}
+	return commitTxFn(tx)
+}
+
+// insertCandidateClaimsUnguarded writes the rows with no lease revalidation.
+// The store's own tests use it to plant claim fixtures whose subject is
+// something else (the acquisition-time overlap block, list/release round
+// trips); production has exactly one door, the guarded
+// InsertCandidateClaims above.
+func (s *Store) insertCandidateClaimsUnguarded(ctx context.Context, claims []domain.CandidateClaim) error {
 	if len(claims) == 0 {
 		return nil
 	}
@@ -48,7 +133,17 @@ func (s *Store) InsertCandidateClaims(ctx context.Context, claims []domain.Candi
 		return err
 	}
 	defer cleanup()
+	if err := insertCandidateClaimRowsTx(ctx, tx, claims); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
+// insertCandidateClaimRowsTx writes one row per claim inside the caller's tx —
+// a candidate's write-set is claimed atomically or not at all, so a crash
+// mid-write can never leave some paths claimed and others free for a
+// concurrent acquire to slip into.
+func insertCandidateClaimRowsTx(ctx context.Context, tx *sql.Tx, claims []domain.CandidateClaim) error {
 	for i := range claims {
 		c := &claims[i]
 		var procStart any
@@ -63,7 +158,50 @@ func (s *Store) InsertCandidateClaims(ctx context.Context, claims []domain.Candi
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
+}
+
+// revalidateClaimLeasesTx re-reads the lock table inside the claiming tx and
+// reports every write-set path whose authorization no longer holds.
+//
+// Requiring the submitter's OWN live exclusive lease at the pinned epoch is
+// sufficient to exclude a peer lock on the same path: AcquireLocks takes the
+// same op-flock and refuses to grant over a live exclusive lock, so a peer row
+// can only exist here if this owner's row is gone, stale, or was replaced —
+// each of which this check already rejects.
+func revalidateClaimLeasesTx(ctx context.Context, tx *sql.Tx, claims []domain.CandidateClaim, guard ClaimGuard, now time.Time) error {
+	all, err := loadLocksTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	held := make(map[string]domain.LockRecord, len(all))
+	for i := range all {
+		if all[i].OwnerUUID == guard.Owner {
+			held[all[i].Target.Canonical] = all[i]
+		}
+	}
+	ec := domain.EvalContext{Now: now, Live: guard.Live}
+
+	var conflicts []ClaimLeaseConflict
+	for i := range claims {
+		path := claims[i].PathCanonical
+		l, ok := held[path]
+		switch {
+		case !ok:
+			conflicts = append(conflicts, ClaimLeaseConflict{path, ClaimLeaseGone})
+		case ec.IsStale(l):
+			conflicts = append(conflicts, ClaimLeaseConflict{path, ClaimLeaseStale})
+		case l.EffectiveMode() != domain.ModeExclusive:
+			conflicts = append(conflicts, ClaimLeaseConflict{path, ClaimLeaseNotExclusive})
+		case guard.Epoch[path] != l.Epoch:
+			conflicts = append(conflicts, ClaimLeaseConflict{path, ClaimLeaseEpochChanged})
+		}
+	}
+	if len(conflicts) == 0 {
+		return nil
+	}
+	sort.Slice(conflicts, func(i, j int) bool { return conflicts[i].Path < conflicts[j].Path })
+	return &LeaseRevalidationError{Conflicts: conflicts}
 }
 
 // ReleaseCandidateClaims deletes every row for candidateID — the store-layer
