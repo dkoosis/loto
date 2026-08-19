@@ -102,40 +102,41 @@ func runSubmit(rt *runtime, repoTop, bead, msg string, targets []domain.Target, 
 		submitAfterLeaseCheck(rt)
 	}
 
-	// 2. Resolve the integration ref (bootstraps to HEAD on first use).
-	integrationRef, err := gate.ResolveIntegrationRef(rt.Ctx, repoTop)
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ resolve integration ref: %v\n", err)
-		return 3
+	// 2+3. Resolve the integration ref (bootstraps to HEAD on first use), then
+	// lane.Commit — private index, exact write-set, no HEAD move.
+	integrationRef, candidateID, proposal, code := submitBuildProposal(rt, repoTop, bead, msg, writeSet, stderr)
+	if code != 0 {
+		return code
 	}
 
-	// 3. lane.Commit — private index, exact write-set, no HEAD move.
-	candidateID := gate.NewCandidateID()
-	id := laneIdentity(rt.Agent)
-	proposal, err := lane.Commit(rt.Ctx, lane.Opts{
-		RepoTop:   repoTop,
-		Base:      integrationRef,
-		Ref:       candidateID,
-		WriteSet:  writeSet,
-		Message:   buildLaneMessage(msg, bead),
-		Author:    id,
-		Committer: id,
-	})
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ lane commit: %v\n", err)
-		return 3
-	}
+	// ‡ Every path below this point that does NOT accept must drop the lane
+	// branch lane.Commit just wrote (Codex #259 P2). `loto submit` documents
+	// "on reject: nothing is written to git" — without this, every rejected
+	// submit leaves a permanent refs/heads/loto/<id> behind, and a retry loop
+	// leaves one per attempt.
+	accepted := false
+	defer func() {
+		if !accepted {
+			discardLaneRef(rt.Ctx, repoTop, candidateID, stderr)
+		}
+	}()
 
-	// 4. Envelope capture. A Capture error (ErrAncestryNotTree, ErrPathNotBlob)
-	// is a real "this candidate is already invalid" verdict, not plumbing
-	// failure — render it as a rejection, not an infra error, so the operator
-	// sees the same triage-first shape admission's own rejections use.
+	// 4. Envelope capture. ONLY ErrAncestryNotTree / ErrPathNotBlob are
+	// candidate verdicts ("this candidate is already invalid") — rendered as a
+	// rejection so the operator sees admission's own triage-first shape. Any
+	// other error is plumbing (ctx cancelled, git ls-tree failed on
+	// permissions or a corrupt object store) and must exit 3, not masquerade
+	// as a verdict the operator can fix by editing their candidate.
 	env, err := gate.Capture(rt.Ctx, gate.CaptureParams{
 		RepoTop: repoTop, IntegrationRef: integrationRef, ProposalSHA: proposal,
 		Base: integrationRef, WriteSet: writeSet, CandidateID: candidateID,
 		Agent: owner, Session: rt.SessionUUID, BeadID: bead, LeaseEpoch: epochs,
 	})
 	if err != nil {
+		if !isCaptureVerdict(err) {
+			fmt.Fprintf(stderr, "✗ capture: %v\n", err)
+			return 3
+		}
 		emitSubmitCaptureRejected(stdout, candidateID, err)
 		return 1
 	}
@@ -146,14 +147,32 @@ func runSubmit(rt *runtime, repoTop, bead, msg string, targets []domain.Target, 
 	// trivially agree with itself and never catch anything — the whole point
 	// of a fresh read here is to notice a lease released and re-granted (or
 	// reclaimed) in the window between the lease check and this call.
+	//
+	// ‡ LOTO_GATE=off is the documented outage escape hatch (git-gate.md
+	// Outcome 7, "the gate can never become the outage"). Checked HERE rather
+	// than inside Admit because gate.Bypassed's contract puts the advisory and
+	// the mandatory audit event on the caller — this is that caller.
+	if gate.Bypassed() {
+		code = submitGateBypass(rt, repoTop, env, owner, candidateID, proposal, writeSet, stdout, stderr)
+		accepted = code == 0
+		return code
+	}
+
 	currentEpochs, err := currentPathEpochs(rt, targets, owner)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ admission: read current epochs: %v\n", err)
 		return 3
 	}
+	// ‡ gate.IntegrationRef (the symbolic name), NOT the SHA resolved back at
+	// step 2 (Codex #259 P1). AdmitParams.IntegrationRef is documented "re-read
+	// fresh" — that is the whole basis of stale-preimage / stale-ancestry.
+	// Handing it the frozen SHA makes both checks reread the same commit the
+	// envelope was captured from, so neither verdict could ever fire. The
+	// resolved SHA stays in use for the proposal base and the capture snapshot,
+	// which DO want the point-in-time value.
 	decision, err := gate.Admit(rt.Ctx, env, gate.AdmitParams{
 		RepoTop: repoTop, PresentedProposalSHA: proposal,
-		IntegrationRef: integrationRef, CurrentEpoch: currentEpochs,
+		IntegrationRef: gate.IntegrationRef, CurrentEpoch: currentEpochs,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ admission: %v\n", err)
@@ -163,10 +182,84 @@ func runSubmit(rt *runtime, repoTop, bead, msg string, targets []domain.Target, 
 		emitSubmitRejected(stdout, candidateID, decision)
 		return 1
 	}
-
 	// 6. Accept: write refs/loto/candidates + refs/loto/proposals atomically,
 	// convert each lease into a durable candidate claim.
+	code = submitAccept(rt, repoTop, env, owner, candidateID, proposal, writeSet, stdout, stderr)
+	accepted = code == 0
+	return code
+}
+
+// submitBuildProposal is runSubmit steps 2 and 3: resolve the integration ref
+// this candidate is based on, then build the proposal commit with lane.Commit.
+// The returned integrationRef is a point-in-time SHA — right for the proposal
+// base and for the capture snapshot, and deliberately NOT what admission
+// re-reads (see the Admit call site).
+//
+// ‡ On success the caller now owns refs/heads/loto/<candidateID>, which
+// lane.Commit has already written — every non-accepting path from there must
+// discard it (discardLaneRef).
+func submitBuildProposal(rt *runtime, repoTop, bead, msg string, writeSet []string, stderr io.Writer) (integrationRef, candidateID, proposal string, code int) {
+	integrationRef, err := gate.ResolveIntegrationRef(rt.Ctx, repoTop)
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ resolve integration ref: %v\n", err)
+		return "", "", "", 3
+	}
+	candidateID = gate.NewCandidateID()
+	id := laneIdentity(rt.Agent)
+	proposal, err = lane.Commit(rt.Ctx, lane.Opts{
+		RepoTop:   repoTop,
+		Base:      integrationRef,
+		Ref:       candidateID,
+		WriteSet:  writeSet,
+		Message:   buildLaneMessage(msg, bead),
+		Author:    id,
+		Committer: id,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ lane commit: %v\n", err)
+		return "", "", "", 3
+	}
+	return integrationRef, candidateID, proposal, 0
+}
+
+// submitGateBypass is the LOTO_GATE=off path: accept without an admission
+// verdict, but never silently. gate.Bypassed's contract puts both obligations
+// on the caller — print the loud advisory, and persist the audit event — and
+// the event is not optional: a bypass that cannot be logged is exactly the
+// silent normalization the escape hatch is designed to prevent, so a failed
+// write refuses the submit rather than proceeding unrecorded.
+func submitGateBypass(rt *runtime, repoTop string, env gate.Envelope, owner domain.AgentUUID, candidateID, proposal string, writeSet []string, stdout, stderr io.Writer) int {
+	fmt.Fprintln(stderr, gate.BypassAdvisory)
+	if err := rt.Store.RecordGateBypass(rt.Ctx, string(owner), "loto submit: LOTO_GATE=off"); err != nil {
+		fmt.Fprintf(stderr, "✗ record gate bypass: %v\n", err)
+		return 3
+	}
 	return submitAccept(rt, repoTop, env, owner, candidateID, proposal, writeSet, stdout, stderr)
+}
+
+// isCaptureVerdict separates gate.Capture's two candidate VERDICTS — the
+// candidate is structurally invalid, and the operator fixes it by resubmitting
+// — from every other error it can return, which is infrastructure (context
+// cancelled, a git plumbing call that failed on permissions or a corrupt
+// object store). Reporting the second kind as `candidate-rejected` would send
+// the operator editing a candidate that was never the problem.
+func isCaptureVerdict(err error) bool {
+	return errors.Is(err, gate.ErrAncestryNotTree) || errors.Is(err, gate.ErrPathNotBlob)
+}
+
+// discardLaneRef drops refs/heads/loto/<candidateID>, the branch lane.Commit
+// writes before the candidate has been judged. Best-effort and advisory-only:
+// the submit already has its verdict, and failing to clean up a temporary ref
+// must not turn a clean rejection into an infrastructure error. The proposal
+// commit itself stays reachable while any candidate/proposal ref names it, so
+// this only ever unreaches an object no accepted candidate depends on.
+func discardLaneRef(ctx context.Context, repoTop, candidateID string, stderr io.Writer) {
+	err := gate.UpdateRefsTx(ctx, repoTop, []gate.RefUpdate{{
+		Verb: gate.VerbDelete, Ref: "refs/heads/loto/" + candidateID,
+	}})
+	if err != nil {
+		fmt.Fprintf(stderr, "⚠ lane ref refs/heads/loto/%s not cleaned up: %v\n", candidateID, err)
+	}
 }
 
 // submitLeaseCheck is runSubmit step 1 — "fail at the cheap end": no git

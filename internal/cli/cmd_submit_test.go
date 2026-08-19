@@ -188,6 +188,82 @@ func TestSubmit_EmptyWriteSet_UsageError(t *testing.T) {
 	}
 }
 
+// TestSubmit_RejectionLeavesNoLaneRef is Codex #259 P2: lane.Commit writes
+// refs/heads/loto/<id> BEFORE the candidate has been judged, so a rejection
+// used to leave that branch behind permanently — one per failed retry, against
+// submit's own documented "on reject: nothing is written to git."
+func TestSubmit_RejectionLeavesNoLaneRef(t *testing.T) {
+	repo := withTempProject(t)
+	submitGitT(t, repo, "add", "-A")
+	submitGitT(t, repo, "commit", "-q", "-m", "base")
+	a := pinAgent(t)
+
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("lock")
+	}
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same epoch-bump perturbation TestSubmit_RendersAdmissionRejection uses:
+	// a real rejection, arrived at through the real flow.
+	t.Cleanup(func() { submitAfterLeaseCheck = nil })
+	submitAfterLeaseCheck = func(rt *runtime) {
+		aTarget, err := resolveCLITarget(rt.RepoTop, tcTargetA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rt.Store.ReleaseLocks(rt.Ctx, []domain.Target{aTarget}, domain.AgentUUID(a.UUID), rt.liveProbe()); err != nil {
+			t.Fatal(err)
+		}
+		if code := Run([]string{tcCmdLock, tcTargetA, "-t", "raced"}, io.Discard, io.Discard); code != 0 {
+			t.Fatal("re-lock inside the hook")
+		}
+	}
+
+	var out, errBuf bytes.Buffer
+	if code := Run([]string{tcCmdSubmit, tcTargetA, tcFlagBead, tcBeadOvno5}, &out, &errBuf); code != 1 {
+		t.Fatalf("want exit 1 (rejection), got %d: out=%q err=%q", code, out.String(), errBuf.String())
+	}
+
+	// No lane branch may survive a rejection, whatever the candidate id was.
+	if refs := submitGitT(t, repo, "for-each-ref", "--format=%(refname)", "refs/heads/loto/"); refs != "" {
+		t.Errorf("rejected submit left lane refs behind: %q", refs)
+	}
+}
+
+// TestSubmit_GateBypass is Codex #259 P1: LOTO_GATE=off is the documented
+// outage escape hatch, and submit is its only caller — unchecked, the hatch is
+// inert. The bypass must accept without admission, print the loud advisory,
+// and leave the mandatory audit event behind.
+func TestSubmit_GateBypass(t *testing.T) {
+	repo := withTempProject(t)
+	submitGitT(t, repo, "add", "-A")
+	submitGitT(t, repo, "commit", "-q", "-m", "base")
+	pinAgent(t)
+	t.Setenv("LOTO_GATE", "off")
+
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("lock")
+	}
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSubmit, tcTargetA, tcFlagBead, tcBeadOvno5}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("bypass submit: exit=%d out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "LOTO_GATE=off") {
+		t.Errorf("bypass must print the advisory: %q", errBuf.String())
+	}
+	id := candidateIDFromSuccessRow(t, out.String())
+	if sha := submitGitT(t, repo, "rev-parse", "--verify", "--quiet", "refs/loto/candidates/"+id); sha == "" {
+		t.Error("bypass must still write the candidate ref")
+	}
+}
+
 // candidateIDFromSuccessRow pulls "id=c-..." out of the success row.
 func candidateIDFromSuccessRow(t *testing.T, out string) string {
 	t.Helper()
