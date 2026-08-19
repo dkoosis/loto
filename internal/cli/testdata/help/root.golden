@@ -10,6 +10,7 @@ commands:
   guard    Wrap checkout|switch|restore; refuses under a live peer (make hooks installs it)
   status   Show lock state; --mine to filter to yours, --collisions for ≥2-owner targets
   doctor   Detect and optionally repair stale locks
+  sync     Fast-forward unleased paths from refs/loto/integration; report conflicts
   tag      Leave a note on a locked target, or pin one to unlocked territory
   ack      Dismiss a tag or territory tag by ID
   whoami   Print agent identity
