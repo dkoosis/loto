@@ -97,7 +97,9 @@ func cmdBeacon(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 
 	repoTop, _ := repoTopForCwd(ctx)
-	targets, invalid := validateLockTargets(fs.Args(), repoTop)
+	// loto-z5nb: a beacon may name a path that does not exist yet — announcing
+	// a Write about to CREATE it is the case a beacon exists to protect.
+	targets, invalid := validateLockTargets(fs.Args(), repoTop, true)
 	if len(invalid) > 0 {
 		render.EmitInvalid(stderr, invalid)
 		return 2

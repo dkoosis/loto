@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"time"
 
 	"loto/internal/domain"
@@ -62,7 +63,7 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	repoTop, _ := repoTopForCwd(ctx)
-	targets, invalid := validateLockTargets(fs.Args(), repoTop)
+	targets, invalid := validateLockTargets(fs.Args(), repoTop, false)
 	if len(invalid) > 0 {
 		render.EmitInvalid(stderr, invalid)
 		return 2
@@ -85,7 +86,16 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // validateLockTargets canonicalizes and Lstat-validates each path before any
 // store work, so rejection produces a single render.EmitInvalid block and
 // leaves zero side effects on disk or DB.
-func validateLockTargets(args []string, repoTop string) ([]domain.Target, []render.InvalidTarget) {
+//
+// allowMissing tolerates ENOENT instead of rejecting it — the beacon-scoped
+// carve-out (loto-z5nb): `loto beacon` announces a write about to happen, and
+// a Write tool call creating a brand-new path is exactly the case a beacon
+// exists to protect. domain.Canonicalize (inside resolveCLITarget) already
+// tolerates a non-existent path; this was the one place downstream that still
+// demanded the file pre-exist. Every other check — symlink, non-regular —
+// still runs unconditionally when the path DOES exist, and `loto lock` itself
+// passes false, unchanged.
+func validateLockTargets(args []string, repoTop string, allowMissing bool) ([]domain.Target, []render.InvalidTarget) {
 	targets := make([]domain.Target, 0, len(args))
 	seen := make(map[string]bool, len(args))
 	var invalid []render.InvalidTarget
@@ -100,26 +110,53 @@ func validateLockTargets(args []string, repoTop string) ([]domain.Target, []rend
 			continue
 		}
 		seen[t.Canonical] = true
-		lst, err := os.Lstat(t.Canonical)
-		if err != nil {
-			reason := "stat-failed: " + err.Error()
-			if errors.Is(err, fs.ErrNotExist) {
-				reason = "not-found"
-			}
+		if reason := statFileTargetReason(repoTop, t.Canonical, allowMissing); reason != "" {
 			invalid = append(invalid, render.InvalidTarget{Path: t.Canonical, Reason: reason})
-			continue
-		}
-		if lst.Mode()&os.ModeSymlink != 0 {
-			invalid = append(invalid, render.InvalidTarget{Path: t.Canonical, Reason: "symlink"})
-			continue
-		}
-		if !lst.Mode().IsRegular() {
-			invalid = append(invalid, render.InvalidTarget{Path: t.Canonical, Reason: "not-regular-file"})
 			continue
 		}
 		targets = append(targets, t)
 	}
 	return targets, invalid
+}
+
+// statFileTargetReason runs the Lstat-shaped half of target validation for
+// one already-canonicalized, already-deduped path. Empty string is a clean
+// pass (which the allowMissing carve-out also produces, on ENOENT); any other
+// value names why the caller should reject it. Split out from
+// validateLockTargets purely to keep that loop's branching under the
+// complexity gate (gocognit) — no behavior change from the inline version it
+// replaces.
+//
+// ‡ canonical is REPO-relative (resolveCLITarget -> normalizeRepoPath), so it
+// must be stat'd under repoTop, not against the process CWD. Statting it bare
+// silently means "repoTop/<cwd-suffix>/<canonical>" whenever loto runs from a
+// subdirectory — which used to surface as a spurious `not-found` on `loto
+// lock`, and with the allowMissing carve-out below would instead SILENTLY
+// admit a beacon while skipping the symlink and regular-file checks the path
+// would actually have failed (Codex #258 P1). repoTop is empty only outside a
+// git repo, where CWD-relative is the only meaning available.
+func statFileTargetReason(repoTop, canonical string, allowMissing bool) string {
+	probe := canonical
+	if repoTop != "" {
+		probe = filepath.Join(repoTop, canonical)
+	}
+	lst, err := os.Lstat(probe)
+	if err != nil {
+		if allowMissing && errors.Is(err, fs.ErrNotExist) {
+			return ""
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			return "not-found"
+		}
+		return "stat-failed: " + err.Error()
+	}
+	if lst.Mode()&os.ModeSymlink != 0 {
+		return "symlink"
+	}
+	if !lst.Mode().IsRegular() {
+		return "not-regular-file"
+	}
+	return ""
 }
 
 // classifyCanonicalizeErr maps domain errors to design.md reason tokens.

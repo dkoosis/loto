@@ -540,6 +540,14 @@ func TestReleaseLocks_DistinguishesMissingFromNotOwner(t *testing.T) {
 	}
 }
 
+// mkTargetRec wraps a bare canonical path into the non-beacon LockRecord
+// validateFileTarget now takes — plain `loto lock` shape, the case every
+// TestValidateFileTarget_TypedErrors assertion predates the beacon carve-out
+// with (loto-z5nb).
+func mkTargetRec(canonical string) domain.LockRecord {
+	return domain.LockRecord{Target: domain.Target{Canonical: canonical}}
+}
+
 // TestValidateFileTarget_TypedErrors verifies validateFileTarget returns
 // *TargetValidationError with reason + Nlink preserved (replaces the prior
 // bare ErrTarget* sentinels that lost state across the wrap).
@@ -556,13 +564,13 @@ func TestValidateFileTarget_TypedErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	var tve *TargetValidationError
-	if err := validateFileTarget(sym); !errors.As(err, &tve) || tve.Reason != ReasonSymlink {
+	if err := validateFileTarget(mkTargetRec(sym)); !errors.As(err, &tve) || tve.Reason != ReasonSymlink {
 		t.Fatalf("symlink: got %v, want ReasonSymlink", err)
 	}
 
 	// directory → ReasonNotRegular
 	tve = nil
-	if err := validateFileTarget(dir); !errors.As(err, &tve) || tve.Reason != ReasonNotRegular {
+	if err := validateFileTarget(mkTargetRec(dir)); !errors.As(err, &tve) || tve.Reason != ReasonNotRegular {
 		t.Fatalf("dir: got %v, want ReasonNotRegular", err)
 	}
 
@@ -572,11 +580,51 @@ func TestValidateFileTarget_TypedErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	tve = nil
-	if err := validateFileTarget(realPath); !errors.As(err, &tve) || tve.Reason != ReasonMultiLinked {
+	if err := validateFileTarget(mkTargetRec(realPath)); !errors.As(err, &tve) || tve.Reason != ReasonMultiLinked {
 		t.Fatalf("multi-link: got %v, want ReasonMultiLinked", err)
 	}
 	if tve.Nlink < 2 {
 		t.Fatalf("Nlink not preserved: got %d, want >= 2", tve.Nlink)
+	}
+}
+
+// TestValidateFileTarget_BeaconToleratesMissingPath is loto-z5nb's own AC: a
+// beacon for a path that does not exist yet must pass, since it announces a
+// Write about to CREATE it — the case AcquireLocks previously had nothing to
+// protect.
+func TestValidateFileTarget_BeaconToleratesMissingPath(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "new.go")
+
+	beacon := domain.LockRecord{Target: domain.Target{Canonical: missing}, Mode: domain.ModeShared, PID: 0, Beacon: true}
+	if !beacon.IsBeacon() {
+		t.Fatal("test fixture invariant broken: want a beacon shape")
+	}
+	if err := validateFileTarget(beacon); err != nil {
+		t.Errorf("beacon on a missing path must be allowed, got %v", err)
+	}
+
+	// The carve-out is ENOENT-only: a beacon whose path IS a symlink is still
+	// refused, same as a plain lock.
+	realPath := filepath.Join(dir, "real.go")
+	if err := os.WriteFile(realPath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sym := filepath.Join(dir, "sym.go")
+	if err := os.Symlink(realPath, sym); err != nil {
+		t.Fatal(err)
+	}
+	beaconOnSymlink := domain.LockRecord{Target: domain.Target{Canonical: sym}, Mode: domain.ModeShared, PID: 0, Beacon: true}
+	var tve *TargetValidationError
+	if err := validateFileTarget(beaconOnSymlink); !errors.As(err, &tve) || tve.Reason != ReasonSymlink {
+		t.Fatalf("beacon on an existing symlink must still be refused, got %v", err)
+	}
+
+	// A plain (non-beacon) lock on a missing path is unaffected — the carve-out
+	// is beacon-scoped, not a general relaxation.
+	plain := mkTargetRec(missing)
+	if err := validateFileTarget(plain); err == nil {
+		t.Error("a plain lock on a missing path must still be refused")
 	}
 }
 
