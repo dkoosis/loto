@@ -179,7 +179,7 @@ func assertLocksHeld(rt *runtime, ec domain.EvalContext, targets []domain.Target
 		case !ok:
 			blocked = append(blocked, laneBlock{t.Canonical, "no-lock-held"})
 		case ec.IsStale(l):
-			blocked = append(blocked, laneBlock{t.Canonical, "lock-stale"})
+			blocked = append(blocked, laneBlock{t.Canonical, lockStaleReason})
 		case l.EffectiveMode() != domain.ModeExclusive:
 			blocked = append(blocked, laneBlock{t.Canonical, "lock-not-exclusive"})
 		default:
@@ -209,7 +209,7 @@ func reassertLocksHeld(rt *runtime, ec domain.EvalContext, targets []domain.Targ
 		case !ok:
 			tainted = append(tainted, laneBlock{t.Canonical, "lock-lost"})
 		case ec.IsStale(l):
-			tainted = append(tainted, laneBlock{t.Canonical, "lock-stale"})
+			tainted = append(tainted, laneBlock{t.Canonical, lockStaleReason})
 		case l.EffectiveMode() != domain.ModeExclusive:
 			tainted = append(tainted, laneBlock{t.Canonical, "lock-downgraded"})
 		case !l.CreatedAt.Equal(before[t.Canonical]):
