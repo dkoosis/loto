@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/gate"
 	"loto/internal/identity"
 	"loto/internal/render"
 	"loto/internal/store"
@@ -135,6 +137,8 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 	renderDoctorReport(stdout, report)
 
+	residue := reportClaimResidue(rt, repoTop, stdout)
+
 	orphans, scanIncomplete := scanOrphansAndHint(rt, repoTop, orphanFlags{
 		orphanMode:    *orphanMode,
 		restoreOrphan: *restoreOrphan,
@@ -144,15 +148,15 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	if *dryRun {
 		// would_gc_claims mirrors the repair tx's gcClaimsTx sweep (D3) so the
 		// dry-run names everything --repair would delete, not just lock rows.
-		fmt.Fprintf(stdout, "✓ dry-run would_reclaim=%d would_gc_claims=%d\n",
-			len(report.StaleLocks), len(report.ExpiredClaims))
+		fmt.Fprintf(stdout, "✓ dry-run would_reclaim=%d would_gc_claims=%d would_release_residue=%d\n",
+			len(report.StaleLocks), len(report.ExpiredClaims), len(residue))
 		if scanIncomplete {
 			return 3
 		}
 		return 0
 	}
 	if *repair {
-		if code := doRepair(rt, live, *restoreOrphan, orphans, stdout, stderr); code != 0 {
+		if code := doRepair(rt, live, *restoreOrphan, orphans, residue, stdout, stderr); code != 0 {
 			return code
 		}
 	}
@@ -190,12 +194,15 @@ func scanOrphansAndHint(rt *runtime, repoTop string, f orphanFlags, stdout io.Wr
 	return orphans, scanIncomplete
 }
 
-func doRepair(rt *runtime, live domain.HolderLiveProbe, restoreOrphan bool, orphans []string, stdout, stderr io.Writer) int {
+func doRepair(rt *runtime, live domain.HolderLiveProbe, restoreOrphan bool, orphans []string, residue []claimResidue, stdout, stderr io.Writer) int {
 	if err := rt.Store.DoctorRepair(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), live); err != nil {
 		fmt.Fprintf(stderr, "✗ repair: %v\n", err)
 		return 3
 	}
 	fmt.Fprintln(stdout, "✓ repaired")
+	if code := releaseClaimResidue(rt, residue, stdout, stderr); code != 0 {
+		return code
+	}
 	if restoreOrphan && len(orphans) > 0 {
 		restored, failures, err := rt.Store.RestoreOrphanMode(rt.Ctx, orphans)
 		if err != nil {
@@ -282,4 +289,102 @@ func walkRepoCandidates(root string) (out []string, skipped int, firstErr error)
 		return nil
 	})
 	return out, skipped, firstErr
+}
+
+// claimResidue is one candidate whose durable claims outlived an acceptance
+// that never finished writing its refs.
+type claimResidue struct {
+	CandidateID string
+	Paths       []string
+}
+
+// scanClaimResidue finds candidate claims whose candidate ref is absent —
+// acceptance residue (loto-ovno.12, Codex #261 P1).
+//
+// AcceptCandidate inserts the claims, then writes refs/loto/candidates/<id>
+// last. Its in-process failure paths compensate, but a SIGKILL or power loss
+// between the two cannot run anything: the claims survive with no ref behind
+// them, acquisition reads every claim as unresolved, and the write set is
+// blocked with no way to clear it. Because the refs are written last, their
+// absence is decisive — a claim whose candidate id has no ref is residue.
+//
+// ‡ A failed ref read returns an error and NO residue. Reading "git failed" as
+// "no refs exist" would classify every live candidate's claims as residue and
+// hand --repair a delete list covering the whole store.
+func scanClaimResidue(rt *runtime, repoTop string) ([]claimResidue, error) {
+	claims, err := rt.Store.ListCandidateClaims(rt.Ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(claims) == 0 {
+		return nil, nil
+	}
+	if repoTop == "" {
+		return nil, errNoRepoForResidue
+	}
+	ids, err := gate.ListCandidateIDs(rt.Ctx, repoTop)
+	if err != nil {
+		return nil, err
+	}
+	live := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		live[id] = struct{}{}
+	}
+	byID := make(map[string][]string)
+	for i := range claims {
+		if _, ok := live[claims[i].CandidateID]; ok {
+			continue
+		}
+		byID[claims[i].CandidateID] = append(byID[claims[i].CandidateID], claims[i].PathCanonical)
+	}
+	out := make([]claimResidue, 0, len(byID))
+	for id, paths := range byID {
+		sort.Strings(paths)
+		out = append(out, claimResidue{CandidateID: id, Paths: paths})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CandidateID < out[j].CandidateID })
+	return out, nil
+}
+
+// errNoRepoForResidue: without a repo top there is no candidates namespace to
+// read, so residue cannot be told from a live candidate. Reported, never
+// silently treated as "clean" — see scanClaimResidue's second ‡.
+var errNoRepoForResidue = errors.New("loto: cannot check candidate refs outside a repo")
+
+// reportClaimResidue renders the residue rows and returns them. A read failure
+// is a ⚠ advisory, not a hard error: doctor's other checks still ran, and the
+// repair path below refuses to act on an unknown state anyway.
+func reportClaimResidue(rt *runtime, repoTop string, stdout io.Writer) []claimResidue {
+	residue, err := scanClaimResidue(rt, repoTop)
+	if err != nil {
+		fmt.Fprintf(stdout, "⚠ claim-residue-scan err=%v\n", err)
+		return nil
+	}
+	for _, r := range residue {
+		fmt.Fprintf(stdout, "⚠ claim-residue candidate=%s paths=%d first=%s\n",
+			r.CandidateID, len(r.Paths), r.Paths[0])
+	}
+	if len(residue) > 0 {
+		fmt.Fprintln(stdout, "```bash")
+		fmt.Fprintln(stdout, "loto doctor --repair")
+		fmt.Fprintln(stdout, "```")
+	}
+	return residue
+}
+
+// releaseClaimResidue drops the residue rows under --repair. Each candidate is
+// released on its own so one failure cannot hide the rest.
+func releaseClaimResidue(rt *runtime, residue []claimResidue, stdout, stderr io.Writer) int {
+	released := 0
+	for _, r := range residue {
+		if err := rt.Store.ReleaseCandidateClaims(rt.Ctx, r.CandidateID); err != nil {
+			fmt.Fprintf(stderr, "✗ claim-residue candidate=%s err=%v\n", r.CandidateID, err)
+			return 3
+		}
+		released += len(r.Paths)
+	}
+	if released > 0 {
+		fmt.Fprintf(stdout, "✓ claim-residue-released candidates=%d paths=%d\n", len(residue), released)
+	}
+	return 0
 }
