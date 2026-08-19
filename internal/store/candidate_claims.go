@@ -290,3 +290,40 @@ func scanCandidateClaims(rows *sql.Rows) ([]domain.CandidateClaim, error) {
 	}
 	return out, rows.Err()
 }
+
+// claimCompensateTimeout bounds the compensating claim delete AcceptCandidate
+// runs when the git side of an acceptance fails after the claims already
+// committed. Same shape and rationale as auditDetachedTimeout.
+const claimCompensateTimeout = 2 * time.Second
+
+// releaseCandidateClaimsForPathsDetached undoes exactly the rows one
+// AcceptCandidate attempt inserted, on a context detached from the caller's.
+//
+// ‡ Detached (Codex #261 P1): the usual reason WriteBlob/WriteCandidateRefs
+// fails is that the caller went away — Ctrl-C, a cancelled ctx. Compensating
+// on that same cancelled ctx fails too, and the claims stay on disk with no
+// candidate refs behind them. Acquisition treats every such claim as
+// unresolved and there is no stale-claim reclamation path yet, so the write
+// set would be blocked for good.
+//
+// ‡ Path-scoped, not candidate-scoped (Codex #261 P2): a candidate-wide
+// DELETE also removes rows an earlier accepted candidate holds under the same
+// ID. NewCandidateID makes that collision vanishingly unlikely today, but the
+// compensation's contract is "undo what THIS attempt wrote," and scoping to
+// the write set states that in the query instead of resting on ID uniqueness.
+func (s *Store) releaseCandidateClaimsForPathsDetached(candidateID string, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), claimCompensateTimeout) //nolint:forbidigo // compensating delete must outlive the (cancelled) acceptance, else the claims strand with no refs behind them.
+	defer cancel()
+
+	placeholders, args := inClauseStrings(paths)
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM candidate_claims WHERE candidate_id = ? AND path_canonical IN (`+placeholders+`)`, //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+		append([]any{candidateID}, args...)...)
+	if err != nil && s.stderr != nil {
+		fmt.Fprintf(s.stderr, "loto: releasing %d claim(s) for candidate %s failed: %v\n", len(paths), candidateID, err)
+	}
+	return err
+}

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"os/exec"
@@ -395,5 +396,98 @@ func assertNoCandidateResidue(t *testing.T, s *Store, repoTop string) {
 	}
 	if refs := gitT(t, repoTop, "for-each-ref", "--format=%(refname)", "refs/loto/"); refs != "" {
 		t.Errorf("refused accept left refs behind: %q", refs)
+	}
+}
+
+// A caller that goes away mid-acceptance (Ctrl-C) must not strand its claims.
+// Codex #261 P1: the compensating release used to run on the caller's own
+// context, so the very cancellation that failed WriteBlob also failed the
+// cleanup — leaving durable claims with no candidate refs behind them, and no
+// reclamation path to clear them. Fails with a ctx-bound compensating delete.
+func TestAcceptCandidate_CompensatesClaimsWhenCallerCancels(t *testing.T) {
+	s := mustOpen(t)
+	repoTop, integration := newGateRepo(t)
+	writeTestFile(t, repoTop, tcAGo, "package x\n\nvar A = 2\n")
+	proposal := buildProposal(t, repoTop, integration)
+	epochs := leaseWriteSet(t, s, repoTop, tcAlice, tcAGo)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	env, err := gate.Capture(ctx, gate.CaptureParams{
+		RepoTop: repoTop, IntegrationRef: integration, ProposalSHA: proposal,
+		Base: integration, WriteSet: []string{tcAGo}, CandidateID: "cancelled", BeadID: tcBead,
+		LeaseEpoch: epochs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Cancel the moment the claim insert commits — the exact window where the
+	// rows are durable and the git side has not started.
+	origCommit := commitTxFn
+	defer func() { commitTxFn = origCommit }()
+	commitTxFn = func(tx *sql.Tx) error {
+		err := origCommit(tx)
+		commitTxFn = origCommit
+		cancel()
+		return err
+	}
+
+	if _, err := s.AcceptCandidate(ctx, repoTop, env, domain.CandidateClaim{OwnerUUID: tcAlice, Host: tcHost}, liveProbe); err == nil {
+		t.Fatal("want AcceptCandidate to fail on the cancelled context, got nil")
+	}
+
+	claims, err := s.ListCandidateClaims(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("cancelled acceptance stranded %d claim(s): %+v", len(claims), claims)
+	}
+}
+
+// Compensation undoes THIS attempt's rows and nothing else. Codex #261 P2: a
+// candidate-wide DELETE also clears claims an already-accepted candidate holds
+// under the same id, leaving its proposal unprotected. NewCandidateID makes
+// that collision unlikely, so the guarantee is asserted at the store's own
+// door rather than left resting on id uniqueness.
+func TestAcceptCandidate_CompensationSparesOtherPathsOfSameCandidateID(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	repoTop, integration := newGateRepo(t)
+	writeTestFile(t, repoTop, tcAGo, "package x\n\nvar A = 2\n")
+	proposal := buildProposal(t, repoTop, integration)
+	epochs := leaseWriteSet(t, s, repoTop, tcAlice, tcAGo)
+
+	// A claim already standing under the same candidate id, on a path outside
+	// this attempt's write set.
+	if err := s.insertCandidateClaimsUnguarded(ctx, []domain.CandidateClaim{{
+		PathCanonical: tcBGo, CandidateID: "shared", OwnerUUID: tcAlice,
+		CreatedAt: time.Now(), Host: tcHost,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	// Occupy the candidates ref so WriteCandidateRefs' create fails and the
+	// compensating release runs.
+	gitT(t, repoTop, "update-ref", "refs/loto/candidates/shared", integration)
+
+	env, err := gate.Capture(ctx, gate.CaptureParams{
+		RepoTop: repoTop, IntegrationRef: integration, ProposalSHA: proposal,
+		Base: integration, WriteSet: []string{tcAGo}, CandidateID: "shared", BeadID: tcBead,
+		LeaseEpoch: epochs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcceptCandidate(ctx, repoTop, env, domain.CandidateClaim{OwnerUUID: tcAlice, Host: tcHost}, liveProbe); err == nil {
+		t.Fatal("want AcceptCandidate to fail on the occupied candidates ref, got nil")
+	}
+
+	claims, err := s.ListCandidateClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].PathCanonical != tcBGo {
+		t.Fatalf("want the preexisting b.go claim intact and a.go compensated, got %+v", claims)
 	}
 }

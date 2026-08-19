@@ -62,10 +62,10 @@ func (s *Store) AcceptCandidate(ctx context.Context, repoTop string, env gate.En
 
 	envelopeSHA, err = env.WriteBlob(ctx, repoTop)
 	if err != nil {
-		return "", errors.Join(err, s.ReleaseCandidateClaims(ctx, env.CandidateID))
+		return "", errors.Join(err, s.releaseCandidateClaimsForPathsDetached(env.CandidateID, env.WriteSet))
 	}
 	if err := gate.WriteCandidateRefs(ctx, repoTop, env.CandidateID, envelopeSHA, env.ProposalSHA); err != nil {
-		return "", errors.Join(err, s.ReleaseCandidateClaims(ctx, env.CandidateID))
+		return "", errors.Join(err, s.releaseCandidateClaimsForPathsDetached(env.CandidateID, env.WriteSet))
 	}
 	return envelopeSHA, nil
 }
