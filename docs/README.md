@@ -15,10 +15,16 @@ ADRs — accepted architectural decisions, append-only.
 - [0001-next-integration.md](decisions/0001-next-integration.md) — claim+lock flow with `next`.
 - [0002-canonical-base.md](decisions/0002-canonical-base.md) — canonical coordination base directory.
 
-## skills/
+## review/
 
-- [loto.md](skills/loto.md) — Claude Code skill describing how to use loto from agent loops.
+The bundle for an outside architectural / strategic review — see [MANIFEST.md](review/MANIFEST.md) for what to send and to whom.
 
-## superpowers/plans/
+- [PROMPT.md](review/PROMPT.md) — the review request; PART A is self-contained.
+- [git-gate-plan.md](review/git-gate-plan.md), [pre-tool-use.sh](review/pre-tool-use.sh), [hooks.json](review/hooks.json), [repo-session-hooks.json](review/repo-session-hooks.json) — snapshots of files that live outside this repo, each carrying its source path in a header.
 
-Implementation plans drafted via the superpowers workflow. Historical; current direction lives in `ROADMAP.md`.
+## also here
+
+- [treehouse-prior-art.md](treehouse-prior-art.md) — prior art survey.
+- [wt-harness-migration-brief.md](wt-harness-migration-brief.md) — worktree harness migration.
+
+Plans live in the kg (`~/Projects/dk/Project/loto/plans/`), not in this repo. The `superpowers/` plan archive and the `skills/loto.md` snapshot were removed 2026-08-20; both are in git history.
