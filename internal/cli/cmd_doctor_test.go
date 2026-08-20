@@ -469,3 +469,86 @@ func TestDoctor_RestoreOrphanModeSkipsLiveLockedFile(t *testing.T) {
 	// nothing about the orphan path. That harm is tracked as loto-2hjh. What this
 	// test pins is that a.go never enters the orphan list at all.
 }
+
+// TestDoctor_OrphanScanExcludesIgnoredTrees is the loto-3we5 regression. The
+// whole-tree walk reported 9,316 orphans in this repo, 9,306 of them files that
+// are read-only BY CONTRACT: the Go module cache and a dolt repo's git objects.
+// `--repair --restore-orphan-mode` would have chmod +w'd every one. Two
+// exclusion routes are pinned here because only their union covers this repo:
+// .gitignore, and $GIT_DIR/info/exclude (which is how .beads/ is ignored).
+func TestDoctor_OrphanScanExcludesIgnoredTrees(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+
+	mkRO := func(rel string) string {
+		t.Helper()
+		p := filepath.Join(repo, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o444); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("cache/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	excludeFile := filepath.Join(repo, ".git", "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(excludeFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(excludeFile, []byte("dolt/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	gitignored := mkRO("cache/mod/dep@v1/go.mod")
+	infoExcluded := mkRO("dolt/repo.git/objects/pack/x.pack")
+	beltOnly := mkRO(".sandbox/cache/mod/dep@v2/go.mod")
+	genuine := mkRO("orphan.go")
+
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdDoctor, tcFlagOrphan}, &out, io.Discard); code != 0 {
+		t.Fatalf("exit %d: %s", code, out.String())
+	}
+	got := out.String()
+
+	if !strings.Contains(got, "orphan-mode target=orphan.go") {
+		t.Errorf("genuine residue in a tracked path must still be reported: %s", got)
+	}
+	for name, p := range map[string]string{
+		"gitignored":    gitignored,
+		"info/exclude":  infoExcluded,
+		"belt (prefix)": beltOnly,
+	} {
+		rel, err := filepath.Rel(repo, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(got, rel) {
+			t.Errorf("%s tree must not be scanned (%s): %s", name, rel, got)
+		}
+	}
+
+	// The destructive half: --restore-orphan-mode must leave every excluded
+	// file at 0444. This is the assertion the bead is actually about.
+	if code := Run([]string{tcCmdDoctor, tcFlagRepair, "--restore-orphan-mode"}, &bytes.Buffer{}, io.Discard); code != 0 {
+		t.Fatalf("repair exit %d", code)
+	}
+	for _, p := range []string{gitignored, infoExcluded, beltOnly} {
+		st, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm() != 0o444 {
+			t.Errorf("%s: read-only-by-design file was chmod'd to %o", p, st.Mode().Perm())
+		}
+	}
+	st, err := os.Stat(genuine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm()&0o200 == 0 {
+		t.Errorf("genuine residue must still be restorable, perm=%o", st.Mode().Perm())
+	}
+}
