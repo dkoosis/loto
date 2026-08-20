@@ -145,3 +145,42 @@ func ListCandidateIDs(ctx context.Context, repoTop string) ([]string, error) {
 	sort.Strings(ids)
 	return ids, nil
 }
+
+// promotingRefPrefix is the namespace a pusher claims a batch under while it
+// verifies. ONE ref per batch, pointing at the prospective chain's TIP COMMIT:
+// that single object is both the reachability anchor (phase 2 runs with no
+// flock held, so nothing else keeps the chain alive) and the claim itself —
+// the promoter's host/pid/proc-start ride as trailers in its message. A
+// separate claim blob would be a second object that can diverge from the
+// commit it describes; one object cannot disagree with itself.
+const promotingRefPrefix = "refs/loto/promoting/"
+
+func promotingRef(batch string) string { return promotingRefPrefix + batch }
+
+// listRefsWithSHAs returns refname → object SHA for every ref under prefix,
+// with the prefix stripped from the key.
+//
+// ‡ Same abort-on-error contract as ListCandidateIDs, for the same reason: a
+// failed ref read must never read as "nothing is there". Promotion uses this
+// to find live promoting claims (an empty map would mean stealing a peer's
+// in-flight batch) and to read the OldSHA values its CAS deletes depend on (an
+// empty map would mean deleting refs unconditionally).
+func listRefsWithSHAs(ctx context.Context, repoTop, prefix string) (map[string]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(refname) %(objectname)", prefix)
+	cmd.Dir = repoTop
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("gate: for-each-ref %s: %w: %s", prefix, err, strings.TrimSpace(stderr.String()))
+	}
+	out := make(map[string]string)
+	for line := range strings.SplitSeq(strings.TrimSpace(stdout.String()), "\n") {
+		name, sha, ok := strings.Cut(line, " ")
+		if !ok || name == "" {
+			continue
+		}
+		out[strings.TrimPrefix(name, prefix)] = sha
+	}
+	return out, nil
+}
