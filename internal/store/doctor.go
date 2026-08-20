@@ -416,6 +416,17 @@ func validateOrphanRoot(repoTop string, paths []string) error {
 // Only LIVE rows suppress. An expired row must not silence its file's orphan
 // report: a file left read-only by a session that died mid-hold is precisely what
 // orphan mode exists to surface. `expires_at > now` matches the live-claim probe.
+//
+// ‡ This is deliberately the TTL half of domain.EvalContext.IsStale, which is
+// `expired OR owner provably dead` (internal/domain/staleness.go:33). Taking only
+// the TTL half means a row whose holder is dead but whose lease has not lapsed
+// still suppresses — strictly MORE suppression than IsStale would give, i.e. the
+// safe direction, since suppressing only ever means "do not chmod". Matching
+// IsStale exactly would need an EvalContext and a liveness probe threaded through
+// two exported methods that take neither, and would make the scan chmod files on
+// the strength of a probe. Not an oversight: --repair reclaims stale rows via
+// reclaimStaleLocks BEFORE RestoreOrphanMode runs, so within a repair the row is
+// already gone and the file is correctly restored.
 func (s *Store) lockedPathSet(ctx context.Context, repoTop string, now time.Time) (map[string]bool, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT target_canonical FROM locks WHERE expires_at > ?`, now.UnixNano())
