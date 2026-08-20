@@ -27,35 +27,16 @@ func (s *Store) ReleaseLocks(ctx context.Context, targets []domain.Target, agent
 		return []ReleaseResult{}, nil
 	}
 
-	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
+	var results []ReleaseResult
+	err := s.withLockBatchTx(ctx, targets, live, func(tx *sql.Tx, existing map[string][]domain.LockRecord, ec domain.EvalContext, now time.Time) error {
+		var owned []string
+		var reclaims []domain.LockRecord
+		results, owned, reclaims = classifyReleases(targets, existing, byAgent, ec)
+		return s.applyReleaseChangesTx(ctx, tx, owned, reclaims, byAgent, now)
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer flock.release()
-
-	tx, cleanup, err := s.beginTx(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer cleanup()
-
-	existing, err := loadLocksByTargetTx(ctx, tx, targets)
-	if err != nil {
-		return nil, err
-	}
-
-	now := time.Now()
-	ec := domain.EvalContext{Now: now, Live: live}
-	results, owned, reclaims := classifyReleases(targets, existing, byAgent, ec)
-
-	if err := s.applyReleaseChangesTx(ctx, tx, owned, reclaims, byAgent, now); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
-	flock.release()
 	return results, nil
 }
 

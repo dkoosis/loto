@@ -32,32 +32,44 @@ func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, agent d
 		return []BreakResult{}, nil
 	}
 
-	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
+	var results []BreakResult
+	err := s.withLockBatchTx(ctx, targets, live, func(tx *sql.Tx, existing map[string][]domain.LockRecord, ec domain.EvalContext, now time.Time) error {
+		var err error
+		results, err = applyBreakChangesTx(ctx, tx, breakBatch{
+			targets: targets, existing: existing, byAgent: byAgent,
+			mode: mode, reason: reason, ec: ec, now: now,
+		})
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer flock.release()
+	return results, nil
+}
 
-	tx, cleanup, err := s.beginTx(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer cleanup()
+// breakBatch is applyBreakChangesTx's input — one struct because the six
+// values travel together and a positional call of that width invites a
+// transposed argument.
+type breakBatch struct {
+	targets  []domain.Target
+	existing map[string][]domain.LockRecord
+	byAgent  string
+	mode     BreakMode
+	reason   string
+	ec       domain.EvalContext
+	now      time.Time
+}
 
-	existing, err := loadLocksByTargetTx(ctx, tx, targets)
-	if err != nil {
-		return nil, err
-	}
-
-	now := time.Now()
-	ec := domain.EvalContext{Now: now, Live: live}
-	force := mode == BreakForce
+// applyBreakChangesTx classifies the batch and writes every consequence —
+// audit events, the per-owner deletes, and the two retention sweeps — inside
+// the caller's transaction.
+func applyBreakChangesTx(ctx context.Context, tx *sql.Tx, b breakBatch) ([]BreakResult, error) {
+	force := b.mode == BreakForce
 	kind := EventLockBroken
 	if !force {
 		kind = EventLockReclaimedStale
 	}
-
-	results, events, deleteByOwner := classifyBreaks(targets, existing, byAgent, force, kind, reason, ec)
+	results, events, deleteByOwner := classifyBreaks(b.targets, b.existing, b.byAgent, force, kind, b.reason, b.ec)
 
 	if len(events) > 0 {
 		if err := appendEventsTx(ctx, tx, events); err != nil {
@@ -75,20 +87,15 @@ func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, agent d
 	// operator ran `doctor --repair` — unbounded retention on a path the hot
 	// loop never triggers (loto-qg0r). gcTagsTx is the same disk-reclamation
 	// pass doctor uses; running it here mirrors AcquireLocks→rotateEventsTx.
-	if err := gcTagsTx(ctx, tx, now); err != nil {
+	if err := gcTagsTx(ctx, tx, b.now); err != nil {
 		return nil, err
 	}
 	// Trim events in the same tx (mirrors AcquireLocks→rotateEventsTx). A
 	// break-heavy workload (repeated `unlock --force` sweeps) that never
 	// acquires would otherwise grow the events table unbounded (loto-bvdk).
-	if err := rotateEventsTx(ctx, tx, now); err != nil {
+	if err := rotateEventsTx(ctx, tx, b.now); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
-	flock.release()
 	return results, nil
 }
 
