@@ -250,13 +250,10 @@ func resolveCLITarget(base, repoTop, raw string) (domain.Target, error) {
 // repoRelFromBase joins a relative token to its base and expresses the result
 // repo-relative, or reports domain.ErrRepoEscape when it lands outside repoTop.
 //
-// ‡ It never calls EvalSymlinks on the TOKEN, and that omission is load-bearing.
-// Absolute tokens get symlink resolution in normalizeRepoPath; giving relative
-// tokens the same treatment would resolve a leaf symlink before
-// statFileTargetReason could refuse it, flipping repo-root invocations that are
-// refused today into accepted ones. Closing that asymmetry — ancestor aliasing
-// and the leaf-symlink policy — is loto-j39r's job, decided deliberately rather
-// than as a side effect of a cwd fix.
+// ‡ Symlinked ANCESTORS are resolved (resolveAncestors); the final component is
+// not, so a symlink target is still refused downstream. Resolving before the
+// containment check also closes a hole: a symlinked directory pointing outside
+// the repo used to pass containment, because filepath.Rel is lexical.
 func repoRelFromBase(base, repoTop, raw string) (string, error) {
 	absTop, err := filepath.Abs(repoTop)
 	if err != nil {
@@ -275,7 +272,7 @@ func repoRelFromBase(base, repoTop, raw string) (string, error) {
 	if r, err := filepath.EvalSymlinks(absBase); err == nil {
 		absBase = r
 	}
-	absP := filepath.Join(absBase, raw)
+	absP := resolveAncestors(filepath.Join(absBase, raw))
 	rel, err := filepath.Rel(absTop, absP)
 	if err != nil {
 		return "", err
@@ -317,14 +314,7 @@ func normalizeRepoPath(p, repoTop string) string {
 	if r, err := filepath.EvalSymlinks(absTop); err == nil {
 		absTop = r
 	}
-	absP := filepath.Clean(p)
-	if r, err := filepath.EvalSymlinks(absP); err == nil {
-		absP = r
-	} else if r, err := filepath.EvalSymlinks(filepath.Dir(absP)); err == nil {
-		// p doesn't exist yet (e.g., loto check on a newly added file under
-		// `git diff --cached`). Resolve symlinks on the longest existing prefix.
-		absP = filepath.Join(r, filepath.Base(absP))
-	}
+	absP := resolveAncestors(p)
 	rel, err := filepath.Rel(absTop, absP)
 	if err != nil {
 		return p
@@ -344,6 +334,60 @@ func normalizeRepoPath(p, repoTop string) string {
 		return p
 	}
 	return filepath.ToSlash(rel)
+}
+
+// resolveAncestors resolves symlinks on an absolute path's DIRECTORY prefix and
+// re-appends the final component untouched.
+//
+// ‡ Two decisions live here, and they pull in opposite directions.
+//
+// Ancestors are resolved because domain.Canonicalize is purely lexical: with
+// `link` a symlinked directory, `link/a.go` and `real/a.go` produced different
+// keys for one file, so two agents could hold exclusive locks on it through two
+// aliases — the exact failure loto exists to prevent (loto-j39r defect 1).
+// Lstat only ever refused a symlinked FINAL component; intermediate symlinks
+// were followed silently.
+//
+// The final component is NOT resolved, so a token naming a symlink still
+// reaches statFileTargetReason and is still refused. Resolving it would make
+// `loto lock sym.go` quietly lock a.go instead — and refusal already denies the
+// alias any way to double-hold, which is what convergence was for. Absolute
+// spellings resolved the leaf before this change and now do not; that is the
+// asymmetry loto-j39r named, unified toward the stricter half.
+//
+// ‡ The missing tail can be more than one segment. A beacon announces a write
+// to a path that does not exist yet — `loto beacon a/b/c.go` with `a` a symlink
+// and `b` not yet created — and the previous one-level fallback (EvalSymlinks
+// on Dir(p) only) gave up there, leaving the symlinked ancestor unresolved and
+// the alias intact.
+func resolveAncestors(abs string) string {
+	dir, leaf := filepath.Split(filepath.Clean(abs))
+	if leaf == "" {
+		return filepath.Clean(abs)
+	}
+	return filepath.Join(resolveExistingDir(filepath.Clean(dir)), leaf)
+}
+
+// resolveExistingDir resolves symlinks on the longest existing prefix of dir and
+// re-appends the segments that do not exist yet. A path with no existing prefix
+// comes back unchanged — there is nothing on disk to alias.
+func resolveExistingDir(dir string) string {
+	if r, err := filepath.EvalSymlinks(dir); err == nil {
+		return r
+	}
+	var tail []string
+	cur := dir
+	for {
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return dir // reached the root without resolving anything
+		}
+		tail = append([]string{filepath.Base(cur)}, tail...)
+		if r, err := filepath.EvalSymlinks(parent); err == nil {
+			return filepath.Join(append([]string{r}, tail...)...)
+		}
+		cur = parent
+	}
 }
 
 // foldContains reports whether child lies within parent using a case-insensitive
