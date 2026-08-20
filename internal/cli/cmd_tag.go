@@ -115,7 +115,7 @@ func cmdTag(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // caller reaching for `internal/store/**` has the right idea in the wrong
 // spelling.
 func resolveTagGround(repoTop, raw string, stderr io.Writer) (canonical string, prefixOnly bool, rc int) {
-	target, err := resolveCLITarget(repoTop, raw)
+	target, err := resolveCLITarget(callerBase(), repoTop, raw)
 	if err == nil {
 		return target.Canonical, false, 0
 	}

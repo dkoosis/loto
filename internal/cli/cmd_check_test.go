@@ -374,3 +374,96 @@ func TestCheck_DuplicateTargetArg_SingleAdvisoryRow(t *testing.T) {
 		t.Errorf("expected exactly one advisory row: %q", s)
 	}
 }
+
+// TestCheck_RelativeTokenFromSubdirFindsPeerConflict is the loto-3tv3 false
+// clean, end to end. From internal/store, `loto check store.go` used to key
+// `store.go`, find nothing, and print ✓ no conflicts while a peer held
+// internal/store/store.go. Invariant 9 calls that strictly worse than no check.
+func TestCheck_RelativeTokenFromSubdirFindsPeerConflict(t *testing.T) {
+	repo := withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	if code := Run([]string{tcCmdLock, tcStoreStoreGo, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice lock failed")
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	t.Chdir(filepath.Join(repo, "internal", "store"))
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcStoreGo}, &out, &bytes.Buffer{})
+	if code != 1 {
+		t.Fatalf("expected exit 1 (conflict), got %d: %q", code, out.String())
+	}
+	if strings.Contains(out.String(), "no conflicts") {
+		t.Fatalf("false clean: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "path=internal/store/store.go") {
+		t.Errorf("expected the conflict on the file the caller means: %q", out.String())
+	}
+}
+
+// TestCheck_SameBasenameAtRootDoesNotCollide is the collision case the AC
+// names: one token, two cwds, two correct-and-different verdicts.
+func TestCheck_SameBasenameAtRootDoesNotCollide(t *testing.T) {
+	repo := withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	if err := os.WriteFile(filepath.Join(repo, tcStoreGo), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	if code := Run([]string{tcCmdLock, tcStoreStoreGo, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice lock failed")
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var rootOut bytes.Buffer
+	if code := Run([]string{tcCmdCheck, tcStoreGo}, &rootOut, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("root store.go is unheld, want exit 0, got %d: %q", code, rootOut.String())
+	}
+	t.Chdir(filepath.Join(repo, "internal", "store"))
+	var subOut bytes.Buffer
+	if code := Run([]string{tcCmdCheck, tcStoreGo}, &subOut, &bytes.Buffer{}); code != 1 {
+		t.Fatalf("internal/store/store.go is held, want exit 1, got %d: %q", code, subOut.String())
+	}
+}
+
+// TestCheckStaged_FromSubdirStillResolvesGitTokens is the --staged fence. git
+// produces its paths with cmd.Dir=repoTop, so they are repo-root-relative
+// already; re-basing them on the caller's cwd would make every staged check
+// from a subdirectory resolve to nonsense. This test fails if a blanket cwd
+// join sneaks into the resolver.
+func TestCheckStaged_FromSubdirStillResolvesGitTokens(t *testing.T) {
+	repo := withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("add", tcStoreStoreGo)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	if code := Run([]string{tcCmdLock, tcStoreStoreGo, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice lock failed")
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	t.Chdir(filepath.Join(repo, "internal", "store"))
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, "--staged"}, &out, &bytes.Buffer{})
+	if strings.Contains(out.String(), "invalid") {
+		t.Fatalf("staged token was re-based on the cwd: %q", out.String())
+	}
+	if code != 1 || !strings.Contains(out.String(), "path=internal/store/store.go") {
+		t.Errorf("expected the staged conflict, got exit %d: %q", code, out.String())
+	}
+}

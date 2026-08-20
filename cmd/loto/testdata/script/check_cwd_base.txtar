@@ -1,0 +1,21 @@
+# loto-3tv3: a relative token means what the CALLER sees, not what the repo root sees.
+# Both files exist and share a base name — the collision the old resolver hid.
+
+touch internal/store/locks.go
+touch locks.go
+
+env LOTO_AGENT_ID=$ALICE
+loto lock internal/store/locks.go -t 'alice on the store'
+
+# From the subdirectory, the bare token names the file the caller is standing next to.
+env LOTO_AGENT_ID=$BOB
+cd internal/store
+! loto check locks.go
+stdout '✗ conflicts count=1'
+stdout 'path=internal/store/locks.go'
+stdout $ALICE
+
+# Repo-root invocation unchanged: the SAME token names the unheld root file.
+cd $WORK
+loto check locks.go
+stdout '✓ no conflicts'

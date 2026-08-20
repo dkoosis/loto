@@ -27,14 +27,14 @@ type checkConflict struct {
 // paths, and applies the pre-resolution refusals that must fire before any
 // store IO. done=true means the caller must return rc immediately — the
 // preflight already emitted whatever the user sees.
-func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) (paths []string, repoTop string, gate bool, rc int, done bool) {
+func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) (paths []string, base string, repoTop string, gate bool, rc int, done bool) {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	staged := fs.Bool("staged", false, "read paths from git diff --cached")
 	gateFlag := fs.Bool("gate", false, "read-only deny gate: exit 1 if a foreign live claim or lock/beacon covers any path; never acquires, refreshes, or writes")
 	cwdUnknown := fs.Bool("cwd-unknown", false, "the caller's working directory is not knowable here (e.g. mcp__trixi__agent_shell): refuse relative paths instead of resolving them against the wrong base")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
-		return nil, "", false, 2, true
+		return nil, "", "", false, 2, true
 	}
 
 	// Resolve repoTop before shelling out to git so `git diff --cached` runs
@@ -43,13 +43,22 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 	// nested-launch / scripted-invocation scenarios.
 	repoTop, _ = repoTopForCwd(ctx)
 
+	// The provenance fork, in one place: tokens the CALLER typed resolve against
+	// the caller's cwd, tokens git produced (cmd.Dir=repoTop) are already
+	// repo-root-relative (loto-3tv3 D3). Both check surfaces are fed from here,
+	// so they cannot drift.
+	base = callerBase()
+	if *staged {
+		base = repoTop
+	}
+
 	paths, code := loadCheckTargets(ctx, repoTop, *staged, fs.Args(), stderr)
 	if code != 0 {
-		return nil, repoTop, *gateFlag, code, true
+		return nil, base, repoTop, *gateFlag, code, true
 	}
 	if len(paths) == 0 {
 		fmt.Fprintln(stdout, "✓ no paths")
-		return nil, repoTop, *gateFlag, 0, true
+		return nil, base, repoTop, *gateFlag, 0, true
 	}
 
 	// loto-tzmv.10: refuse before resolving, never guess. Scoped to paths the
@@ -60,14 +69,14 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 	// See refuseUnresolvableRelative.
 	if *cwdUnknown && !*staged {
 		if rc, refused := refuseUnresolvableRelative(stdout, paths); refused {
-			return nil, repoTop, *gateFlag, rc, true
+			return nil, base, repoTop, *gateFlag, rc, true
 		}
 	}
-	return paths, repoTop, *gateFlag, 0, false
+	return paths, base, repoTop, *gateFlag, 0, false
 }
 
 func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	paths, repoTop, gate, rc, done := checkPreflight(ctx, args, stdout, stderr)
+	paths, base, repoTop, gate, rc, done := checkPreflight(ctx, args, stdout, stderr)
 	if done {
 		return rc
 	}
@@ -81,7 +90,7 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// stays byte-identical (hard rule, plan "Plain loto check ... behavior
 	// must stay byte-identical").
 	if gate {
-		return runCheckGate(ctx, paths, repoTop, stdout, stderr)
+		return runCheckGate(ctx, paths, base, repoTop, stdout, stderr)
 	}
 
 	rt, err := openRuntime(ctx)
@@ -107,7 +116,7 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// both the conflict scan and the foreign-claim advisory consume the same
 	// resolved targets (no double resolution). Mirrors runCheckGate's
 	// resolve-then-branch shape (gemini/coderabbit, #214).
-	targets, invalid := resolveCheckTargets(repoTop, paths)
+	targets, invalid := resolveCheckTargets(base, repoTop, paths)
 	if len(invalid) > 0 {
 		printCheckInvalid(stdout, invalid)
 		return 2
@@ -183,11 +192,11 @@ func loadCheckTargets(ctx context.Context, repoTop string, staged bool, posArgs 
 // (sorted by original path, the deterministic-output rule) — the shared front
 // half of plain check and check --gate, so invalid-target classification
 // can't drift between the two codepaths (review nit, #211).
-func resolveCheckTargets(repoTop string, paths []string) ([]domain.Target, []checkInvalid) {
+func resolveCheckTargets(base, repoTop string, paths []string) ([]domain.Target, []checkInvalid) {
 	var targets []domain.Target
 	var invalid []checkInvalid
 	for _, raw := range paths {
-		t, err := resolveCLITarget(repoTop, raw)
+		t, err := resolveCLITarget(base, repoTop, raw)
 		if err != nil {
 			invalid = append(invalid, checkInvalid{Path: raw, Reason: classifyCanonicalizeErr(err)})
 			continue

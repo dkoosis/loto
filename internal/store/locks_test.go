@@ -564,13 +564,13 @@ func TestValidateFileTarget_TypedErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	var tve *TargetValidationError
-	if err := validateFileTarget(mkTargetRec(sym)); !errors.As(err, &tve) || tve.Reason != ReasonSymlink {
+	if err := validateFileTarget("", mkTargetRec(sym)); !errors.As(err, &tve) || tve.Reason != ReasonSymlink {
 		t.Fatalf("symlink: got %v, want ReasonSymlink", err)
 	}
 
 	// directory → ReasonNotRegular
 	tve = nil
-	if err := validateFileTarget(mkTargetRec(dir)); !errors.As(err, &tve) || tve.Reason != ReasonNotRegular {
+	if err := validateFileTarget("", mkTargetRec(dir)); !errors.As(err, &tve) || tve.Reason != ReasonNotRegular {
 		t.Fatalf("dir: got %v, want ReasonNotRegular", err)
 	}
 
@@ -580,7 +580,7 @@ func TestValidateFileTarget_TypedErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	tve = nil
-	if err := validateFileTarget(mkTargetRec(realPath)); !errors.As(err, &tve) || tve.Reason != ReasonMultiLinked {
+	if err := validateFileTarget("", mkTargetRec(realPath)); !errors.As(err, &tve) || tve.Reason != ReasonMultiLinked {
 		t.Fatalf("multi-link: got %v, want ReasonMultiLinked", err)
 	}
 	if tve.Nlink < 2 {
@@ -600,7 +600,7 @@ func TestValidateFileTarget_BeaconToleratesMissingPath(t *testing.T) {
 	if !beacon.IsBeacon() {
 		t.Fatal("test fixture invariant broken: want a beacon shape")
 	}
-	if err := validateFileTarget(beacon); err != nil {
+	if err := validateFileTarget("", beacon); err != nil {
 		t.Errorf("beacon on a missing path must be allowed, got %v", err)
 	}
 
@@ -616,14 +616,14 @@ func TestValidateFileTarget_BeaconToleratesMissingPath(t *testing.T) {
 	}
 	beaconOnSymlink := domain.LockRecord{Target: domain.Target{Canonical: sym}, Mode: domain.ModeShared, PID: 0, Beacon: true}
 	var tve *TargetValidationError
-	if err := validateFileTarget(beaconOnSymlink); !errors.As(err, &tve) || tve.Reason != ReasonSymlink {
+	if err := validateFileTarget("", beaconOnSymlink); !errors.As(err, &tve) || tve.Reason != ReasonSymlink {
 		t.Fatalf("beacon on an existing symlink must still be refused, got %v", err)
 	}
 
 	// A plain (non-beacon) lock on a missing path is unaffected — the carve-out
 	// is beacon-scoped, not a general relaxation.
 	plain := mkTargetRec(missing)
-	if err := validateFileTarget(plain); err == nil {
+	if err := validateFileTarget("", plain); err == nil {
 		t.Error("a plain lock on a missing path must still be refused")
 	}
 }
@@ -686,5 +686,97 @@ func TestAcquireBlocksOnLiveSession(t *testing.T) {
 	var mce *MultiConflictError
 	if !errors.As(err, &mce) {
 		t.Fatalf("bob acquire over LIVE holder must conflict, got err=%v", err)
+	}
+}
+
+// TestValidateFileTarget_RepoRelativeCanonicalJoinsRepoTop is the loto-3tv3 D8
+// regression. Canonicals are repo-relative; probing one bare resolves it
+// against the process CWD, so from any cwd but the repo root the store either
+// misses the file or stats a same-named neighbour.
+func TestValidateFileTarget_RepoRelativeCanonicalJoinsRepoTop(t *testing.T) {
+	repoTop := t.TempDir()
+	sub := filepath.Join(repoTop, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "a.go"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir()) // a cwd that is not the repo top
+
+	if err := validateFileTarget(repoTop, mkTargetRec("sub/a.go")); err != nil {
+		t.Errorf("with repoTop: %v", err)
+	}
+	if err := validateFileTarget("", mkTargetRec("sub/a.go")); err == nil {
+		t.Error("without repoTop the bare probe must miss — that is the defect being pinned")
+	}
+}
+
+// TestValidateFileTarget_EmptyRepoTopLegacyUnchanged is why ~40 mkFileLock call
+// sites needed no edit: an absolute canonical with no repoTop probes exactly
+// what it probed before.
+func TestValidateFileTarget_EmptyRepoTopLegacyUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateFileTarget("", mkTargetRec(p)); err != nil {
+		t.Errorf("absolute canonical, no repoTop: %v", err)
+	}
+}
+
+// TestValidateFileTarget_AbsoluteCanonicalIgnoresRepoTop pins that the join is
+// conditional: joining repoTop to an absolute path would produce nonsense.
+func TestValidateFileTarget_AbsoluteCanonicalIgnoresRepoTop(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateFileTarget(t.TempDir(), mkTargetRec(p)); err != nil {
+		t.Errorf("absolute canonical with a repoTop set: %v", err)
+	}
+}
+
+// TestValidateFileTarget_BeaconMissingLeafStillTolerated keeps the loto-z5nb
+// carve-out intact under the join: a beacon announces a write to a path that
+// may not exist yet.
+func TestValidateFileTarget_BeaconMissingLeafStillTolerated(t *testing.T) {
+	repoTop := t.TempDir()
+	t.Chdir(t.TempDir())
+	rec := mkTargetRec("sub/brand-new.go")
+	rec.Beacon = true
+	if err := validateFileTarget(repoTop, rec); err != nil {
+		t.Errorf("beacon on a missing path: %v", err)
+	}
+}
+
+// TestAcquireLocks_WithRepoTopFromForeignCwd is the end-to-end "correct from
+// any CWD": a store opened with WithRepoTop accepts a repo-relative canonical
+// no matter where the process is standing.
+func TestAcquireLocks_WithRepoTopFromForeignCwd(t *testing.T) {
+	ctx := context.Background()
+	repoTop := t.TempDir()
+	sub := filepath.Join(repoTop, "internal", "store")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "locks.go"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenContext(ctx, filepath.Join(t.TempDir(), "loto.db"), WithRepoTop(repoTop))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	t.Chdir(t.TempDir())
+
+	rec := mkTargetRec("internal/store/locks.go")
+	rec.OwnerUUID = tcAlice
+	rec.SessionUUID = tcAlice
+	rec.ExpiresAt = time.Now().Add(time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
+		t.Fatalf("acquire from a foreign cwd: %v", err)
 	}
 }

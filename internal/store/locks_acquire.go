@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"syscall"
 	"time"
@@ -48,7 +49,7 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 	}
 	defer flock.release()
 
-	if err := validateAllFileTargets(sorted); err != nil {
+	if err := s.validateAllFileTargets(sorted); err != nil {
 		return nil, err
 	}
 
@@ -167,9 +168,9 @@ func blockOnCandidateClaims(ctx context.Context, tx *sql.Tx, sorted []domain.Loc
 	return &CandidateClaimConflictError{Blockers: claims}
 }
 
-func validateAllFileTargets(sorted []domain.LockRecord) error {
+func (s *Store) validateAllFileTargets(sorted []domain.LockRecord) error {
 	for i := range sorted {
-		if err := validateFileTarget(sorted[i]); err != nil {
+		if err := validateFileTarget(s.repoTop, sorted[i]); err != nil {
 			return err
 		}
 	}
@@ -190,9 +191,20 @@ func validateAllFileTargets(sorted []domain.LockRecord) error {
 // path DOES exist — or a plain `loto lock` on any missing path — still runs
 // every check below unchanged; a symlink or non-regular file is refused
 // whether or not the caller is beaconing.
-func validateFileTarget(rec domain.LockRecord) error {
+//
+// ‡ The canonical is repo-relative, so it is joined to repoTop before it is
+// stat'd (loto-3tv3 D8). Probing it bare resolves against the process CWD,
+// which is right only from the repo root: from a subdirectory the store either
+// misses the file entirely or stats a same-named neighbour. Errors and
+// TargetValidationError.Path still name the CANONICAL, matching
+// statFileTargetReason's precedent — the caller thinks in keys, not probes.
+func validateFileTarget(repoTop string, rec domain.LockRecord) error {
 	p := rec.Target.Canonical
-	lst, err := os.Lstat(p)
+	probe := p
+	if repoTop != "" && !filepath.IsAbs(p) {
+		probe = filepath.Join(repoTop, filepath.FromSlash(p))
+	}
+	lst, err := os.Lstat(probe)
 	if err != nil {
 		if rec.IsBeacon() && errors.Is(err, fs.ErrNotExist) {
 			return nil

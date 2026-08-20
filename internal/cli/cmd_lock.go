@@ -99,8 +99,10 @@ func validateLockTargets(args []string, repoTop string, allowMissing bool) ([]do
 	targets := make([]domain.Target, 0, len(args))
 	seen := make(map[string]bool, len(args))
 	var invalid []render.InvalidTarget
+	// Every token here is caller-typed, so one syscall serves the whole batch.
+	base := callerBase()
 	for _, raw := range args {
-		t, err := resolveCLITarget(repoTop, raw)
+		t, err := resolveCLITarget(base, repoTop, raw)
 		if err != nil {
 			invalid = append(invalid, render.InvalidTarget{Path: raw, Reason: classifyCanonicalizeErr(err)})
 			continue
@@ -159,9 +161,15 @@ func statFileTargetReason(repoTop, canonical string, allowMissing bool) string {
 	return ""
 }
 
-// classifyCanonicalizeErr maps domain errors to design.md reason tokens.
+// classifyCanonicalizeErr maps domain errors — and the one resolver error that
+// can precede them — to design.md reason tokens.
 func classifyCanonicalizeErr(err error) string {
 	switch {
+	case errors.Is(err, errCallerCWDUnknown):
+		// The same fact refuseUnresolvableRelative reports through a different
+		// door: the caller's cwd is not knowable, so a relative token has no
+		// base. Deliberately reuses that token rather than minting a second one.
+		return "relative-path-caller-cwd-unknown"
 	case errors.Is(err, domain.ErrTargetIsDir):
 		return "not-regular-file"
 	case errors.Is(err, domain.ErrEmptyTarget):

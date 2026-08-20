@@ -186,13 +186,13 @@ func gateInfraUnreachable(stderr io.Writer, err error) int {
 // rows) go to stdout; FAIL-OPEN notices go to stderr (loto-tzmv.8), because a
 // hook that exits 0 after writing to stdout leaves the model blind to the fact
 // that the gate never ran.
-func runCheckGate(ctx context.Context, paths []string, repoTop string, stdout, stderr io.Writer) int {
+func runCheckGate(ctx context.Context, paths []string, base, repoTop string, stdout, stderr io.Writer) int {
 	// Before any verdict: say so if this binary predates the hook that called
 	// it (loto-tzmv.7). A stale gate answers ✓ with the confidence of a current
 	// one, which is how the 2026-08-12 rot went unnoticed for 8 days.
 	warnIfContractStale(stderr)
 
-	targets, invalid := resolveCheckTargets(repoTop, paths)
+	targets, invalid := resolveCheckTargets(base, repoTop, paths)
 	if len(invalid) > 0 {
 		printCheckInvalid(stdout, invalid)
 		return 2
