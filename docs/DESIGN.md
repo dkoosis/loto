@@ -30,6 +30,17 @@ $XDG_STATE_HOME/loto/                     # canonical, shared across subtrees
 SQLite tables:
 - `locks` — one row per holder per target. Keyed by the composite PK `(target_canonical, owner_uuid)` so a target can carry several coexisting shared holders. Carries owner, session, intent, expiry, host, pid, branch, **mode** (`shared` | `exclusive`; empty legacy → exclusive).
 
+‡ **`target_canonical` is a repo-relative POSIX path, based at the git
+toplevel.** Absolute forms are rejected at `domain.Canonicalize`
+(`ErrRepoEscape`, `internal/domain/target.go`), and translating a caller's
+path — absolute, cwd-relative, or a bare token — into that form is
+`internal/cli/paths.go`'s job, done once at the CLI boundary. `events`
+rows carry the same form. Every consumer that needs a filesystem path
+joins the row to the repo root; a consumer that dereferences a row bare
+resolves it against the process CWD, which is the loto-qoic / loto-gc82
+bug class. This line is the contract those two beads were each an
+instance of missing.
+
 ‡ **Identity is host-global, state is project-scoped.** Agent identity
 lives at `~/.loto/agents/`, not under any project — one Claude session
 touches many projects, and `LOTO_AGENT_ID` is exported once at SessionStart.
@@ -291,9 +302,16 @@ missed; `loto doctor --repair` mops up the rest.
    the others may fail.
 8. **No silent dispossession — of locks or of bytes.** Any forced release
    writes a system event observable via `loto status` / `loto doctor`.
-   Chmod-era residue (read-only on disk, no DB row) is flagged by `doctor`
-   but never restored without explicit `--restore-orphan-mode`, since a
-   read-only file with no row may simply be one the user meant to protect.
+   Read-only files split by **evidence**, and the split decides whether a
+   flag is required. A read-only file loto has no record of is flagged by
+   `doctor` and never restored without explicit `--restore-orphan-mode` —
+   it may simply be one the user meant to protect. A read-only file that
+   loto's own lock rows or audit trail name, and that no *live* lock
+   holds, is chmod-era residue and nothing else, so `--repair` restores it
+   unprompted. A **live-locked** path is never restored by either route:
+   its holder may have made the file read-only itself, and loto undoing
+   protection on a path it is currently coordinating is the harm this
+   invariant exists to forbid (loto-2hjh).
 9. **A clean verdict is a claim, not a default.** The gate may decline to
    answer (fail-open, exit 3, `⚠` to stderr); it may never answer `✓ no
    conflicts` on a path it could not resolve. A false clean is strictly
