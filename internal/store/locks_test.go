@@ -117,6 +117,20 @@ func TestBreakLockStaleOnly_CrossHost(t *testing.T) {
 	}
 }
 
+// mustOpenWithRepoTop opens a store whose repo root is top. Use when a test
+// needs the store to reconcile absolute candidates against repo-relative rows
+// (loto-6e02: the root is a property of the store, not of the call).
+func mustOpenWithRepoTop(t *testing.T, top string) *Store {
+	t.Helper()
+	dir := t.TempDir()
+	s, err := OpenContext(context.Background(), filepath.Join(dir, "loto.db"), WithRepoTop(top))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
 func mustOpen(t *testing.T) *Store {
 	t.Helper()
 	dir := t.TempDir()

@@ -71,7 +71,7 @@ func TestTerritoryTagSurvivesDoctorRepair(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatal(err)
 	}
 	notes, err := s.ListTerritoryTags(ctx)
@@ -264,7 +264,7 @@ func TestGCTerritoryTagsSweepsExpiredAndOldAcked(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatal(err)
 	}
 	kept := map[string]bool{}

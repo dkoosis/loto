@@ -108,7 +108,7 @@ func TestDoctorRepair_MigrationAuditSurvivesCancelledCtx(t *testing.T) {
 		return orig(f, mode)
 	}
 
-	if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatalf("repair should succeed (commit happened before cancel): %v", err)
 	}
 

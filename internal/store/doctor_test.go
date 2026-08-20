@@ -41,7 +41,7 @@ func TestDoctorRepairReclaims(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.DoctorRepair(ctx, "doctor-agent", "", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor-agent", deadProbe); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.LockAt(ctx, l.Target)
@@ -61,8 +61,8 @@ func TestDoctorAudit_DetectsOrphanModeFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := mustOpen(t)
-	orphans, err := s.ScanOrphanModes(context.Background(), dir, liveProbe, []string{orphan, clean})
+	s := mustOpenWithRepoTop(t, dir)
+	orphans, err := s.ScanOrphanModes(context.Background(), liveProbe, []string{orphan, clean})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestScanOrphanModes_OwnedFileSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := mustOpen(t)
+	s := mustOpenWithRepoTop(t, dir)
 	ctx := context.Background()
 	now := time.Now()
 	// ‡ Repo-relative, as domain.Canonicalize would produce. Earlier this
@@ -107,7 +107,7 @@ func TestScanOrphanModes_OwnedFileSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orphans, err := s.ScanOrphanModes(ctx, dir, liveProbe, []string{owned})
+	orphans, err := s.ScanOrphanModes(ctx, liveProbe, []string{owned})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,8 +122,8 @@ func TestRestoreOrphanMode_ChmodsToWritable(t *testing.T) {
 	if err := os.WriteFile(p, []byte("x"), 0o444); err != nil {
 		t.Fatal(err)
 	}
-	s := mustOpen(t)
-	restored, failures, err := s.RestoreOrphanMode(context.Background(), dir, liveProbe, []string{p})
+	s := mustOpenWithRepoTop(t, dir)
+	restored, failures, err := s.RestoreOrphanMode(context.Background(), liveProbe, []string{p})
 	if err != nil {
 		t.Fatalf("RestoreOrphanMode: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestRestoreOrphanMode_HoldsOpFlock(t *testing.T) {
 	if err := os.WriteFile(p, []byte("x"), 0o444); err != nil {
 		t.Fatal(err)
 	}
-	s := mustOpen(t)
+	s := mustOpenWithRepoTop(t, dir)
 
 	// External holder of op-flock — simulates a concurrent AcquireLocks
 	// (or any other op-flock-taking path) in flight.
@@ -160,7 +160,7 @@ func TestRestoreOrphanMode_HoldsOpFlock(t *testing.T) {
 		t.Fatalf("acquireOpFlock: %v", err)
 	}
 
-	_, _, err = s.RestoreOrphanMode(context.Background(), dir, liveProbe, []string{p})
+	_, _, err = s.RestoreOrphanMode(context.Background(), liveProbe, []string{p})
 	if !errors.Is(err, ErrFlockTimeout) {
 		t.Fatalf("expected ErrFlockTimeout, got %v", err)
 	}
@@ -173,7 +173,7 @@ func TestRestoreOrphanMode_HoldsOpFlock(t *testing.T) {
 	h.release()
 
 	// After release, restore succeeds.
-	restored, failures, err := s.RestoreOrphanMode(context.Background(), dir, liveProbe, []string{p})
+	restored, failures, err := s.RestoreOrphanMode(context.Background(), liveProbe, []string{p})
 	if err != nil {
 		t.Fatalf("post-release RestoreOrphanMode: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestRestoreOrphanMode_SkipsRelockedPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := mustOpen(t)
+	s := mustOpenWithRepoTop(t, dir)
 	ctx := context.Background()
 
 	// Simulate the TOCTOU window: scan first (both appear as orphans at this
@@ -232,7 +232,7 @@ func TestRestoreOrphanMode_SkipsRelockedPaths(t *testing.T) {
 	}
 
 	// Now call RestoreOrphanMode with the stale scan list.
-	restored, failures, err := s.RestoreOrphanMode(ctx, dir, liveProbe, scanned)
+	restored, failures, err := s.RestoreOrphanMode(ctx, liveProbe, scanned)
 	if err != nil {
 		t.Fatalf("RestoreOrphanMode: %v", err)
 	}
@@ -565,7 +565,7 @@ func TestDoctorRepair_RestoresWriteMode(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := os.Stat(l.Target.Canonical)
@@ -587,7 +587,7 @@ func TestDoctorRepair_ReclaimLeavesModeUntouched(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.LockAt(ctx, l.Target)
@@ -616,7 +616,7 @@ func TestDoctorRepair_MultipleStaleLocksSameOwner(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a, b, c}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatalf("repair with multiple stale locks: %v", err)
 	}
 	for _, l := range []domain.LockRecord{a, b, c} {
@@ -697,7 +697,7 @@ func TestDoctorRepair_VACUUMFailureDoesNotMaskSuccess(t *testing.T) {
 	}
 	t.Cleanup(func() { vacuumFn = origVacuum })
 
-	if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatalf("VACUUM failure must not surface as DoctorRepair error: %v", err)
 	}
 
@@ -746,7 +746,7 @@ func TestDoctorRepair_ReleasesOpFlockBeforeVACUUM(t *testing.T) {
 	}
 	t.Cleanup(func() { vacuumFn = origVacuum })
 
-	if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatalf("DoctorRepair: %v", err)
 	}
 	if lockedAtVacuum {
@@ -768,7 +768,7 @@ func TestDoctorRepair_SweepsExpiredClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 		t.Fatal(err)
 	}
 	all, err := s.ListClaims(ctx)
@@ -841,7 +841,7 @@ func TestDoctorRepair_ChmodEraMigration(t *testing.T) {
 		}
 	}
 
-	if err := s.DoctorRepair(ctx, "doctor", "", liveProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
@@ -897,7 +897,7 @@ func TestDoctorRepair_ChmodEraMigrationIsIdempotent(t *testing.T) {
 	}
 
 	for i := range 2 {
-		if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
+		if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
 			t.Fatalf("repair %d: %v", i, err)
 		}
 	}
@@ -919,7 +919,6 @@ func TestScanOrphanModes_AbsoluteCandidatesRequireRepoTop(t *testing.T) {
 	if err := os.WriteFile(abs, []byte("x"), 0o444); err != nil {
 		t.Fatal(err)
 	}
-	s := mustOpen(t)
 	ctx := context.Background()
 
 	for _, tc := range []struct {
@@ -930,7 +929,10 @@ func TestScanOrphanModes_AbsoluteCandidatesRequireRepoTop(t *testing.T) {
 		{"relative repoTop", "some/rel"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			orphans, err := s.ScanOrphanModes(ctx, tc.repoTop, liveProbe, []string{abs})
+			// The base is now the store's own (loto-6e02), so the bad base is
+			// injected at open rather than passed per call.
+			bad := mustOpenWithRepoTop(t, tc.repoTop)
+			orphans, err := bad.ScanOrphanModes(ctx, liveProbe, []string{abs})
 			if !errors.Is(err, errOrphanNoRepoTop) {
 				t.Errorf("err = %v, want errOrphanNoRepoTop", err)
 			}
@@ -953,7 +955,7 @@ func TestScanOrphanModes_ExpiredLockRowDoesNotSuppress(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := mustOpen(t)
+	s := mustOpenWithRepoTop(t, dir)
 	ctx := context.Background()
 	now := time.Now()
 	l := domain.LockRecord{
@@ -980,7 +982,7 @@ func TestScanOrphanModes_ExpiredLockRowDoesNotSuppress(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orphans, err := s.ScanOrphanModes(ctx, dir, liveProbe, []string{stale})
+	orphans, err := s.ScanOrphanModes(ctx, liveProbe, []string{stale})
 	if err != nil {
 		t.Fatalf("ScanOrphanModes: %v", err)
 	}
@@ -1003,7 +1005,7 @@ func TestScanOrphanModes_DeadHolderBeforeTTLDoesNotSuppress(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := mustOpen(t)
+	s := mustOpenWithRepoTop(t, dir)
 	ctx := context.Background()
 	now := time.Now()
 	// Lease still an hour from lapsing — only the holder is gone.
@@ -1026,7 +1028,7 @@ func TestScanOrphanModes_DeadHolderBeforeTTLDoesNotSuppress(t *testing.T) {
 
 	// deadProbe: every local pid gone. TTL has NOT lapsed, so an expiry-only
 	// filter would still call this row live and swallow the report.
-	orphans, err := s.ScanOrphanModes(ctx, dir, deadProbe, []string{crashed})
+	orphans, err := s.ScanOrphanModes(ctx, deadProbe, []string{crashed})
 	if err != nil {
 		t.Fatalf("ScanOrphanModes: %v", err)
 	}
@@ -1036,7 +1038,7 @@ func TestScanOrphanModes_DeadHolderBeforeTTLDoesNotSuppress(t *testing.T) {
 
 	// And the live-holder case still suppresses, so this is a liveness test and
 	// not just "the filter is off".
-	orphans, err = s.ScanOrphanModes(ctx, dir, liveProbe, []string{crashed})
+	orphans, err = s.ScanOrphanModes(ctx, liveProbe, []string{crashed})
 	if err != nil {
 		t.Fatalf("ScanOrphanModes (live): %v", err)
 	}
@@ -1062,7 +1064,7 @@ func TestDoctorRepair_LiveLockKeepsModeUntilReleased(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.DoctorRepair(ctx, "doctor", "", liveProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", liveProbe); err != nil {
 		t.Fatal(err)
 	}
 	st, err := os.Stat(l.Target.Canonical)
@@ -1079,7 +1081,7 @@ func TestDoctorRepair_LiveLockKeepsModeUntilReleased(t *testing.T) {
 	if _, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, "alice", liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DoctorRepair(ctx, "doctor", "", liveProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", liveProbe); err != nil {
 		t.Fatal(err)
 	}
 	st, err = os.Stat(l.Target.Canonical)

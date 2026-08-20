@@ -1,14 +1,18 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"loto/internal/domain"
@@ -139,7 +143,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 	residue := reportClaimResidue(rt, repoTop, stdout)
 
-	scan, scanIncomplete := scanOrphansAndHint(rt, repoTop, live, orphanFlags{
+	orphans, scanIncomplete := scanOrphansAndHint(rt, repoTop, live, orphanFlags{
 		orphanMode:    *orphanMode,
 		restoreOrphan: *restoreOrphan,
 		repair:        *repair,
@@ -156,7 +160,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 0
 	}
 	if *repair {
-		if code := doRepair(rt, live, *restoreOrphan, scan, residue, stdout, stderr); code != 0 {
+		if code := doRepair(rt, live, *restoreOrphan, orphans, residue, stdout, stderr); code != 0 {
 			return code
 		}
 	}
@@ -173,39 +177,29 @@ type orphanFlags struct {
 	repair        bool
 }
 
-// orphanScan pairs the root the candidates were built from with the orphans
-// found under it. The two must travel together: the store reconciles absolute
-// candidate paths against repo-relative lock rows and can only do that with the
-// root those candidates were joined from (loto-qoic). Passing them separately is
-// how the two got out of step in the first place.
-type orphanScan struct {
-	RepoTop string
-	Paths   []string
-}
-
 // scanOrphansAndHint runs the orphan-mode scan when requested and prints the
 // restore-recovery hint. It returns the orphan list and whether the scan was
 // incomplete (gh#130). Factored out of cmdDoctor to keep its complexity in check.
-func scanOrphansAndHint(rt *runtime, repoTop string, live domain.HolderLiveProbe, f orphanFlags, stdout io.Writer) (scan orphanScan, scanIncomplete bool) {
+func scanOrphansAndHint(rt *runtime, repoTop string, live domain.HolderLiveProbe, f orphanFlags, stdout io.Writer) (orphans []string, scanIncomplete bool) {
 	if !f.orphanMode && !f.restoreOrphan {
-		return orphanScan{RepoTop: repoTop}, false
+		return nil, false
 	}
-	scan, scanIncomplete = runOrphanScan(rt, repoTop, live, stdout)
+	orphans, scanIncomplete = runOrphanScan(rt, repoTop, live, stdout)
 	// Surface the recovery path. An orphan-mode file is read-only with no lock
 	// row (e.g. a SIGKILL between strip and commit in lock acquire, loto-j863):
 	// a dead-end unless the user knows the restore flag. Suppress when this run
 	// is already restoring — the repair line below says it all.
-	if len(scan.Paths) > 0 && (!f.repair || !f.restoreOrphan) {
-		fmt.Fprintf(stdout, "‡ %d orphan-mode file(s) read-only with no lock row — restore writable:\n", len(scan.Paths))
+	if len(orphans) > 0 && (!f.repair || !f.restoreOrphan) {
+		fmt.Fprintf(stdout, "‡ %d orphan-mode file(s) read-only with no lock row — restore writable:\n", len(orphans))
 		fmt.Fprintln(stdout, "```bash")
 		fmt.Fprintln(stdout, "loto doctor --repair --restore-orphan-mode")
 		fmt.Fprintln(stdout, "```")
 	}
-	return scan, scanIncomplete
+	return orphans, scanIncomplete
 }
 
-func doRepair(rt *runtime, live domain.HolderLiveProbe, restoreOrphan bool, scan orphanScan, residue []claimResidue, stdout, stderr io.Writer) int {
-	if err := rt.Store.DoctorRepair(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), scan.RepoTop, live); err != nil {
+func doRepair(rt *runtime, live domain.HolderLiveProbe, restoreOrphan bool, orphans []string, residue []claimResidue, stdout, stderr io.Writer) int {
+	if err := rt.Store.DoctorRepair(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), live); err != nil {
 		fmt.Fprintf(stderr, "✗ repair: %v\n", err)
 		return 3
 	}
@@ -213,8 +207,8 @@ func doRepair(rt *runtime, live domain.HolderLiveProbe, restoreOrphan bool, scan
 	if code := releaseClaimResidue(rt, residue, stdout, stderr); code != 0 {
 		return code
 	}
-	if restoreOrphan && len(scan.Paths) > 0 {
-		restored, failures, err := rt.Store.RestoreOrphanMode(rt.Ctx, scan.RepoTop, live, scan.Paths)
+	if restoreOrphan && len(orphans) > 0 {
+		restored, failures, err := rt.Store.RestoreOrphanMode(rt.Ctx, live, orphans)
 		if err != nil {
 			fmt.Fprintf(stderr, "✗ restore-orphan-mode: %v\n", err)
 			return 3
@@ -231,7 +225,7 @@ func doRepair(rt *runtime, live domain.HolderLiveProbe, restoreOrphan bool, scan
 // signal (gh#130). Returns the orphan list and a flag set when the underlying
 // walk skipped entries (e.g. permission-denied subtrees) so the caller can
 // surface a non-zero exit instead of a false-clean report.
-func runOrphanScan(rt *runtime, repoTop string, live domain.HolderLiveProbe, stdout io.Writer) (orphanScan, bool) {
+func runOrphanScan(rt *runtime, repoTop string, live domain.HolderLiveProbe, stdout io.Writer) ([]string, bool) {
 	scan, skipped, firstErr := scanAndReportOrphans(rt, repoTop, live, stdout)
 	if skipped > 0 {
 		fmt.Fprintf(stdout, "✗ scan-skipped count=%d first=%v\n", skipped, firstErr)
@@ -245,16 +239,16 @@ func runOrphanScan(rt *runtime, repoTop string, live domain.HolderLiveProbe, std
 // permission-denied subtrees), and the first walk error encountered. Callers
 // must surface a non-zero skipped count as an incomplete-scan signal; silently
 // dropping these would produce a false-clean report (gh#130).
-// ‡ Candidates are ABSOLUTE, joined from repoTop by walkRepoCandidates, and the
-// store needs that same root to reconcile them against repo-relative lock rows
-// (loto-qoic). Hence orphanScan rather than a bare slice — the root is not
-// incidental to the paths, it is the only thing that makes them interpretable.
-func scanAndReportOrphans(rt *runtime, repoTop string, live domain.HolderLiveProbe, stdout io.Writer) (orphanScan, int, error) {
-	candidates, skipped, firstWalkErr := walkRepoCandidates(repoTop)
-	orphans, err := rt.Store.ScanOrphanModes(rt.Ctx, repoTop, live, candidates)
+// ‡ Candidates are ABSOLUTE, joined from repoTop by repoCandidates, and the
+// store reconciles them against repo-relative lock rows using ITS OWN root
+// (WithRepoTop, loto-6e02). The root is a property of the store's data, not of
+// the call — passing it per-call is how the two got out of step in loto-qoic.
+func scanAndReportOrphans(rt *runtime, repoTop string, live domain.HolderLiveProbe, stdout io.Writer) ([]string, int, error) {
+	candidates, skipped, firstWalkErr := repoCandidates(rt.Ctx, repoTop)
+	orphans, err := rt.Store.ScanOrphanModes(rt.Ctx, live, candidates)
 	if err != nil {
 		fmt.Fprintf(stdout, "✗ scan-orphans: %v\n", err)
-		return orphanScan{RepoTop: repoTop}, skipped, firstWalkErr
+		return nil, skipped, firstWalkErr
 	}
 	for _, p := range orphans {
 		rel, err := filepath.Rel(repoTop, p)
@@ -263,46 +257,142 @@ func scanAndReportOrphans(rt *runtime, repoTop string, live domain.HolderLivePro
 		}
 		fmt.Fprintf(stdout, "✗ orphan-mode target=%s\n", rel)
 	}
-	return orphanScan{RepoTop: repoTop, Paths: orphans}, skipped, firstWalkErr
+	return orphans, skipped, firstWalkErr
 }
 
-var walkSkipDirs = map[string]bool{
+// errScanIncomplete wraps the warning git wrote when it could not read part of
+// the tree. Static so callers can errors.Is it; the warning text rides along.
+var errScanIncomplete = errors.New("orphan scan incomplete")
+
+// walkSkipSegments is the belt, not the mechanism. git's --exclude-standard is
+// what actually bounds the candidate set (repoCandidates); this list is what
+// stands between a mis-configured repo — no .gitignore, a broken git — and a
+// mass chmod of a dependency cache. Matched on any repo-relative segment.
+var walkSkipSegments = map[string]bool{
 	".git": true, "node_modules": true, "vendor": true,
 	"dist": true, "build": true, "target": true, ".cache": true,
+	".beads": true,
 }
 
-// walkRepoCandidates enumerates regular files under root, skipping known
-// vendored/build dirs. Walk errors (typically permission-denied subtrees) are
-// counted via skipped and the first such error is returned via firstErr — the
-// caller is responsible for surfacing an incomplete-scan signal so a partial
-// walk does not masquerade as a clean result (gh#130).
-func walkRepoCandidates(root string) (out []string, skipped int, firstErr error) {
+// walkSkipPrefixes are repo-relative path prefixes excluded outright. A
+// repo-local GOMODCACHE is 0444 by contract, and restoring write on it is the
+// destructive false positive loto-3we5 was opened about.
+var walkSkipPrefixes = []string{".sandbox/cache/"}
+
+// repoCandidates enumerates the files an orphan-mode scan may consider:
+// everything git tracks or would track, which is exactly everything that is
+// not ignored.
+//
+// ‡ git is the source, not a filter over a walk. --exclude-standard is the
+// only thing that honors all three ignore inputs at once — per-directory
+// .gitignore, $GIT_DIR/info/exclude, and core.excludesFile — and on this repo
+// the difference is decisive: .sandbox/cache/ is in .gitignore, but .beads/ is
+// ignored ONLY via .git/info/exclude. A hand-parsed .gitignore would still walk
+// the entire dolt object store and hand --restore-orphan-mode 19 packfiles.
+//
+// The old whole-tree WalkDir touched 33,236 files here in 6.75s and reported
+// 9,306 orphans, of which 9,287 were read-only-by-design cache entries.
+//
+// skipped/firstErr keep the gh#130 incomplete-scan contract: a scan that could
+// not see everything must never read as clean. git failing entirely is one
+// error and zero candidates — never a silent empty set.
+func repoCandidates(ctx context.Context, root string) (out []string, skipped int, firstErr error) {
 	if root == "" {
 		return nil, 0, nil
 	}
-	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
+	raw, warnings, err := gitLsFiles(ctx, root)
+	if err != nil {
+		return nil, 1, fmt.Errorf("git ls-files in %s: %w", root, err)
+	}
+	// git exits 0 on an unreadable subtree and merely warns, so the warnings are
+	// the whole incomplete-scan signal here (gh#130). Dropping them would let a
+	// permission-denied directory read as a clean scan — the failure mode the
+	// WalkDir error callback existed to prevent.
+	for _, w := range warnings {
+		skipped++
+		if firstErr == nil {
+			firstErr = fmt.Errorf("%w: %s", errScanIncomplete, w)
+		}
+	}
+	for rel := range strings.SplitSeq(raw, "\x00") {
+		abs, cerr, ok := candidatePath(root, rel)
+		if cerr != nil {
 			skipped++
 			if firstErr == nil {
-				firstErr = fmt.Errorf("%s: %w", p, err)
+				firstErr = cerr
 			}
-			// Continue the walk so a single unreadable subtree does not abort
-			// the scan; the caller reports the partial result via skipped/firstErr.
-			return nil
+			continue
 		}
-		if d.IsDir() {
-			if walkSkipDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
+		if ok {
+			out = append(out, abs)
 		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		out = append(out, p)
-		return nil
-	})
+	}
 	return out, skipped, firstErr
+}
+
+// gitLsFiles runs the candidate enumeration and returns stdout, the warning
+// lines git wrote to stderr, and a hard error. Separate from gitCmd because
+// only this caller needs stderr on SUCCESS: git reports an unreadable directory
+// as a warning and exit 0.
+func gitLsFiles(ctx context.Context, root string) (stdout string, warnings []string, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+	cmd.Dir = root
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	if runErr := cmd.Run(); runErr != nil {
+		return "", nil, runErr
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(errBuf.String()), "\n") {
+		if line != "" {
+			warnings = append(warnings, line)
+		}
+	}
+	return outBuf.String(), warnings, nil
+}
+
+// candidatePath decides one git-listed entry: the absolute path and true when
+// it is a scannable regular file, a non-nil error when the entry exists but
+// could not be read (an incomplete-scan signal), false otherwise.
+//
+// ‡ git lists symlinks, and paths it saw before they were deleted. The scan is
+// about file modes, so neither is a candidate. WalkDir gave this for free.
+func candidatePath(root, rel string) (string, error, bool) { //nolint:revive // (path, err, ok) reads better here than a struct for one caller
+	if rel == "" || skipCandidate(rel) {
+		return "", nil, false
+	}
+	abs := filepath.Join(root, filepath.FromSlash(rel))
+	fi, err := os.Lstat(abs)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil, false // listed but gone: not an incomplete scan
+		}
+		return "", fmt.Errorf("%s: %w", rel, err), false
+	}
+	if !fi.Mode().IsRegular() {
+		return "", nil, false
+	}
+	return abs, nil, true
+}
+
+// skipCandidate applies the belt to one repo-relative POSIX path.
+func skipCandidate(rel string) bool {
+	for _, pre := range walkSkipPrefixes {
+		if strings.HasPrefix(rel, pre) {
+			return true
+		}
+	}
+	for seg := range strings.SplitSeq(rel, "/") {
+		if walkSkipSegments[seg] {
+			return true
+		}
+	}
+	return false
 }
 
 // claimResidue is one candidate whose durable claims outlived an acceptance
