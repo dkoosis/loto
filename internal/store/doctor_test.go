@@ -62,7 +62,7 @@ func TestDoctorAudit_DetectsOrphanModeFiles(t *testing.T) {
 	}
 
 	s := mustOpen(t)
-	orphans, err := s.ScanOrphanModes(context.Background(), dir, []string{orphan, clean})
+	orphans, err := s.ScanOrphanModes(context.Background(), dir, liveProbe, []string{orphan, clean})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestScanOrphanModes_OwnedFileSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orphans, err := s.ScanOrphanModes(ctx, dir, []string{owned})
+	orphans, err := s.ScanOrphanModes(ctx, dir, liveProbe, []string{owned})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestRestoreOrphanMode_ChmodsToWritable(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := mustOpen(t)
-	restored, failures, err := s.RestoreOrphanMode(context.Background(), dir, []string{p})
+	restored, failures, err := s.RestoreOrphanMode(context.Background(), dir, liveProbe, []string{p})
 	if err != nil {
 		t.Fatalf("RestoreOrphanMode: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestRestoreOrphanMode_HoldsOpFlock(t *testing.T) {
 		t.Fatalf("acquireOpFlock: %v", err)
 	}
 
-	_, _, err = s.RestoreOrphanMode(context.Background(), dir, []string{p})
+	_, _, err = s.RestoreOrphanMode(context.Background(), dir, liveProbe, []string{p})
 	if !errors.Is(err, ErrFlockTimeout) {
 		t.Fatalf("expected ErrFlockTimeout, got %v", err)
 	}
@@ -173,7 +173,7 @@ func TestRestoreOrphanMode_HoldsOpFlock(t *testing.T) {
 	h.release()
 
 	// After release, restore succeeds.
-	restored, failures, err := s.RestoreOrphanMode(context.Background(), dir, []string{p})
+	restored, failures, err := s.RestoreOrphanMode(context.Background(), dir, liveProbe, []string{p})
 	if err != nil {
 		t.Fatalf("post-release RestoreOrphanMode: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestRestoreOrphanMode_SkipsRelockedPaths(t *testing.T) {
 	}
 
 	// Now call RestoreOrphanMode with the stale scan list.
-	restored, failures, err := s.RestoreOrphanMode(ctx, dir, scanned)
+	restored, failures, err := s.RestoreOrphanMode(ctx, dir, liveProbe, scanned)
 	if err != nil {
 		t.Fatalf("RestoreOrphanMode: %v", err)
 	}
@@ -921,7 +921,7 @@ func TestScanOrphanModes_AbsoluteCandidatesRequireRepoTop(t *testing.T) {
 		{"relative repoTop", "some/rel"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			orphans, err := s.ScanOrphanModes(ctx, tc.repoTop, []string{abs})
+			orphans, err := s.ScanOrphanModes(ctx, tc.repoTop, liveProbe, []string{abs})
 			if !errors.Is(err, errOrphanNoRepoTop) {
 				t.Errorf("err = %v, want errOrphanNoRepoTop", err)
 			}
@@ -971,11 +971,67 @@ func TestScanOrphanModes_ExpiredLockRowDoesNotSuppress(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orphans, err := s.ScanOrphanModes(ctx, dir, []string{stale})
+	orphans, err := s.ScanOrphanModes(ctx, dir, liveProbe, []string{stale})
 	if err != nil {
 		t.Fatalf("ScanOrphanModes: %v", err)
 	}
 	if len(orphans) != 1 || orphans[0] != stale {
 		t.Errorf("orphans = %v, want [%s] — an expired row must not suppress", orphans, stale)
+	}
+}
+
+// TestScanOrphanModes_DeadHolderBeforeTTLDoesNotSuppress pins the crash case
+// orphan mode exists for (loto-j863). A holder SIGKILLed before its TTL lapses
+// leaves a read-only file behind and a lock row that has NOT expired. Filtering
+// liveness on expiry alone would suppress exactly that file — a false negative
+// in the one scenario orphan recovery is meant to surface. The owned set must
+// use domain.EvalContext.IsStale, the same predicate reclaimStaleLocks applies.
+func TestScanOrphanModes_DeadHolderBeforeTTLDoesNotSuppress(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	crashed := filepath.Join(dir, "crashed.go")
+	if err := os.WriteFile(crashed, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+	// Lease still an hour from lapsing — only the holder is gone.
+	l := domain.LockRecord{
+		Target:      domain.Target{Canonical: "crashed.go"},
+		OwnerUUID:   tcAlice,
+		SessionUUID: tcAlice,
+		Intent:      tcTest,
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(time.Hour),
+		Host:        tcHost,
+		PID:         1,
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(crashed, 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	// deadProbe: every local pid gone. TTL has NOT lapsed, so an expiry-only
+	// filter would still call this row live and swallow the report.
+	orphans, err := s.ScanOrphanModes(ctx, dir, deadProbe, []string{crashed})
+	if err != nil {
+		t.Fatalf("ScanOrphanModes: %v", err)
+	}
+	if len(orphans) != 1 || orphans[0] != crashed {
+		t.Errorf("orphans = %v, want [%s] — a dead holder inside its TTL must not suppress", orphans, crashed)
+	}
+
+	// And the live-holder case still suppresses, so this is a liveness test and
+	// not just "the filter is off".
+	orphans, err = s.ScanOrphanModes(ctx, dir, liveProbe, []string{crashed})
+	if err != nil {
+		t.Fatalf("ScanOrphanModes (live): %v", err)
+	}
+	if len(orphans) != 0 {
+		t.Errorf("orphans = %v, want none — a live holder must still suppress", orphans)
 	}
 }

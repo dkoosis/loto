@@ -413,47 +413,36 @@ func validateOrphanRoot(repoTop string, paths []string) error {
 // ever match hand-built test fixtures — the same fiction that let this bug live
 // in a green suite for months.
 //
-// Only LIVE rows suppress. An expired row must not silence its file's orphan
-// report: a file left read-only by a session that died mid-hold is precisely what
-// orphan mode exists to surface. `expires_at > now` matches the live-claim probe.
-//
-// ‡ This is deliberately the TTL half of domain.EvalContext.IsStale, which is
-// `expired OR owner provably dead` (internal/domain/staleness.go:33). Taking only
-// the TTL half means a row whose holder is dead but whose lease has not lapsed
-// still suppresses — strictly MORE suppression than IsStale would give, i.e. the
-// safe direction, since suppressing only ever means "do not chmod". Matching
-// IsStale exactly would need an EvalContext and a liveness probe threaded through
-// two exported methods that take neither, and would make the scan chmod files on
-// the strength of a probe. Not an oversight: --repair reclaims stale rows via
-// reclaimStaleLocks BEFORE RestoreOrphanMode runs, so within a repair the row is
-// already gone and the file is correctly restored.
-func (s *Store) lockedPathSet(ctx context.Context, repoTop string, now time.Time) (map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT target_canonical FROM locks WHERE expires_at > ?`, now.UnixNano())
+// ‡ Liveness uses domain.EvalContext.IsStale — the SAME predicate reclaimStaleLocks
+// applies — and not a bare `expires_at > now`. The difference is the whole point of
+// orphan mode: a holder that is SIGKILLed before its TTL lapses leaves a read-only
+// file behind with a row that has not yet expired (loto-j863). Filtering on expiry
+// alone would suppress exactly that file — a false negative in the crash case
+// orphan recovery exists to surface. One predicate, no drift (staleness.go).
+// A nil probe degrades safely to TTL-only.
+func (s *Store) lockedPathSet(ctx context.Context, repoTop string, ec domain.EvalContext) (map[string]bool, error) {
+	recs, err := s.ListLocks(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	owned := map[string]bool{}
-	for rows.Next() {
-		var c string
-		if err := rows.Scan(&c); err != nil {
-			return nil, err
+	for i := range recs {
+		if ec.IsStale(recs[i]) {
+			continue
 		}
+		c := recs[i].Target.Canonical
 		if repoTop == "" {
 			owned[c] = true
 			continue
 		}
 		owned[filepath.Join(repoTop, filepath.FromSlash(c))] = true
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
 	return owned, nil
 }
 
 // ScanOrphanModes returns paths that are read-only on disk but have no
-// matching LIVE lock row. Caller supplies the candidate paths (typically all
+// matching live lock row, where "live" is domain.EvalContext.IsStale inverted:
+// neither past its TTL nor held by a provably dead owner. Caller supplies the candidate paths (typically all
 // regular files under the repo, or a curated subset).
 //
 // ‡ Candidates must be ABSOLUTE and rooted at repoTop; lock rows are
@@ -468,14 +457,14 @@ func (s *Store) lockedPathSet(ctx context.Context, repoTop string, now time.Time
 // be one the user meant to protect — hence the explicit --restore-orphan-mode
 // gate. restoreChmodEraFiles walks paths LOTO ITSELF LOCKED, where a missing
 // write bit is chmod-era residue and nothing else, so it runs unprompted.
-func (s *Store) ScanOrphanModes(ctx context.Context, repoTop string, paths []string) ([]string, error) {
+func (s *Store) ScanOrphanModes(ctx context.Context, repoTop string, live domain.HolderLiveProbe, paths []string) ([]string, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
 	if err := validateOrphanRoot(repoTop, paths); err != nil {
 		return nil, err
 	}
-	owned, err := s.lockedPathSet(ctx, repoTop, time.Now())
+	owned, err := s.lockedPathSet(ctx, repoTop, domain.EvalContext{Now: time.Now(), Live: live})
 	if err != nil {
 		return nil, err
 	}
@@ -515,7 +504,7 @@ func (s *Store) ScanOrphanModes(ctx context.Context, repoTop string, paths []str
 // AcquireLocks/Release/Break can't mutate the lock set mid-restore and
 // leave the filesystem and DB views torn (loto-98v, gh#124). Same posture
 // as DoctorRepair, which already serializes its DB+chmod work under op-flock.
-func (s *Store) RestoreOrphanMode(ctx context.Context, repoTop string, paths []string) (restored []string, failures []OrphanRestoreFailure, err error) {
+func (s *Store) RestoreOrphanMode(ctx context.Context, repoTop string, live domain.HolderLiveProbe, paths []string) (restored []string, failures []OrphanRestoreFailure, err error) {
 	if err := validateOrphanRoot(repoTop, paths); err != nil {
 		return nil, nil, err
 	}
@@ -529,7 +518,7 @@ func (s *Store) RestoreOrphanMode(ctx context.Context, repoTop string, paths []s
 	// locked paths so we can skip any that became locked since the caller's scan
 	// (TOCTOU fix for loto-h85e). The flock ensures the lock table is stable for
 	// the duration of this query + chmod loop, and the query MUST stay inside it.
-	nowOwned, err := s.lockedPathSet(ctx, repoTop, time.Now())
+	nowOwned, err := s.lockedPathSet(ctx, repoTop, domain.EvalContext{Now: time.Now(), Live: live})
 	if err != nil {
 		return nil, nil, fmt.Errorf("RestoreOrphanMode: re-query locks: %w", err)
 	}
