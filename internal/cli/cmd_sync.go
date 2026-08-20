@@ -149,6 +149,16 @@ func runSync(rt *runtime, repoTop string, stdout, stderr io.Writer) int {
 
 	synced, conflicts, code := syncStoreDecideApply(rt, repoTop, decidable, stderr)
 	if code != 0 {
+		// A mid-apply failure leaves the tree PARTIALLY fast-forwarded. Naming
+		// the files that already changed is the whole report the operator gets
+		// (loto-8sic); returning only the error would leave them to diff the
+		// tree by hand to find out what moved.
+		if len(synced) > 0 {
+			fmt.Fprintf(stdout, "⚠ sync synced=%d partial=true — the tree is partially fast-forwarded\n", len(synced))
+			for _, p := range synced {
+				fmt.Fprintf(stdout, "✓ target=%s action=fast-forward\n", p)
+			}
+		}
 		return code
 	}
 
@@ -164,6 +174,8 @@ func runSync(rt *runtime, repoTop string, stdout, stderr io.Writer) int {
 // reads run here, immediately before apply — narrows the read→write TOCTOU
 // window to milliseconds (plan Decision log; fully closing it needs the
 // store op-flock, out of scope this bead).
+// ‡ On a non-zero code the returned synced slice is still meaningful: apply is
+// not atomic, so it names the files already written before the failure.
 func syncStoreDecideApply(rt *runtime, repoTop string, decidable []syncDiff, stderr io.Writer) (synced []string, conflicts []syncConflict, code int) {
 	locks, err := rt.Store.ListLocks(rt.Ctx)
 	if err != nil {
@@ -188,10 +200,13 @@ func syncStoreDecideApply(rt *runtime, repoTop string, decidable []syncDiff, std
 	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe())}
 	apply, conflicts := syncDecide(decidable, locks, claims, cands, ec)
 
+	// ‡ syncApply returns what it wrote BEFORE it failed. Discarding that on
+	// the error path is what loto-8sic was opened about: the tree is left
+	// partially fast-forwarded and the caller cannot say which files moved.
 	synced, err = syncApply(rt.Ctx, repoTop, apply)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return nil, nil, 3
+		return synced, nil, 3
 	}
 	return synced, conflicts, 0
 }
