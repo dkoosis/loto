@@ -486,7 +486,7 @@ func TestDoctorRepair_GCsOrphanedTags(t *testing.T) {
 	if n := rawTagRowCount(t, s); n != 1 {
 		t.Fatalf("precondition: 1 orphan tag row, got %d", n)
 	}
-	if err := s.DoctorRepair(ctx, tcAlice, "", liveProbe); err != nil {
+	if err := s.DoctorRepair(ctx, tcAlice, liveProbe); err != nil {
 		t.Fatalf("DoctorRepair: %v", err)
 	}
 	if n := rawTagRowCount(t, s); n != 0 {

@@ -177,11 +177,11 @@ func checkSidecar(l domain.LockRecord, sc SidecarCheck) (SidecarFinding, bool) {
 // DoctorAudit — whose sidecar cross-check still needs a this-host string — it
 // takes no host argument.
 //
-// repoTop is the absolute git toplevel the chmod-era migration resolves its
-// repo-relative candidates against (loto-gc82). Empty means "no repo here":
-// the migration then touches only candidates that are already absolute, and
-// never falls back to the process CWD.
-func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, repoTop string, live domain.HolderLiveProbe) error {
+// The chmod-era migration resolves its repo-relative candidates against the
+// store's own repo root (WithRepoTop). An unset root means "no repo here": the
+// migration then touches only candidates that are already absolute, and never
+// falls back to the process CWD (loto-gc82).
+func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live domain.HolderLiveProbe) error {
 	byAgent := string(agent) // internal store helpers thread the owner as a plain string
 	// Hold the op-flock across the tx AND the post-commit chmod restores
 	// so concurrent AcquireLocks can't race the filesystem half of the
@@ -234,7 +234,7 @@ func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, repoTo
 	// for up to busy_timeout under contention (loto-3qev). VACUUM also runs after
 	// release (loto-3bl0): it's post-commit, uses a fresh pool conn with SQLite's
 	// own locking, and needs no op-flock.
-	failEvents := restoreChmodEraFiles(repoTop, candidates, byAgent, now)
+	failEvents := restoreChmodEraFiles(s.repoTop, candidates, byAgent, now)
 	flock.release()
 	if len(failEvents) > 0 {
 		_ = s.appendAuditDetached(failEvents)
@@ -427,7 +427,8 @@ var errOrphanNoRepoTop = errors.New("orphan scan: cannot reconcile candidate pat
 // candidate; a relative repoTop joins to something that can never equal one.
 // A repoTop that is absolute but WRONG stays unguarded — the store cannot
 // validate a base it does not own (see loto-6e02).
-func validateOrphanRoot(repoTop string, paths []string) error {
+func (s *Store) validateOrphanRoot(paths []string) error {
+	repoTop := s.repoTop
 	if repoTop == "" {
 		for _, p := range paths {
 			if filepath.IsAbs(p) {
@@ -467,7 +468,7 @@ func validateOrphanRoot(repoTop string, paths []string) error {
 // alone would suppress exactly that file — a false negative in the crash case
 // orphan recovery exists to surface. One predicate, no drift (staleness.go).
 // A nil probe degrades safely to TTL-only.
-func (s *Store) lockedPathSet(ctx context.Context, repoTop string, ec domain.EvalContext) (map[string]bool, error) {
+func (s *Store) lockedPathSet(ctx context.Context, ec domain.EvalContext) (map[string]bool, error) {
 	recs, err := s.ListLocks(ctx)
 	if err != nil {
 		return nil, err
@@ -478,11 +479,11 @@ func (s *Store) lockedPathSet(ctx context.Context, repoTop string, ec domain.Eva
 			continue
 		}
 		c := recs[i].Target.Canonical
-		if repoTop == "" {
+		if s.repoTop == "" {
 			owned[c] = true
 			continue
 		}
-		owned[filepath.Join(repoTop, filepath.FromSlash(c))] = true
+		owned[filepath.Join(s.repoTop, filepath.FromSlash(c))] = true
 	}
 	return owned, nil
 }
@@ -507,14 +508,14 @@ func (s *Store) lockedPathSet(ctx context.Context, repoTop string, ec domain.Eva
 // missing write bit is chmod-era residue and nothing else, so it runs
 // unprompted. On a live-locked path it is not — the holder may have made the
 // file read-only itself — which is why live rows are excluded (loto-2hjh).
-func (s *Store) ScanOrphanModes(ctx context.Context, repoTop string, live domain.HolderLiveProbe, paths []string) ([]string, error) {
+func (s *Store) ScanOrphanModes(ctx context.Context, live domain.HolderLiveProbe, paths []string) ([]string, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
-	if err := validateOrphanRoot(repoTop, paths); err != nil {
+	if err := s.validateOrphanRoot(paths); err != nil {
 		return nil, err
 	}
-	owned, err := s.lockedPathSet(ctx, repoTop, domain.EvalContext{Now: time.Now(), Live: live})
+	owned, err := s.lockedPathSet(ctx, domain.EvalContext{Now: time.Now(), Live: live})
 	if err != nil {
 		return nil, err
 	}
@@ -554,8 +555,8 @@ func (s *Store) ScanOrphanModes(ctx context.Context, repoTop string, live domain
 // AcquireLocks/Release/Break can't mutate the lock set mid-restore and
 // leave the filesystem and DB views torn (loto-98v, gh#124). Same posture
 // as DoctorRepair, which already serializes its DB+chmod work under op-flock.
-func (s *Store) RestoreOrphanMode(ctx context.Context, repoTop string, live domain.HolderLiveProbe, paths []string) (restored []string, failures []OrphanRestoreFailure, err error) {
-	if err := validateOrphanRoot(repoTop, paths); err != nil {
+func (s *Store) RestoreOrphanMode(ctx context.Context, live domain.HolderLiveProbe, paths []string) (restored []string, failures []OrphanRestoreFailure, err error) {
+	if err := s.validateOrphanRoot(paths); err != nil {
 		return nil, nil, err
 	}
 	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
@@ -568,7 +569,7 @@ func (s *Store) RestoreOrphanMode(ctx context.Context, repoTop string, live doma
 	// locked paths so we can skip any that became locked since the caller's scan
 	// (TOCTOU fix for loto-h85e). The flock ensures the lock table is stable for
 	// the duration of this query + chmod loop, and the query MUST stay inside it.
-	nowOwned, err := s.lockedPathSet(ctx, repoTop, domain.EvalContext{Now: time.Now(), Live: live})
+	nowOwned, err := s.lockedPathSet(ctx, domain.EvalContext{Now: time.Now(), Live: live})
 	if err != nil {
 		return nil, nil, fmt.Errorf("RestoreOrphanMode: re-query locks: %w", err)
 	}
