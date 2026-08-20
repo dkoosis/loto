@@ -17,6 +17,7 @@ package cli
 //   01-08   primitives          (whoami, lock+status, check, racing, handoff, status, doctor, version)
 //   09-16   coordination        (lane, drain, hook-gate, migration, queue, reviewer, TDD, cross-repo)
 //   17-20   safety invariants   (multi-file atomic, reads-are-free, force-break, lazy GC)
+//   21      git-gate end-to-end (two agents + a rogue write; demo_gate_test.go)
 
 import (
 	"bytes"
@@ -193,6 +194,8 @@ func TestDemo_00_Index(t *testing.T) {
 		"18  reads are free     a lock coordinates writes; reads are never gated",
 		"19  force-break        unlock --force takes over; no silent dispossession",
 		"20  lazy GC            expired row reaped on next acquire, no doctor needed",
+		"── git-gate ──",
+		"21  gate end-to-end   two agents, rogue write, sync repairs",
 	}
 	var b strings.Builder
 	b.WriteString("\n    ┌─ loto demo index ")

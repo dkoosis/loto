@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"loto/internal/domain"
+	"loto/internal/store"
 )
 
 const (
@@ -263,6 +264,46 @@ func TestSubmit_GateBypass(t *testing.T) {
 	id := candidateIDFromSuccessRow(t, out.String())
 	if sha := submitGitT(t, repo, "rev-parse", "--verify", "--quiet", "refs/loto/candidates/"+id); sha == "" {
 		t.Error("bypass must still write the candidate ref")
+	}
+	assertGateBypassLogged(t)
+}
+
+// assertGateBypassLogged is the loto-ovno.11 contract item "bypass logged":
+// exactly one gate_bypass event, attributed and reasoned, after a bypassed
+// submit.
+//
+// ‡ The event is the half that makes the hatch survivable (git-gate.md Outcome
+// 7: "every bypass is logged as a violation-class event ... so bypass cannot
+// silently become the norm"). The advisory scrolls past; only the persisted
+// row can answer "how often does this repo run with the gate off?" — so the
+// failure worth pinning is an ACCEPTED bypass that left no trace, not a
+// missing warning line.
+func assertGateBypassLogged(t *testing.T) {
+	t.Helper()
+	rt, err := openRuntime(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	events, err := rt.Store.ListEvents(rt.Ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []domain.Event
+	for _, e := range events {
+		if e.Kind == store.EventGateBypass {
+			found = append(found, e)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("want exactly 1 %s event after a bypassed submit, got %d (of %d events)",
+			store.EventGateBypass, len(found), len(events))
+	}
+	if found[0].ActorUUID == "" {
+		t.Error("a bypass event must name who bypassed — an unattributed one cannot be followed up")
+	}
+	if found[0].Reason == "" {
+		t.Error("a bypass event must record why — the reason is what tells submit's hatch from a later caller's")
 	}
 }
 
