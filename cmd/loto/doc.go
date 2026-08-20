@@ -35,7 +35,7 @@
 //
 // # Design north star
 //
-// See docs/NORTH_STAR.md for the full design contract — coordination
+// See docs/DESIGN.md for the full design contract — coordination
 // layers (tag/record-tier, chmod enforcement, op-flock; foreground file
 // flock and global lock deferred), invariants (flock is truth except for
 // the bounded record-tier carve-out), and the five-Claude acceptance

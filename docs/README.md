@@ -4,8 +4,8 @@ Index of design + reference docs for loto. Audience: future Claudes and dk.
 
 ## top-level
 
-- [NORTH_STAR.md](NORTH_STAR.md) — what loto is for, the contract, what stays out of scope.
-- [PLAN.md](PLAN.md) — current → north star roadmap; companion to NORTH_STAR.
+- [DESIGN.md](DESIGN.md) — what loto is for, the design contract, what stays out of scope.
+- [../ROADMAP.md](../ROADMAP.md) — the destination and the epics that get there; status lives in `.beads/`.
 - [true-bug-audit-2026-04-29.md](true-bug-audit-2026-04-29.md) — point-in-time correctness/concurrency/persistence audit.
 
 ## decisions/
@@ -21,4 +21,4 @@ ADRs — accepted architectural decisions, append-only.
 
 ## superpowers/plans/
 
-Implementation plans drafted via the superpowers workflow. Historical; current roadmap lives in PLAN.md.
+Implementation plans drafted via the superpowers workflow. Historical; current direction lives in `ROADMAP.md`.

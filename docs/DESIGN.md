@@ -1,8 +1,20 @@
-<!-- auto-published from KG (nug:3aa4cdc415eb) — edit source nug, not this file -->
-
 # loto design
 
-*Author: dk. Audience: future Claudes (and dk). The spec behind the charter (`docs/NORTH_STAR.md`); the elevator pitch is `docs/NORTH_STAR_MINI.md`.*
+*Author: dk. Audience: future Claudes (and dk). The design contract — what loto is for, how it works, what stays out of scope. Direction and epics live in `ROADMAP.md`.*
+
+## what this is for
+
+★ Lockout/tagout for files — parallel Claude sessions in one repo coordinate writes instead of clobbering each other.
+
+loto brings [lockout/tagout](https://www.osha.com/blog/lockout-tagout) to files. An agent locks a file while editing it, so no other agent can change it at the same time. The agent tags the file with basic information such as who holds it and what work is being performed (such as a Git issue or bead ID).
+
+loto solves the problem that when multiple Claude Code sessions run in the same repo, they clobber each other or panic on unexpected diffs. (Worktrees just delay the issue until merge.) With loto, a participating agent can instantly see if a file is locked by another team member, and why.
+
+## non-goals
+
+✗ Multi-host coordination (NFS, network shares — flock semantics break).
+✗ Long-lived processes across sessions. No daemon.
+✗ Enforced consistency. Loto assumes a cooperative team and does not prevent a process from changing permissions and directly writing to files.
 
 ## the model
 
@@ -51,8 +63,7 @@ on the roadmap.
 | Global lock | flock(2) on a project-wide handle | flock | **deferred** | "Sweep across the whole tree; everyone else stand down" |
 
 ‡ **Truth, not tags — with one bounded exception.** SQL rows can lie
-(writer crashed mid-tx, row rotted past TTL). flock and filesystem mode
-bits cannot. Every protocol decision involving a *foreground* operation
+(writer crashed mid-tx, row rotted past TTL). flock cannot. Every protocol decision involving a *foreground* operation
 must remain valid if every `locks` row on disk is wrong or missing.
 **Exception:** rows carrying a non-zero, unexpired `expires_at` are
 authoritative for that TTL window — the record-tier carve-out, because
@@ -377,3 +388,15 @@ If you find yourself writing one of these, stop and reconsider:
 If a feature can't be expressed as "what does the next single `loto`
 invocation do, given the current state of `$LOTO_HOME`?", it's probably
 in the wrong layer.
+
+## end-state acceptance
+
+We reach the destination when a fresh Claude, dropped into any worktree
+of a project where 4 other Claudes are working, can:
+
+1. Run `loto status` and understand who's on what in <1s.
+2. Acquire one or more file locks atomically, and edit safely.
+3. Receive a useful blocker report when something is held.
+4. Crash, restart, and resume without leaving stale state.
+
+That's the bar. Anything else is scope creep.

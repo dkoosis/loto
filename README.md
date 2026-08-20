@@ -40,7 +40,7 @@ loto lock internal/store/store.go -t "fix bug"
 Enforcement is layered: the row + TTL is authoritative across CC hook
 events (PreToolUse → PostToolUse), and the PreToolUse gate refuses a
 peer's write over a held path. loto itself never changes a file's
-permissions — see `docs/NORTH_STAR.md` for why that changed, and for the
+permissions — see `docs/DESIGN.md` for why that changed, and for the
 full design contract.
 
 ## installation
@@ -175,7 +175,7 @@ an accident of naming.
 7. **Cleanup is layered.** SessionEnd hook (eager) → lazy GC on next
    acquire (passive) → `loto doctor --repair` (manual).
 
-See `docs/NORTH_STAR.md` for the full contract.
+See `docs/DESIGN.md` for the full contract.
 
 ## what loto isn't
 

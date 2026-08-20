@@ -6,7 +6,7 @@ Operational notes for the OpenAI Codex cloud sandbox running against this repo.
 
 loto coordinates concurrent Claude/Codex agents editing the same repo. flock(2)
 is the source of truth; JSON tags are advisory metadata. Single-host only — no
-NFS, no daemon. See `docs/NORTH_STAR.md` for the full design.
+NFS, no daemon. See `docs/DESIGN.md` for the full design.
 
 ## Definition of "done" in sandbox
 

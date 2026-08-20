@@ -175,6 +175,6 @@ When blocked:
 
 ## Cross-refs
 
-- `~/Projects/loto/docs/NORTH_STAR.md` — full design rationale
+- `~/Projects/loto/docs/DESIGN.md` — full design rationale
 - nug `32f0ece29b72` — Claude-Optimized Utility Output
 - nug `c75320ff5718` — Symbol Glossary
