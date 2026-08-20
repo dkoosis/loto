@@ -1,0 +1,12 @@
+usage: loto sync
+
+Fast-forward every unleased path that diverges from refs/loto/integration to
+integration content, and report the conflicts it refused to touch.
+
+Divergence comes from rejected/abandoned candidates leaving tree residue,
+out-of-band writes, and interrupted sessions — never ordinary promotion
+(promoted blobs already originate in the tree). A path under a live lease, a
+live territory claim, or an unresolved candidate claim is never written; it
+is reported as a conflict row instead.
+
+loto sync takes no arguments; run it from anywhere inside the repo.
