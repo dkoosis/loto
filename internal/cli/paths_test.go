@@ -301,3 +301,94 @@ func TestResolveCLITarget_RelativeLeafSymlinkStillRefused(t *testing.T) {
 		t.Errorf("canonical = %q, want sym.go — the token must not be symlink-resolved", got.Canonical)
 	}
 }
+
+// TestResolveCLITarget_SymlinkedAncestorConverges is the loto-j39r defect-1
+// regression. domain.Canonicalize is lexical, so link/a.go and real/a.go named
+// one file under two keys — and two agents could hold exclusive locks on it
+// through the two aliases, which is the failure loto exists to prevent.
+func TestResolveCLITarget_SymlinkedAncestorConverges(t *testing.T) {
+	top := evalTop(t, t.TempDir())
+	realDir := filepath.Join(top, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, tcTargetA), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDir, filepath.Join(top, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	viaLink, err := resolveCLITarget(top, top, "link/"+tcTargetA)
+	if err != nil {
+		t.Fatalf("via link: %v", err)
+	}
+	viaReal, err := resolveCLITarget(top, top, "real/"+tcTargetA)
+	if err != nil {
+		t.Fatalf("via real: %v", err)
+	}
+	if viaLink.Canonical != viaReal.Canonical {
+		t.Errorf("aliases must converge: link=%q real=%q", viaLink.Canonical, viaReal.Canonical)
+	}
+	if viaLink.Canonical != "real/"+tcTargetA {
+		t.Errorf("canonical = %q, want real/%s", viaLink.Canonical, tcTargetA)
+	}
+}
+
+// TestResolveCLITarget_DeepMissingLeafUnderSymlinkedAncestor pins the tail walk.
+// A beacon announces a write to a path that does not exist yet; the old
+// one-level fallback resolved only Dir(p), so two missing segments left the
+// symlinked ancestor unresolved and the alias intact.
+func TestResolveCLITarget_DeepMissingLeafUnderSymlinkedAncestor(t *testing.T) {
+	top := evalTop(t, t.TempDir())
+	realDir := filepath.Join(top, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDir, filepath.Join(top, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveCLITarget(top, top, "link/pkg/brand-new.go")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got.Canonical != "real/pkg/brand-new.go" {
+		t.Errorf("canonical = %q, want real/pkg/brand-new.go", got.Canonical)
+	}
+}
+
+// TestResolveCLITarget_SymlinkedAncestorOutOfRepoEscapes closes the hole the
+// lexical containment check left open: filepath.Rel could not see that an
+// in-repo-looking prefix was a symlink pointing somewhere else entirely.
+func TestResolveCLITarget_SymlinkedAncestorOutOfRepoEscapes(t *testing.T) {
+	top := evalTop(t, t.TempDir())
+	outside := evalTop(t, t.TempDir())
+	if err := os.WriteFile(filepath.Join(outside, tcTargetA), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(top, "escape")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := resolveCLITarget(top, top, "escape/"+tcTargetA); !errors.Is(err, domain.ErrRepoEscape) {
+		t.Errorf("err = %v, want ErrRepoEscape", err)
+	}
+}
+
+// TestResolveAncestors_MissingTailRidesAlong pins both ends of the walk: the
+// existing prefix is resolved, and every segment that does not exist yet is
+// re-appended verbatim.
+func TestResolveAncestors_MissingTailRidesAlong(t *testing.T) {
+	dir := t.TempDir()
+	resolved := evalTop(t, dir)
+	got := resolveAncestors(filepath.Join(dir, "nope", "deeper", "x.go"))
+	if want := filepath.Join(resolved, "nope", "deeper", "x.go"); got != want {
+		t.Errorf("resolveAncestors = %q, want %q", got, want)
+	}
+	// No existing prefix at all: nothing on disk to alias, so nothing changes.
+	orphaned := filepath.Join(string(filepath.Separator), "no-such-root-9f2a", "x.go")
+	if got := resolveAncestors(orphaned); got != orphaned {
+		t.Errorf("resolveAncestors(%q) = %q, want it unchanged", orphaned, got)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -614,5 +615,65 @@ func TestLock_StampsHolderBranch(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), " branch="+short) {
 		t.Errorf("status missing branch=%s for detached HEAD:\n%s", short, out.String())
+	}
+}
+
+// TestLock_SymlinkedAncestorCannotDoubleHold is the loto-j39r P1, end to end:
+// two agents locking one file through two directory spellings. Before ancestor
+// resolution both acquires succeeded, and each agent believed it held the file
+// exclusively.
+func TestLock_SymlinkedAncestorCannotDoubleHold(t *testing.T) {
+	repo := withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	realDir := filepath.Join(repo, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, tcTargetA), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDir, filepath.Join(repo, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	if code := Run([]string{tcCmdLock, "real/" + tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice lock via the real path failed")
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdLock, "link/" + tcTargetA, "-t", tcIntentTest}, &out, &bytes.Buffer{}); code == 0 {
+		t.Fatalf("bob acquired the same file through a symlinked ancestor: %q", out.String())
+	}
+}
+
+// TestLock_SymlinkAliasesDedupeWithinOneBatch pins the other half: once the two
+// spellings converge they are one target, so a single batch naming both is a
+// duplicate rather than two locks.
+func TestLock_SymlinkAliasesDedupeWithinOneBatch(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+
+	realDir := filepath.Join(repo, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, tcTargetA), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDir, filepath.Join(repo, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, "real/" + tcTargetA, "link/" + tcTargetA, "-t", tcIntentTest}, &out, &errBuf)
+	if code == 0 {
+		t.Fatalf("expected the alias to be rejected as a duplicate: out=%q", out.String())
+	}
+	if !strings.Contains(errBuf.String()+out.String(), "duplicate-target") {
+		t.Errorf("expected duplicate-target: out=%q err=%q", out.String(), errBuf.String())
 	}
 }
