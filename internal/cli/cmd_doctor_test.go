@@ -256,7 +256,7 @@ func seedClaim(t *testing.T, candidateID, path string) {
 		t.Fatal(err)
 	}
 	defer rt.Store.Close()
-	target, err := resolveCLITarget(rt.RepoTop, path)
+	target, err := resolveCLITarget(callerBase(), rt.RepoTop, path)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -24,6 +24,29 @@ type Store struct {
 	db     *sql.DB
 	dbPath string
 	stderr io.Writer
+	// repoTop is the absolute checkout root that repo-relative canonicals are
+	// probed against on the filesystem (loto-3tv3 D8). Empty means "no repo
+	// frame": probes fall back to the canonical as given, which is the legacy
+	// behavior and what the in-package tests (absolute canonicals) exercise.
+	//
+	// ‡ Per-process, not per-store-file. StateDir keys the DB by origin-remote
+	// slug, so two worktrees of one repo share a store; repoTop means "validate
+	// against MY checkout", the same semantics statFileTargetReason has had
+	// since loto-cqk.
+	repoTop string
+}
+
+// OpenOption configures a Store after its connection is established. Options
+// are applied post-open so nothing threads through the acquireOpenLocks →
+// openWithRecovery → openOnce chain.
+type OpenOption func(*Store)
+
+// WithRepoTop tells the store which checkout to resolve repo-relative
+// canonicals against. Without it, validateFileTarget Lstats the canonical bare
+// — i.e. against the process CWD — which is correct only when the process
+// happens to be standing at the repo root.
+func WithRepoTop(top string) OpenOption {
+	return func(s *Store) { s.repoTop = top }
 }
 
 // connDSN: WAL + busy_timeout + immediate-mode write txns.
@@ -48,8 +71,15 @@ func Open(p string) (*Store, error) {
 // OpenContext is Open with a caller-supplied context. Cancellation aborts
 // flock polling (op-flock + recovery-lock) instead of waiting out
 // LOTO_FLOCK_TIMEOUT.
-func OpenContext(ctx context.Context, p string) (*Store, error) {
-	return acquireOpenLocks(ctx, p)
+func OpenContext(ctx context.Context, p string, opts ...OpenOption) (*Store, error) {
+	s, err := acquireOpenLocks(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s, nil
 }
 
 // acquireOpenLocks is the single canonical entry point for the Open-path

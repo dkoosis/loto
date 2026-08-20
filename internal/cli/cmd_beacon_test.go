@@ -87,6 +87,12 @@ func TestCmdBeacon_SymlinkRefusedFromNestedCwd(t *testing.T) {
 // #258 P1: with the stat resolved against CWD, an ordinary `loto lock` on a
 // real file reported a spurious "not-found" whenever loto ran anywhere but
 // the repo root.
+//
+// It is also the loto-3tv3 acceptance case for lock. withTempProject seeds
+// repo/a.go, so the bare token `a.go` typed from repo/sub is the
+// same-basename-at-root collision: before the fix it minted the key `a.go` —
+// exit 0, wrong file, silently. The key assertion below is what makes that
+// visible; exit 0 alone passed the whole time the bug was live.
 func TestCmdLock_ExistingFileFromNestedCwd(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)
@@ -94,14 +100,55 @@ func TestCmdLock_ExistingFileFromNestedCwd(t *testing.T) {
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sub, "a.go"), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(sub, tcTargetA), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(sub)
 
 	var out, errBuf bytes.Buffer
-	code := Run([]string{"lock", "a.go", "-t", "nested cwd"}, &out, &errBuf)
+	code := Run([]string{tcCmdLock, tcTargetA, "-t", "nested cwd"}, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("lock from a nested cwd: exit=%d out=%q err=%q", code, out.String(), errBuf.String())
+	}
+
+	var st bytes.Buffer
+	if code := Run([]string{tcCmdStatus, tcFlagMine}, &st, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("status: exit=%d %q", code, st.String())
+	}
+	if !strings.Contains(st.String(), "target=sub/a.go") {
+		t.Errorf("lock must key the file the caller sees: %q", st.String())
+	}
+	if strings.Contains(st.String(), "target=a.go") {
+		t.Errorf("lock keyed the repo-root file instead: %q", st.String())
+	}
+}
+
+// TestCmdUnlock_FromSubdirReleasesTheFileTheCallerMeans pins the lock/unlock
+// key round-trip. If the two verbs minted different keys for one token, unlock
+// could not find its own lock and the row would sit there until TTL.
+func TestCmdUnlock_FromSubdirReleasesTheFileTheCallerMeans(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	sub := filepath.Join(repo, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, tcTargetA), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(sub)
+
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", "round trip"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("lock from a nested cwd failed")
+	}
+	if code := Run([]string{tcCmdUnlock, tcTargetA, "-t", tcIntentDone}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("unlock from a nested cwd failed")
+	}
+	var st bytes.Buffer
+	if code := Run([]string{tcCmdStatus, tcFlagMine}, &st, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("status: exit=%d %q", code, st.String())
+	}
+	if strings.Contains(st.String(), "target=") {
+		t.Errorf("unlock must release the row lock minted: %q", st.String())
 	}
 }

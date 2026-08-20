@@ -37,4 +37,6 @@ const (
 	tcClosesNone   = "none"
 	tcRefImpl1     = "impl-1"
 	tcClosesAbc    = "loto-abc"
+	tcTargetSym    = "sym.go"
+	tcStoreGo      = "store.go"
 )

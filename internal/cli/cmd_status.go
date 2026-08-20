@@ -41,7 +41,7 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 
 	if fs.NArg() == 1 {
-		t, err := resolveCLITarget(repoTop, fs.Arg(0))
+		t, err := resolveCLITarget(callerBase(), repoTop, fs.Arg(0))
 		if err != nil {
 			fmt.Fprintf(stderr, "✗ %v\n", err)
 			return 2

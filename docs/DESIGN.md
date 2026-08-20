@@ -324,8 +324,15 @@ not of loto, and the two shell call sites do not agree:
 
 | caller | relative path | why |
 |---|---|---|
+| direct CLI (`loto lock x.go` typed in a shell) | **the process's own cwd** (`os.Getwd`) | loto was spawned by the shell the caller is standing in, so its cwd IS the caller's |
 | `Bash` | payload cwd + any leading `cd` in the same command | the process is fresh per call, so the payload's cwd is the shell's cwd |
 | `mcp__trixi__agent_shell` | **unresolvable — refuse** | the shell keeps its own persistent cwd, set by a `cd` that may have run three tool calls ago and absent from the payload |
+
+Tokens loto did not get from a caller do not take the caller's base:
+`check --staged` reads its paths from `git diff --cached` run with
+`cmd.Dir = repoTop`, so they are repo-root-relative by construction. The
+base is a parameter of the resolver, chosen where the provenance is known
+(loto-3tv3).
 
 A caller that cannot vouch for the base passes `--cwd-unknown`; loto then
 refuses relative tokens (`✗ unresolvable`) rather than guessing. Absolute

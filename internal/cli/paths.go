@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -182,11 +183,113 @@ func gitCmd(ctx context.Context, repoTop string, args ...string) (string, error)
 	return string(out), err
 }
 
+// errCallerCWDUnknown reports that a relative token cannot be resolved because
+// the caller's base directory is not knowable (os.Getwd failed — a deleted cwd).
+// Refusing is the only safe answer: falling back to repo-root-relative is the
+// false clean invariant 9 forbids.
+var errCallerCWDUnknown = errors.New("caller cwd unknown: cannot resolve a relative path")
+
+// callerBase returns the directory a caller-typed relative token resolves
+// against — the process's own cwd, since loto was spawned by the shell the
+// caller is standing in. Empty on failure, which resolveCLITarget turns into a
+// refusal rather than a guess.
+//
+// ‡ os.Getwd (physical), deliberately not $PWD (logical). repoTop comes from
+// `git rev-parse --show-toplevel` run against the same getcwd(2), so base and
+// top agree by construction; $PWD is a mutable env var an agent's shell can
+// leave stale, and a lock key is durable state.
+func callerBase() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
+}
+
 // resolveCLITarget normalizes a user-supplied path (absolute, relative, or
 // inside repoTop) into a canonical domain.Target. Centralizes the
 // normalizeRepoPath + Canonicalize policy so future fixes land in one place.
-func resolveCLITarget(repoTop, raw string) (domain.Target, error) {
-	return domain.Canonicalize(normalizeRepoPath(raw, repoTop))
+//
+// base is the directory a RELATIVE token resolves against — the token's
+// provenance, which only the caller knows (loto-3tv3):
+//
+//   - caller-typed positionals → the caller's cwd (callerBase())
+//   - tokens git produced with cmd.Dir=repoTop (`check --staged`) → repoTop
+//   - "" → the base is not knowable; relative tokens are refused
+//
+// The caller declares; loto must not sniff. Making the base a parameter is what
+// keeps `check --staged` (git-produced, already repo-root-relative) from being
+// re-based onto the cwd.
+func resolveCLITarget(base, repoTop, raw string) (domain.Target, error) {
+	if repoTop == "" || filepath.IsAbs(raw) {
+		// No repo frame, or a token that carries its own base: today's path.
+		return domain.Canonicalize(normalizeRepoPath(raw, repoTop))
+	}
+	// Spelling verdicts are base-independent and are decided on the RAW token;
+	// positional verdicts are base-dependent and are re-decided after the join.
+	// filepath.Join Cleans, which erases the spellings Canonicalize rules on
+	// (a trailing slash, a glob metacharacter), so they must be judged first.
+	if _, err := domain.Canonicalize(raw); err != nil {
+		switch {
+		case errors.Is(err, domain.ErrTargetIsRepoRoot), errors.Is(err, domain.ErrRepoEscape):
+			// positional: base-dependent, re-decided below
+		default:
+			return domain.Target{}, err
+		}
+	}
+	if base == "" {
+		return domain.Target{}, errCallerCWDUnknown
+	}
+	rel, err := repoRelFromBase(base, repoTop, raw)
+	if err != nil {
+		return domain.Target{}, err
+	}
+	return domain.Canonicalize(rel)
+}
+
+// repoRelFromBase joins a relative token to its base and expresses the result
+// repo-relative, or reports domain.ErrRepoEscape when it lands outside repoTop.
+//
+// ‡ It never calls EvalSymlinks on the TOKEN, and that omission is load-bearing.
+// Absolute tokens get symlink resolution in normalizeRepoPath; giving relative
+// tokens the same treatment would resolve a leaf symlink before
+// statFileTargetReason could refuse it, flipping repo-root invocations that are
+// refused today into accepted ones. Closing that asymmetry — ancestor aliasing
+// and the leaf-symlink policy — is loto-j39r's job, decided deliberately rather
+// than as a side effect of a cwd fix.
+func repoRelFromBase(base, repoTop, raw string) (string, error) {
+	absTop, err := filepath.Abs(repoTop)
+	if err != nil {
+		return "", err
+	}
+	// Same reason as normalizeRepoPath: /var vs /private/var on macOS, and any
+	// other symlinked checkout root.
+	if r, err := filepath.EvalSymlinks(absTop); err == nil {
+		absTop = r
+	}
+	// Resolve symlinks on the BASE — a directory the caller is standing in, not
+	// the token — so a logical cwd (/var/... on macOS, where os.Getwd can answer
+	// from $PWD) lines up with the physical repoTop. Without this every token
+	// from a temp-dir checkout reads as a repo escape.
+	absBase := base
+	if r, err := filepath.EvalSymlinks(absBase); err == nil {
+		absBase = r
+	}
+	absP := filepath.Join(absBase, raw)
+	rel, err := filepath.Rel(absTop, absP)
+	if err != nil {
+		return "", err
+	}
+	if rel == "." {
+		return ".", nil // Canonicalize answers ErrTargetIsRepoRoot
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if sub, ok := foldContains(absTop, absP); ok && caseInsensitiveFS(absTop) {
+			return filepath.ToSlash(sub), nil
+		}
+		return "", domain.ErrRepoEscape
+	}
+	return filepath.ToSlash(rel), nil
 }
 
 // normalizeRepoPath translates an absolute path that lies inside repoTop to a

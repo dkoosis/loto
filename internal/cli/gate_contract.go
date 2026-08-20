@@ -25,7 +25,8 @@ import (
 // Version log:
 //
 //	1 — `check --gate`, `guard`, `beacon`, `check --cwd-unknown`.
-const GateContractVersion = 1
+//	2 — direct-CLI relative positionals resolve against the caller's cwd (loto-3tv3).
+const GateContractVersion = 2
 
 // gateContractEnv is where the hook stamps the version it needs. An env var
 // rather than a per-verb flag: `check --gate`, `guard` and `beacon` are all
