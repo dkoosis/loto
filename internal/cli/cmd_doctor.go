@@ -139,7 +139,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 	residue := reportClaimResidue(rt, repoTop, stdout)
 
-	orphans, scanIncomplete := scanOrphansAndHint(rt, repoTop, orphanFlags{
+	scan, scanIncomplete := scanOrphansAndHint(rt, repoTop, live, orphanFlags{
 		orphanMode:    *orphanMode,
 		restoreOrphan: *restoreOrphan,
 		repair:        *repair,
@@ -156,7 +156,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 0
 	}
 	if *repair {
-		if code := doRepair(rt, live, *restoreOrphan, orphans, residue, stdout, stderr); code != 0 {
+		if code := doRepair(rt, live, *restoreOrphan, scan, residue, stdout, stderr); code != 0 {
 			return code
 		}
 	}
@@ -173,28 +173,38 @@ type orphanFlags struct {
 	repair        bool
 }
 
+// orphanScan pairs the root the candidates were built from with the orphans
+// found under it. The two must travel together: the store reconciles absolute
+// candidate paths against repo-relative lock rows and can only do that with the
+// root those candidates were joined from (loto-qoic). Passing them separately is
+// how the two got out of step in the first place.
+type orphanScan struct {
+	RepoTop string
+	Paths   []string
+}
+
 // scanOrphansAndHint runs the orphan-mode scan when requested and prints the
 // restore-recovery hint. It returns the orphan list and whether the scan was
 // incomplete (gh#130). Factored out of cmdDoctor to keep its complexity in check.
-func scanOrphansAndHint(rt *runtime, repoTop string, f orphanFlags, stdout io.Writer) (orphans []string, scanIncomplete bool) {
+func scanOrphansAndHint(rt *runtime, repoTop string, live domain.HolderLiveProbe, f orphanFlags, stdout io.Writer) (scan orphanScan, scanIncomplete bool) {
 	if !f.orphanMode && !f.restoreOrphan {
-		return nil, false
+		return orphanScan{RepoTop: repoTop}, false
 	}
-	orphans, scanIncomplete = runOrphanScan(rt, repoTop, stdout)
+	scan, scanIncomplete = runOrphanScan(rt, repoTop, live, stdout)
 	// Surface the recovery path. An orphan-mode file is read-only with no lock
 	// row (e.g. a SIGKILL between strip and commit in lock acquire, loto-j863):
 	// a dead-end unless the user knows the restore flag. Suppress when this run
 	// is already restoring — the repair line below says it all.
-	if len(orphans) > 0 && (!f.repair || !f.restoreOrphan) {
-		fmt.Fprintf(stdout, "‡ %d orphan-mode file(s) read-only with no lock row — restore writable:\n", len(orphans))
+	if len(scan.Paths) > 0 && (!f.repair || !f.restoreOrphan) {
+		fmt.Fprintf(stdout, "‡ %d orphan-mode file(s) read-only with no lock row — restore writable:\n", len(scan.Paths))
 		fmt.Fprintln(stdout, "```bash")
 		fmt.Fprintln(stdout, "loto doctor --repair --restore-orphan-mode")
 		fmt.Fprintln(stdout, "```")
 	}
-	return orphans, scanIncomplete
+	return scan, scanIncomplete
 }
 
-func doRepair(rt *runtime, live domain.HolderLiveProbe, restoreOrphan bool, orphans []string, residue []claimResidue, stdout, stderr io.Writer) int {
+func doRepair(rt *runtime, live domain.HolderLiveProbe, restoreOrphan bool, scan orphanScan, residue []claimResidue, stdout, stderr io.Writer) int {
 	if err := rt.Store.DoctorRepair(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), live); err != nil {
 		fmt.Fprintf(stderr, "✗ repair: %v\n", err)
 		return 3
@@ -203,8 +213,8 @@ func doRepair(rt *runtime, live domain.HolderLiveProbe, restoreOrphan bool, orph
 	if code := releaseClaimResidue(rt, residue, stdout, stderr); code != 0 {
 		return code
 	}
-	if restoreOrphan && len(orphans) > 0 {
-		restored, failures, err := rt.Store.RestoreOrphanMode(rt.Ctx, orphans)
+	if restoreOrphan && len(scan.Paths) > 0 {
+		restored, failures, err := rt.Store.RestoreOrphanMode(rt.Ctx, scan.RepoTop, live, scan.Paths)
 		if err != nil {
 			fmt.Fprintf(stderr, "✗ restore-orphan-mode: %v\n", err)
 			return 3
@@ -221,13 +231,13 @@ func doRepair(rt *runtime, live domain.HolderLiveProbe, restoreOrphan bool, orph
 // signal (gh#130). Returns the orphan list and a flag set when the underlying
 // walk skipped entries (e.g. permission-denied subtrees) so the caller can
 // surface a non-zero exit instead of a false-clean report.
-func runOrphanScan(rt *runtime, repoTop string, stdout io.Writer) ([]string, bool) {
-	orphans, skipped, firstErr := scanAndReportOrphans(rt, repoTop, stdout)
+func runOrphanScan(rt *runtime, repoTop string, live domain.HolderLiveProbe, stdout io.Writer) (orphanScan, bool) {
+	scan, skipped, firstErr := scanAndReportOrphans(rt, repoTop, live, stdout)
 	if skipped > 0 {
 		fmt.Fprintf(stdout, "✗ scan-skipped count=%d first=%v\n", skipped, firstErr)
-		return orphans, true
+		return scan, true
 	}
-	return orphans, false
+	return scan, false
 }
 
 // scanAndReportOrphans walks the repo for orphan-mode candidates. It returns
@@ -235,12 +245,16 @@ func runOrphanScan(rt *runtime, repoTop string, stdout io.Writer) ([]string, boo
 // permission-denied subtrees), and the first walk error encountered. Callers
 // must surface a non-zero skipped count as an incomplete-scan signal; silently
 // dropping these would produce a false-clean report (gh#130).
-func scanAndReportOrphans(rt *runtime, repoTop string, stdout io.Writer) ([]string, int, error) {
+// ‡ Candidates are ABSOLUTE, joined from repoTop by walkRepoCandidates, and the
+// store needs that same root to reconcile them against repo-relative lock rows
+// (loto-qoic). Hence orphanScan rather than a bare slice — the root is not
+// incidental to the paths, it is the only thing that makes them interpretable.
+func scanAndReportOrphans(rt *runtime, repoTop string, live domain.HolderLiveProbe, stdout io.Writer) (orphanScan, int, error) {
 	candidates, skipped, firstWalkErr := walkRepoCandidates(repoTop)
-	orphans, err := rt.Store.ScanOrphanModes(rt.Ctx, candidates)
+	orphans, err := rt.Store.ScanOrphanModes(rt.Ctx, repoTop, live, candidates)
 	if err != nil {
 		fmt.Fprintf(stdout, "✗ scan-orphans: %v\n", err)
-		return nil, skipped, firstWalkErr
+		return orphanScan{RepoTop: repoTop}, skipped, firstWalkErr
 	}
 	for _, p := range orphans {
 		rel, err := filepath.Rel(repoTop, p)
@@ -249,7 +263,7 @@ func scanAndReportOrphans(rt *runtime, repoTop string, stdout io.Writer) ([]stri
 		}
 		fmt.Fprintf(stdout, "✗ orphan-mode target=%s\n", rel)
 	}
-	return orphans, skipped, firstWalkErr
+	return orphanScan{RepoTop: repoTop, Paths: orphans}, skipped, firstWalkErr
 }
 
 var walkSkipDirs = map[string]bool{

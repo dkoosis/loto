@@ -14,7 +14,10 @@ import (
 	"loto/internal/store"
 )
 
-const tcFlagDryRun = "--dry-run"
+const (
+	tcFlagDryRun        = "--dry-run"
+	tcFlagRestoreOrphan = "--restore-orphan-mode"
+)
 
 func TestDoctorHealthyEmpty(t *testing.T) {
 	withTempProject(t)
@@ -96,7 +99,7 @@ func TestDoctor_OrphanModeSurfacesRecoveryHint(t *testing.T) {
 	if !strings.Contains(got, "orphan-mode target=orphan.go") {
 		t.Fatalf("expected orphan finding in output: %s", got)
 	}
-	if !strings.Contains(got, "--restore-orphan-mode") {
+	if !strings.Contains(got, tcFlagRestoreOrphan) {
 		t.Errorf("orphan-mode output must point at recovery command --restore-orphan-mode: %s", got)
 	}
 }
@@ -109,7 +112,7 @@ func TestDoctor_NoOrphanHintWhenClean(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, out.String())
 	}
-	if strings.Contains(out.String(), "--restore-orphan-mode") {
+	if strings.Contains(out.String(), tcFlagRestoreOrphan) {
 		t.Errorf("clean scan must not emit recovery hint: %s", out.String())
 	}
 }
@@ -180,7 +183,7 @@ func TestDoctor_RestoreOrphanModeFlagRepairs(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	code := Run([]string{tcCmdDoctor, tcFlagRepair, "--restore-orphan-mode"}, &out, io.Discard)
+	code := Run([]string{tcCmdDoctor, tcFlagRepair, tcFlagRestoreOrphan}, &out, io.Discard)
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, out.String())
 	}
@@ -376,4 +379,93 @@ func TestDoctorDryRunCountsResidueWithoutReleasing(t *testing.T) {
 	if got := claimPaths(t); len(got) != 1 {
 		t.Errorf("dry-run must not release, got %v", got)
 	}
+}
+
+// TestDoctor_OrphanModeSkipsLiveLockedFile pins the loto-qoic contract: a file
+// holding a live lock row is never reported as orphan-mode residue, whatever
+// path form the CLI hands the store. Pre-fix the CLI supplies absolute
+// candidates while locks.target_canonical is repo-relative, so the owned-lock
+// filter in ScanOrphanModes never matches and a.go is reported.
+func TestDoctor_OrphanModeSkipsLiveLockedFile(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("lock %s failed", tcTargetA)
+	}
+	// The chmod is this test's own act, not something `lock` produces: loto no
+	// longer strips the write bit on acquire (loto-zssw). Do not "simplify" this
+	// away on the theory that locking makes the file read-only.
+	if err := os.Chmod(filepath.Join(repo, tcTargetA), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	// Control. Read-only with no lock row, so it must still be reported. Without
+	// it this test passes trivially whenever the scan returns nothing at all.
+	if err := os.WriteFile(filepath.Join(repo, tcTargetB), []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdDoctor, tcFlagOrphan}, &out, io.Discard); code != 0 {
+		t.Fatalf("doctor %s exit %d: %s", tcFlagOrphan, code, out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "orphan-mode target="+tcTargetB) {
+		t.Errorf("genuine orphan %s must still be reported: %q", tcTargetB, got)
+	}
+	if strings.Contains(got, "orphan-mode target="+tcTargetA) {
+		t.Errorf("%s holds a live lock and must not be reported as an orphan: %q", tcTargetA, got)
+	}
+	fi, err := os.Stat(filepath.Join(repo, tcTargetA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o444 {
+		t.Errorf("a scan without %s must not chmod: mode=%04o", tcFlagRepair, fi.Mode().Perm())
+	}
+}
+
+// TestDoctor_RestoreOrphanModeSkipsLiveLockedFile pins the restore half: a
+// live-locked file never enters the orphan list, so --restore-orphan-mode
+// cannot chmod it. Pre-fix the restore count reads 2 rather than 1.
+func TestDoctor_RestoreOrphanModeSkipsLiveLockedFile(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("lock %s failed", tcTargetA)
+	}
+	if err := os.Chmod(filepath.Join(repo, tcTargetA), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, tcTargetB), []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdDoctor, tcFlagRepair, tcFlagRestoreOrphan}, &out, io.Discard); code != 0 {
+		t.Fatalf("doctor %s --restore-orphan-mode exit %d: %s", tcFlagRepair, code, out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "restored-orphan-mode count=1 failed=0") {
+		t.Errorf("only the genuine orphan should be restored: %q", got)
+	}
+	// The count is arity, not identity — doRepair prints no per-path line for a
+	// successful restore — so pin which file was in the list.
+	if n := strings.Count(got, "orphan-mode target="); n != 1 {
+		t.Errorf("expected exactly one orphan-mode row, got %d: %q", n, got)
+	}
+	if strings.Contains(got, "orphan-mode target="+tcTargetA) {
+		t.Errorf("%s holds a live lock and must not enter the orphan list: %q", tcTargetA, got)
+	}
+	fi, err := os.Stat(filepath.Join(repo, tcTargetB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm()&0o200 == 0 {
+		t.Errorf("genuine orphan %s should have been restored: mode=%04o", tcTargetB, fi.Mode().Perm())
+	}
+	// Deliberately NOT asserting a.go's mode. DoctorRepair's chmod-era migration
+	// (chmodEraCandidates -> restoreChmodEraFiles) re-adds owner-write to every
+	// current lock row's path by design, so a.go's mode after --repair says
+	// nothing about the orphan path. That harm is tracked as loto-2hjh. What this
+	// test pins is that a.go never enters the orphan list at all.
 }
