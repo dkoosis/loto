@@ -205,7 +205,7 @@ func scanOrphansAndHint(rt *runtime, repoTop string, live domain.HolderLiveProbe
 }
 
 func doRepair(rt *runtime, live domain.HolderLiveProbe, restoreOrphan bool, scan orphanScan, residue []claimResidue, stdout, stderr io.Writer) int {
-	if err := rt.Store.DoctorRepair(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), live); err != nil {
+	if err := rt.Store.DoctorRepair(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), scan.RepoTop, live); err != nil {
 		fmt.Fprintf(stderr, "✗ repair: %v\n", err)
 		return 3
 	}

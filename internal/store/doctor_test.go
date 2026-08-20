@@ -41,7 +41,7 @@ func TestDoctorRepairReclaims(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.DoctorRepair(ctx, "doctor-agent", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor-agent", "", deadProbe); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.LockAt(ctx, l.Target)
@@ -565,7 +565,7 @@ func TestDoctorRepair_RestoresWriteMode(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := os.Stat(l.Target.Canonical)
@@ -587,7 +587,7 @@ func TestDoctorRepair_ReclaimLeavesModeUntouched(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.LockAt(ctx, l.Target)
@@ -616,7 +616,7 @@ func TestDoctorRepair_MultipleStaleLocksSameOwner(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a, b, c}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
 		t.Fatalf("repair with multiple stale locks: %v", err)
 	}
 	for _, l := range []domain.LockRecord{a, b, c} {
@@ -697,7 +697,7 @@ func TestDoctorRepair_VACUUMFailureDoesNotMaskSuccess(t *testing.T) {
 	}
 	t.Cleanup(func() { vacuumFn = origVacuum })
 
-	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
 		t.Fatalf("VACUUM failure must not surface as DoctorRepair error: %v", err)
 	}
 
@@ -746,7 +746,7 @@ func TestDoctorRepair_ReleasesOpFlockBeforeVACUUM(t *testing.T) {
 	}
 	t.Cleanup(func() { vacuumFn = origVacuum })
 
-	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
 		t.Fatalf("DoctorRepair: %v", err)
 	}
 	if lockedAtVacuum {
@@ -768,7 +768,7 @@ func TestDoctorRepair_SweepsExpiredClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.DoctorRepair(ctx, "doctor", deadProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
 		t.Fatal(err)
 	}
 	all, err := s.ListClaims(ctx)
@@ -818,7 +818,8 @@ func TestDoctorRepair_ChmodEraMigration(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 
-	// held: a live row whose file the old loto left read-only.
+	// held: a LIVE row whose file is read-only. The migration must leave it
+	// alone — a live holder may have made it read-only itself (loto-2hjh).
 	held := mkFileLock(t, "held.go", "alice", time.Hour)
 	// released: locked then released, so only the audit trail names it.
 	released := mkFileLock(t, "released.go", "alice", time.Hour)
@@ -840,20 +841,25 @@ func TestDoctorRepair_ChmodEraMigration(t *testing.T) {
 		}
 	}
 
-	if err := s.DoctorRepair(ctx, "doctor", liveProbe); err != nil {
+	if err := s.DoctorRepair(ctx, "doctor", "", liveProbe); err != nil {
 		t.Fatal(err)
 	}
 
-	for _, p := range []string{held.Target.Canonical, released.Target.Canonical} {
-		st, err := os.Stat(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if st.Mode().Perm()&0o200 == 0 {
-			t.Errorf("%s: chmod-era straggler not restored, perm=%o", p, st.Mode().Perm())
-		}
+	st, err := os.Stat(released.Target.Canonical)
+	if err != nil {
+		t.Fatal(err)
 	}
-	st, err := os.Stat(stranger)
+	if st.Mode().Perm()&0o200 == 0 {
+		t.Errorf("%s: chmod-era straggler not restored, perm=%o", released.Target.Canonical, st.Mode().Perm())
+	}
+	st, err = os.Stat(held.Target.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o444 {
+		t.Errorf("a live-locked path must keep its mode, perm=%o", st.Mode().Perm())
+	}
+	st, err = os.Stat(stranger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -869,6 +875,9 @@ func TestDoctorRepair_ChmodEraMigrationIsIdempotent(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 
+	// deadProbe below makes this row stale, so it is a chmod-era candidate. A
+	// LIVE row would not be one at all (loto-2hjh) and the drain would be
+	// unmeasurable here.
 	l := mkFileLock(t, "a.go", "alice", time.Hour)
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
@@ -888,7 +897,7 @@ func TestDoctorRepair_ChmodEraMigrationIsIdempotent(t *testing.T) {
 	}
 
 	for i := range 2 {
-		if err := s.DoctorRepair(ctx, "doctor", liveProbe); err != nil {
+		if err := s.DoctorRepair(ctx, "doctor", "", deadProbe); err != nil {
 			t.Fatalf("repair %d: %v", i, err)
 		}
 	}
@@ -1033,5 +1042,113 @@ func TestScanOrphanModes_DeadHolderBeforeTTLDoesNotSuppress(t *testing.T) {
 	}
 	if len(orphans) != 0 {
 		t.Errorf("orphans = %v, want none — a live holder must still suppress", orphans)
+	}
+}
+
+// TestDoctorRepair_LiveLockKeepsModeUntilReleased is the loto-2hjh regression.
+// The north-star harm is loto undoing its own lock's protection: `doctor
+// --repair`, with no orphan flag, used to add owner-write to a file loto held a
+// live lock on. The same file must be restored once the lock is gone — the
+// migration's actual job is unchanged, only its warrant is narrower.
+func TestDoctorRepair_LiveLockKeepsModeUntilReleased(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	l := mkFileLock(t, "a.go", "alice", time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(l.Target.Canonical, 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.DoctorRepair(ctx, "doctor", "", liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(l.Target.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o444 {
+		t.Fatalf("repair must not touch a live-locked path, perm=%o", st.Mode().Perm())
+	}
+	if got, _ := s.LockAt(ctx, l.Target); got == nil {
+		t.Fatal("live lock must survive repair")
+	}
+
+	if _, err := s.ReleaseLocks(ctx, []domain.Target{l.Target}, "alice", liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DoctorRepair(ctx, "doctor", "", liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	st, err = os.Stat(l.Target.Canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm()&0o200 == 0 {
+		t.Errorf("once released, chmod-era residue must still be restored, perm=%o", st.Mode().Perm())
+	}
+}
+
+// TestRestoreChmodEraFiles_ResolvesAgainstRepoTop is the loto-gc82 regression.
+// Candidates are repo-relative; resolving them bare deref'd against the process
+// CWD, so `doctor --repair` from a subdirectory chmod'd a same-named write-less
+// file that merely shared a base name with a lock or event row.
+func TestRestoreChmodEraFiles_ResolvesAgainstRepoTop(t *testing.T) {
+	repoTop := t.TempDir()
+	target := filepath.Join(repoTop, "victim.go")
+	if err := os.WriteFile(target, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	// The decoy sits under the caller's cwd, shares the base name, and is
+	// write-less — the exact shape the old code chmod'd by mistake.
+	sub := t.TempDir()
+	decoy := filepath.Join(sub, "victim.go")
+	if err := os.WriteFile(decoy, []byte("y"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(sub)
+
+	if ev := restoreChmodEraFiles(repoTop, []string{"victim.go"}, "doctor", time.Now()); len(ev) != 0 {
+		t.Fatalf("unexpected failure events: %+v", ev)
+	}
+
+	st, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm()&0o200 == 0 {
+		t.Errorf("candidate under repoTop must be restored, perm=%o", st.Mode().Perm())
+	}
+	st, err = os.Stat(decoy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o444 {
+		t.Errorf("a same-named file under cwd must be left alone, perm=%o", st.Mode().Perm())
+	}
+}
+
+// TestRestoreChmodEraFiles_RelativeCandidateWithoutRepoTopIsSkipped pins the
+// other half of loto-gc82: with no repo to resolve against, the only available
+// guess is the process CWD, so the migration must skip rather than guess.
+func TestRestoreChmodEraFiles_RelativeCandidateWithoutRepoTopIsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "orphan.go")
+	if err := os.WriteFile(p, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	if ev := restoreChmodEraFiles("", []string{"orphan.go"}, "doctor", time.Now()); len(ev) != 0 {
+		t.Fatalf("unexpected failure events: %+v", ev)
+	}
+	st, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o444 {
+		t.Errorf("relative candidate with no repoTop must be skipped, perm=%o", st.Mode().Perm())
 	}
 }

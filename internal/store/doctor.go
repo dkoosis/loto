@@ -176,7 +176,12 @@ func checkSidecar(l domain.LockRecord, sc SidecarCheck) (SidecarFinding, bool) {
 // policy rides inside `live` (HolderLiveProbe takes the record), so unlike
 // DoctorAudit — whose sidecar cross-check still needs a this-host string — it
 // takes no host argument.
-func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live domain.HolderLiveProbe) error {
+//
+// repoTop is the absolute git toplevel the chmod-era migration resolves its
+// repo-relative candidates against (loto-gc82). Empty means "no repo here":
+// the migration then touches only candidates that are already absolute, and
+// never falls back to the process CWD.
+func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, repoTop string, live domain.HolderLiveProbe) error {
 	byAgent := string(agent) // internal store helpers thread the owner as a plain string
 	// Hold the op-flock across the tx AND the post-commit chmod restores
 	// so concurrent AcquireLocks can't race the filesystem half of the
@@ -205,7 +210,7 @@ func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live d
 	// Read the migration's candidate paths INSIDE the tx, before commit — the
 	// events table is rotated by rotateEventsTx below, and a path whose last
 	// event just aged out is exactly the one still sitting at 0444.
-	candidates, err := chmodEraCandidates(ctx, tx, all)
+	candidates, err := chmodEraCandidates(ctx, tx, all, ec)
 	if err != nil {
 		return err
 	}
@@ -229,7 +234,7 @@ func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live d
 	// for up to busy_timeout under contention (loto-3qev). VACUUM also runs after
 	// release (loto-3bl0): it's post-commit, uses a fresh pool conn with SQLite's
 	// own locking, and needs no op-flock.
-	failEvents := restoreChmodEraFiles(candidates, byAgent, now)
+	failEvents := restoreChmodEraFiles(repoTop, candidates, byAgent, now)
 	flock.release()
 	if len(failEvents) > 0 {
 		_ = s.appendAuditDetached(failEvents)
@@ -269,11 +274,27 @@ func reclaimStaleLocks(ctx context.Context, tx *sql.Tx, all []domain.LockRecord,
 // Deliberately NOT a repo walk. loto has no repo to walk from here — the store
 // is cross-repo — and a walk would be unbounded where this is bounded by rows
 // loto already keeps.
-func chmodEraCandidates(ctx context.Context, tx *sql.Tx, all []domain.LockRecord) ([]string, error) {
+//
+// ‡ A LIVE lock's target is never a candidate (loto-2hjh). The migration's
+// warrant is that a write-less path loto has a record of can only be a bit the
+// old loto set and failed to restore. That inference holds for a path whose
+// lock is gone or stale — nothing is editing it — and fails for one held right
+// now: a live holder may have made the file read-only itself, and adding
+// owner-write back under it is loto undoing protection on a path it is
+// currently coordinating. Live rows are skipped here; `all` is the pre-reclaim
+// snapshot, so a row this same repair is about to reclaim as stale still
+// qualifies.
+func chmodEraCandidates(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, ec domain.EvalContext) ([]string, error) {
+	live := make(map[string]bool, len(all))
+	for i := range all {
+		if !ec.IsStale(all[i]) {
+			live[all[i].Target.Canonical] = true
+		}
+	}
 	seen := make(map[string]bool, len(all))
 	var out []string
 	add := func(p string) {
-		if p == "" || seen[p] {
+		if p == "" || seen[p] || live[p] {
 			return
 		}
 		seen[p] = true
@@ -309,17 +330,43 @@ func chmodEraCandidates(ctx context.Context, tx *sql.Tx, all []domain.LockRecord
 // off the flock critical section (loto-3qev); the caller emits them after
 // releasing. A missing file, a symlink, or a path outside this machine is not
 // an error — the candidate list is historical and most of it is gone.
-func restoreChmodEraFiles(candidates []string, byAgent string, now time.Time) []domain.Event {
+//
+// ‡ Candidates are repo-relative POSIX paths (`locks.target_canonical`, and the
+// same form in `events`), so each one is resolved against repoTop before it is
+// stat'd or chmod'd (loto-gc82). Resolving bare would deref against the process
+// CWD, and `doctor --repair` runs from any subdirectory: a same-named write-less
+// file under the caller's cwd would be chmod'd in place of the real target.
+// Store-level fixtures carry absolute canonicals, so an already-absolute
+// candidate is taken as-is.
+func restoreChmodEraFiles(repoTop string, candidates []string, byAgent string, now time.Time) []domain.Event {
 	var failEvents []domain.Event
 	for _, p := range candidates {
-		if !lacksOwnerWrite(p) {
+		abs, ok := resolveChmodEraCandidate(repoTop, p)
+		if !ok {
 			continue
 		}
-		if rerr := restoreWrite(p); rerr != nil {
+		if !lacksOwnerWrite(abs) {
+			continue
+		}
+		if rerr := restoreWrite(abs); rerr != nil {
 			failEvents = append(failEvents, modeRestoreFailedEvent(p, byAgent, now, rerr))
 		}
 	}
 	return failEvents
+}
+
+// resolveChmodEraCandidate turns a candidate path into the absolute path to
+// stat. It reports false for a candidate that cannot be resolved without
+// guessing — a repo-relative path with no repoTop — because the only available
+// guess is the process CWD, which is the loto-gc82 bug.
+func resolveChmodEraCandidate(repoTop, p string) (string, bool) {
+	if filepath.IsAbs(p) {
+		return p, true
+	}
+	if repoTop == "" {
+		return "", false
+	}
+	return filepath.Join(repoTop, filepath.FromSlash(p)), true
 }
 
 // lacksOwnerWrite reports whether path is a regular file the owner cannot
@@ -455,8 +502,11 @@ func (s *Store) lockedPathSet(ctx context.Context, repoTop string, ec domain.Eva
 // ‡ Sibling of restoreChmodEraFiles, and the split between them is about
 // evidence. This one walks the REPO, so a read-only file it finds may simply
 // be one the user meant to protect — hence the explicit --restore-orphan-mode
-// gate. restoreChmodEraFiles walks paths LOTO ITSELF LOCKED, where a missing
-// write bit is chmod-era residue and nothing else, so it runs unprompted.
+// gate. restoreChmodEraFiles walks paths loto's own lock rows and audit trail
+// name, MINUS the ones a live lock holds: on a path nothing is editing, a
+// missing write bit is chmod-era residue and nothing else, so it runs
+// unprompted. On a live-locked path it is not — the holder may have made the
+// file read-only itself — which is why live rows are excluded (loto-2hjh).
 func (s *Store) ScanOrphanModes(ctx context.Context, repoTop string, live domain.HolderLiveProbe, paths []string) ([]string, error) {
 	if len(paths) == 0 {
 		return nil, nil
