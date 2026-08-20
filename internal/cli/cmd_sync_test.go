@@ -419,3 +419,56 @@ func TestSyncDecide_ConflictTable(t *testing.T) {
 		})
 	}
 }
+
+// TestSync_MidApplyFailureReportsWhatItWrote is the loto-8sic regression.
+// syncApply is not atomic: it stops at the first write failure, having already
+// fast-forwarded everything before it. That list used to be discarded, so the
+// operator got exit 3 and a bare error while the tree sat half-changed — the
+// opposite of what design.md asks stdout to be.
+//
+// The failure is forced by making one target read-only on disk, so the blob
+// write hits EACCES. Targets are applied in sorted order, so a.go is written
+// before z.go fails.
+func TestSync_MidApplyFailureReportsWhatItWrote(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not gate root")
+	}
+	repo := syncBaseRepo(t)
+	zPath := filepath.Join(repo, "z.go")
+	if err := os.WriteFile(zPath, []byte("zed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	syncGitT(t, repo, "add", "-A")
+	syncGitT(t, repo, "commit", "-q", "-m", "add z")
+	syncGitT(t, repo, "update-ref", "refs/loto/integration", "HEAD")
+
+	// Diverge both paths, then take write permission off z.go.
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("junk\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(zPath, []byte("drift\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(zPath, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(zPath, 0o644) })
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 3 {
+		t.Fatalf("exit %d, want 3; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "partial=true") {
+		t.Errorf("a partially applied tree must say so: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "✓ target="+tcTargetA+" action=fast-forward") {
+		t.Errorf("the file that WAS written must be named: %q", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "z.go") {
+		t.Errorf("the failure must name the path that stopped it: %q", errBuf.String())
+	}
+	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != "" {
+		t.Errorf("a.go should have been fast-forwarded before the failure, got %q", got)
+	}
+}
