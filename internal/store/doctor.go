@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -369,20 +370,55 @@ func gcClaimsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	return err
 }
 
-// ScanOrphanModes returns paths that are read-only on disk but have no
-// matching lock row. Caller supplies the candidate paths (typically all
-// regular files under the repo, or a curated subset).
-//
-// ‡ Sibling of restoreChmodEraFiles, and the split between them is about
-// evidence. This one walks the REPO, so a read-only file it finds may simply
-// be one the user meant to protect — hence the explicit --restore-orphan-mode
-// gate. restoreChmodEraFiles walks paths LOTO ITSELF LOCKED, where a missing
-// write bit is chmod-era residue and nothing else, so it runs unprompted.
-func (s *Store) ScanOrphanModes(ctx context.Context, paths []string) ([]string, error) {
-	if len(paths) == 0 {
-		return nil, nil
+// errOrphanNoRepoTop reports a candidate/lock-row path-form mismatch the store
+// cannot reconcile. Loud on purpose: the alternative is a filter that silently
+// answers "nothing is owned", which is exactly the loto-qoic bug.
+var errOrphanNoRepoTop = errors.New("orphan scan: cannot reconcile candidate paths with repo-relative lock rows")
+
+// validateOrphanRoot refuses the two bases that would silently reproduce
+// loto-qoic. An empty repoTop cannot join a repo-relative row up to an absolute
+// candidate; a relative repoTop joins to something that can never equal one.
+// A repoTop that is absolute but WRONG stays unguarded — the store cannot
+// validate a base it does not own (see loto-6e02).
+func validateOrphanRoot(repoTop string, paths []string) error {
+	if repoTop == "" {
+		for _, p := range paths {
+			if filepath.IsAbs(p) {
+				return fmt.Errorf("%w: absolute candidate %q with empty repoTop", errOrphanNoRepoTop, p)
+			}
+		}
+		return nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT target_canonical FROM locks`)
+	if !filepath.IsAbs(repoTop) {
+		return fmt.Errorf("%w: repoTop %q is not absolute", errOrphanNoRepoTop, repoTop)
+	}
+	return nil
+}
+
+// lockedPathSet returns the absolute paths that currently hold a LIVE lock row,
+// keyed to match doctor's candidates.
+//
+// ‡ Path-form contract (loto-qoic). locks.target_canonical is REPO-RELATIVE:
+// domain.Canonicalize rejects a leading '/', and every production writer reaches
+// the column through internal/cli/paths.go's normalizeRepoPath. Doctor's
+// candidates are ABSOLUTE, and must stay so — ScanOrphanModes os.Stat's them and
+// RestoreOrphanMode chmods them, both relative to process CWD, while doctor runs
+// from any subdirectory. The two key spaces are disjoint, so something must join
+// them; this is that place, because it is the function that performs the
+// comparison. Rows are joined UP to absolute rather than candidates relativized
+// down, only because rows are few and candidates are thousands.
+//
+// The raw stored row is deliberately NOT also used as a key. An absolute
+// target_canonical cannot be written by any current path, so that arm would only
+// ever match hand-built test fixtures — the same fiction that let this bug live
+// in a green suite for months.
+//
+// Only LIVE rows suppress. An expired row must not silence its file's orphan
+// report: a file left read-only by a session that died mid-hold is precisely what
+// orphan mode exists to surface. `expires_at > now` matches the live-claim probe.
+func (s *Store) lockedPathSet(ctx context.Context, repoTop string, now time.Time) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT target_canonical FROM locks WHERE expires_at > ?`, now.UnixNano())
 	if err != nil {
 		return nil, err
 	}
@@ -393,9 +429,43 @@ func (s *Store) ScanOrphanModes(ctx context.Context, paths []string) ([]string, 
 		if err := rows.Scan(&c); err != nil {
 			return nil, err
 		}
-		owned[c] = true
+		if repoTop == "" {
+			owned[c] = true
+			continue
+		}
+		owned[filepath.Join(repoTop, filepath.FromSlash(c))] = true
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return owned, nil
+}
+
+// ScanOrphanModes returns paths that are read-only on disk but have no
+// matching LIVE lock row. Caller supplies the candidate paths (typically all
+// regular files under the repo, or a curated subset).
+//
+// ‡ Candidates must be ABSOLUTE and rooted at repoTop; lock rows are
+// repo-relative, and repoTop is what joins the two. This narrows the older
+// "caller supplies the candidates" contract — see lockedPathSet for why the
+// store owns the comparison (loto-qoic). Only the empty-base and relative-base
+// mistakes are machine-checked (validateOrphanRoot); an absolute-but-wrong
+// repoTop cannot be caught here.
+//
+// ‡ Sibling of restoreChmodEraFiles, and the split between them is about
+// evidence. This one walks the REPO, so a read-only file it finds may simply
+// be one the user meant to protect — hence the explicit --restore-orphan-mode
+// gate. restoreChmodEraFiles walks paths LOTO ITSELF LOCKED, where a missing
+// write bit is chmod-era residue and nothing else, so it runs unprompted.
+func (s *Store) ScanOrphanModes(ctx context.Context, repoTop string, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	if err := validateOrphanRoot(repoTop, paths); err != nil {
+		return nil, err
+	}
+	owned, err := s.lockedPathSet(ctx, repoTop, time.Now())
+	if err != nil {
 		return nil, err
 	}
 
@@ -425,11 +495,19 @@ func (s *Store) ScanOrphanModes(ctx context.Context, paths []string) ([]string, 
 // the paths it successfully chmod'd and a parallel slice of per-path failures
 // so callers can surface why a file was skipped.
 //
+// ‡ Same path-form contract as ScanOrphanModes: absolute candidates, rooted at
+// repoTop, reconciled against repo-relative rows (loto-qoic). The re-check below
+// is only meaningful because that reconciliation happens here, inside the
+// op-flock — a caller-side pre-filter cannot cover the same window.
+//
 // Holds the project op-flock across the full restore so a concurrent
 // AcquireLocks/Release/Break can't mutate the lock set mid-restore and
 // leave the filesystem and DB views torn (loto-98v, gh#124). Same posture
 // as DoctorRepair, which already serializes its DB+chmod work under op-flock.
-func (s *Store) RestoreOrphanMode(ctx context.Context, paths []string) (restored []string, failures []OrphanRestoreFailure, err error) {
+func (s *Store) RestoreOrphanMode(ctx context.Context, repoTop string, paths []string) (restored []string, failures []OrphanRestoreFailure, err error) {
+	if err := validateOrphanRoot(repoTop, paths); err != nil {
+		return nil, nil, err
+	}
 	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
 	if err != nil {
 		return nil, nil, err
@@ -439,22 +517,10 @@ func (s *Store) RestoreOrphanMode(ctx context.Context, paths []string) (restored
 	// Re-validate ownership under the held op-flock: build the set of currently
 	// locked paths so we can skip any that became locked since the caller's scan
 	// (TOCTOU fix for loto-h85e). The flock ensures the lock table is stable for
-	// the duration of this query + chmod loop.
-	rows, err := s.db.QueryContext(ctx, `SELECT target_canonical FROM locks`)
+	// the duration of this query + chmod loop, and the query MUST stay inside it.
+	nowOwned, err := s.lockedPathSet(ctx, repoTop, time.Now())
 	if err != nil {
 		return nil, nil, fmt.Errorf("RestoreOrphanMode: re-query locks: %w", err)
-	}
-	defer rows.Close()
-	nowOwned := map[string]bool{}
-	for rows.Next() {
-		var c string
-		if err := rows.Scan(&c); err != nil {
-			return nil, nil, fmt.Errorf("RestoreOrphanMode: scan locks row: %w", err)
-		}
-		nowOwned[c] = true
-	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("RestoreOrphanMode: locks rows: %w", err)
 	}
 
 	for _, p := range paths {

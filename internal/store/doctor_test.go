@@ -62,7 +62,7 @@ func TestDoctorAudit_DetectsOrphanModeFiles(t *testing.T) {
 	}
 
 	s := mustOpen(t)
-	orphans, err := s.ScanOrphanModes(context.Background(), []string{orphan, clean})
+	orphans, err := s.ScanOrphanModes(context.Background(), dir, []string{orphan, clean})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +73,12 @@ func TestDoctorAudit_DetectsOrphanModeFiles(t *testing.T) {
 
 func TestScanOrphanModes_OwnedFileSkipped(t *testing.T) {
 	dir := t.TempDir()
+	// ‡ Do not "clean up" this chdir (loto-qoic). The lock row below is
+	// repo-relative, which is the only form production can store, and
+	// AcquireLocks -> validateFileTarget Lstat's Target.Canonical bare, against
+	// the process CWD (locks_acquire.go). Without the chdir this test dies in
+	// setup. That bare Lstat is loto-j39r's bug, noted here, not fixed here.
+	t.Chdir(dir)
 	owned := filepath.Join(dir, "owned.go")
 	if err := os.WriteFile(owned, []byte("x"), 0o444); err != nil {
 		t.Fatal(err)
@@ -81,8 +87,14 @@ func TestScanOrphanModes_OwnedFileSkipped(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	now := time.Now()
+	// ‡ Repo-relative, as domain.Canonicalize would produce. Earlier this
+	// fixture stored the ABSOLUTE path — a value Canonicalize rejects and
+	// production can never write — and then passed the same absolute string as
+	// the candidate, so both sides agreed and the test passed while the owned-lock
+	// filter was dead in production. That fiction is what hid loto-qoic. The
+	// candidate stays absolute, as doctor supplies it.
 	l := domain.LockRecord{
-		Target:      domain.Target{Canonical: owned},
+		Target:      domain.Target{Canonical: "owned.go"},
 		OwnerUUID:   "alice",
 		SessionUUID: "alice",
 		Intent:      tcTest,
@@ -95,7 +107,7 @@ func TestScanOrphanModes_OwnedFileSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orphans, err := s.ScanOrphanModes(ctx, []string{owned})
+	orphans, err := s.ScanOrphanModes(ctx, dir, []string{owned})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +123,7 @@ func TestRestoreOrphanMode_ChmodsToWritable(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := mustOpen(t)
-	restored, failures, err := s.RestoreOrphanMode(context.Background(), []string{p})
+	restored, failures, err := s.RestoreOrphanMode(context.Background(), dir, []string{p})
 	if err != nil {
 		t.Fatalf("RestoreOrphanMode: %v", err)
 	}
@@ -148,7 +160,7 @@ func TestRestoreOrphanMode_HoldsOpFlock(t *testing.T) {
 		t.Fatalf("acquireOpFlock: %v", err)
 	}
 
-	_, _, err = s.RestoreOrphanMode(context.Background(), []string{p})
+	_, _, err = s.RestoreOrphanMode(context.Background(), dir, []string{p})
 	if !errors.Is(err, ErrFlockTimeout) {
 		t.Fatalf("expected ErrFlockTimeout, got %v", err)
 	}
@@ -161,7 +173,7 @@ func TestRestoreOrphanMode_HoldsOpFlock(t *testing.T) {
 	h.release()
 
 	// After release, restore succeeds.
-	restored, failures, err := s.RestoreOrphanMode(context.Background(), []string{p})
+	restored, failures, err := s.RestoreOrphanMode(context.Background(), dir, []string{p})
 	if err != nil {
 		t.Fatalf("post-release RestoreOrphanMode: %v", err)
 	}
@@ -176,6 +188,9 @@ func TestRestoreOrphanMode_HoldsOpFlock(t *testing.T) {
 // same call must still be restored so we verify per-path behaviour.
 func TestRestoreOrphanMode_SkipsRelockedPaths(t *testing.T) {
 	dir := t.TempDir()
+	// ‡ Required, and required for the same reason as
+	// TestScanOrphanModes_OwnedFileSkipped — see the note there (loto-qoic).
+	t.Chdir(dir)
 	// genuineOrphan: read-only, no lock row — should be restored.
 	genuine := filepath.Join(dir, "genuine.go")
 	if err := os.WriteFile(genuine, []byte("x"), 0o444); err != nil {
@@ -195,8 +210,9 @@ func TestRestoreOrphanMode_SkipsRelockedPaths(t *testing.T) {
 	scanned := []string{genuine, raced}
 
 	now := time.Now()
+	// Repo-relative row + absolute candidate: the production pairing.
 	racedLock := domain.LockRecord{
-		Target:      domain.Target{Canonical: raced},
+		Target:      domain.Target{Canonical: "raced.go"},
 		OwnerUUID:   tcAlice,
 		SessionUUID: tcAlice,
 		Intent:      tcTest,
@@ -216,7 +232,7 @@ func TestRestoreOrphanMode_SkipsRelockedPaths(t *testing.T) {
 	}
 
 	// Now call RestoreOrphanMode with the stale scan list.
-	restored, failures, err := s.RestoreOrphanMode(ctx, scanned)
+	restored, failures, err := s.RestoreOrphanMode(ctx, dir, scanned)
 	if err != nil {
 		t.Fatalf("RestoreOrphanMode: %v", err)
 	}
@@ -878,5 +894,88 @@ func TestDoctorRepair_ChmodEraMigrationIsIdempotent(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("migration must fire once and then drain, got %d chmod calls", calls)
+	}
+}
+
+// TestScanOrphanModes_AbsoluteCandidatesRequireRepoTop pins D3's guard. Both
+// arms are bases that would silently reproduce loto-qoic: an empty repoTop
+// cannot join a repo-relative row up to an absolute candidate, and a relative
+// repoTop joins to something that can never equal one. A wrong-but-absolute
+// repoTop stays unguarded by design — the store cannot validate a base it does
+// not own (loto-6e02).
+func TestScanOrphanModes_AbsoluteCandidatesRequireRepoTop(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	abs := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(abs, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name    string
+		repoTop string
+	}{
+		{"empty repoTop with an absolute candidate", ""},
+		{"relative repoTop", "some/rel"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orphans, err := s.ScanOrphanModes(ctx, tc.repoTop, []string{abs})
+			if !errors.Is(err, errOrphanNoRepoTop) {
+				t.Errorf("err = %v, want errOrphanNoRepoTop", err)
+			}
+			if orphans != nil {
+				t.Errorf("orphans = %v, want nil on refusal", orphans)
+			}
+		})
+	}
+}
+
+// TestScanOrphanModes_ExpiredLockRowDoesNotSuppress pins D8. Only LIVE rows
+// suppress an orphan report. A file left read-only by a session that died
+// mid-hold is exactly what orphan mode exists to surface, so an expired row
+// must not silence it — the row survives in `locks` until --repair reclaims it.
+func TestScanOrphanModes_ExpiredLockRowDoesNotSuppress(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	stale := filepath.Join(dir, "stale.go")
+	if err := os.WriteFile(stale, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+	l := domain.LockRecord{
+		Target:      domain.Target{Canonical: "stale.go"},
+		OwnerUUID:   tcAlice,
+		SessionUUID: tcAlice,
+		Intent:      tcTest,
+		CreatedAt:   now.Add(-2 * time.Hour),
+		ExpiresAt:   now.Add(time.Hour),
+		Host:        "h",
+		PID:         1,
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	// Expire the lease behind the acquire path, which refuses to mint one that
+	// is already dead. This is the state a session that died mid-hold leaves.
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE locks SET expires_at = ? WHERE target_canonical = ?`,
+		now.Add(-time.Minute).UnixNano(), "stale.go"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stale, 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	orphans, err := s.ScanOrphanModes(ctx, dir, []string{stale})
+	if err != nil {
+		t.Fatalf("ScanOrphanModes: %v", err)
+	}
+	if len(orphans) != 1 || orphans[0] != stale {
+		t.Errorf("orphans = %v, want [%s] — an expired row must not suppress", orphans, stale)
 	}
 }
