@@ -154,6 +154,27 @@ func (s *Store) UnresolvedViolations(ctx context.Context) ([]Violation, error) {
 	return scanViolations(rows)
 }
 
+// ViolationByID returns one row, open or closed, by id. The closed half is
+// the point: a resolved row carries WHY it was cleared, and a record no
+// surface can read back is not a record.
+func (s *Store) ViolationByID(ctx context.Context, id string) (Violation, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, path_canonical, observed_at, fingerprint, lease_state, expected_owner, resolved_at, resolution
+		   FROM violations WHERE id = ?`, id)
+	if err != nil {
+		return Violation{}, err
+	}
+	defer rows.Close()
+	vs, err := scanViolations(rows)
+	if err != nil {
+		return Violation{}, err
+	}
+	if len(vs) == 0 {
+		return Violation{}, ErrUnknownViolation
+	}
+	return vs[0], nil
+}
+
 // UnresolvedViolationPaths returns path -> open violation id, the exact shape
 // admission's violation-intersect check consumes. A map rather than a slice
 // because the check is a membership test per write-set path, and the id is
@@ -288,11 +309,30 @@ func (s *Store) ReconcileScan(ctx context.Context, obs []gate.Observation, ec do
 	if err != nil {
 		return res, err
 	}
+	paths := make([]string, 0, len(obs))
+	for _, o := range obs {
+		paths = append(paths, o.Path)
+	}
+	acked, err := s.ackedFingerprints(ctx, paths)
+	if err != nil {
+		return res, err
+	}
 	seen := make(map[string]struct{}, len(obs))
 	var candidates []ObservedViolation
 	for _, o := range obs {
 		seen[o.Path] = struct{}{}
 		if _, ok := authorized[o.Path]; ok {
+			continue
+		}
+		// A human already looked at exactly this content on this path and
+		// said it is legitimate and staying (`loto violations resolve`,
+		// any resolution other than the machine ResolutionReverted). Content
+		// unchanged since that ack must not be re-flagged on every later
+		// scan — that would make "use resolve for a change that is
+		// legitimate and staying" (the CLI's own guidance) false in
+		// practice (Codex #276 P2). A DIFFERENT fingerprint on the same
+		// path is a new mutation and still gets flagged.
+		if _, ok := acked[o.Path+"\x00"+o.Fingerprint]; ok {
 			continue
 		}
 		state, owner := s.lapsedLeaseWitness(ctx, o.Path, ec)
@@ -325,6 +365,35 @@ func (s *Store) ReconcileScan(ctx context.Context, obs []gate.Observation, ec do
 		return res, err
 	}
 	return res, nil
+}
+
+// ackedFingerprints returns, keyed "path\x00fingerprint", every (path,
+// content) pair a human has explicitly resolved with something other than
+// the machine ResolutionReverted — i.e. every fingerprint someone has looked
+// at and said is legitimate. Membership is the only operation the caller
+// needs, hence the flat key rather than a nested map.
+func (s *Store) ackedFingerprints(ctx context.Context, paths []string) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
+	if len(paths) == 0 {
+		return out, nil
+	}
+	placeholders, args := inClauseStrings(paths)
+	args = append(args, ResolutionReverted)
+	q := `SELECT path_canonical, fingerprint FROM violations` + //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+		` WHERE path_canonical IN (` + placeholders + `) AND resolved_at IS NOT NULL AND resolution != ?`
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var path, fp string
+		if err := rows.Scan(&path, &fp); err != nil {
+			return nil, err
+		}
+		out[path+"\x00"+fp] = struct{}{}
+	}
+	return out, rows.Err()
 }
 
 // authorizedPaths is the set of observed paths something live covers — a live

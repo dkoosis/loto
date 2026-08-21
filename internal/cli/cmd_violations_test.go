@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,6 +207,113 @@ func TestViolations_StatusResurfacesTheNotice(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "⚠ violations count=1") {
 		t.Errorf("status did not resurface the violation: %q", out.String())
+	}
+}
+
+// ‡ The P1 (Codex #276): deleting refs/loto/integration after violations are
+// on the books must NOT read as "every path was reverted". A missing baseline
+// is no evidence about the worktree at all, so the scan is a no-op and every
+// open row survives — the alternative silently launders every contamination
+// the moment the ref goes missing.
+func TestViolations_MissingBaselineDoesNotResolveOpenRows(t *testing.T) {
+	repo := violationRepo(t)
+	rogueWrite(t, repo, tcTargetB, "rogue\n")
+	if code, out := runViolations(t, tcSubScan); code != 1 {
+		t.Fatalf("seed scan: exit=%d out=%q", code, out)
+	}
+
+	submitGitT(t, repo, "update-ref", "-d", "refs/loto/integration")
+
+	code, out := runViolations(t, tcSubScan)
+	if code != 1 {
+		t.Fatalf("want the open violation to survive a baseline-less scan, got exit=%d: %q", code, out)
+	}
+	if !strings.Contains(out, "✗ violations count=1") {
+		t.Errorf("baseline-less scan cleared the row: %q", out)
+	}
+	if strings.Contains(out, "resolved=1") {
+		t.Errorf("baseline-less scan auto-resolved: %q", out)
+	}
+}
+
+// An acked change that is staying must stay acked: the CLI tells the operator
+// to use resolve "for a change that is legitimate and staying", so a later
+// scan finding the SAME content on the same path must not re-flag it
+// (Codex #276 P2). Content that changes again is a new mutation and does.
+func TestViolations_AckSurvivesTheNextScan(t *testing.T) {
+	repo := violationRepo(t)
+	rogueWrite(t, repo, tcTargetB, "vendored regen\n")
+	_, scanOut := runViolations(t, tcSubScan)
+	id := violationIDFromRow(t, scanOut)
+	if code, out := runViolations(t, tcSubResolve, id, "-m", "legitimate, staying"); code != 0 {
+		t.Fatalf("resolve: exit=%d out=%q", code, out)
+	}
+
+	// Same content, still unleased: the ack holds.
+	if code, out := runViolations(t, tcSubScan); code != 0 {
+		t.Fatalf("want the ack to survive, got exit=%d: %q", code, out)
+	}
+
+	// Different content on the same path is a NEW mutation, and is flagged.
+	rogueWrite(t, repo, tcTargetB, "a second, unacked rogue write\n")
+	if code, out := runViolations(t, tcSubScan); code != 1 {
+		t.Fatalf("want a fresh violation for new content, got exit=%d: %q", code, out)
+	}
+}
+
+// `-m` promises the reason is recorded. It has to reach the ROW — printing it
+// to stdout and storing the literal "acked" leaves no durable explanation for
+// why a contamination was cleared by hand (Codex #276 P2).
+func TestViolations_ResolveMessageReachesTheRow(t *testing.T) {
+	repo := violationRepo(t)
+	rogueWrite(t, repo, tcTargetB, "vendored regen\n")
+	_, scanOut := runViolations(t, tcSubScan)
+	id := violationIDFromRow(t, scanOut)
+
+	const why = "intentional vendored regen"
+	if code, out := runViolations(t, tcSubResolve, id, "-m", why); code != 0 {
+		t.Fatalf("resolve: exit=%d out=%q", code, out)
+	}
+
+	rt, err := openRuntime(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	v, err := rt.Store.ViolationByID(rt.Ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Resolution != why {
+		t.Errorf("stored resolution=%q, want the -m message %q", v.Resolution, why)
+	}
+}
+
+// `loto status <path>` is the most focused form, and was the one that never
+// reached the violation notice — the targeted report has to carry it too
+// (Codex #276 P2).
+func TestViolations_StatusOnTheTargetPathResurfacesTheNotice(t *testing.T) {
+	repo := violationRepo(t)
+	rogueWrite(t, repo, tcTargetB, "rogue\n")
+	if code, out := runViolations(t, tcSubScan); code != 1 {
+		t.Fatalf("seed scan: exit=%d out=%q", code, out)
+	}
+
+	var out, errBuf bytes.Buffer
+	if code := Run([]string{tcCmdStatus, tcTargetB}, &out, &errBuf); code != 0 {
+		t.Fatalf("status: exit=%d err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "⚠ violations count=1") {
+		t.Errorf("targeted status did not resurface the violation: %q", out.String())
+	}
+
+	// A path with no violation stays quiet — the notice is scoped, not global.
+	var otherOut, otherErr bytes.Buffer
+	if code := Run([]string{tcCmdStatus, tcTargetA}, &otherOut, &otherErr); code != 0 {
+		t.Fatalf("status: exit=%d err=%q", code, otherErr.String())
+	}
+	if strings.Contains(otherOut.String(), "⚠ violations") {
+		t.Errorf("notice leaked onto an unrelated target: %q", otherOut.String())
 	}
 }
 

@@ -131,7 +131,7 @@ func violationsResolve(ctx context.Context, args []string, stdout, stderr io.Wri
 	}
 	defer rt.Close()
 
-	if err := rt.Store.ResolveViolation(rt.Ctx, id, store.ResolutionAcked); err != nil {
+	if err := rt.Store.ResolveViolation(rt.Ctx, id, *why); err != nil {
 		if errors.Is(err, store.ErrUnknownViolation) {
 			fmt.Fprintf(stderr, "✗ no unresolved violation id=%s\n", id)
 			return 3
@@ -160,6 +160,15 @@ func resolveReason(why string) string {
 func runViolationScan(rt *runtime, repoTop string) (store.ScanResult, error) {
 	obs, err := gate.ScanWorktree(rt.Ctx, repoTop)
 	if err != nil {
+		if errors.Is(err, gate.ErrNoBaseline) {
+			// No refs/loto/integration to read a diff against is not evidence
+			// the tree agrees with anything (Codex #276 P1) — reconciling
+			// zero observations would auto-resolve every violation already
+			// on the books as "reverted". Report a no-op scan instead of
+			// feeding ReconcileScan a reading it cannot tell apart from a
+			// genuinely clean tree.
+			return store.ScanResult{}, nil
+		}
 		return store.ScanResult{}, err
 	}
 	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
@@ -187,9 +196,38 @@ func violationRows(rt *runtime, stderr io.Writer) ([]render.ViolationRow, int) {
 // contract: a store read that fails must not turn `loto status` or a
 // PreToolUse check into an error, so the notice is simply omitted.
 func violationNotice(rt *runtime, w io.Writer) {
-	vs, err := rt.Store.UnresolvedViolations(rt.Ctx)
-	if err != nil || len(vs) == 0 {
+	rows, err := unresolvedViolationRows(rt)
+	if err != nil || len(rows) == 0 {
 		return
+	}
+	render.EmitViolationNotice(w, rows)
+}
+
+// violationNoticeForPath is violationNotice narrowed to one canonical path —
+// `loto status <target>`'s single-target report (Codex #276 P2: the targeted
+// form returned before the whole-repo notice was ever reached, so an
+// unresolved violation on exactly the path being checked went unreported,
+// the one case this advisory most needs to fire).
+func violationNoticeForPath(rt *runtime, w io.Writer, canonical string) {
+	rows, err := unresolvedViolationRows(rt)
+	if err != nil || len(rows) == 0 {
+		return
+	}
+	kept := rows[:0]
+	for _, r := range rows {
+		if r.Path == canonical {
+			kept = append(kept, r)
+		}
+	}
+	render.EmitViolationNotice(w, kept)
+}
+
+// unresolvedViolationRows lifts the open set into render shape once, shared
+// by the whole-repo and single-target notices.
+func unresolvedViolationRows(rt *runtime) ([]render.ViolationRow, error) {
+	vs, err := rt.Store.UnresolvedViolations(rt.Ctx)
+	if err != nil {
+		return nil, err
 	}
 	rows := make([]render.ViolationRow, len(vs))
 	for i, v := range vs {
@@ -198,5 +236,5 @@ func violationNotice(rt *runtime, w io.Writer) {
 			LeaseState: v.LeaseState, Fingerprint: v.Fingerprint,
 		}
 	}
-	render.EmitViolationNotice(w, rows)
+	return rows, nil
 }

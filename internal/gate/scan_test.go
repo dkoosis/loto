@@ -2,6 +2,7 @@ package gate
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -86,20 +87,69 @@ func TestScanWorktree_UntrackedFileIsNotObserved(t *testing.T) {
 }
 
 // The sensor never bootstraps refs/loto/integration — a scan fired from a
-// PreToolUse hook has no business writing a ref. No baseline, no reading.
-func TestScanWorktree_NoIntegrationRefIsACleanNoOp(t *testing.T) {
+// PreToolUse hook has no business writing a ref. No baseline, no reading —
+// but that is reported as ErrNoBaseline, NOT as a silent (nil, nil), because
+// a caller that cannot tell "no baseline" apart from "compared, found
+// nothing" would auto-resolve every violation already on the books the
+// moment the ref went missing (Codex #276 P1).
+func TestScanWorktree_NoIntegrationRefIsReportedDistinctly(t *testing.T) {
 	repoTop, _ := newIntegrationRepo(t)
 	writeFile(t, repoTop, tfFileA, "package gate\n\nvar A = 99\n")
 
 	obs, err := ScanWorktree(context.Background(), repoTop)
-	if err != nil {
-		t.Fatalf("want a clean no-op, got error: %v", err)
+	if !errors.Is(err, ErrNoBaseline) {
+		t.Fatalf("want ErrNoBaseline, got obs=%v err=%v", obs, err)
 	}
 	if len(obs) != 0 {
 		t.Fatalf("want no observations without a baseline, got %v", obs)
 	}
 	if out := gitT(t, repoTop, "for-each-ref", "--format=%(refname)", IntegrationRef); out != "" {
 		t.Fatalf("scan created %s — it must never write a ref", out)
+	}
+}
+
+// A tracked symlink retargeted to a destination that does not exist must not
+// take the whole batch down: hash-object --stdin-paths opens the path it is
+// given, which for a symlink means following it, and a dangling target makes
+// that open fail — for every path in the same call, not just this one
+// (Codex #276 P2). The fingerprinter hashes the link's own payload instead,
+// so an unrelated rogue edit in the same scan is still recorded.
+func TestScanWorktree_DanglingSymlinkIsHashedNotDereferenced(t *testing.T) {
+	const link = "link.txt"
+	repoTop := scanRepo(t)
+	if err := os.Symlink("target-that-exists.txt", filepath.Join(repoTop, link)); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, repoTop, "target-that-exists.txt", "hi\n")
+	gitT(t, repoTop, "add", "-A")
+	gitT(t, repoTop, "commit", "-qm", "add symlink")
+	gitT(t, repoTop, "update-ref", IntegrationRef, "HEAD")
+
+	if err := os.Remove(filepath.Join(repoTop, link)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("nonexistent-target.txt", filepath.Join(repoTop, link)); err != nil {
+		t.Fatal(err)
+	}
+	// An ordinary rogue edit alongside it — proves the WHOLE batch survives,
+	// not just the symlink.
+	writeFile(t, repoTop, tfFileA, "package gate\n\nvar A = 2\n")
+
+	obs := mustScan(t, repoTop)
+	var sawLink, sawFile bool
+	for _, o := range obs {
+		switch o.Path {
+		case link:
+			sawLink = true
+			if o.Fingerprint == "" {
+				t.Errorf("dangling symlink got no fingerprint")
+			}
+		case tfFileA:
+			sawFile = true
+		}
+	}
+	if !sawLink || !sawFile {
+		t.Fatalf("want both %s and %s observed, got %v", link, tfFileA, obs)
 	}
 }
 

@@ -273,6 +273,7 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 	}
 	if len(overlapping) == 0 {
 		fmt.Fprintf(w, "✓ free target=%s\n", relPath(t.Canonical))
+		violationNoticeForPath(rt, w, t.Canonical)
 		return 0
 	}
 	// ec is only consumed by the per-holder rows below; build it after the
@@ -291,5 +292,6 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 	if tags, err := rt.Store.ListAliveForTarget(rt.Ctx, domain.Canonical(t.Canonical)); err == nil {
 		render.EmitTagRows(w, tags)
 	}
+	violationNoticeForPath(rt, w, t.Canonical)
 	return 0
 }

@@ -276,4 +276,18 @@ func TestRotateEvents_FiresOnReleaseBreakDowngrade(t *testing.T) {
 		}
 		assertTrimmed(t, s)
 	})
+
+	// The gate's verdict writer is the newest high-frequency producer: one
+	// row per judged candidate, and a session can submit repeatedly under a
+	// single held lease — no acquire, no doctor, so nothing else would ever
+	// rotate (Codex #276 P2). Without rotation on the detached-audit path,
+	// `loto gate stats`' documented window silently stops being true.
+	t.Run("admission_verdict", func(t *testing.T) {
+		s := mustOpen(t)
+		seedExcess(t, s, eventsRetentionMax+50)
+		if err := s.RecordAdmissionVerdict(ctx, tcAlice, "cand-1", ""); err != nil {
+			t.Fatalf("verdict: %v", err)
+		}
+		assertTrimmed(t, s)
+	})
 }

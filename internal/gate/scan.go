@@ -3,9 +3,13 @@ package gate
 import (
 	"bytes"
 	"context"
+	"crypto/sha1" //nolint:gosec // matches git's own blob-hash algorithm, not used for security
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -18,6 +22,14 @@ var ErrUnhashablePath = errors.New("gate: scan: path contains a newline, cannot 
 // hashes than paths — the pairing is positional, so a mismatch would silently
 // attach the wrong fingerprint to every path after it.
 var ErrHashCountMismatch = errors.New("gate: scan: hash-object returned the wrong number of hashes")
+
+// ErrNoBaseline reports that refs/loto/integration does not currently
+// resolve. This is NOT evidence the tree agrees with anything — a baseline
+// that never existed and a baseline that existed, had violations recorded
+// against it, and then vanished (a deleted ref, a corrupt object store) are
+// indistinguishable at this call, and neither licenses treating every open
+// violation as reverted. The caller owns that distinction (Codex #276 P1).
+var ErrNoBaseline = errors.New("gate: scan: refs/loto/integration does not resolve")
 
 // Observation is one worktree path whose content no longer matches the
 // integration ref. It is a raw sensor reading, NOT a violation: the sensor
@@ -47,9 +59,12 @@ type Observation struct {
 //
 // Read-only and best-effort by construction:
 //
-//   - No integration ref yet → (nil, nil). The sensor never bootstraps the
-//     ref; ResolveIntegrationRef does that, and it is a WRITE, which a scan
-//     fired from a PreToolUse hook has no business performing.
+//   - No integration ref yet → (nil, ErrNoBaseline). The sensor never
+//     bootstraps the ref; ResolveIntegrationRef does that, and it is a
+//     WRITE, which a scan fired from a PreToolUse hook has no business
+//     performing. ErrNoBaseline is distinct from a clean empty reading
+//     precisely so a caller cannot mistake "nothing to compare against" for
+//     "compared, found nothing" — only the latter may auto-resolve.
 //   - Untracked files are deliberately out of scope. They are absent from
 //     integration, so "differs" is not a meaningful reading of them —
 //     untracked residue is its own problem (loto-ovno.13).
@@ -60,11 +75,7 @@ type Observation struct {
 func ScanWorktree(ctx context.Context, repoTop string) ([]Observation, error) {
 	g := gitRunner{repoTop: repoTop}
 	if _, err := g.run(ctx, "rev-parse", "--verify", "--quiet", IntegrationRef); err != nil {
-		// A missing baseline is not a failure: with no integration ref there
-		// is nothing for the tree to differ FROM, and the sensor's contract
-		// is a clean empty reading, not an error the PreToolUse hook would
-		// have to learn to ignore.
-		return nil, nil //nolint:nilerr // absent baseline is a clean empty reading, not an error
+		return nil, ErrNoBaseline
 	}
 	out, err := g.run(ctx, "diff", "--name-status", "-z", "--no-renames", IntegrationRef, "--")
 	if err != nil {
@@ -117,6 +128,16 @@ func parseNameStatusZ(out string) (changed, deleted []string) {
 // newline cannot be fed through it. Rather than silently mis-hash the
 // following path, such a path is refused by name — a repo that has one gets
 // an error it can act on, not a wrong fingerprint it cannot see.
+//
+// Symlinks are hashed separately, in Go, from their link payload rather than
+// through hash-object --stdin-paths (Codex #276 P2): that command opens the
+// path, which for a symlink means following it, and a symlink retargeted to
+// a dangling destination makes the OPEN fail with exit 128 — for the WHOLE
+// batch, not just that one path, so one stale symlink would silently drop
+// every other violation the same scan should have recorded. Git itself never
+// dereferences a symlink to hash it — the blob IS the link target string —
+// so gitBlobSHA reproduces that directly from os.Readlink, no subprocess,
+// nothing to open.
 func hashWorktreePaths(ctx context.Context, repoTop string, paths []string) (map[string]string, error) {
 	if len(paths) == 0 {
 		return map[string]string{}, nil
@@ -126,9 +147,32 @@ func hashWorktreePaths(ctx context.Context, repoTop string, paths []string) (map
 			return nil, fmt.Errorf("%w: %q", ErrUnhashablePath, p)
 		}
 	}
+	m := make(map[string]string, len(paths))
+	regular := make([]string, 0, len(paths))
+	for _, p := range paths {
+		fi, err := os.Lstat(filepath.Join(repoTop, p))
+		if err != nil {
+			// Vanished between the diff and here (or otherwise unreadable):
+			// not this function's failure mode to invent a fingerprint for.
+			return nil, fmt.Errorf("gate: scan: lstat %q: %w", p, err)
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			regular = append(regular, p)
+			continue
+		}
+		target, err := os.Readlink(filepath.Join(repoTop, p))
+		if err != nil {
+			return nil, fmt.Errorf("gate: scan: readlink %q: %w", p, err)
+		}
+		m[p] = gitBlobSHA(target)
+	}
+	if len(regular) == 0 {
+		return m, nil
+	}
+
 	cmd := exec.CommandContext(ctx, "git", "hash-object", "--stdin-paths")
 	cmd.Dir = repoTop
-	cmd.Stdin = strings.NewReader(strings.Join(paths, "\n") + "\n")
+	cmd.Stdin = strings.NewReader(strings.Join(regular, "\n") + "\n")
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
@@ -136,12 +180,21 @@ func hashWorktreePaths(ctx context.Context, repoTop string, paths []string) (map
 		return nil, fmt.Errorf("gate: scan hash-object: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	shas := strings.Fields(out.String())
-	if len(shas) != len(paths) {
-		return nil, fmt.Errorf("%w: %d hashes for %d paths", ErrHashCountMismatch, len(shas), len(paths))
+	if len(shas) != len(regular) {
+		return nil, fmt.Errorf("%w: %d hashes for %d paths", ErrHashCountMismatch, len(shas), len(regular))
 	}
-	m := make(map[string]string, len(paths))
-	for i, p := range paths {
+	for i, p := range regular {
 		m[p] = shas[i]
 	}
 	return m, nil
+}
+
+// gitBlobSHA computes the same SHA-1 `git hash-object` would for a blob
+// holding content — "blob <len>\x00<content>" — without shelling out. Used
+// only for symlink targets, where content is the link payload string.
+func gitBlobSHA(content string) string {
+	h := sha1.New() //nolint:gosec // git's blob object id, not a security use
+	fmt.Fprintf(h, "blob %d\x00", len(content))
+	h.Write([]byte(content))
+	return hex.EncodeToString(h.Sum(nil))
 }

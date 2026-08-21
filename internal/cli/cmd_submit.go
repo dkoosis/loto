@@ -26,10 +26,13 @@ Package your held locks' current edits into a candidate for the git-gate
 pipeline: lease check -> lane.Commit -> envelope capture -> admission.
 
 On accept: writes refs/loto/candidates/<id> + refs/loto/proposals/<id>, and
-converts each lease into a durable candidate claim. On reject: nothing is
-written to git or the store — fix the reported reason and resubmit. This is
-the first point where the whole front half of the gate is observable in one
-command (loto-ovno.5).
+converts each lease into a durable candidate claim. On reject: no candidate
+or claim state is written — fix the reported reason and resubmit. Every
+attempt, accepted or not, leaves one audit event (see: loto gate stats) and
+may record a violation-scan finding (see: loto violations); neither is
+candidate/claim state and neither blocks a resubmit. This is the first point
+where the whole front half of the gate is observable in one command
+(loto-ovno.5).
 
 examples:
   loto submit internal/store/store.go --bead loto-ovno.5
@@ -112,9 +115,9 @@ func runSubmit(rt *runtime, repoTop, bead, msg string, targets []domain.Target, 
 
 	// ‡ Every path below this point that does NOT accept must drop the lane
 	// branch lane.Commit just wrote (Codex #259 P2). `loto submit` documents
-	// "on reject: nothing is written to git" — without this, every rejected
-	// submit leaves a permanent refs/heads/loto/<id> behind, and a retry loop
-	// leaves one per attempt.
+	// "on reject: no candidate or claim state is written" — without this,
+	// every rejected submit leaves a permanent refs/heads/loto/<id> behind,
+	// and a retry loop leaves one per attempt.
 	accepted := false
 	defer func() {
 		if !accepted {

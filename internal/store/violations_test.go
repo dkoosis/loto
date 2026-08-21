@@ -230,6 +230,68 @@ func TestResolveViolation_ClosesOnceAndRefusesTwice(t *testing.T) {
 	}
 }
 
+// The resolution string the caller supplies is what lands on the row —
+// `loto violations resolve -m "<why>"` promises the reason is recorded, and
+// stdout is not a record (Codex #276 P2).
+func TestResolveViolation_PersistsTheSuppliedResolution(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	rec, err := s.RecordViolations(ctx,
+		[]ObservedViolation{{PathCanonical: tcRogueGo, Fingerprint: tcSHA1, LeaseState: LeaseStateUnleased}})
+	if err != nil || len(rec) != 1 {
+		t.Fatalf("seed: %v n=%d", err, len(rec))
+	}
+
+	const why = "intentional vendored regen"
+	if err := s.ResolveViolation(ctx, rec[0].ID, why); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	var got string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT resolution FROM violations WHERE id = ?`, rec[0].ID).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != why {
+		t.Errorf("resolution=%q, want %q", got, why)
+	}
+}
+
+// An ack is a judgment about CONTENT, not just about a row: a later scan
+// seeing the same fingerprint on the same still-unleased path must not
+// re-open it, or `resolve` would only silence the warning until the next
+// scan (Codex #276 P2). A different fingerprint is a new mutation and does
+// re-open.
+func TestReconcileScan_AckedFingerprintIsNotReopened(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	ec := liveEval()
+
+	res, err := s.ReconcileScan(ctx, []gate.Observation{{Path: tcRogueGo, Fingerprint: tcSHA1}}, ec)
+	if err != nil || len(res.Recorded) != 1 {
+		t.Fatalf("seed: %v recorded=%d", err, len(res.Recorded))
+	}
+	if err := s.ResolveViolation(ctx, res.Recorded[0].ID, "legitimate, staying"); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := s.ReconcileScan(ctx, []gate.Observation{{Path: tcRogueGo, Fingerprint: tcSHA1}}, ec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Recorded) != 0 {
+		t.Errorf("acked fingerprint re-recorded: %+v", again.Recorded)
+	}
+
+	changed, err := s.ReconcileScan(ctx, []gate.Observation{{Path: tcRogueGo, Fingerprint: tcSHA2}}, ec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed.Recorded) != 1 {
+		t.Errorf("new content on an acked path was not recorded: %+v", changed.Recorded)
+	}
+}
+
 // A path may be contaminated, reverted, and contaminated again — each episode
 // is its own record. The partial unique index constrains OPEN rows only.
 func TestReconcileScan_SecondEpisodeAfterRevertRecordsAgain(t *testing.T) {
