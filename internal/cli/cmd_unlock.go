@@ -155,7 +155,11 @@ func breakTargets(rt *runtime, args []string, intent, repoTop string, expect hol
 		return code
 	}
 	var expectations store.BreakExpectations
-	if len(expect) > 0 {
+	// len(targets) restates locally what checkExpectHolderUsage already
+	// enforced (--expect-holder ⇒ exactly one target). It keeps the index
+	// honest to any reader — and to nilcheck, which cannot correlate
+	// resolveUnlockArgs's nil-on-error return with its code!=0 companion.
+	if len(expect) > 0 && len(targets) > 0 {
 		expectations = store.BreakExpectations{targets[0].Canonical: expect}
 	}
 	// --force ORPHANS tags (gc-deletes them) rather than acking, by design
