@@ -138,6 +138,7 @@ func runSubmit(rt *runtime, repoTop, bead, msg string, targets []domain.Target, 
 			fmt.Fprintf(stderr, "✗ capture: %v\n", err)
 			return 3
 		}
+		recordVerdict(rt, candidateID, captureRejectionReason(err), stderr)
 		emitSubmitCaptureRejected(stdout, candidateID, err)
 		return 1
 	}
@@ -159,11 +160,49 @@ func runSubmit(rt *runtime, repoTop, bead, msg string, targets []domain.Target, 
 		return code
 	}
 
+	decision, code := submitAdmit(rt, repoTop, env, owner, targets, proposal, stderr)
+	if code != 0 {
+		return code
+	}
+	if !decision.Accepted {
+		recordVerdict(rt, candidateID, decision.Reason, stderr)
+		emitSubmitRejected(stdout, candidateID, decision)
+		return 1
+	}
+	// 6. Accept: write refs/loto/candidates + refs/loto/proposals atomically,
+	// convert each lease into a durable candidate claim.
+	code = submitAccept(rt, repoTop, env, owner, candidateID, proposal, writeSet, true, stdout, stderr)
+	accepted = code == 0
+	return code
+}
+
+// recordVerdict appends the audit row `loto gate stats` counts. Best-effort
+// with a ⚠ on failure: the verdict has already been rendered and acted on,
+// and losing its breadcrumb must not change the exit code the caller sees.
+// An empty reason means accepted.
+func recordVerdict(rt *runtime, candidateID string, reason gate.RejectionReason, stderr io.Writer) {
+	if err := rt.Store.RecordAdmissionVerdict(rt.Ctx, rt.Agent.UUID, candidateID, reason); err != nil {
+		fmt.Fprintf(stderr, "⚠ verdict not recorded id=%s: %v\n", candidateID, err)
+	}
+}
+
+// submitAdmit is runSubmit step 5: read the live state admission judges
+// against — current lease epochs and open violations — then call Admit. A
+// non-zero code is an infrastructure failure the caller returns immediately;
+// a Decision (accepted or not) is a verdict.
+func submitAdmit(rt *runtime, repoTop string, env gate.Envelope, owner domain.AgentUUID, targets []domain.Target, proposal string, stderr io.Writer) (gate.Decision, int) {
 	currentEpochs, err := currentPathEpochs(rt, targets, owner)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ admission: read current epochs: %v\n", err)
-		return 3
+		return gate.Decision{}, 3
 	}
+	// Sensor pass, HERE and not earlier: the submitter's own leases are live
+	// by now (step 1), so its own edits read as authorized rather than as
+	// contamination. A scan failure is advisory — admission still runs
+	// against whatever the store already holds, because a sensor that could
+	// not read the tree must not become the outage the escape hatch exists to
+	// prevent (git-gate.md Outcome 7).
+	unresolved := submitViolationScan(rt, repoTop, stderr)
 	// ‡ gate.IntegrationRef (the symbolic name), NOT the SHA resolved back at
 	// step 2 (Codex #259 P1). AdmitParams.IntegrationRef is documented "re-read
 	// fresh" — that is the whole basis of stale-preimage / stale-ancestry.
@@ -174,20 +213,35 @@ func runSubmit(rt *runtime, repoTop, bead, msg string, targets []domain.Target, 
 	decision, err := gate.Admit(rt.Ctx, env, gate.AdmitParams{
 		RepoTop: repoTop, PresentedProposalSHA: proposal,
 		IntegrationRef: gate.IntegrationRef, CurrentEpoch: currentEpochs,
+		UnresolvedViolations: unresolved,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ admission: %v\n", err)
-		return 3
+		return gate.Decision{}, 3
 	}
-	if !decision.Accepted {
-		emitSubmitRejected(stdout, candidateID, decision)
-		return 1
+	return decision, 0
+}
+
+// submitViolationScan runs the whole-tree sensor pass and returns the open
+// violations admission should judge against — path -> violation id.
+//
+// Every failure here degrades to "what the store already holds" with a ⚠
+// row, never to an error: the scan makes admission's violation-intersect
+// check SHARPER, and a submit that cannot run it is no worse off than a
+// submit made before the sensor existed. Refusing instead would hand every
+// broken-git-plumbing day a repo-wide submit outage.
+func submitViolationScan(rt *runtime, repoTop string, stderr io.Writer) map[string]string {
+	if res, err := runViolationScan(rt, repoTop); err != nil {
+		fmt.Fprintf(stderr, "⚠ violation scan skipped: %v\n", err)
+	} else if len(res.Recorded) > 0 {
+		fmt.Fprintf(stderr, "⚠ violations recorded=%d by this scan\n", len(res.Recorded))
 	}
-	// 6. Accept: write refs/loto/candidates + refs/loto/proposals atomically,
-	// convert each lease into a durable candidate claim.
-	code = submitAccept(rt, repoTop, env, owner, candidateID, proposal, writeSet, stdout, stderr)
-	accepted = code == 0
-	return code
+	unresolved, err := rt.Store.UnresolvedViolationPaths(rt.Ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "⚠ violation read skipped: %v\n", err)
+		return nil
+	}
+	return unresolved
 }
 
 // submitBuildProposal is runSubmit steps 2 and 3: resolve the integration ref
@@ -235,7 +289,10 @@ func submitGateBypass(rt *runtime, repoTop string, env gate.Envelope, owner doma
 		fmt.Fprintf(stderr, "✗ record gate bypass: %v\n", err)
 		return 3
 	}
-	return submitAccept(rt, repoTop, env, owner, candidateID, proposal, writeSet, stdout, stderr)
+	// judged=false: a bypassed candidate never reached a verdict, and
+	// recording one would let `loto gate stats` report the gate as having
+	// accepted work it never looked at. The bypass has its own class.
+	return submitAccept(rt, repoTop, env, owner, candidateID, proposal, writeSet, false, stdout, stderr)
 }
 
 // isCaptureVerdict separates gate.Capture's two candidate VERDICTS — the
@@ -293,7 +350,7 @@ func submitLeaseCheck(rt *runtime, ec domain.EvalContext, owner domain.AgentUUID
 // submitAccept is runSubmit step 6 — admission accepted: write
 // refs/loto/candidates + refs/loto/proposals atomically, convert each lease
 // into a durable candidate claim.
-func submitAccept(rt *runtime, repoTop string, env gate.Envelope, owner domain.AgentUUID, candidateID, proposal string, writeSet []string, stdout, stderr io.Writer) int {
+func submitAccept(rt *runtime, repoTop string, env gate.Envelope, owner domain.AgentUUID, candidateID, proposal string, writeSet []string, judged bool, stdout, stderr io.Writer) int {
 	pid, src := stampPID()
 	var procStart int64
 	if src == pidDurable {
@@ -317,11 +374,17 @@ func submitAccept(rt *runtime, repoTop string, env gate.Envelope, owner domain.A
 		// mismatch — the proposer's remedy is identical, re-lock and resubmit.
 		var stale *store.LeaseRevalidationError
 		if errors.As(err, &stale) {
+			if judged {
+				recordVerdict(rt, candidateID, gate.ReasonStaleLeaseEpoch, stderr)
+			}
 			emitSubmitLeaseLost(stdout, candidateID, stale)
 			return 1
 		}
 		fmt.Fprintf(stderr, "✗ accept: %v\n", err)
 		return 3
+	}
+	if judged {
+		recordVerdict(rt, candidateID, "", stderr)
 	}
 	fmt.Fprintf(stdout, "✓ candidate id=%s envelope=%s proposal=%s files=%d\n", candidateID, envSHA, proposal, len(writeSet))
 	return 0
@@ -389,15 +452,20 @@ func emitSubmitRejected(w io.Writer, candidateID string, d gate.Decision) {
 // learn two different failure grammars for "this candidate cannot be built"
 // versus "this candidate was built but refused."
 func emitSubmitCaptureRejected(w io.Writer, candidateID string, err error) {
-	reason := "capture-failed"
-	switch {
-	case errors.Is(err, gate.ErrAncestryNotTree):
-		reason = "stale-ancestry"
-	case errors.Is(err, gate.ErrPathNotBlob):
-		reason = "malformed-candidate"
-	}
-	fmt.Fprintf(w, "✗ candidate-rejected count=1 id=%s reason=%s\n", candidateID, reason)
+	fmt.Fprintf(w, "✗ candidate-rejected count=1 id=%s reason=%s\n", candidateID, captureRejectionReason(err))
 	fmt.Fprintf(w, "✗ %v\n", err)
+}
+
+// captureRejectionReason maps a Capture verdict onto the shared taxonomy, so
+// the class the operator READS and the class `loto gate stats` COUNTS are the
+// same string derived once. isCaptureVerdict has already established that err
+// is one of the two verdicts; anything else reaching here is a bug upstream,
+// and malformed-candidate is the honest floor for it.
+func captureRejectionReason(err error) gate.RejectionReason {
+	if errors.Is(err, gate.ErrAncestryNotTree) {
+		return gate.ReasonStaleAncestry
+	}
+	return gate.ReasonMalformedCandidate
 }
 
 // emitSubmitLeaseLost renders a claim-time lease-revalidation refusal with the

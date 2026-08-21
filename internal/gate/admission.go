@@ -7,12 +7,13 @@ import (
 	"strings"
 )
 
-// RejectionReason names why Admit refused a candidate — the subset of
-// git-gate.md's rejection taxonomy this bead's checks can actually produce.
-// The remaining classes (violation-intersect's REAL logic, verify-red,
-// verify-infrastructure, promotion-race) belong to later beads (.7, .9); this
-// bead's violation-intersect check is a deliberate no-op until the violation
-// store ships (loto-ovno.9) — see checkViolationIntersect.
+// RejectionReason names why a candidate was refused. The constants below are
+// git-gate.md's rejection taxonomy in full — including the classes Admit
+// itself cannot produce (verify-red, verify-infrastructure, promotion-race
+// come from the promotion half; gate-bypass is the escape hatch's own class).
+// They live in one type on purpose: `loto gate stats` reports counts PER
+// CLASS, and a taxonomy split across two packages is a taxonomy that will
+// drift.
 type RejectionReason string
 
 const (
@@ -26,7 +27,50 @@ const (
 	ReasonStalePreimage      RejectionReason = "stale-preimage"
 	ReasonStaleAncestry      RejectionReason = "stale-ancestry"
 	ReasonMalformedCandidate RejectionReason = "malformed-candidate"
+	// ReasonViolationIntersect: a write-set path carries an unresolved sticky
+	// violation. This is a CORRECTNESS check, not UX — it is what stops a
+	// leaseholder laundering a rogue edit it never noticed into integration
+	// under a perfectly valid lease (git-gate.md Phase 5).
+	ReasonViolationIntersect RejectionReason = "violation-intersect"
+
+	// The classes below are produced OUTSIDE Admit — named here so the
+	// taxonomy has one home and `loto gate stats` one enumeration.
+
+	// ReasonGateBypass: LOTO_GATE=off admitted this candidate without a
+	// verdict. Counted as its own class precisely so a bypass cannot quietly
+	// become the norm (git-gate.md Outcome 7).
+	ReasonGateBypass RejectionReason = "gate-bypass"
+	// ReasonVerifyRed: the gate-owned verify command failed against the
+	// prospective chain tip.
+	ReasonVerifyRed RejectionReason = "verify-red"
+	// ReasonVerifyInfrastructure: verify could not reach a verdict — the
+	// worktree, the toolchain, or the command itself failed. Distinct from
+	// verify-red because the candidate is not implicated.
+	ReasonVerifyInfrastructure RejectionReason = "verify-infrastructure"
+	// ReasonPromotionRace: another pusher advanced integration underneath
+	// this promotion's compare-and-swap.
+	ReasonPromotionRace RejectionReason = "promotion-race"
 )
+
+// RejectionReasons is the taxonomy in report order — cheap structural classes
+// first, then contamination, then the promotion half. `loto gate stats`
+// iterates THIS list so a class with zero counts still prints: a taxonomy
+// that hides its empty classes teaches nothing about what never fires.
+//
+//nolint:gochecknoglobals // the taxonomy itself, iterated by the stats reporter
+var RejectionReasons = []RejectionReason{
+	ReasonProposalSHAMismatch,
+	ReasonMalformedCandidate,
+	ReasonUnauthorizedPath,
+	ReasonStaleLeaseEpoch,
+	ReasonStalePreimage,
+	ReasonStaleAncestry,
+	ReasonViolationIntersect,
+	ReasonGateBypass,
+	ReasonVerifyRed,
+	ReasonVerifyInfrastructure,
+	ReasonPromotionRace,
+}
 
 // Decision is Admit's verdict. Reason and Detail are zero-value on Accepted.
 type Decision struct {
@@ -62,6 +106,15 @@ type AdmitParams struct {
 	// meaningful: they compare the envelope's OLD snapshot against integration
 	// as it stands RIGHT NOW.
 	IntegrationRef string
+	// UnresolvedViolations is path -> open violation id, read by the caller
+	// from the violation store immediately before calling (loto-ovno.9). Nil
+	// is a valid value and means "the caller has no violation store" — the
+	// pre-sensor behavior, and what every test that is not ABOUT violations
+	// should pass.
+	//
+	// ‡ A map supplied by the caller, not a lookup this package performs, for
+	// the same reason CurrentEpoch is: gate reads git and nothing else.
+	UnresolvedViolations map[string]string
 	// CurrentEpoch is path -> the CURRENT locks.epoch value, read by the
 	// caller immediately before calling Admit (loto-ovno.2's epoch column). A
 	// path absent from the map reads as epoch 0, matching a fresh/never-locked
@@ -100,7 +153,7 @@ func Admit(ctx context.Context, env Envelope, p AdmitParams) (Decision, error) {
 	} else if !d.Accepted {
 		return d, nil
 	}
-	if d := checkViolationIntersect(env); !d.Accepted {
+	if d := checkViolationIntersect(env, p.UnresolvedViolations); !d.Accepted {
 		return d, nil
 	}
 	return accept(), nil
@@ -215,13 +268,30 @@ func checkAncestryCurrent(ctx context.Context, repoTop string, env Envelope, int
 	return accept(), nil
 }
 
-// checkViolationIntersect is a deliberate no-op: "write-set intersects no
-// unresolved violation... activates once the sensor exists" (loto-ovno.4's
-// own bead description; the sticky-violation store is loto-ovno.9). Kept as
-// its own named check, called from Admit in the position git-gate.md lists
-// it, so wiring the real logic in later is a body-only change with no
-// call-site edit.
-func checkViolationIntersect(_ Envelope) Decision {
+// checkViolationIntersect refuses a candidate whose write-set touches any
+// path carrying an unresolved violation — "write-set intersects no unresolved
+// violation" (git-gate.md's admission bullet).
+//
+// ‡ This is the check that closes the laundering path. The proposer here may
+// be entirely innocent and hold a perfectly valid lease: the violation was
+// recorded BEFORE that lease existed, the sensor cannot say who wrote it, and
+// the proposer's commit would carry the contamination into integration
+// wearing the proposer's authorization. Refusing is the only sound move — the
+// remedy is to look at the diff, and either revert the rogue change or
+// `loto violations resolve` it on the record.
+//
+// The write-set is walked in ITS order (not the map's) so the same candidate
+// against the same store always names the same path first.
+func checkViolationIntersect(env Envelope, unresolved map[string]string) Decision {
+	if len(unresolved) == 0 {
+		return accept()
+	}
+	for _, path := range env.WriteSet {
+		if id, ok := unresolved[path]; ok {
+			return reject(ReasonViolationIntersect,
+				fmt.Sprintf("%s: unresolved violation %s — revert the change or `loto violations resolve %s`", path, id, id))
+		}
+	}
 	return accept()
 }
 
