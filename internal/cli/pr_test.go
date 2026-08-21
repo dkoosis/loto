@@ -265,10 +265,13 @@ func TestPR_NewWorkUpdatesTheOpenPR(t *testing.T) {
 }
 
 // TestPR_DryRunTouchesNothing: --dry-run must write no ref and reach no
-// remote, so it is safe to run inside a shared checkout at any time.
+// remote, so it is safe to run inside a shared checkout at any time. Also
+// pins determinism (design.md) — two runs over one state, byte-identical —
+// because that assertion needs the same fixture and the fixture is the cost.
 func TestPR_DryRunTouchesNothing(t *testing.T) {
 	f := usePublisher(t)
 	repo := prBaseRepo(t)
+	prPlant(t, repo, tcPRBeadB, "cand-b1", tcPRFileB, "B1\n")
 	prPlant(t, repo, tcPRBeadA, "cand-a1", tcPRFileA, "A1\n")
 
 	stdout, stderr, code := executeCommand(tcCmdPR, "--dry-run")
@@ -277,7 +280,7 @@ func TestPR_DryRunTouchesNothing(t *testing.T) {
 	}
 	// opened/updated stay at zero — a dry run opened and updated nothing —
 	// and what it would carry gets its own key.
-	if !strings.HasPrefix(stdout, "✓ pr beads=1 opened=0 updated=0 current=0 blocked=0 unattributed=0 pending=1 dry-run=true\n") {
+	if !strings.HasPrefix(stdout, "✓ pr beads=2 opened=0 updated=0 current=0 blocked=0 unattributed=0 pending=2 dry-run=true\n") {
 		t.Errorf("dry-run triage line wrong:\n%s", stdout)
 	}
 	if !strings.Contains(stdout, "action="+prActionWouldBuild) {
@@ -291,6 +294,16 @@ func TestPR_DryRunTouchesNothing(t *testing.T) {
 	}
 	if len(f.pushed) != 0 || len(f.created) != 0 {
 		t.Errorf("--dry-run reached the remote: pushed=%v created=%d", f.pushed, len(f.created))
+	}
+
+	second, _, _ := executeCommand(tcCmdPR, "--dry-run")
+	if second != stdout {
+		t.Errorf("two runs over the same state differ:\n%s\n---\n%s", stdout, second)
+	}
+	// Rows sort by line, so bead A precedes bead B whatever order they
+	// promoted in — and B promoted first above.
+	if strings.Index(stdout, tcPRBeadA) > strings.Index(stdout, tcPRBeadB) {
+		t.Errorf("rows are not sorted deterministically:\n%s", stdout)
 	}
 }
 
@@ -348,25 +361,6 @@ func TestPR_UnattributedCommitIsAdvisory(t *testing.T) {
 	}
 }
 
-// TestPR_OutputIsByteIdentical pins the determinism rule (design.md): the
-// same repo state must render the same bytes.
-func TestPR_OutputIsByteIdentical(t *testing.T) {
-	usePublisher(t)
-	repo := prBaseRepo(t)
-	prPlant(t, repo, tcPRBeadB, "cand-b1", tcPRFileB, "B1\n")
-	prPlant(t, repo, tcPRBeadA, "cand-a1", tcPRFileA, "A1\n")
-
-	first, _, _ := executeCommand(tcCmdPR, "--dry-run")
-	second, _, _ := executeCommand(tcCmdPR, "--dry-run")
-	if first != second {
-		t.Errorf("two runs over the same state differ:\n%s\n---\n%s", first, second)
-	}
-	// Sorted by row, so bead A precedes bead B whatever order they promoted in.
-	if strings.Index(first, tcPRBeadA) > strings.Index(first, tcPRBeadB) {
-		t.Errorf("rows are not sorted deterministically:\n%s", first)
-	}
-}
-
 // TestPR_BeadFilter narrows a run to one bead.
 func TestPR_BeadFilter(t *testing.T) {
 	f := usePublisher(t)
@@ -390,9 +384,10 @@ func TestPR_BeadFilter(t *testing.T) {
 // upstream can produce a non-bead branch — which is the point of the guard.
 func TestPR_RefusesToPushAnythingButABeadBranch(t *testing.T) {
 	f := usePublisher(t)
-	repo := prBaseRepo(t)
 
-	_, err := bridgeBead(context.Background(), repo,
+	// t.TempDir, not prBaseRepo: the guard fires before any git call, so
+	// building a repo would only buy wall-clock.
+	_, err := bridgeBead(context.Background(), t.TempDir(),
 		prOpts{base: tcPRMain, remote: "origin"}, f,
 		&gate.BeadBridge{BeadID: tcPRBeadA, Branch: "main", Class: gate.BridgeUpToDate})
 	if !errors.Is(err, errPRNotABeadBranch) {
@@ -406,7 +401,6 @@ func TestPR_RefusesToPushAnythingButABeadBranch(t *testing.T) {
 // TestPR_RejectsPositionalArgs keeps the flag surface honest.
 func TestPR_RejectsPositionalArgs(t *testing.T) {
 	usePublisher(t)
-	prBaseRepo(t)
 	if _, _, code := executeCommand(tcCmdPR, "stray"); code != 2 {
 		t.Errorf("exit = %d, want 2", code)
 	}

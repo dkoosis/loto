@@ -352,27 +352,33 @@ func TestPlanBridge_UnattributedCommitIsReportedNeverBridged(t *testing.T) {
 // bridged marker can disagree. Every one of them is a human having moved a
 // ref; the bridge reports and refuses rather than guessing.
 func TestPlanBridge_StaleBranchShapes(t *testing.T) {
-	t.Run("branch-missing", func(t *testing.T) {
+	// ‡ The two ref-only shapes share one repo on two beads: they move only
+	// that bead's branch and marker, so they cannot interfere. The two below
+	// them each move `main`, which is repo-global, and so each needs its own.
+	t.Run("ref-only shapes", func(t *testing.T) {
 		repoTop := newBridgeRepo(t)
 		plantPromoted(t, repoTop, tbBeadA, tbCandA1, map[string]string{tfFileA: tbA1})
-		b := beadIn(t, mustPlan(t, repoTop), tbBeadA)
-		mustBuild(t, repoTop, b)
-		gitT(t, repoTop, "update-ref", "-d", b.Ref)
+		plantPromoted(t, repoTop, tbBeadB, tbCandB1, map[string]string{tfFileB: tbB1})
 
-		got := beadIn(t, mustPlan(t, repoTop), tbBeadA)
-		if got.Class != BridgeStaleBranch || got.Detail != detailBranchMissing {
-			t.Errorf("class/detail = %q/%q, want stale-branch/%s", got.Class, got.Detail, detailBranchMissing)
-		}
-	})
+		// branch-missing: built, then someone deleted the branch out from
+		// under an open PR.
+		built := beadIn(t, mustPlan(t, repoTop), tbBeadA)
+		mustBuild(t, repoTop, built)
+		gitT(t, repoTop, "update-ref", "-d", built.Ref)
+		// unmarked-branch: a branch this package never wrote.
+		gitT(t, repoTop, "update-ref", bridgeBranchPrefix+tbBeadB, tbMain)
 
-	t.Run("unmarked-branch", func(t *testing.T) {
-		repoTop := newBridgeRepo(t)
-		plantPromoted(t, repoTop, tbBeadA, tbCandA1, map[string]string{tfFileA: tbA1})
-		gitT(t, repoTop, "update-ref", bridgeBranchPrefix+tbBeadA, tbMain)
-
-		got := beadIn(t, mustPlan(t, repoTop), tbBeadA)
-		if got.Class != BridgeStaleBranch || got.Detail != detailUnmarked {
-			t.Errorf("class/detail = %q/%q, want stale-branch/%s", got.Class, got.Detail, detailUnmarked)
+		plan := mustPlan(t, repoTop)
+		for _, tc := range []struct {
+			bead, want string
+		}{
+			{tbBeadA, detailBranchMissing},
+			{tbBeadB, detailUnmarked},
+		} {
+			got := beadIn(t, plan, tc.bead)
+			if got.Class != BridgeStaleBranch || got.Detail != tc.want {
+				t.Errorf("%s: class/detail = %q/%q, want stale-branch/%s", tc.bead, got.Class, got.Detail, tc.want)
+			}
 		}
 	})
 
@@ -416,29 +422,29 @@ func TestPlanBridge_StaleBranchShapes(t *testing.T) {
 
 // --- acceptance 4: transitions -------------------------------------------
 
-// TestBuildBridge_DeletionRoundTrips: a promoted deletion must arrive on the
-// branch as a deletion, not as a path the replay quietly kept.
-func TestBuildBridge_DeletionRoundTrips(t *testing.T) {
+// TestBuildBridge_TransitionShapes: a deletion must arrive as a deletion, and
+// a created nested path must arrive with its parent trees — both without
+// disturbing anything the bead never touched.
+//
+// ‡ Two beads in ONE repo, not two repos. Their write-sets are disjoint, so
+// their branches are independent — which is the same property the whole
+// per-bead split rests on, exercised here for free instead of paying for a
+// second fixture.
+func TestBuildBridge_TransitionShapes(t *testing.T) {
 	repoTop := newBridgeRepo(t)
 	plantPromoted(t, repoTop, tbBeadA, tbCandA1, map[string]string{tfFileA: ""})
+	plantPromoted(t, repoTop, tbBeadB, tbCandB1, map[string]string{"pkg/sub/new.go": "made\n"})
+	plan := mustPlan(t, repoTop)
 
-	b := beadIn(t, mustPlan(t, repoTop), tbBeadA)
-	if len(b.Pending) != 1 || len(b.Pending[0].Transitions) != 1 || b.Pending[0].Transitions[0].Result != nil {
-		t.Fatalf("transitions = %+v, want one deletion", b.Pending)
+	del := beadIn(t, plan, tbBeadA)
+	if len(del.Pending) != 1 || len(del.Pending[0].Transitions) != 1 || del.Pending[0].Transitions[0].Result != nil {
+		t.Fatalf("transitions = %+v, want one deletion", del.Pending)
 	}
-	head := mustBuild(t, repoTop, b)
-	if got := treeHas(t, repoTop, head, tfFileA); got != "" {
+	if got := treeHas(t, repoTop, mustBuild(t, repoTop, del), tfFileA); got != "" {
 		t.Errorf("%s survived the replayed deletion: %q", tfFileA, got)
 	}
-}
 
-// TestBuildBridge_CreatedPathCarriesItsDirectory: a created nested path must
-// arrive with its parent trees, and must not disturb anything else.
-func TestBuildBridge_CreatedPathCarriesItsDirectory(t *testing.T) {
-	repoTop := newBridgeRepo(t)
-	plantPromoted(t, repoTop, tbBeadA, tbCandA1, map[string]string{"pkg/sub/new.go": "made\n"})
-
-	head := mustBuild(t, repoTop, beadIn(t, mustPlan(t, repoTop), tbBeadA))
+	head := mustBuild(t, repoTop, beadIn(t, plan, tbBeadB))
 	if got := treeHas(t, repoTop, head, "pkg/sub/new.go"); got != "made" {
 		t.Errorf("created path = %q", got)
 	}
