@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -135,14 +136,20 @@ func TestScanWorktree_DanglingSymlinkIsHashedNotDereferenced(t *testing.T) {
 	// not just the symlink.
 	writeFile(t, repoTop, tfFileA, "package gate\n\nvar A = 2\n")
 
+	// git's own blob id for the retargeted link, straight from the index —
+	// the fingerprint we compute has to BE this, not merely be non-empty,
+	// or a later scan could not tell one link target from another.
+	gitT(t, repoTop, "add", link)
+	wantSHA := strings.Fields(gitT(t, repoTop, "ls-files", "-s", link))[1]
+
 	obs := mustScan(t, repoTop)
 	var sawLink, sawFile bool
 	for _, o := range obs {
 		switch o.Path {
 		case link:
 			sawLink = true
-			if o.Fingerprint == "" {
-				t.Errorf("dangling symlink got no fingerprint")
+			if o.Fingerprint != wantSHA {
+				t.Errorf("symlink fingerprint = %q, want git's own %q", o.Fingerprint, wantSHA)
 			}
 		case tfFileA:
 			sawFile = true
