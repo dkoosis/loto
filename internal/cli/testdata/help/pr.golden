@@ -1,0 +1,22 @@
+usage: loto pr [--dry-run] [--bead <id>] [--base <ref>] [--remote <name>]
+
+Cross promoted work from refs/loto/integration to GitHub: group every promoted
+commit by its Bead: trailer, build one branch per bead, push it, and open one
+non-draft PR per bead carrying a Closes: trailer.
+
+integration is machine-verified state; main is human-accepted state, and only
+a person moves work between them — this verb builds the request, never the
+merge. It never pushes to main and never merges anything.
+
+Safe to run repeatedly: a bead already bridged is skipped, a bead that promoted
+again since gets the new commits appended to its open branch, and a bead whose
+paths moved on main is refused rather than replayed over.
+
+  -base string
+    	the branch every PR targets and every bead branch forks from (default "main")
+  -bead string
+    	limit the run to one bead id
+  -dry-run
+    	report what would be built and opened; touch no ref and no remote
+  -remote string
+    	git remote to push bead branches to (default "origin")

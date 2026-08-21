@@ -62,5 +62,6 @@ lane choreography (engine verbs; used by the /team fleet harness):
   lane     Commit an exact write-set to a lane ref by plumbing; needs every write-set lock held
   verify   Run a command against a commit in a throwaway worktree; exit 1 fail, 3 infra
   beacon   Mint a short-TTL shared lease on paths this agent is about to write (PreToolUse gate)
-  submit   Package held-lock edits into a git-gate candidate: commit, capture, admit`)
+  submit   Package held-lock edits into a git-gate candidate: commit, capture, admit
+  pr       Bridge promoted integration commits to GitHub: one branch and one PR per bead`)
 }
