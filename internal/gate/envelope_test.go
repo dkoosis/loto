@@ -481,3 +481,52 @@ func TestGitRunner_BlobAtDirectoryIsRejected(t *testing.T) {
 		t.Fatalf("want ErrPathNotBlob for a directory path, got %v", err)
 	}
 }
+
+// TestDecodeEnvelope_RejectsSemanticallyEmpty is the loto-amkj regression.
+// `{}` is valid JSON, so it used to decode to a zero Envelope with a nil error.
+// Promotion then found a candidate with no transitions, applied none, and
+// advanced refs/loto/integration by an EMPTY, UNATTRIBUTED commit while
+// retiring the candidate ref. git-gate.md's "a candidate ref without its
+// envelope is rejected" has to mean semantically absent, not merely
+// unparseable, or the guarantee only ever covered garbled bytes.
+func TestDecodeEnvelope_RejectsSemanticallyEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		json string
+	}{
+		{"empty object", `{}`},
+		{"no write set", `{"candidate_id":"c-1","proposal_sha":"abc","bead_id":"b","write_set":[],"transitions":[]}`},
+		{"no candidate id", `{"proposal_sha":"abc","bead_id":"b","write_set":["a.go"],"transitions":[{"path":"a.go"}]}`},
+		{"no proposal sha", `{"candidate_id":"c-1","bead_id":"b","write_set":["a.go"],"transitions":[{"path":"a.go"}]}`},
+		{"no bead id", `{"candidate_id":"c-1","proposal_sha":"abc","write_set":["a.go"],"transitions":[{"path":"a.go"}]}`},
+		{"transition count does not match write set", `{"candidate_id":"c-1","proposal_sha":"abc","bead_id":"b","write_set":["a.go","b.go"],"transitions":[{"path":"a.go"}]}`},
+	} {
+		if _, err := DecodeEnvelope([]byte(tc.json)); !errors.Is(err, ErrMalformedEnvelope) {
+			t.Errorf("%s: err = %v, want ErrMalformedEnvelope", tc.name, err)
+		}
+	}
+}
+
+// TestDecodeEnvelope_AcceptsWhatCaptureMints pins the other side: the validator
+// must not reject an envelope that legitimately came from Capture, or every
+// candidate in flight becomes unreadable.
+func TestDecodeEnvelope_AcceptsWhatCaptureMints(t *testing.T) {
+	repoTop, integration := newIntegrationRepo(t)
+	writeFile(t, repoTop, tfFileA, "package gate\n\nvar A = 2\n")
+	proposal := mustLaneCommit(t, laneOpts(repoTop, integration, "lane-decode", tfFileA))
+	env := mustCapture(t, CaptureParams{
+		RepoTop: repoTop, IntegrationRef: integration, ProposalSHA: proposal, Base: integration,
+		WriteSet: []string{tfFileA}, CandidateID: "c-decode", BeadID: tfBead,
+	})
+	data, err := env.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeEnvelope(data)
+	if err != nil {
+		t.Fatalf("a Capture-minted envelope must decode: %v", err)
+	}
+	if got.CandidateID != env.CandidateID || len(got.Transitions) != len(env.Transitions) {
+		t.Errorf("round trip lost data: %+v", got)
+	}
+}
