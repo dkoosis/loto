@@ -231,12 +231,12 @@ func PlanBridge(ctx context.Context, p BridgeParams) (BridgePlan, error) {
 		return BridgePlan{}, err
 	}
 
-	byBead, order := groupByBead(commits, &plan)
-	for _, bead := range order {
-		if p.BeadID != "" && bead != p.BeadID {
+	groups := groupByBead(commits, &plan)
+	for i := range groups {
+		if p.BeadID != "" && groups[i].bead != p.BeadID {
 			continue
 		}
-		b, err := planBead(ctx, p, mainSHA, bead, byBead[bead])
+		b, err := planBead(ctx, p, mainSHA, groups[i].bead, groups[i].commits)
 		if err != nil {
 			return BridgePlan{}, err
 		}
@@ -256,26 +256,41 @@ func (p BridgeParams) normalize() (BridgeParams, error) {
 	return p, nil
 }
 
+// beadGroup is one bead's promoted commits, in integration order.
+//
+// ‡ A slice of pairs, not a map plus a key order. The two-value shape let a
+// caller look up a key the grouping never wrote and get a nil slice back —
+// harmless in practice, but nilaway is right that nothing in the types said
+// so. One value that carries its own commits cannot be looked up wrong.
+type beadGroup struct {
+	bead    string
+	commits []BridgeCommit
+}
+
 // groupByBead partitions promoted commits by their Bead: trailer, preserving
 // integration order within each bead and first-appearance order across beads.
 // A commit whose bead id is missing or unusable as a ref component lands in
 // plan.Unattributed instead: the bridge cannot name a `Closes:` for it and
 // cannot group it, and folding it into some other bead's PR would attribute a
 // change to work that never asked for it.
-func groupByBead(commits []BridgeCommit, plan *BridgePlan) (byBead map[string][]BridgeCommit, order []string) {
-	byBead = map[string][]BridgeCommit{}
+func groupByBead(commits []BridgeCommit, plan *BridgePlan) []beadGroup {
+	at := map[string]int{}
+	groups := []beadGroup{}
 	for i := range commits {
 		bead := commits[i].beadID()
 		if !beadIDUsableAsRef(bead) {
 			plan.Unattributed = append(plan.Unattributed, commits[i])
 			continue
 		}
-		if _, seen := byBead[bead]; !seen {
-			order = append(order, bead)
+		idx, seen := at[bead]
+		if !seen {
+			idx = len(groups)
+			at[bead] = idx
+			groups = append(groups, beadGroup{bead: bead})
 		}
-		byBead[bead] = append(byBead[bead], commits[i])
+		groups[idx].commits = append(groups[idx].commits, commits[i])
 	}
-	return byBead, order
+	return groups
 }
 
 func (c BridgeCommit) beadID() string { return parseTrailers(c.Message)[trailerBead] }
@@ -338,27 +353,30 @@ func planBead(ctx context.Context, p BridgeParams, mainSHA, bead string, commits
 //
 // ‡ The list it filters is `main..refs/loto/integration`, so a commit already
 // reachable from main is not in it at all. That is what makes "the marker
-// names a commit this list does not contain" a POSITIVE signal rather than an
-// ambiguity: the previously-bridged work landed on main. The only other way
-// to produce it is rewriting integration's history, which the gate does not
-// do and the plan does not contemplate.
+// names a commit this list does not contain" (markerFound false with a marker
+// present) a POSITIVE signal rather than an ambiguity: the previously-bridged
+// work landed on main. The only other way to produce it is rewriting
+// integration's history, which the gate does not do and the plan does not
+// contemplate.
 func selectPending(commits []BridgeCommit, markerSHA string, hadMarker, hadBranch bool) (pending []BridgeCommit, class BridgeClass, detail string) {
-	markerAt := -1
+	// afterMarker is the commits the marker does NOT already account for;
+	// markerFound says whether the marker named one of these commits at all.
+	afterMarker, markerFound := []BridgeCommit(nil), false
 	if hadMarker {
 		for i := range commits {
 			if commits[i].SHA == markerSHA {
-				markerAt = i
+				afterMarker, markerFound = commits[i+1:], true
 				break
 			}
 		}
 	}
 	switch {
-	case markerAt >= 0 && !hadBranch:
+	case markerFound && !hadBranch:
 		// The marker's commits are still unmerged, so an open PR is very
 		// likely pointing at a branch someone deleted underneath it.
 		return nil, BridgeStaleBranch, detailBranchMissing
-	case markerAt >= 0:
-		return commits[markerAt+1:], "", ""
+	case markerFound:
+		return afterMarker, "", ""
 	case hadMarker && hadBranch:
 		// The bridged work landed on main, but the branch that carried it is
 		// still here. Appending to it would put already-merged commits in the
