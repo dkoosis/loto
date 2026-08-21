@@ -258,7 +258,7 @@ func TestRotateEvents_FiresOnReleaseBreakDowngrade(t *testing.T) {
 		}
 		seedExcess(t, s, eventsRetentionMax+50)
 		// tcBob force-breaks tcAlice's lock.
-		if _, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "x", liveProbe); err != nil {
+		if _, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "x", liveProbe, nil); err != nil {
 			t.Fatalf("break: %v", err)
 		}
 		assertTrimmed(t, s)

@@ -389,6 +389,24 @@ func EmitBreakResults(outW, errW io.Writer, results []store.BreakResult) int {
 			if exit < 1 {
 				exit = 1
 			}
+		case errors.Is(r.Err, store.ErrHolderChanged):
+			// A refused compare-and-swap is an advisory conflict (exit 1), not
+			// an IO error (3): the store is fine, someone else holds the path.
+			// Both hold sets print because the caller's next move depends on
+			// which half moved — a new owner means back off, a bumped epoch on
+			// the same owner means the holder cycled and a fresh read may
+			// authorize the break after all.
+			var hc *store.HolderChangedError
+			if errors.As(r.Err, &hc) {
+				fmt.Fprintf(errW, "✗ %s target=%s expected=%s actual=%s\n",
+					store.ReasonHolderChanged, path,
+					domain.FormatHoldRefs(hc.Expected), domain.FormatHoldRefs(hc.Actual))
+			} else {
+				fmt.Fprintf(errW, "✗ %s target=%s\n", store.ReasonHolderChanged, path)
+			}
+			if exit < 1 {
+				exit = 1
+			}
 		default:
 			fmt.Fprintf(errW, "✗ target=%s err=%v\n", path, r.Err)
 			exit = 3

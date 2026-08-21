@@ -433,7 +433,7 @@ func TestBreakLocks_GCsOrphanedTags(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Force-break by a 3rd party (bob).
-	res, err := s.BreakLocks(ctx, []domain.Target{lock.Target}, tcBob, BreakForce, "break", liveProbe)
+	res, err := s.BreakLocks(ctx, []domain.Target{lock.Target}, tcBob, BreakForce, "break", liveProbe, nil)
 	if err != nil || res[0].Err != nil {
 		t.Fatalf("break: %v / %v", err, res[0].Err)
 	}

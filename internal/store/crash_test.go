@@ -55,7 +55,7 @@ func TestCrash_BreakLockAtomic(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "x", liveProbe)
+	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "x", liveProbe, nil)
 	if err != nil || res[0].Err == nil {
 		t.Fatal("expected break-without-force on liveProbe lock to fail")
 	}

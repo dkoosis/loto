@@ -168,7 +168,7 @@ func TestBreakLocks_MultiHolderShared(t *testing.T) {
 		t.Fatalf("bob shared acquire: %v", err)
 	}
 
-	res, err := s.BreakLocks(ctx, []domain.Target{a.Target}, "carol", BreakForce, "test break", liveProbe)
+	res, err := s.BreakLocks(ctx, []domain.Target{a.Target}, "carol", BreakForce, "test break", liveProbe, nil)
 	if err != nil {
 		t.Fatalf("BreakLocks: %v", err)
 	}

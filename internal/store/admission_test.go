@@ -317,7 +317,7 @@ func TestAcceptCandidate_RefusesWhenPeerHoldsTheLease(t *testing.T) {
 	}
 
 	target := domain.Target{Canonical: tcAGo}
-	if _, err := s.BreakLocks(ctx, []domain.Target{target}, tcBob, BreakForce, "peer takeover", liveProbe); err != nil {
+	if _, err := s.BreakLocks(ctx, []domain.Target{target}, tcBob, BreakForce, "peer takeover", liveProbe, nil); err != nil {
 		t.Fatal(err)
 	}
 	leaseWriteSet(t, s, repoTop, tcBob, tcAGo)

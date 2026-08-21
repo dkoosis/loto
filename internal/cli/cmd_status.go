@@ -230,8 +230,12 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord) {
 		if l.Branch != "" {
 			branch = " branch=" + l.Branch
 		}
-		fmt.Fprintf(stdout, "✓ target=%s owner=%s mode=%s intent=%q held_since=%s ttl_remaining=%s liveness=%s host=%s pid=%d%s\n",
-			relPath(l.Target.Canonical), l.OwnerUUID, l.EffectiveMode(), l.Intent,
+		// epoch= is the generation half of this hold's identity: joined to
+		// owner= as `owner@epoch` it is the token `unlock --force
+		// --expect-holder` compares against (loto-tqcw). Printed as its own
+		// field rather than a pre-joined `hold=` so no row repeats the owner.
+		fmt.Fprintf(stdout, "✓ target=%s owner=%s epoch=%d mode=%s intent=%q held_since=%s ttl_remaining=%s liveness=%s host=%s pid=%d%s\n",
+			relPath(l.Target.Canonical), l.OwnerUUID, l.Epoch, l.EffectiveMode(), l.Intent,
 			l.CreatedAt.UTC().Format(time.RFC3339),
 			fmtTTL(ec.RemainingTTL(*l)), ec.Classify(*l),
 			l.Host, l.PID, branch)
@@ -265,8 +269,11 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 	fmt.Fprintf(w, "✗ overlap count=%d target=%s\n", len(overlapping), relPath(t.Canonical))
 	for i := range overlapping {
 		l := &overlapping[i]
-		fmt.Fprintf(w, "✗ holder target=%s owner=%s mode=%s intent=%q ttl_remaining=%s liveness=%s\n",
-			relPath(l.Target.Canonical), l.OwnerUUID, l.EffectiveMode(), l.Intent,
+		// epoch= joins owner= into the `owner@epoch` --expect-holder token; this
+		// is THE read a caller makes before deciding to break, so the token has
+		// to be here (loto-tqcw).
+		fmt.Fprintf(w, "✗ holder target=%s owner=%s epoch=%d mode=%s intent=%q ttl_remaining=%s liveness=%s\n",
+			relPath(l.Target.Canonical), l.OwnerUUID, l.Epoch, l.EffectiveMode(), l.Intent,
 			fmtTTL(ec.RemainingTTL(*l)), ec.Classify(*l))
 	}
 	if tags, err := rt.Store.ListAliveForTarget(rt.Ctx, domain.Canonical(t.Canonical)); err == nil {

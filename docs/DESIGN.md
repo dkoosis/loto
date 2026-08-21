@@ -100,6 +100,31 @@ When reclamation displaces a holder (forced break, GC of an expired
 row), loto writes a `system` event so `loto status` and `loto doctor`
 surface it. No silent dispossession.
 
+**Breaking a lock you actually read (loto-tqcw).** A caller decides to
+break from a `loto status` read, and that read is already stale by the
+time the break lands — the holder may have released and a third agent
+taken the path, so the break dispossesses an agent nobody ever looked at.
+`--expect-holder owner@epoch` makes the break a compare-and-swap: the
+caller states the holds it believes it is breaking, and the store — under
+the same op-flock that guards the write, so compare and swap are one
+atomic step — refuses when the target's live hold set is not exactly
+that. Refusal is `✗ holder-changed target=… expected=… actual=…` on
+stderr at exit 1, and nothing is written or audited: a break that did not
+happen dispossessed nobody.
+
+The token is `owner@epoch`, not the owner alone, because an owner UUID
+survives release-and-reacquire — a break authorized against `alice` would
+still land on alice's *next* hold. The epoch is the path's authorization
+generation (see below): preserved across a lease renewal, bumped by every
+fresh grant. Shared targets carry several holders, so the caller repeats
+the flag and the compare is exact-set — a reader who joined since the read
+refuses the break rather than being swept up in it. `loto status` prints
+`owner=` and `epoch=` on every holder row so the token can be assembled.
+
+Bare `--force` stays a **blind** break, documented as such in
+`loto unlock -h`. A sweep over a dead peer's territory has no generation
+to name, and doctor's stale reclaim breaks rows it never read as a caller.
+
 ## lock modes (shared / exclusive)
 
 A lock is `exclusive` (sole writer — the default) or `shared` (multi-reader
