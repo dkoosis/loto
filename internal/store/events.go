@@ -60,7 +60,7 @@ func (s *Store) appendAuditDetached(evs []domain.Event) error {
 	auditDetachedHook()
 	ctx, cancel := context.WithTimeout(context.Background(), auditDetachedTimeout) //nolint:forbidigo // detached audit write must outlive the (cancelled) triggering op so the trail is recorded (gh#107).
 	defer cancel()
-	err := s.AppendEvents(ctx, evs)
+	err := s.appendEventsRotating(ctx, evs)
 	if err != nil && s.stderr != nil {
 		fmt.Fprintf(s.stderr, "loto: audit-write failed for %d event(s): %v\n", len(evs), err)
 	}
@@ -80,6 +80,10 @@ func (s *Store) AppendEvent(ctx context.Context, e domain.Event) (string, error)
 // AppendEvents inserts a batch of events in a single transaction. Empty input
 // is a no-op. Event.ID is assigned in-place when empty so callers can read it
 // back after the call.
+//
+// Deliberately does NOT rotate: this is the raw insert primitive, and the
+// retention pass belongs to the ops that produce events at volume
+// (AcquireLocks and friends, appendAuditDetached below).
 func (s *Store) AppendEvents(ctx context.Context, evs []domain.Event) error {
 	if len(evs) == 0 {
 		return nil
@@ -90,6 +94,31 @@ func (s *Store) AppendEvents(ctx context.Context, evs []domain.Event) error {
 	}
 	defer cleanup()
 	if err := appendEventsTx(ctx, tx, evs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// appendEventsRotating is AppendEvents plus the retention pass, in one tx
+// (mirrors AcquireLocks→rotateEventsTx). Used by the detached-audit path:
+// its callers — admission verdicts most of all (RecordAdmissionVerdict, one
+// row per judged candidate) — can run many times over with no intervening
+// lock mutation and no `doctor --repair`, which are the only other places
+// rotation fires. Without this, a submit-heavy session grows events past the
+// documented 1000-row / 7-day bound (Codex #276 P2).
+func (s *Store) appendEventsRotating(ctx context.Context, evs []domain.Event) error {
+	if len(evs) == 0 {
+		return nil
+	}
+	tx, cleanup, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	if err := appendEventsTx(ctx, tx, evs); err != nil {
+		return err
+	}
+	if err := rotateEventsTx(ctx, tx, time.Now()); err != nil {
 		return err
 	}
 	return tx.Commit()

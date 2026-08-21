@@ -49,12 +49,18 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return statusSingleTarget(stdout, rt, t)
 	}
 
+	return statusWholeRepo(stdout, stderr, rt, *mine)
+}
+
+// statusWholeRepo renders the no-target report: locks, claims, territory
+// tags, then any unresolved violations.
+func statusWholeRepo(stdout, stderr io.Writer, rt *runtime, mine bool) int {
 	all, err := rt.Store.ListLocks(rt.Ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	if *mine {
+	if mine {
 		all = filterLocksByOwner(all, rt.Agent.UUID)
 	}
 	sort.Slice(all, func(i, j int) bool {
@@ -71,8 +77,14 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 3
 	}
 	now := time.Now()
-	printStatusClaims(stdout, rt, claims, *mine, now)
-	printStatusTerritoryTags(stdout, rt, *mine, now)
+	printStatusClaims(stdout, rt, claims, mine, now)
+	printStatusTerritoryTags(stdout, rt, mine, now)
+	// Read-only resurfacing: status reports what the store already knows, it
+	// does not run the sensor. Recording is a whole-tree git diff, and making
+	// every `loto status` pay for one would put a scan on the path of the
+	// command agents run most often to orient. `loto violations scan` and
+	// `loto submit` are the two producers.
+	violationNotice(rt, stdout)
 	return 0
 }
 
@@ -261,6 +273,7 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 	}
 	if len(overlapping) == 0 {
 		fmt.Fprintf(w, "✓ free target=%s\n", relPath(t.Canonical))
+		violationNoticeForPath(rt, w, t.Canonical)
 		return 0
 	}
 	// ec is only consumed by the per-holder rows below; build it after the
@@ -279,5 +292,6 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 	if tags, err := rt.Store.ListAliveForTarget(rt.Ctx, domain.Canonical(t.Canonical)); err == nil {
 		render.EmitTagRows(w, tags)
 	}
+	violationNoticeForPath(rt, w, t.Canonical)
 	return 0
 }

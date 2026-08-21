@@ -10,6 +10,13 @@ import (
 // (shared between "loto lane" and "loto submit" blocked-target reporting).
 const lockStaleReason = "lock-stale"
 
+// flagHelpLong / subHelp are the two spellings of "show me the usage" every
+// subcommand router matches, named once so the routers stay comparable.
+const (
+	flagHelpLong = "--help"
+	subHelp      = "help"
+)
+
 type cmd func(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 var registry = map[string]cmd{} //nolint:gochecknoglobals // command registry pattern
@@ -52,6 +59,7 @@ commands:
   doctor   Detect and optionally repair stale locks
   sync     Fast-forward unleased paths from refs/loto/integration; report conflicts
   tag      Leave a note on a locked target, or pin one to unlocked territory
+  violations  List, scan for, or resolve unauthorized writes to unleased paths
   ack      Dismiss a tag or territory tag by ID
   whoami   Print agent identity
   who      Map handles to Claude Code peer names — the address SendMessage needs
@@ -63,5 +71,6 @@ lane choreography (engine verbs; used by the /team fleet harness):
   verify   Run a command against a commit in a throwaway worktree; exit 1 fail, 3 infra
   beacon   Mint a short-TTL shared lease on paths this agent is about to write (PreToolUse gate)
   submit   Package held-lock edits into a git-gate candidate: commit, capture, admit
+  gate     stats — admission verdicts per rejection class over a window
   pr       Bridge promoted integration commits to GitHub: one branch and one PR per bead`)
 }

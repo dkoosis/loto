@@ -229,6 +229,12 @@ func runCheckGate(ctx context.Context, paths []string, base, repoTop string, std
 	// wide staged set would otherwise re-probe one holder hundreds of times.
 	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe())}
 	rows := gateDecide(targets, locks, claims, rt.Agent.UUID, ec)
+	// Resurfaced on BOTH verdicts, and never as one: an unresolved violation
+	// is not a reason to block this tool call — it is a reason the NEXT
+	// submit will be refused, and the agent is better told now than at the
+	// end of the work. Read-only, like status: the gate's hot path does not
+	// run the sensor.
+	violationNotice(rt, stdout)
 	if len(rows) == 0 {
 		fmt.Fprintln(stdout, "✓ no conflicts")
 		return 0

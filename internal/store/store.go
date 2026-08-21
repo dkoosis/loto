@@ -346,6 +346,8 @@ var migrationEnsures = []struct {
 	{"add locks.epoch", ensureLocksEpoch},
 	{"add path_epochs table", ensurePathEpochsTable},
 	{"add candidate_claims table", ensureCandidateClaimsTable},
+	{"add violations table", ensureViolationsTable},
+	{"add violations.baseline", ensureViolationsBaseline},
 }
 
 // schemaCurrent reports whether a re-migrate would be a pure no-op — the gate
@@ -623,6 +625,36 @@ func ensureCandidateClaimsTable(ctx context.Context, db sqlExecQuerier, apply bo
 	return ensureTableBySentinelName(ctx, db, apply, "candidate_claims", candidateClaimsDDL)
 }
 
+// ensureViolationsTable adds the sticky-violation table to an existing DB
+// (loto-ovno.9). Same precedent as ensurePathEpochsTable.
+func ensureViolationsTable(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	return ensureTableBySentinelName(ctx, db, apply, "violations", violationsDDL)
+}
+
+// ensureViolationsBaseline adds the baseline column to a violations table
+// created before that column existed. The sentinel-name ensure above probes
+// only for the TABLE, so a DB carrying this table's first shape would keep it
+// forever and every insert would fail on the missing column. Follows
+// ensureLocksEpoch: probe pragma_table_info, ALTER, never bump user_version.
+func ensureViolationsBaseline(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('violations') WHERE name = 'baseline'`,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return false, nil
+	}
+	if apply {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE violations ADD COLUMN baseline TEXT NOT NULL DEFAULT ''`); err != nil {
+			return false, err
+		}
+		return false, nil // applied: no longer outstanding
+	}
+	return true, nil
+}
+
 // ensureTableBySentinelName is the shared body ensureClaimsTable /
 // ensureTerritoryTagsTable each hand-duplicated: probe sqlite_master for
 // tableName, apply ddl if apply and absent, never touch user_version. Factored
@@ -705,7 +737,7 @@ CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);`
 
 // ensureEventsCheckCurrent widens the events CHECK constraint to admit the
 // kinds added after a DB was created — lock_downgraded (loto-k5el.2), then
-// lock_refreshed (ccp-z1vj.6). A CHECK can't be ALTERed, so the events table is
+// lock_refreshed (ccp-z1vj.6), then the admission verdict pair (loto-ovno.9). A CHECK can't be ALTERed, so the events table is
 // rebuilt — but only when the stored DDL lacks the NEWEST kind (probe via
 // sqlite_master.sql substring), making this a no-op on fresh DBs and re-Opens.
 // The probe tracks the newest kind, so widening the constraint again means
@@ -718,14 +750,14 @@ func ensureEventsCheckCurrent(ctx context.Context, db sqlExecQuerier, apply bool
 		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&ddl); err != nil {
 		return false, err
 	}
-	if strings.Contains(ddl, "'gate_bypass'") {
+	if strings.Contains(ddl, "'candidate_rejected'") {
 		return false, nil // already current
 	}
 	const rebuild = `
 CREATE TABLE events_new (
   id               TEXT PRIMARY KEY,
   target_canonical TEXT NOT NULL,
-  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started','lock_downgraded','lock_refreshed','gate_bypass')),
+  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started','lock_downgraded','lock_refreshed','gate_bypass','candidate_accepted','candidate_rejected')),
   actor_uuid       TEXT NOT NULL,
   subject_uuid     TEXT,
   reason           TEXT NOT NULL DEFAULT '',

@@ -53,7 +53,7 @@ CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);
 CREATE TABLE IF NOT EXISTS events (
   id               TEXT PRIMARY KEY,
   target_canonical TEXT NOT NULL,
-  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started','lock_downgraded','lock_refreshed','gate_bypass')),
+  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started','lock_downgraded','lock_refreshed','gate_bypass','candidate_accepted','candidate_rejected')),
   actor_uuid       TEXT NOT NULL,
   subject_uuid     TEXT,
   reason           TEXT NOT NULL DEFAULT '',
@@ -153,3 +153,34 @@ CREATE TABLE IF NOT EXISTS candidate_claims (
   PRIMARY KEY (path_canonical, candidate_id)
 );
 CREATE INDEX IF NOT EXISTS idx_candidate_claims_candidate ON candidate_claims(candidate_id);
+
+-- violations: a recorded unauthorized mutation — working-tree content that
+-- differs from refs/loto/integration on a path nothing authorized
+-- (loto-ovno.9; git-gate.md Phase 5 "sticky violations"). STICKY: the open row
+-- survives a lease acquired afterwards, which is what stops a leaseholder
+-- laundering a rogue edit it never noticed. No culprit column — the sensor
+-- reads content, not writers. Added to existing DBs via ensureViolationsTable
+-- in migrate() (no user_version bump); declared here so fresh DBs match.
+-- baseline: the refs/loto/integration commit the observation was a delta FROM.
+-- An acknowledgement ("legitimate and staying") is only meaningful against the
+-- baseline it was given — once integration moves, the same path+fingerprint
+-- can mean the opposite. Without it, acking a DELETION (whose fingerprint is
+-- empty) would suppress every future deletion of that path forever.
+CREATE TABLE IF NOT EXISTS violations (
+  id             TEXT PRIMARY KEY,
+  path_canonical TEXT NOT NULL,
+  observed_at    INTEGER NOT NULL,
+  fingerprint    TEXT NOT NULL DEFAULT '',
+  baseline       TEXT NOT NULL DEFAULT '',
+  lease_state    TEXT NOT NULL DEFAULT '',
+  expected_owner TEXT NOT NULL DEFAULT '',
+  resolved_at    INTEGER,
+  resolution     TEXT NOT NULL DEFAULT ''
+);
+-- Partial unique index: at most ONE open row per path, so two loto processes
+-- scanning the same dirty tree concurrently cannot both insert. Closed rows
+-- are unconstrained — a path may be contaminated, reverted, and contaminated
+-- again, and each episode is its own record.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_violations_open_path
+  ON violations(path_canonical) WHERE resolved_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_violations_open ON violations(resolved_at, path_canonical);

@@ -61,6 +61,8 @@ loto status                           # who holds what; --mine to filter
 loto doctor [--dry-run|--repair]      # detect and optionally repair stale locks
 loto whoami                           # session identity; --peer-name records its messaging name
 loto who [<handle>]                   # handle ↔ Claude Code peer name, for cross-session messaging
+loto violations [scan|resolve <id>]   # unauthorized writes to unleased paths; sticky until reverted or resolved
+loto gate stats [--since <dur>]       # admission verdicts per rejection class
 loto version                          # version
 ```
 

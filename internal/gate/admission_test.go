@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -324,5 +325,94 @@ func TestBypassed(t *testing.T) {
 				t.Errorf("Bypassed() = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// tfViolationID is the opaque violation id the intersect tests thread through
+// — it must reach the rejection detail, because the operator's remedy is
+// `loto violations resolve <that id>`.
+const tfViolationID = "v-deadbeefdeadbeef"
+
+// violationEnv builds the clean candidate the intersect tests perturb: one
+// write-set path, everything else in agreement with integration.
+func violationEnv(t *testing.T) (repoTop, integration string, env Envelope) {
+	t.Helper()
+	repoTop, integration = newIntegrationRepo(t)
+	writeFile(t, repoTop, tfFileA, "package gate\n\nvar A = 2\n")
+	proposal := mustLaneCommit(t, laneOpts(repoTop, integration, "lane-v", tfFileA))
+	env = mustCapture(t, CaptureParams{
+		RepoTop: repoTop, IntegrationRef: integration, ProposalSHA: proposal,
+		Base: integration, WriteSet: []string{tfFileA}, CandidateID: "c1", BeadID: tfBead,
+		LeaseEpoch: map[string]int64{tfFileA: 1},
+	})
+	return repoTop, integration, env
+}
+
+// The correctness check the whole sensor exists for: a candidate whose
+// write-set touches a contaminated path is refused, however valid its lease.
+func TestAdmit_RejectsViolationIntersect(t *testing.T) {
+	repoTop, integration, env := violationEnv(t)
+	p := admitParamsFor(repoTop, env, integration)
+	p.UnresolvedViolations = map[string]string{tfFileA: tfViolationID}
+
+	d := mustAdmit(t, env, p)
+	if d.Accepted || d.Reason != ReasonViolationIntersect {
+		t.Fatalf("want ReasonViolationIntersect, got %+v", d)
+	}
+	// The detail must name the id, not merely the class: "there is a
+	// violation somewhere" is not something the operator can act on.
+	if !strings.Contains(d.Detail, tfViolationID) {
+		t.Errorf("detail = %q, want it to name violation %s", d.Detail, tfViolationID)
+	}
+}
+
+// A violation on a path this candidate does not touch is somebody else's
+// problem — the check is an INTERSECT, not a repo-wide freeze. Getting this
+// wrong would stop every submit in the repo on one dirty file.
+func TestAdmit_AcceptsWhenViolationIsOffTheWriteSet(t *testing.T) {
+	repoTop, integration, env := violationEnv(t)
+	p := admitParamsFor(repoTop, env, integration)
+	p.UnresolvedViolations = map[string]string{tfFileB: tfViolationID}
+
+	if d := mustAdmit(t, env, p); !d.Accepted {
+		t.Fatalf("want accepted — the violation is off this write-set, got %+v", d)
+	}
+}
+
+// Nil is the pre-sensor caller, and must read as "no violations known",
+// never as "unknown, so refuse".
+func TestAdmit_NilViolationsAccepts(t *testing.T) {
+	repoTop, integration, env := violationEnv(t)
+	p := admitParamsFor(repoTop, env, integration)
+	p.UnresolvedViolations = nil
+
+	if d := mustAdmit(t, env, p); !d.Accepted {
+		t.Fatalf("want accepted with no violation store, got %+v", d)
+	}
+}
+
+// The taxonomy is enumerated in one place and every class is distinct — the
+// stats reporter iterates RejectionReasons, so a duplicate or an omission
+// there silently mis-counts a whole class.
+func TestRejectionReasons_AreDistinctAndComplete(t *testing.T) {
+	seen := map[RejectionReason]bool{}
+	for _, r := range RejectionReasons {
+		if r == "" {
+			t.Error("taxonomy carries an empty class")
+		}
+		if seen[r] {
+			t.Errorf("taxonomy lists %s twice", r)
+		}
+		seen[r] = true
+	}
+	for _, r := range []RejectionReason{
+		ReasonProposalSHAMismatch, ReasonUnauthorizedPath, ReasonStaleLeaseEpoch,
+		ReasonStalePreimage, ReasonStaleAncestry, ReasonMalformedCandidate,
+		ReasonViolationIntersect, ReasonGateBypass, ReasonVerifyRed,
+		ReasonVerifyInfrastructure, ReasonPromotionRace,
+	} {
+		if !seen[r] {
+			t.Errorf("taxonomy omits %s", r)
+		}
 	}
 }
