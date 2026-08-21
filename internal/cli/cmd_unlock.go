@@ -42,7 +42,7 @@ func (h *holdRefList) Set(v string) error {
 	return nil
 }
 
-// checkExpectHolderUsage refuses the two invocations where --expect-holder
+// checkExpectHolderUsage refuses the three invocations where --expect-holder
 // cannot mean what it says, before any store is opened.
 //
 // ‡ CAS is single-target on purpose. --expect-holder names holds, not targets,
@@ -51,9 +51,17 @@ func (h *holdRefList) Set(v string) error {
 // would silently exempt the others. A surgical break states one path; a sweep
 // over dead territory is the blind form and always was. Multi-target CAS can
 // come back as `path=owner@epoch` tokens if a caller ever needs it.
-func checkExpectHolderUsage(expect holdRefList, force bool, nargs int, stderr io.Writer) int {
+func checkExpectHolderUsage(expect holdRefList, force, all bool, nargs int, stderr io.Writer) int {
 	if len(expect) == 0 {
 		return 0
+	}
+	// --all takes the ReleaseBySession path, which reads no target and no
+	// expectation: `--all --force --expect-holder alice@3 a.go` would sweep
+	// every lock this uuid owns while reading as a guarded break of one path.
+	// Refuse rather than let the sweep wear the CAS's clothes.
+	if all {
+		fmt.Fprintln(stderr, "✗ --expect-holder names one hold to break; --all releases your own locks and reads no target: drop one")
+		return 2
 	}
 	if !force {
 		fmt.Fprintln(stderr, "✗ --expect-holder is the compare-and-swap for --force; plain unlock only ever releases your own row")
@@ -78,7 +86,7 @@ func cmdUnlock(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
-	if code := checkExpectHolderUsage(expect, *force, fs.NArg(), stderr); code != 0 {
+	if code := checkExpectHolderUsage(expect, *force, *all, fs.NArg(), stderr); code != 0 {
 		return code
 	}
 	// -t is required only for --force: BreakLocks records it in the break audit

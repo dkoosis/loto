@@ -197,3 +197,37 @@ func TestUnlockForce_ExpectHolder_DuplicateTokenRefused(t *testing.T) {
 		t.Fatalf("duplicate --expect-holder must exit 2, got %d; stderr=%q", code, errBuf.String())
 	}
 }
+
+// TestUnlockForce_ExpectHolder_WithAllRefused: --all takes the
+// ReleaseBySession path, which reads neither the positional target nor the
+// expectation. Accepting the combination would sweep every lock the caller
+// owns while the invocation reads as a guarded break of one path — the silent
+// dispossession this whole flag exists to stop, aimed at the caller instead.
+func TestUnlockForce_ExpectHolder_WithAllRefused(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	if code := Run([]string{tcCmdLock, tcTargetA, tcStoreStoreGo, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("lock exit %d", code)
+	}
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcFlagAll, tcTargetA, tcFlagForce, "-t", tcIntentWhy,
+		tcFlagExpectHolder, tcHoldAlice1}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("--all with --expect-holder must exit 2, got %d; stdout=%q stderr=%q",
+			code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "--all") {
+		t.Errorf("diagnostic must name the conflicting flag; stderr=%q", errBuf.String())
+	}
+	// The refusal has to happen before the sweep, not after it.
+	var status bytes.Buffer
+	Run([]string{tcCmdStatus, tcTargetA}, &status, io.Discard)
+	if strings.Contains(status.String(), "✓ free") {
+		t.Errorf("a refused invocation must not have released anything; status=%q", status.String())
+	}
+	status.Reset()
+	Run([]string{tcCmdStatus, tcStoreStoreGo}, &status, io.Discard)
+	if strings.Contains(status.String(), "✓ free") {
+		t.Errorf("the sibling lock must survive too; status=%q", status.String())
+	}
+}
