@@ -242,9 +242,14 @@ func demoRunCount(t *testing.T, runs string) int {
 	return len(strings.Fields(string(b)))
 }
 
-// demoPromote runs one promotion in this process, the way a pusher would.
-// There is no `loto promote` verb yet (loto-ovno.8 owns the CLI/PR bridge), so
-// the demo calls the library directly and narrates the phases itself.
+// demoPromote runs one promotion in this process, the way a pusher would — no
+// daemon, the pusher's own process (git-gate.md non-goals).
+//
+// ‡ Promotion is library-only. No CLI verb advances refs/loto/integration, and
+// loto-ovno.8's `loto pr` is not one either: it reads whatever integration
+// already holds and bridges it onward to per-bead branches and PRs. So the demo
+// calls gate.Promote directly. If a promote verb ever lands, this function and
+// the act-3 narration are the two places to swap it in.
 func demoPromote(t *testing.T, repo string, verify []string) gate.PromoteResult {
 	t.Helper()
 	rt, err := openRuntime(context.Background())
