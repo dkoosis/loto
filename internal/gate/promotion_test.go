@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -655,4 +656,51 @@ func TestPromote_VerifyRunsUnlocked(t *testing.T) {
 	if !<-tookIt {
 		t.Error("the promotion flock was held across phase 2 — admission would have stalled behind verify")
 	}
+}
+
+// TestPromote_MalformedEnvelopeIsNotPromoted is the loto-amkj regression at the
+// layer that would have done the damage. Before validation, a candidate ref
+// pointing at `{}` was selected, contributed no transitions, and still got a
+// chain commit — integration advanced by an empty, unattributed commit and the
+// candidate ref was retired as though it had landed.
+func TestPromote_MalformedEnvelopeIsNotPromoted(t *testing.T) {
+	repoTop, integration := newIntegrationRepo(t)
+	bootstrapIntegration(t, repoTop, integration)
+
+	// A candidate ref whose blob parses as JSON but carries nothing.
+	id := NewCandidateID()
+	empty := writeBlobT(t, repoTop, "{}\n")
+	gitT(t, repoTop, "update-ref", candidateRef(id), empty)
+	gitT(t, repoTop, "update-ref", proposalRef(id), integration)
+
+	rec := &claimRecorder{}
+	res, err := Promote(context.Background(), promoteParams(repoTop, rec))
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	if len(res.Outcomes) != 0 {
+		t.Errorf("a malformed candidate must not produce an outcome: %+v", res.Outcomes)
+	}
+	if res.Integration != integration {
+		t.Errorf("integration moved to %q — an empty commit was promoted", res.Integration)
+	}
+	if !refExists(t, repoTop, candidateRef(id)) {
+		t.Error("a malformed candidate's ref must not be retired by promotion")
+	}
+	if rec.saw(id) {
+		t.Error("a malformed candidate's claims must not be released")
+	}
+}
+
+// writeBlobT writes content as a git blob and returns its SHA.
+func writeBlobT(t *testing.T, repoTop, content string) string {
+	t.Helper()
+	cmd := exec.Command("git", "hash-object", "-w", "--stdin")
+	cmd.Dir = repoTop
+	cmd.Stdin = strings.NewReader(content)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("hash-object: %v", err)
+	}
+	return strings.TrimSpace(string(out))
 }

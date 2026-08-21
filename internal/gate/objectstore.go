@@ -102,6 +102,19 @@ func DecodeEnvelope(data []byte) (Envelope, error) {
 	if err := json.Unmarshal(data, &w); err != nil {
 		return Envelope{}, fmt.Errorf("gate: decode envelope: %w", err)
 	}
+	// ‡ Parsing is not validating. `{}` is valid JSON and used to decode to a
+	// zero Envelope with no error — an envelope with no write-set, no
+	// transitions, and no author. Promotion then applied no transitions,
+	// advanced refs/loto/integration by an EMPTY, UNATTRIBUTED commit, and
+	// retired the candidate ref (loto-amkj). git-gate.md says a candidate ref
+	// without its envelope is rejected; that has to mean semantically absent,
+	// not merely unparseable, or the guarantee only covers garbled bytes.
+	//
+	// The check lives here rather than in each caller because every reader of a
+	// candidate ref comes through this function — one door, one rule.
+	if err := validateWireEnvelope(w); err != nil {
+		return Envelope{}, err
+	}
 	e := Envelope{
 		CandidateID: w.CandidateID,
 		ProposalSHA: w.ProposalSHA,
@@ -121,6 +134,35 @@ func DecodeEnvelope(data []byte) (Envelope, error) {
 		e.Ancestry[i] = AncestryEntry(a)
 	}
 	return e, nil
+}
+
+// validateWireEnvelope enforces the invariants Capture establishes at mint
+// time, re-checked at read time because the bytes in between are a git object
+// anyone with repo access can write.
+//
+// It deliberately mirrors Capture's own required-field list rather than adding
+// rules of its own: an envelope that could not have been minted is one that
+// must not be trusted, and a second, stricter definition here would reject
+// envelopes that are legitimately in flight.
+func validateWireEnvelope(w wireEnvelope) error {
+	for name, v := range map[string]string{
+		"candidate_id": w.CandidateID,
+		"proposal_sha": w.ProposalSHA,
+		"bead_id":      w.BeadID,
+	} {
+		if v == "" {
+			return fmt.Errorf("%w: %s", ErrMalformedEnvelope, name)
+		}
+	}
+	if len(w.WriteSet) == 0 {
+		return fmt.Errorf("%w: write_set", ErrMalformedEnvelope)
+	}
+	// One transition per write-set path is Capture's postcondition, and it is
+	// what makes "promotion changes exactly the write-set paths" checkable.
+	if len(w.Transitions) != len(w.WriteSet) {
+		return fmt.Errorf("%w: %d transitions for %d write-set paths", ErrMalformedEnvelope, len(w.Transitions), len(w.WriteSet))
+	}
+	return nil
 }
 
 // WriteBlob content-addresses e into the repo's git object database via

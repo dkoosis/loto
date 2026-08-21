@@ -118,6 +118,13 @@ var (
 	// re-check against. Fail at the cheap end, at capture, rather than
 	// minting an envelope that records a false precondition.
 	ErrAncestryNotTree = errors.New("gate: ancestor directory does not resolve to a tree in integration")
+	// ErrMalformedEnvelope is returned when an envelope's BYTES parse but its
+	// contents could not have come from Capture — no write-set, no candidate
+	// id, a transition count that does not match the write-set. Exported
+	// because admission and promotion both have to tell "this candidate is
+	// malformed" apart from "git failed", and only the first is a verdict
+	// about the candidate (loto-amkj).
+	ErrMalformedEnvelope = errors.New("gate: envelope is malformed")
 	// errMalformedLsTreeLine is an internal git-plumbing-parse failure, never a
 	// caller-facing condition — wrapped with the offending line for debugging.
 	errMalformedLsTreeLine = errors.New("gate: malformed ls-tree line")
