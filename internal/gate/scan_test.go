@@ -25,11 +25,14 @@ func scanRepo(t *testing.T) string {
 
 func mustScan(t *testing.T, repoTop string) []Observation {
 	t.Helper()
-	obs, err := ScanWorktree(context.Background(), repoTop)
+	scan, err := ScanWorktree(context.Background(), repoTop)
 	if err != nil {
 		t.Fatalf("ScanWorktree: %v", err)
 	}
-	return obs
+	if scan.Baseline == "" {
+		t.Fatalf("scan returned no baseline")
+	}
+	return scan.Observations
 }
 
 // A clean tree is not silence-because-broken; it is a positive empty reading.
@@ -97,12 +100,12 @@ func TestScanWorktree_NoIntegrationRefIsReportedDistinctly(t *testing.T) {
 	repoTop, _ := newIntegrationRepo(t)
 	writeFile(t, repoTop, tfFileA, "package gate\n\nvar A = 99\n")
 
-	obs, err := ScanWorktree(context.Background(), repoTop)
+	scan, err := ScanWorktree(context.Background(), repoTop)
 	if !errors.Is(err, ErrNoBaseline) {
-		t.Fatalf("want ErrNoBaseline, got obs=%v err=%v", obs, err)
+		t.Fatalf("want ErrNoBaseline, got scan=%+v err=%v", scan, err)
 	}
-	if len(obs) != 0 {
-		t.Fatalf("want no observations without a baseline, got %v", obs)
+	if len(scan.Observations) != 0 {
+		t.Fatalf("want no observations without a baseline, got %v", scan.Observations)
 	}
 	if out := gitT(t, repoTop, "for-each-ref", "--format=%(refname)", IntegrationRef); out != "" {
 		t.Fatalf("scan created %s — it must never write a ref", out)
@@ -157,6 +160,59 @@ func TestScanWorktree_DanglingSymlinkIsHashedNotDereferenced(t *testing.T) {
 	}
 	if !sawLink || !sawFile {
 		t.Fatalf("want both %s and %s observed, got %v", link, tfFileA, obs)
+	}
+}
+
+// A submodule moved to a different commit shows up in the diff as its
+// DIRECTORY, and `git hash-object` on a directory is "fatal: Unable to hash"
+// — which, like the dangling symlink above, kills the whole batch and drops
+// every unrelated violation with it (Codex #276 round 2). A gitlink's
+// identity is the commit it points at, so that is what gets fingerprinted.
+func TestScanWorktree_MovedSubmoduleDoesNotKillTheBatch(t *testing.T) {
+	const sub = "vendor/dep"
+	repoTop := scanRepo(t)
+
+	// A real submodule: its own repo with two commits, embedded as a gitlink.
+	subSrc := t.TempDir()
+	gitT(t, subSrc, "init", "-q", "-b", "main")
+	gitT(t, subSrc, "config", "commit.gpgsign", "false")
+	writeFile(t, subSrc, "dep.go", "package dep\n")
+	gitT(t, subSrc, "add", "-A")
+	gitT(t, subSrc, "commit", "-qm", "dep v1")
+	first := gitT(t, subSrc, "rev-parse", "HEAD")
+	writeFile(t, subSrc, "dep.go", "package dep\n\nvar V = 2\n")
+	gitT(t, subSrc, "add", "-A")
+	gitT(t, subSrc, "commit", "-qm", "dep v2")
+	second := gitT(t, subSrc, "rev-parse", "HEAD")
+
+	gitT(t, repoTop, "-c", "protocol.file.allow=always", "submodule", "add", "-q", subSrc, sub)
+	gitT(t, repoTop, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "-q")
+	subDir := filepath.Join(repoTop, sub)
+	gitT(t, subDir, "checkout", "-q", first)
+	gitT(t, repoTop, "add", "-A")
+	gitT(t, repoTop, "commit", "-qm", "vendor dep at v1")
+	gitT(t, repoTop, "update-ref", IntegrationRef, "HEAD")
+
+	// Move the submodule — the gitlink now differs from integration.
+	gitT(t, subDir, "checkout", "-q", second)
+	// An ordinary rogue edit alongside it: the batch must survive.
+	writeFile(t, repoTop, tfFileA, "package gate\n\nvar A = 3\n")
+
+	obs := mustScan(t, repoTop)
+	var sawSub, sawFile bool
+	for _, o := range obs {
+		switch o.Path {
+		case sub:
+			sawSub = true
+			if o.Fingerprint != second {
+				t.Errorf("gitlink fingerprint = %q, want the commit it points at %q", o.Fingerprint, second)
+			}
+		case tfFileA:
+			sawFile = true
+		}
+	}
+	if !sawSub || !sawFile {
+		t.Fatalf("want both %s and %s observed, got %+v", sub, tfFileA, obs)
 	}
 }
 

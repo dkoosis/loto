@@ -11,10 +11,19 @@ import (
 )
 
 const (
-	tcRogueGo = "internal/rogue.go"
-	tcSHA1    = "1111111111111111111111111111111111111111"
-	tcSHA2    = "2222222222222222222222222222222222222222"
+	tcRogueGo   = "internal/rogue.go"
+	tcSHA1      = "1111111111111111111111111111111111111111"
+	tcSHA2      = "2222222222222222222222222222222222222222"
+	tcBaseline  = "b000000000000000000000000000000000000000"
+	tcBaseline2 = "b111111111111111111111111111111111111111"
 )
+
+// scanOf wraps observations as one whole-tree pass against tcBaseline — the
+// shape ReconcileScan consumes now that a reading carries what it was a delta
+// FROM.
+func scanOf(obs ...gate.Observation) gate.Scan {
+	return gate.Scan{Baseline: tcBaseline, Observations: obs}
+}
 
 func liveEval() domain.EvalContext {
 	return domain.EvalContext{Now: time.Now(), Live: liveProbe}
@@ -38,7 +47,7 @@ func TestReconcileScan_UnleasedPathBecomesViolation(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 
-	res, err := s.ReconcileScan(ctx, []gate.Observation{{Path: tcRogueGo, Fingerprint: tcSHA1}}, liveEval())
+	res, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcRogueGo, Fingerprint: tcSHA1}), liveEval())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +77,7 @@ func TestReconcileScan_LiveLeaseIsNotAViolation(t *testing.T) {
 	}
 
 	res, err := s.ReconcileScan(ctx,
-		[]gate.Observation{{Path: l.Target.Canonical, Fingerprint: tcSHA1}}, liveEval())
+		scanOf(gate.Observation{Path: l.Target.Canonical, Fingerprint: tcSHA1}), liveEval())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +99,7 @@ func TestReconcileScan_ExpiredLeaseRecordsWitnessNotCulprit(t *testing.T) {
 	ec := domain.EvalContext{Now: time.Now().Add(2 * time.Hour), Live: liveProbe}
 
 	res, err := s.ReconcileScan(ctx,
-		[]gate.Observation{{Path: l.Target.Canonical, Fingerprint: tcSHA1}}, ec)
+		scanOf(gate.Observation{Path: l.Target.Canonical, Fingerprint: tcSHA1}), ec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +124,7 @@ func TestReconcileScan_LiveCandidateClaimIsNotAViolation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := s.ReconcileScan(ctx, []gate.Observation{{Path: tcRogueGo, Fingerprint: tcSHA1}}, liveEval())
+	res, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcRogueGo, Fingerprint: tcSHA1}), liveEval())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,14 +142,14 @@ func TestReconcileScan_ViolationIsStickyAcrossALaterLease(t *testing.T) {
 	l := mkFileLock(t, tcAGo, tcAlice, time.Hour)
 	path := l.Target.Canonical
 
-	if _, err := s.ReconcileScan(ctx, []gate.Observation{{Path: path, Fingerprint: tcSHA1}}, liveEval()); err != nil {
+	if _, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: path, Fingerprint: tcSHA1}), liveEval()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
 	// Same path, still dirty, now leased — the launderer's happy path.
-	if _, err := s.ReconcileScan(ctx, []gate.Observation{{Path: path, Fingerprint: tcSHA2}}, liveEval()); err != nil {
+	if _, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: path, Fingerprint: tcSHA2}), liveEval()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -189,11 +198,11 @@ func TestRecordViolations_ReObservationIsANoOp(t *testing.T) {
 func TestReconcileScan_RevertAutoResolves(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	if _, err := s.ReconcileScan(ctx, []gate.Observation{{Path: tcRogueGo, Fingerprint: tcSHA1}}, liveEval()); err != nil {
+	if _, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcRogueGo, Fingerprint: tcSHA1}), liveEval()); err != nil {
 		t.Fatal(err)
 	}
 
-	res, err := s.ReconcileScan(ctx, nil, liveEval())
+	res, err := s.ReconcileScan(ctx, scanOf(), liveEval())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,6 +266,50 @@ func TestResolveViolation_PersistsTheSuppliedResolution(t *testing.T) {
 	}
 }
 
+// An ack is scoped to the BASELINE it was given. Once integration moves, the
+// same path+fingerprint can mean the opposite thing, so the old ack must stop
+// suppressing it (Codex #276 round 2).
+//
+// The sharp case is a deletion, whose fingerprint is always empty: ack one,
+// let integration absorb it, and later have the file reintroduced upstream —
+// leaving it absent locally is now a NEW unauthorized deletion, and a
+// baseline-blind ack would suppress it forever.
+func TestReconcileScan_AckDoesNotSurviveABaselineChange(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	ec := liveEval()
+
+	res, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcRogueGo, Deleted: true}), ec)
+	if err != nil || len(res.Recorded) != 1 {
+		t.Fatalf("seed: %v recorded=%d", err, len(res.Recorded))
+	}
+	if err := s.ResolveViolation(ctx, res.Recorded[0].ID, "deletion is intentional"); err != nil {
+		t.Fatal(err)
+	}
+	// Same baseline: the ack holds.
+	same, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcRogueGo, Deleted: true}), ec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(same.Recorded) != 0 {
+		t.Errorf("ack did not hold against its own baseline: %+v", same.Recorded)
+	}
+
+	// Integration moved. The same absent file is a fresh unauthorized
+	// deletion against the new baseline, and must be recorded again.
+	moved := gate.Scan{
+		Baseline:     tcBaseline2,
+		Observations: []gate.Observation{{Path: tcRogueGo, Deleted: true}},
+	}
+	after, err := s.ReconcileScan(ctx, moved, ec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Recorded) != 1 {
+		t.Errorf("ack survived a baseline change — a later deletion is suppressed forever: %+v", after.Recorded)
+	}
+}
+
 // An ack is a judgment about CONTENT, not just about a row: a later scan
 // seeing the same fingerprint on the same still-unleased path must not
 // re-open it, or `resolve` would only silence the warning until the next
@@ -267,7 +320,7 @@ func TestReconcileScan_AckedFingerprintIsNotReopened(t *testing.T) {
 	ctx := context.Background()
 	ec := liveEval()
 
-	res, err := s.ReconcileScan(ctx, []gate.Observation{{Path: tcRogueGo, Fingerprint: tcSHA1}}, ec)
+	res, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcRogueGo, Fingerprint: tcSHA1}), ec)
 	if err != nil || len(res.Recorded) != 1 {
 		t.Fatalf("seed: %v recorded=%d", err, len(res.Recorded))
 	}
@@ -275,7 +328,7 @@ func TestReconcileScan_AckedFingerprintIsNotReopened(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	again, err := s.ReconcileScan(ctx, []gate.Observation{{Path: tcRogueGo, Fingerprint: tcSHA1}}, ec)
+	again, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcRogueGo, Fingerprint: tcSHA1}), ec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +336,7 @@ func TestReconcileScan_AckedFingerprintIsNotReopened(t *testing.T) {
 		t.Errorf("acked fingerprint re-recorded: %+v", again.Recorded)
 	}
 
-	changed, err := s.ReconcileScan(ctx, []gate.Observation{{Path: tcRogueGo, Fingerprint: tcSHA2}}, ec)
+	changed, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcRogueGo, Fingerprint: tcSHA2}), ec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,13 +352,13 @@ func TestReconcileScan_SecondEpisodeAfterRevertRecordsAgain(t *testing.T) {
 	ctx := context.Background()
 	ec := liveEval()
 
-	if _, err := s.ReconcileScan(ctx, []gate.Observation{{Path: tcRogueGo, Fingerprint: tcSHA1}}, ec); err != nil {
+	if _, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcRogueGo, Fingerprint: tcSHA1}), ec); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ReconcileScan(ctx, nil, ec); err != nil {
+	if _, err := s.ReconcileScan(ctx, scanOf(), ec); err != nil {
 		t.Fatal(err)
 	}
-	res, err := s.ReconcileScan(ctx, []gate.Observation{{Path: tcRogueGo, Fingerprint: tcSHA2}}, ec)
+	res, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcRogueGo, Fingerprint: tcSHA2}), ec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +376,7 @@ func TestReconcileScan_DeletionIsAViolationWithNoFingerprint(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 
-	res, err := s.ReconcileScan(ctx, []gate.Observation{{Path: tcRogueGo, Deleted: true}}, liveEval())
+	res, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcRogueGo, Deleted: true}), liveEval())
 	if err != nil {
 		t.Fatal(err)
 	}

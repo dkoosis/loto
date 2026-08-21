@@ -158,7 +158,7 @@ func resolveReason(why string) string {
 // every open row absent from the observation set, which is sound for a
 // whole-tree pass and silently wrong for a partial one.
 func runViolationScan(rt *runtime, repoTop string) (store.ScanResult, error) {
-	obs, err := gate.ScanWorktree(rt.Ctx, repoTop)
+	scan, err := gate.ScanWorktree(rt.Ctx, repoTop)
 	if err != nil {
 		if errors.Is(err, gate.ErrNoBaseline) {
 			// No refs/loto/integration to read a diff against is not evidence
@@ -172,22 +172,17 @@ func runViolationScan(rt *runtime, repoTop string) (store.ScanResult, error) {
 		return store.ScanResult{}, err
 	}
 	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
-	return rt.Store.ReconcileScan(rt.Ctx, obs, ec)
+	return rt.Store.ReconcileScan(rt.Ctx, scan, ec)
 }
 
-// violationRows reads the open set and lifts it into render shape.
+// violationRows reads the open set and lifts it into render shape, reporting
+// a read failure as the report's own exit code (unlike the advisory notices
+// below, which stay silent).
 func violationRows(rt *runtime, stderr io.Writer) ([]render.ViolationRow, int) {
-	vs, err := rt.Store.UnresolvedViolations(rt.Ctx)
+	rows, err := unresolvedViolationRows(rt)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ read violations: %v\n", err)
 		return nil, 3
-	}
-	rows := make([]render.ViolationRow, len(vs))
-	for i, v := range vs {
-		rows[i] = render.ViolationRow{
-			ID: v.ID, Path: v.PathCanonical, ObservedAt: time.Unix(0, v.ObservedAt),
-			LeaseState: v.LeaseState, Fingerprint: v.Fingerprint,
-		}
 	}
 	return rows, 0
 }
@@ -230,7 +225,8 @@ func unresolvedViolationRows(rt *runtime) ([]render.ViolationRow, error) {
 		return nil, err
 	}
 	rows := make([]render.ViolationRow, len(vs))
-	for i, v := range vs {
+	for i := range vs {
+		v := &vs[i]
 		rows[i] = render.ViolationRow{
 			ID: v.ID, Path: v.PathCanonical, ObservedAt: time.Unix(0, v.ObservedAt),
 			LeaseState: v.LeaseState, Fingerprint: v.Fingerprint,

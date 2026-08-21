@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS violations (
   path_canonical TEXT NOT NULL,
   observed_at    INTEGER NOT NULL,
   fingerprint    TEXT NOT NULL DEFAULT '',
+  baseline       TEXT NOT NULL DEFAULT '',
   lease_state    TEXT NOT NULL DEFAULT '',
   expected_owner TEXT NOT NULL DEFAULT '',
   resolved_at    INTEGER,
@@ -71,6 +72,11 @@ type Violation struct {
 	PathCanonical string
 	ObservedAt    int64
 	Fingerprint   string
+	// Baseline is the refs/loto/integration commit the observation was a
+	// delta FROM. An acknowledgement is only meaningful against it: when
+	// integration moves, the same (path, fingerprint) can mean something
+	// entirely different (Codex #276 round 2).
+	Baseline      string
 	LeaseState    string
 	ExpectedOwner string
 	ResolvedAt    *int64
@@ -85,6 +91,7 @@ func (v Violation) Resolved() bool { return v.ResolvedAt != nil }
 type ObservedViolation struct {
 	PathCanonical string
 	Fingerprint   string
+	Baseline      string
 	LeaseState    string
 	ExpectedOwner string
 }
@@ -119,13 +126,14 @@ func (s *Store) RecordViolations(ctx context.Context, obs []ObservedViolation) (
 	for _, o := range obs {
 		v := Violation{
 			ID: newViolationID(), PathCanonical: o.PathCanonical, ObservedAt: nowNs,
-			Fingerprint: o.Fingerprint, LeaseState: o.LeaseState, ExpectedOwner: o.ExpectedOwner,
+			Fingerprint: o.Fingerprint, Baseline: o.Baseline,
+			LeaseState: o.LeaseState, ExpectedOwner: o.ExpectedOwner,
 		}
 		res, err := tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO violations
-			   (id, path_canonical, observed_at, fingerprint, lease_state, expected_owner, resolved_at, resolution)
-			 VALUES (?, ?, ?, ?, ?, ?, NULL, '')`,
-			v.ID, v.PathCanonical, v.ObservedAt, v.Fingerprint, v.LeaseState, v.ExpectedOwner)
+			   (id, path_canonical, observed_at, fingerprint, baseline, lease_state, expected_owner, resolved_at, resolution)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, NULL, '')`,
+			v.ID, v.PathCanonical, v.ObservedAt, v.Fingerprint, v.Baseline, v.LeaseState, v.ExpectedOwner)
 		if err != nil {
 			return nil, err
 		}
@@ -145,7 +153,7 @@ func (s *Store) RecordViolations(ctx context.Context, obs []ObservedViolation) (
 // (.claude/rules/design.md: same input, byte-identical output).
 func (s *Store) UnresolvedViolations(ctx context.Context) ([]Violation, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, path_canonical, observed_at, fingerprint, lease_state, expected_owner, resolved_at, resolution
+		`SELECT id, path_canonical, observed_at, fingerprint, baseline, lease_state, expected_owner, resolved_at, resolution
 		   FROM violations WHERE resolved_at IS NULL ORDER BY path_canonical, id`)
 	if err != nil {
 		return nil, err
@@ -159,7 +167,7 @@ func (s *Store) UnresolvedViolations(ctx context.Context) ([]Violation, error) {
 // surface can read back is not a record.
 func (s *Store) ViolationByID(ctx context.Context, id string) (Violation, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, path_canonical, observed_at, fingerprint, lease_state, expected_owner, resolved_at, resolution
+		`SELECT id, path_canonical, observed_at, fingerprint, baseline, lease_state, expected_owner, resolved_at, resolution
 		   FROM violations WHERE id = ?`, id)
 	if err != nil {
 		return Violation{}, err
@@ -185,8 +193,8 @@ func (s *Store) UnresolvedViolationPaths(ctx context.Context) (map[string]string
 		return nil, err
 	}
 	out := make(map[string]string, len(vs))
-	for _, v := range vs {
-		out[v.PathCanonical] = v.ID
+	for i := range vs {
+		out[vs[i].PathCanonical] = vs[i].ID
 	}
 	return out, nil
 }
@@ -267,7 +275,7 @@ func scanViolations(rows *sql.Rows) ([]Violation, error) {
 		var v Violation
 		var resolvedAt sql.NullInt64
 		if err := rows.Scan(&v.ID, &v.PathCanonical, &v.ObservedAt, &v.Fingerprint,
-			&v.LeaseState, &v.ExpectedOwner, &resolvedAt, &v.Resolution); err != nil {
+			&v.Baseline, &v.LeaseState, &v.ExpectedOwner, &resolvedAt, &v.Resolution); err != nil {
 			return nil, err
 		}
 		if resolvedAt.Valid {
@@ -302,7 +310,8 @@ type ScanResult struct {
 // this a PARTIAL observation set would silently resolve every violation it
 // did not look at — hence the whole-tree contract, stated here and enforced
 // by having exactly one producer.
-func (s *Store) ReconcileScan(ctx context.Context, obs []gate.Observation, ec domain.EvalContext) (ScanResult, error) {
+func (s *Store) ReconcileScan(ctx context.Context, scan gate.Scan, ec domain.EvalContext) (ScanResult, error) {
+	obs := scan.Observations
 	res := ScanResult{Observed: len(obs)}
 
 	authorized, err := s.authorizedPaths(ctx, obs, ec)
@@ -313,7 +322,7 @@ func (s *Store) ReconcileScan(ctx context.Context, obs []gate.Observation, ec do
 	for _, o := range obs {
 		paths = append(paths, o.Path)
 	}
-	acked, err := s.ackedFingerprints(ctx, paths)
+	acked, err := s.ackedFingerprints(ctx, paths, scan.Baseline)
 	if err != nil {
 		return res, err
 	}
@@ -337,7 +346,7 @@ func (s *Store) ReconcileScan(ctx context.Context, obs []gate.Observation, ec do
 		}
 		state, owner := s.lapsedLeaseWitness(ctx, o.Path, ec)
 		candidates = append(candidates, ObservedViolation{
-			PathCanonical: o.Path, Fingerprint: o.Fingerprint,
+			PathCanonical: o.Path, Fingerprint: o.Fingerprint, Baseline: scan.Baseline,
 			LeaseState: state, ExpectedOwner: owner,
 		})
 	}
@@ -353,9 +362,9 @@ func (s *Store) ReconcileScan(ctx context.Context, obs []gate.Observation, ec do
 		return res, err
 	}
 	var reverted []string
-	for _, v := range open {
-		if _, still := seen[v.PathCanonical]; !still {
-			reverted = append(reverted, v.PathCanonical)
+	for i := range open {
+		if _, still := seen[open[i].PathCanonical]; !still {
+			reverted = append(reverted, open[i].PathCanonical)
 		}
 	}
 	if res.Resolved, err = s.ResolveViolationsForPaths(ctx, reverted, ResolutionReverted); err != nil {
@@ -372,15 +381,16 @@ func (s *Store) ReconcileScan(ctx context.Context, obs []gate.Observation, ec do
 // the machine ResolutionReverted — i.e. every fingerprint someone has looked
 // at and said is legitimate. Membership is the only operation the caller
 // needs, hence the flat key rather than a nested map.
-func (s *Store) ackedFingerprints(ctx context.Context, paths []string) (map[string]struct{}, error) {
+func (s *Store) ackedFingerprints(ctx context.Context, paths []string, baseline string) (map[string]struct{}, error) {
 	out := map[string]struct{}{}
 	if len(paths) == 0 {
 		return out, nil
 	}
 	placeholders, args := inClauseStrings(paths)
-	args = append(args, ResolutionReverted)
+	args = append(args, ResolutionReverted, baseline)
 	q := `SELECT path_canonical, fingerprint FROM violations` + //nolint:gosec // G202 placeholders are '?' chars only, all data via args
-		` WHERE path_canonical IN (` + placeholders + `) AND resolved_at IS NOT NULL AND resolution != ?`
+		` WHERE path_canonical IN (` + placeholders + `) AND resolved_at IS NOT NULL` +
+		` AND resolution != ? AND baseline = ?`
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err

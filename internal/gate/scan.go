@@ -72,19 +72,25 @@ type Observation struct {
 //     plain add/modify/delete. A rename reported as one R record would hide
 //     the destination path from the intersect check, which is precisely the
 //     path a candidate would go on to declare.
-func ScanWorktree(ctx context.Context, repoTop string) ([]Observation, error) {
+//
+// Returns the baseline it read alongside the observations: an observation is
+// a statement about a delta FROM a specific integration commit, and a caller
+// recording one has to be able to say which (Codex #276 round 2).
+func ScanWorktree(ctx context.Context, repoTop string) (Scan, error) {
 	g := gitRunner{repoTop: repoTop}
-	if _, err := g.run(ctx, "rev-parse", "--verify", "--quiet", IntegrationRef); err != nil {
-		return nil, ErrNoBaseline
+	baseline, err := g.run(ctx, "rev-parse", "--verify", "--quiet", IntegrationRef)
+	if err != nil {
+		return Scan{}, ErrNoBaseline
 	}
+	baseline = strings.TrimSpace(baseline)
 	out, err := g.run(ctx, "diff", "--name-status", "-z", "--no-renames", IntegrationRef, "--")
 	if err != nil {
-		return nil, fmt.Errorf("gate: scan diff against %s: %w", IntegrationRef, err)
+		return Scan{}, fmt.Errorf("gate: scan diff against %s: %w", IntegrationRef, err)
 	}
 	changed, deleted := parseNameStatusZ(out)
 	fingerprints, err := hashWorktreePaths(ctx, repoTop, changed)
 	if err != nil {
-		return nil, err
+		return Scan{}, err
 	}
 
 	obs := make([]Observation, 0, len(changed)+len(deleted))
@@ -95,7 +101,17 @@ func ScanWorktree(ctx context.Context, repoTop string) ([]Observation, error) {
 		obs = append(obs, Observation{Path: p, Deleted: true})
 	}
 	sort.Slice(obs, func(i, j int) bool { return obs[i].Path < obs[j].Path })
-	return obs, nil
+	return Scan{Baseline: baseline, Observations: obs}, nil
+}
+
+// Scan is one whole-tree sensor pass: what differed, and what it differed
+// FROM. The baseline travels with the readings because a violation record
+// that omits it cannot be re-evaluated when integration moves — an
+// acknowledgement of "this delta is fine" is only meaningful against the
+// baseline it was given.
+type Scan struct {
+	Baseline     string
+	Observations []Observation
 }
 
 // parseNameStatusZ splits `git diff --name-status -z` output — NUL-separated
@@ -129,15 +145,25 @@ func parseNameStatusZ(out string) (changed, deleted []string) {
 // following path, such a path is refused by name — a repo that has one gets
 // an error it can act on, not a wrong fingerprint it cannot see.
 //
-// Symlinks are hashed separately, in Go, from their link payload rather than
-// through hash-object --stdin-paths (Codex #276 P2): that command opens the
-// path, which for a symlink means following it, and a symlink retargeted to
-// a dangling destination makes the OPEN fail with exit 128 — for the WHOLE
-// batch, not just that one path, so one stale symlink would silently drop
-// every other violation the same scan should have recorded. Git itself never
-// dereferences a symlink to hash it — the blob IS the link target string —
-// so gitBlobSHA reproduces that directly from os.Readlink, no subprocess,
-// nothing to open.
+// ‡ Only ordinary files go through hash-object, because that command OPENS
+// each path it is handed and two tracked shapes make the open fail — taking
+// the WHOLE batch with it (exit 128), so one odd entry would silently drop
+// every other violation the same scan should have recorded (Codex #276):
+//
+//   - Symlinks. hash-object follows the link; a symlink retargeted to a
+//     dangling destination cannot be opened. Git never dereferences a symlink
+//     to hash it — the blob IS the link target string — so gitBlobSHA
+//     reproduces that from os.Readlink, no subprocess, nothing to open.
+//   - Gitlinks (submodules). A diff reports the submodule's DIRECTORY when it
+//     is checked out at a different commit, and `hash-object` on a directory
+//     is "fatal: Unable to hash". The gitlink's identity is the commit it
+//     points at, which is what git stores in the tree, so that is the
+//     fingerprint — read from the submodule's own HEAD.
+//
+// A gitlink whose HEAD cannot be read still yields an observation with an
+// empty fingerprint rather than an error: the path DID change, and losing
+// that reading to protect a fingerprint would be the outage the sensor is
+// forbidden to become.
 func hashWorktreePaths(ctx context.Context, repoTop string, paths []string) (map[string]string, error) {
 	if len(paths) == 0 {
 		return map[string]string{}, nil
@@ -147,24 +173,9 @@ func hashWorktreePaths(ctx context.Context, repoTop string, paths []string) (map
 			return nil, fmt.Errorf("%w: %q", ErrUnhashablePath, p)
 		}
 	}
-	m := make(map[string]string, len(paths))
-	regular := make([]string, 0, len(paths))
-	for _, p := range paths {
-		fi, err := os.Lstat(filepath.Join(repoTop, p))
-		if err != nil {
-			// Vanished between the diff and here (or otherwise unreadable):
-			// not this function's failure mode to invent a fingerprint for.
-			return nil, fmt.Errorf("gate: scan: lstat %q: %w", p, err)
-		}
-		if fi.Mode()&os.ModeSymlink == 0 {
-			regular = append(regular, p)
-			continue
-		}
-		target, err := os.Readlink(filepath.Join(repoTop, p))
-		if err != nil {
-			return nil, fmt.Errorf("gate: scan: readlink %q: %w", p, err)
-		}
-		m[p] = gitBlobSHA(target)
+	m, regular, err := fingerprintSpecialPaths(ctx, repoTop, paths)
+	if err != nil {
+		return nil, err
 	}
 	if len(regular) == 0 {
 		return m, nil
@@ -187,6 +198,51 @@ func hashWorktreePaths(ctx context.Context, repoTop string, paths []string) (map
 		m[p] = shas[i]
 	}
 	return m, nil
+}
+
+// fingerprintSpecialPaths splits paths into the ones hash-object must not be
+// handed — symlinks and gitlinks, each fingerprinted here — and the ordinary
+// files returned for the batch. See hashWorktreePaths for why the split
+// exists at all.
+func fingerprintSpecialPaths(ctx context.Context, repoTop string, paths []string) (map[string]string, []string, error) {
+	m := make(map[string]string, len(paths))
+	regular := make([]string, 0, len(paths))
+	for _, p := range paths {
+		full := filepath.Join(repoTop, p)
+		fi, err := os.Lstat(full)
+		if err != nil {
+			// Vanished between the diff and here (or otherwise unreadable):
+			// not this function's failure mode to invent a fingerprint for.
+			return nil, nil, fmt.Errorf("gate: scan: lstat %q: %w", p, err)
+		}
+		switch {
+		case fi.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(full)
+			if err != nil {
+				return nil, nil, fmt.Errorf("gate: scan: readlink %q: %w", p, err)
+			}
+			m[p] = gitBlobSHA(target)
+		case fi.IsDir():
+			// A directory in a diff against a tree is a gitlink; its
+			// fingerprint is the commit it points at.
+			m[p] = submoduleHead(ctx, full)
+		default:
+			regular = append(regular, p)
+		}
+	}
+	return m, regular, nil
+}
+
+// submoduleHead returns the commit a checked-out gitlink currently points at,
+// or "" when it cannot be read (uninitialized submodule, unreadable .git).
+// Empty is a legitimate answer here: the observation still stands, only its
+// fingerprint is unknown.
+func submoduleHead(ctx context.Context, dir string) string {
+	out, err := gitRunner{repoTop: dir}.run(ctx, "rev-parse", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
 }
 
 // gitBlobSHA computes the same SHA-1 `git hash-object` would for a blob

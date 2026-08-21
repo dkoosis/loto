@@ -161,11 +161,17 @@ CREATE INDEX IF NOT EXISTS idx_candidate_claims_candidate ON candidate_claims(ca
 -- laundering a rogue edit it never noticed. No culprit column — the sensor
 -- reads content, not writers. Added to existing DBs via ensureViolationsTable
 -- in migrate() (no user_version bump); declared here so fresh DBs match.
+-- baseline: the refs/loto/integration commit the observation was a delta FROM.
+-- An acknowledgement ("legitimate and staying") is only meaningful against the
+-- baseline it was given — once integration moves, the same path+fingerprint
+-- can mean the opposite. Without it, acking a DELETION (whose fingerprint is
+-- empty) would suppress every future deletion of that path forever.
 CREATE TABLE IF NOT EXISTS violations (
   id             TEXT PRIMARY KEY,
   path_canonical TEXT NOT NULL,
   observed_at    INTEGER NOT NULL,
   fingerprint    TEXT NOT NULL DEFAULT '',
+  baseline       TEXT NOT NULL DEFAULT '',
   lease_state    TEXT NOT NULL DEFAULT '',
   expected_owner TEXT NOT NULL DEFAULT '',
   resolved_at    INTEGER,

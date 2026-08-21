@@ -347,6 +347,7 @@ var migrationEnsures = []struct {
 	{"add path_epochs table", ensurePathEpochsTable},
 	{"add candidate_claims table", ensureCandidateClaimsTable},
 	{"add violations table", ensureViolationsTable},
+	{"add violations.baseline", ensureViolationsBaseline},
 }
 
 // schemaCurrent reports whether a re-migrate would be a pure no-op — the gate
@@ -628,6 +629,30 @@ func ensureCandidateClaimsTable(ctx context.Context, db sqlExecQuerier, apply bo
 // (loto-ovno.9). Same precedent as ensurePathEpochsTable.
 func ensureViolationsTable(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	return ensureTableBySentinelName(ctx, db, apply, "violations", violationsDDL)
+}
+
+// ensureViolationsBaseline adds the baseline column to a violations table
+// created before that column existed. The sentinel-name ensure above probes
+// only for the TABLE, so a DB carrying this table's first shape would keep it
+// forever and every insert would fail on the missing column. Follows
+// ensureLocksEpoch: probe pragma_table_info, ALTER, never bump user_version.
+func ensureViolationsBaseline(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('violations') WHERE name = 'baseline'`,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return false, nil
+	}
+	if apply {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE violations ADD COLUMN baseline TEXT NOT NULL DEFAULT ''`); err != nil {
+			return false, err
+		}
+		return false, nil // applied: no longer outstanding
+	}
+	return true, nil
 }
 
 // ensureTableBySentinelName is the shared body ensureClaimsTable /
