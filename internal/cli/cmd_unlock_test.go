@@ -159,7 +159,7 @@ func TestUnlock_ForceWithoutIntent_Rejected(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 	var out, errBuf bytes.Buffer
-	code := Run([]string{tcCmdUnlock, tcTargetA, "--force"}, &out, &errBuf)
+	code := Run([]string{tcCmdUnlock, tcTargetA, tcFlagForce}, &out, &errBuf)
 	if code != 2 {
 		t.Fatalf("force unlock without -t exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
 	}

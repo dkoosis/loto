@@ -49,8 +49,8 @@ func TestPermuteWith_EndOfFlagsEscape(t *testing.T) {
 		},
 		{
 			name: "no escape leaves normal permute behavior",
-			args: []string{"foo", "-t", "why"},
-			want: []string{"-t", "why", "foo"},
+			args: []string{"foo", "-t", tcIntentWhy},
+			want: []string{"-t", tcIntentWhy, "foo"},
 		},
 	}
 	for _, tt := range tests {

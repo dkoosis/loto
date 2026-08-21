@@ -39,4 +39,9 @@ const (
 	tcClosesAbc    = "loto-abc"
 	tcTargetSym    = "sym.go"
 	tcStoreGo      = "store.go"
+	tcFlagForce    = "--force"
+	// tcHoldAlice1 is a well-formed but deliberately WRONG --expect-holder
+	// token: the parse must succeed so the compare, not the parser, does the
+	// refusing.
+	tcHoldAlice1 = "alice@1"
 )

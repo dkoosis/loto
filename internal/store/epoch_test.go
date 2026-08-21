@@ -194,7 +194,7 @@ func TestBreakLocks_ThenReacquireIncrementsEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "taking over", liveProbe); err != nil {
+	if _, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "taking over", liveProbe, nil); err != nil {
 		t.Fatal(err)
 	}
 	bob := l

@@ -47,11 +47,11 @@ func TestBreakLockStaleOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, tcTest, liveProbe)
+	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, tcTest, liveProbe, nil)
 	if err != nil || res[0].Err == nil {
 		t.Fatal("liveProbe break without force must fail")
 	}
-	res, err = s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "deadline", liveProbe)
+	res, err = s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "deadline", liveProbe, nil)
 	if err != nil || res[0].Err != nil {
 		t.Fatalf("force break: %v / %v", err, res[0].Err)
 	}
@@ -92,7 +92,7 @@ func TestBreakLockStaleOnly_CrossHost(t *testing.T) {
 	// BreakStale from "local-host": the lock is on a different host, not
 	// expired → the probe answers UNKNOWN, IsStale is false (can't probe a
 	// remote pid), so the break must be refused.
-	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "cross-host", aliveOn("local-host"))
+	res, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "cross-host", aliveOn("local-host"), nil)
 	if err != nil {
 		t.Fatalf("BreakLocks: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestBreakLockStaleOnly_CrossHost(t *testing.T) {
 
 	// Same lock, but BreakStale from "remote-host" (same host as lock holder):
 	// pid probe says alive → also refused.
-	res, err = s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "same-host", aliveOn("remote-host"))
+	res, err = s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "same-host", aliveOn("remote-host"), nil)
 	if err != nil {
 		t.Fatalf("BreakLocks: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestBreakLockStaleOnly_CrossHost(t *testing.T) {
 	}
 
 	// Same host, but pid probe says dead → stale, break succeeds.
-	res, err = s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "same-host-dead", deadOn("remote-host"))
+	res, err = s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakStale, "same-host-dead", deadOn("remote-host"), nil)
 	if err != nil || res[0].Err != nil {
 		t.Fatalf("BreakStale from same host with dead pid should succeed: %v / %v", err, res[0].Err)
 	}
@@ -176,7 +176,7 @@ func TestBreakLocks_BatchedMultiTarget(t *testing.T) {
 	}
 
 	targets := []domain.Target{la.Target, lb.Target, lc.Target}
-	results, err := s.BreakLocks(ctx, targets, tcBob, BreakForce, "batch break", liveProbe)
+	results, err := s.BreakLocks(ctx, targets, tcBob, BreakForce, "batch break", liveProbe, nil)
 	if err != nil {
 		t.Fatalf("BreakLocks: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestBreakLocks_MixedNoLockAndOwned(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.BreakLocks(ctx, []domain.Target{la.Target, missing}, tcBob, BreakForce, "mixed", liveProbe)
+	results, err := s.BreakLocks(ctx, []domain.Target{la.Target, missing}, tcBob, BreakForce, "mixed", liveProbe, nil)
 	if err != nil {
 		t.Fatalf("BreakLocks: %v", err)
 	}
