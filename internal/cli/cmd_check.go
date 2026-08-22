@@ -263,15 +263,15 @@ func printCheckConflicts(stdout io.Writer, rows []checkConflict) bool {
 			blocking++
 		}
 	}
-	head := "✓"
+	head := glyphPass
 	if blocking > 0 {
-		head = "✗"
+		head = glyphFail
 	}
 	fmt.Fprintf(stdout, "%s conflicts count=%d blocking=%d\n", head, len(rows), blocking)
 	for i := range rows {
 		r := &rows[i]
 		if r.Blocking {
-			fmt.Fprintf(stdout, "✗ path=%s blocker=%s holder_target=%s intent=%q expires_at=%s liveness=alive\n",
+			fmt.Fprintf(stdout, "%s path=%s blocker=%s holder_target=%s intent=%q expires_at=%s liveness=alive\n", glyphFail,
 				relPath(r.Path), r.Blocker.OwnerUUID, relPath(r.Blocker.Target.Canonical), r.Blocker.Intent,
 				r.Blocker.ExpiresAt.UTC().Format(time.RFC3339))
 			// Prefer tag+defer: the breadcrumb surfaces in the holder's tag

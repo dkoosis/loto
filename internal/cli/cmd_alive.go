@@ -171,9 +171,9 @@ func emitAlive(w io.Writer, rows []aliveRow) int {
 func aliveGlyph(s identity.SessionLiveness) string {
 	switch s {
 	case identity.SessionLive:
-		return "✓"
+		return glyphPass
 	case identity.SessionDead:
-		return "✗"
+		return glyphFail
 	case identity.SessionUnknown:
 		return "⚠"
 	default:

@@ -17,15 +17,20 @@ _CODEX_PLATFORM="${_CODEX_OS}-${_CODEX_ARCH}"
 
 _REPO_DIR="$(cd "$_SANDBOX_DIR/.." && pwd)"
 
-export GOTOOLCHAIN=local
+# Keep Go's toolchain selection enabled. The Codex base image can lag the
+# version required by go.mod even when the requested toolchain is already in
+# the module cache; forcing "local" turns that healthy setup into a hard
+# version-mismatch failure as soon as this activation script is sourced.
+export GOTOOLCHAIN=auto
 export GOPROXY="https://proxy.golang.org,direct"
 export GOSUMDB="sum.golang.org"
 
-# Repo-local caches
-export GOCACHE="$_REPO_DIR/.sandbox/cache/go-build"
-export GOMODCACHE="$_REPO_DIR/.sandbox/cache/mod"
+# Keep the ambient Go caches selected by the sandbox. Setup warms those caches,
+# and automatic toolchain downloads are stored in GOMODCACHE; redirecting them
+# here both discards the warm build cache and hides a newer cached toolchain in
+# constrained environments where it cannot be downloaded again.
 export GOLANGCI_LINT_CACHE="$_REPO_DIR/.sandbox/cache/golangci-lint"
-mkdir -p "$GOCACHE" "$GOMODCACHE" "$GOLANGCI_LINT_CACHE" 2>/dev/null || true
+mkdir -p "$GOLANGCI_LINT_CACHE" 2>/dev/null || true
 
 # Performance
 export GOMAXPROCS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)

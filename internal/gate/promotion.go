@@ -855,7 +855,7 @@ func (h *promoteFlock) release() {
 	if h == nil || h.f == nil {
 		return
 	}
-	_ = syscall.Flock(int(h.f.Fd()), syscall.LOCK_UN)
+	_ = syscall.Flock(int(h.f.Fd()), syscall.LOCK_UN) //nolint:gosec // an open file descriptor originates as an int
 	_ = h.f.Close()
 	h.f = nil
 }
@@ -888,7 +888,7 @@ func acquirePromoteFlock(ctx context.Context, repoTop string) (*promoteFlock, er
 	deadline := time.Now().Add(promoteFlockLimit)
 	backoff := promoteFlockPollInitial
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) //nolint:gosec // an open file descriptor originates as an int
 		if err == nil {
 			return &promoteFlock{f: f}, nil
 		}

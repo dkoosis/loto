@@ -255,7 +255,7 @@ func blockedRow(b *gate.BeadBridge) (prRow, bool) {
 	}
 	return prRow{
 		bead:    b.BeadID,
-		line:    fmt.Sprintf("✗ bead=%s branch=%s reason=%s %s", b.BeadID, b.Branch, b.Class, blocker),
+		line:    fmt.Sprintf("%s bead=%s branch=%s reason=%s %s", glyphFail, b.BeadID, b.Branch, b.Class, blocker),
 		action:  prActionBlocked,
 		reason:  string(b.Class),
 		target:  target,
@@ -264,7 +264,7 @@ func blockedRow(b *gate.BeadBridge) (prRow, bool) {
 }
 
 func prRowLine(b *gate.BeadBridge, action string, ref prRef) string {
-	glyph := "✓"
+	glyph := glyphPass
 	if action == prActionAlreadyOpen {
 		glyph = "ℹ"
 	}
@@ -307,9 +307,9 @@ func orDash(s string) string {
 // emitPRReport renders triage counts then every row, sorted so the same repo
 // state prints byte-identically (design.md).
 func emitPRReport(w io.Writer, o prOpts, plan gate.BridgePlan, counts map[string]int, rows []prRow) {
-	glyph := "✓"
+	glyph := glyphPass
 	if counts[prActionBlocked] > 0 {
-		glyph = "✗"
+		glyph = glyphFail
 	}
 	// ‡ A dry run reports zero opened and zero updated, because it opened and
 	// updated nothing. What it would carry goes in its own `pending=` key —

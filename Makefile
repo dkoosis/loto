@@ -128,18 +128,20 @@ vuln: ## Scan for known vulnerabilities (fo-rendered)
 dupl: ## Detect duplicate code (jscpd; fo-rendered; skips if not installed — dev-only)
 	@if ! command -v jscpd >/dev/null 2>&1; then \
 		echo "+ dupl: jscpd not installed — skipped (npm i -g jscpd)"; \
-		exit 0; \
+	else \
+		rm -rf .jscpd-tmp; \
+		jscpd . --silent --reporters json --output .jscpd-tmp >/dev/null 2>&1 || true; \
+		fo wrap jscpd < .jscpd-tmp/jscpd-report.json | fo --format llm; \
 	fi
-	@rm -rf .jscpd-tmp
-	@jscpd . --silent --reporters json --output .jscpd-tmp >/dev/null 2>&1 || true
-	@cat .jscpd-tmp/jscpd-report.json | fo wrap jscpd | fo --format llm
 
 nilcheck: ## Run nilaway (fo-rendered; skips if not installed — dev-only)
 	@if ! command -v nilaway >/dev/null 2>&1; then \
 		echo "+ nilcheck: nilaway not installed — skipped (go install go.uber.org/nilaway/cmd/nilaway@latest)"; \
-		exit 0; \
+	else \
+		nilaway -include-pkgs=loto -test=false ./... 2>&1 \
+			| fo wrap diag --tool nilaway --level error \
+			| fo --format llm; \
 	fi
-	@nilaway -include-pkgs=loto -test=false ./... 2>&1 | fo wrap diag --tool nilaway --level error | fo --format llm
 
 ## ---------------------------------------------------------------------
 ## Build

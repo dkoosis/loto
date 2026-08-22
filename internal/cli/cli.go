@@ -15,6 +15,8 @@ const lockStaleReason = "lock-stale"
 const (
 	flagHelpLong = "--help"
 	subHelp      = "help"
+	glyphPass    = "✓"
+	glyphFail    = "✗"
 )
 
 type cmd func(ctx context.Context, args []string, stdout, stderr io.Writer) int

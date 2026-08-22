@@ -45,7 +45,7 @@ func (h *opFlock) release() {
 	if h == nil || h.f == nil {
 		return
 	}
-	_ = syscall.Flock(int(h.f.Fd()), syscall.LOCK_UN)
+	_ = syscall.Flock(int(h.f.Fd()), syscall.LOCK_UN) //nolint:gosec // an open file descriptor originates as an int
 	_ = h.f.Close()
 	h.f = nil
 }
@@ -83,7 +83,7 @@ func acquireOpFlock(ctx context.Context, path string, stderrW io.Writer) (*opFlo
 		// flock call wins. Otherwise the wakeup→success path skips notice and
 		// the test (and CLI UX) gets nondeterministic feedback.
 		maybeEmitWaitNotice(stderrW, start, &noticed)
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) //nolint:gosec // an open file descriptor originates as an int
 		if err == nil {
 			return &opFlock{f: f}, nil
 		}

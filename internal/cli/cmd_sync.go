@@ -531,15 +531,15 @@ func syncApplyOne(ctx context.Context, repoTop string, d syncDiff) error {
 // (byte-identical for the same input), then the fix block when there are
 // conflicts to act on.
 func emitSyncReport(w io.Writer, synced []string, conflicts []syncConflict, skipped []syncDiff) {
-	glyph := "✓"
+	glyph := glyphPass
 	if len(conflicts) > 0 {
-		glyph = "✗"
+		glyph = glyphFail
 	}
 	fmt.Fprintf(w, "%s sync synced=%d conflicts=%d skipped=%d\n", glyph, len(synced), len(conflicts), len(skipped))
 
 	rows := make([]syncReportRow, 0, len(synced)+len(conflicts)+len(skipped))
 	for _, p := range synced {
-		rows = append(rows, syncReportRow{path: p, line: fmt.Sprintf("✓ target=%s action=fast-forward", p)})
+		rows = append(rows, syncReportRow{path: p, line: fmt.Sprintf("%s target=%s action=fast-forward", glyphPass, p)})
 	}
 	for _, c := range conflicts {
 		rows = append(rows, syncReportRow{path: c.Path, line: formatSyncConflictRow(c)})

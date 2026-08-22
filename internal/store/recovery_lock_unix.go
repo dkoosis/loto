@@ -31,10 +31,10 @@ func acquireRecoveryLock(ctx context.Context, dbPath string) (func(), error) {
 	limit := flockLimitFromEnv(nil)
 	deadline := time.Now().Add(limit)
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) //nolint:gosec // an open file descriptor originates as an int
 		if err == nil {
 			return func() {
-				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:gosec // an open file descriptor originates as an int
 				_ = f.Close()
 			}, nil
 		}
