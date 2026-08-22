@@ -19,7 +19,7 @@ include .sandbox/lib/Makefile.doctor.mk
 include .sandbox/lib/Makefile.cross.mk
 
 .PHONY: help scan check audit deploy report report-human \
-        vet lint arch test race demo demo-v vuln dupl nilcheck stress \
+        vet lint arch test race demo demo-v vuln dupl nilcheck stress scriptcheck \
         selfcheck build install tidy clean hooks
 
 BIN_DIR := bin
@@ -28,6 +28,12 @@ PKG     := ./...
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -X main.Version=$(VERSION) -X main.GitCommit=$(COMMIT)
+
+# Every fo-rendered check runs through gate.sh so a producer that dies before
+# emitting findings reports its own diagnostic instead of "+ no findings"
+# (loto-fcbp). The wrapper preserves the producer's exit status, so these
+# targets gate exactly as they did before.
+GATE := bash scripts/gate.sh
 
 # Report stream — fo dashboard format. `set +e` opts out of the recipe-wide
 # -euo pipefail so report MUST run every tool and emit output even if one
@@ -54,13 +60,16 @@ help: ## Show this help
 		/^## [^-]/ { printf "\n%s\n", substr($$0, 4) } \
 		/^[a-zA-Z0-9_-]+:.*?## / { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-check: vet lint arch test build selfcheck ## Full repo: vet + lint + arch + test + build + conform
+check: vet lint arch test build scriptcheck selfcheck ## Full repo: vet + lint + arch + test + build + scripts + conform
 	@echo "=== check pass ==="
 
 # Dogfood the fleet gate (sd-th5.15): conform is pinned as a go.mod tool
 # dependency (go.sum-verified); bumping the pin is a deliberate PR.
 selfcheck: ## Run conform (fleet SDLC checker) against this repo
 	go tool conform
+
+scriptcheck: ## Test the build-tooling shell scripts (scripts/*_test.sh)
+	@bash scripts/gate_test.sh
 
 audit: check race vuln dupl nilcheck demo ## Exhaustive: +race +vuln +dupl +nilcheck +demo
 	@echo "=== audit pass ==="
@@ -88,7 +97,7 @@ report-human: ## Same as report, rendered for humans (always exits 0)
 ## ---------------------------------------------------------------------
 
 vet: ## Run go vet (fo-rendered)
-	@go vet $(PKG) 2>&1 | fo wrap diag --tool vet --level error | fo --format llm
+	@$(GATE) vet diag -- go vet $(PKG)
 
 arch: ## Enforce layering (.go-arch-lint.yml)
 	@if ! command -v go-arch-lint >/dev/null 2>&1; then \
@@ -107,13 +116,13 @@ lint: ## Run golangci-lint (full)
 		echo "golangci-lint not installed; source .sandbox/activate.sh or 'go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest'"; \
 		exit 1; \
 	fi
-	@golangci-lint run --output.sarif.path=/dev/stdout $(PKG) 2>/dev/null | fo --format llm
+	@$(GATE) lint sarif -- golangci-lint run --output.sarif.path=/dev/stdout $(PKG)
 
 test: ## Run tests with coverage (fo-rendered)
-	@go test -json -count=1 -cover $(PKG) | fo --format llm
+	@$(GATE) test testjson -- go test -json -count=1 -cover $(PKG)
 
 race: ## Run tests with race detector (slow, fo-rendered)
-	@go test -race -json -timeout=5m -count=1 $(PKG) | fo --format llm
+	@$(GATE) race testjson -- go test -race -json -timeout=5m -count=1 $(PKG)
 
 stress: ## Concurrent-agent conformance gauntlet (build-tag stress)
 	go test -tags=stress -race -run TestStress -count=1 -timeout=2m ./...
@@ -123,7 +132,7 @@ vuln: ## Scan for known vulnerabilities (fo-rendered)
 		echo "govulncheck not installed (install: go install golang.org/x/vuln/cmd/govulncheck@latest)"; \
 		exit 1; \
 	fi
-	@govulncheck -format sarif ./... 2>/dev/null | fo --format llm
+	@$(GATE) vuln sarif -- govulncheck -format sarif ./...
 
 dupl: ## Detect duplicate code (jscpd; fo-rendered; skips if not installed — dev-only)
 	@if ! command -v jscpd >/dev/null 2>&1; then \
@@ -139,7 +148,7 @@ nilcheck: ## Run nilaway (fo-rendered; skips if not installed — dev-only)
 		echo "+ nilcheck: nilaway not installed — skipped (go install go.uber.org/nilaway/cmd/nilaway@latest)"; \
 		exit 0; \
 	fi
-	@nilaway -include-pkgs=loto -test=false ./... 2>&1 | fo wrap diag --tool nilaway --level error | fo --format llm
+	@$(GATE) nilaway diag -- nilaway -include-pkgs=loto -test=false ./...
 
 ## ---------------------------------------------------------------------
 ## Build
