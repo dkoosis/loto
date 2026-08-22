@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // HolderLiveProbe answers "is the holder of this lock still alive?" with the
 // display-tier trichotomy. The probe owns ALL environmental policy — which
@@ -36,12 +39,7 @@ type EvalContext struct {
 
 // IsKin reports whether owner u counts as the caller's own for conflicts.
 func (c EvalContext) IsKin(u AgentUUID) bool {
-	for _, k := range c.Kin {
-		if k == u {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(c.Kin, u)
 }
 
 // IsStale returns true if the lock is past its TTL OR the holder is provably
