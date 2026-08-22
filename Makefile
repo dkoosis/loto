@@ -121,8 +121,11 @@ lint: ## Run golangci-lint (full)
 test: ## Run tests with coverage (fo-rendered)
 	@$(GATE) test testjson -- go test -json -count=1 -cover $(PKG)
 
+# -timeout is per test binary. go test runs packages in parallel, so under
+# -race the slowest package (internal/cli, ~175s alone) is CPU-starved and blew
+# the old 5m ceiling — a starved package, not a hang. 20m is headroom.
 race: ## Run tests with race detector (slow, fo-rendered)
-	@$(GATE) race testjson -- go test -race -json -timeout=5m -count=1 $(PKG)
+	@$(GATE) race testjson -- go test -race -json -timeout=20m -count=1 $(PKG)
 
 stress: ## Concurrent-agent conformance gauntlet (build-tag stress)
 	go test -tags=stress -race -run TestStress -count=1 -timeout=2m ./...
@@ -134,21 +137,25 @@ vuln: ## Scan for known vulnerabilities (fo-rendered)
 	fi
 	@$(GATE) vuln sarif -- govulncheck -format sarif ./...
 
+# ‡ The skip and the run live in ONE recipe line. Make gives each line its own
+# shell, so an `exit 0` on the detection line ends only that shell — the next
+# line then ran the missing tool anyway and died on "command not found". The
+# same shape is safe under `exit 1` (arch, lint, vuln): make stops there.
 dupl: ## Detect duplicate code (jscpd; fo-rendered; skips if not installed — dev-only)
 	@if ! command -v jscpd >/dev/null 2>&1; then \
 		echo "+ dupl: jscpd not installed — skipped (npm i -g jscpd)"; \
-		exit 0; \
+	else \
+		rm -rf .jscpd-tmp; \
+		jscpd . --silent --reporters json --output .jscpd-tmp >/dev/null 2>&1 || true; \
+		fo wrap jscpd <.jscpd-tmp/jscpd-report.json | fo --format llm; \
 	fi
-	@rm -rf .jscpd-tmp
-	@jscpd . --silent --reporters json --output .jscpd-tmp >/dev/null 2>&1 || true
-	@cat .jscpd-tmp/jscpd-report.json | fo wrap jscpd | fo --format llm
 
 nilcheck: ## Run nilaway (fo-rendered; skips if not installed — dev-only)
 	@if ! command -v nilaway >/dev/null 2>&1; then \
 		echo "+ nilcheck: nilaway not installed — skipped (go install go.uber.org/nilaway/cmd/nilaway@latest)"; \
-		exit 0; \
+	else \
+		$(GATE) nilaway diag -- nilaway -include-pkgs=loto -test=false ./...; \
 	fi
-	@$(GATE) nilaway diag -- nilaway -include-pkgs=loto -test=false ./...
 
 ## ---------------------------------------------------------------------
 ## Build
