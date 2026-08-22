@@ -36,7 +36,14 @@ func sortedByCanonical(recs []domain.LockRecord) []domain.LockRecord {
 // buildLockRecords from rt.Agent.UUID), so the precondition holds today; a
 // future batch-import/migration caller that submits mixed owners must thread
 // the per-record owner through before relying on these audit events.
-func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live domain.HolderLiveProbe) ([]domain.LockRecord, error) {
+//
+// kin, when given, names owner UUIDs whose live rows do not block this acquire
+// (domain.EvalContext.Kin): `loto beacon` under a LOTO_SUBAGENT_ID stamp passes
+// the parent identity so the beacon can sit beside the parent-owned exclusive
+// lock a worker took from Bash (loto-wofb). `loto lock` passes none — two
+// exclusive rows on one target under two family uuids is not a shape the
+// store wants, and a stamped `loto lock` does not occur outside tests.
+func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live domain.HolderLiveProbe, kin ...domain.AgentUUID) ([]domain.LockRecord, error) {
 	if len(recs) == 0 {
 		return nil, nil
 	}
@@ -77,7 +84,10 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 		return nil, err
 	}
 
-	blockers, err := collectAllBlockers(ctx, tx, all, sorted, now, live)
+	// Bundle the (now, live, kin) ambient triple once. Host policy rides inside
+	// the probe closure (HolderLiveProbe takes the record), so one EvalContext
+	// serves every lock in the batch — no per-lock rebinding.
+	blockers, err := collectAllBlockers(ctx, tx, all, sorted, domain.EvalContext{Now: now, Live: live, Kin: kin})
 	if err != nil {
 		return nil, err
 	}
@@ -226,11 +236,7 @@ func validateFileTarget(repoTop string, rec domain.LockRecord) error {
 // collectAllBlockers returns the live conflicting holders plus the canonical
 // paths of reclaimed stale EXCLUSIVE rows (deduped) — the caller must restore
 // owner-write on those after commit unless it re-stripped them itself.
-func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, sorted []domain.LockRecord, now time.Time, live domain.HolderLiveProbe) ([]domain.LockRecord, error) {
-	// Bundle the (now, live) ambient pair once. Host policy rides inside the
-	// probe closure (HolderLiveProbe takes the record), so one EvalContext
-	// serves every lock in the batch — no per-lock rebinding.
-	ec := domain.EvalContext{Now: now, Live: live}
+func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, sorted []domain.LockRecord, ec domain.EvalContext) ([]domain.LockRecord, error) {
 	seen := map[string]bool{}
 	var blockers []domain.LockRecord
 	for i := range sorted {
@@ -263,7 +269,9 @@ func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domai
 	var blockers []domain.LockRecord
 	for i := range all {
 		ex := &all[i]
-		if !domain.SameCanonical(ex.Target, l.Target) || ex.OwnerUUID == l.OwnerUUID {
+		// Kin rows (the parent identity behind a subagent stamp) are skipped
+		// exactly like same-owner rows: never reclaimed here, never blocking.
+		if !domain.SameCanonical(ex.Target, l.Target) || ex.OwnerUUID == l.OwnerUUID || ec.IsKin(ex.OwnerUUID) {
 			continue
 		}
 		if ec.IsStale(*ex) {

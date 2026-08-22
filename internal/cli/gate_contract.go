@@ -26,7 +26,8 @@ import (
 //
 //	1 — `check --gate`, `guard`, `beacon`, `check --cwd-unknown`.
 //	2 — direct-CLI relative positionals resolve against the caller's cwd (loto-3tv3).
-const GateContractVersion = 2
+//	3 — `check --gate` under LOTO_SUBAGENT_ID treats the parent identity's locks/claims as its own (loto-wofb).
+const GateContractVersion = 3
 
 // gateContractEnv is where the hook stamps the version it needs. An env var
 // rather than a per-verb flag: `check --gate`, `guard` and `beacon` are all

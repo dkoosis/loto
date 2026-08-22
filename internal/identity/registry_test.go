@@ -1242,3 +1242,40 @@ func TestGCStaleAgents_UnreplacedRecordStillReaped(t *testing.T) {
 		t.Errorf("unreplaced stale record must still be reaped: err=%v", err)
 	}
 }
+
+// EnsureParent (loto-wofb): under a stamp it resolves the identity the stamp
+// hides — the same owner Ensure returns with the stamp removed — and reports
+// nothing when no stamp is set or when the parent env pins nothing.
+func TestEnsureParentResolvesHiddenIdentity(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.Unsetenv("LOTO_AGENT_ID")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "sess-wofb")
+	ctx := context.Background()
+
+	if _, ok, err := EnsureParent(ctx); err != nil || ok {
+		t.Fatalf("no stamp → nothing hidden; got ok=%v err=%v", ok, err)
+	}
+	parent, err := Ensure(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("LOTO_SUBAGENT_ID", "a3b8547117dfa76ef")
+	sib, err := Ensure(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := EnsureParent(ctx)
+	if err != nil || !ok {
+		t.Fatalf("stamped → parent resolves; got ok=%v err=%v", ok, err)
+	}
+	if got.UUID != parent.UUID || got.UUID == sib.UUID {
+		t.Fatalf("parent=%s want %s (sibling %s)", got.UUID, parent.UUID, sib.UUID)
+	}
+
+	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
+	if _, ok, err := EnsureParent(ctx); err != nil || ok {
+		t.Fatalf("unpinned parent env → nothing to resolve, never mint; got ok=%v err=%v", ok, err)
+	}
+}

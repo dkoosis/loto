@@ -212,7 +212,37 @@ func Ensure(ctx context.Context) (*Agent, error) {
 	if a, handled, err := resolveSubagent(ctx); handled {
 		return a, err
 	}
+	return ensureUnstamped(ctx)
+}
 
+// EnsureParent resolves the identity a LOTO_SUBAGENT_ID stamp is hiding: the
+// owner this process would be WITHOUT the stamp (loto-wofb). A stamped
+// sibling's Bash calls are unstamped — hooks cannot export env into later
+// tool calls — so its own `loto lock`/`claim` rows are owned by this parent
+// identity. The gate treats those as the sibling's own; otherwise a worker is
+// refused by the very lock it just took.
+//
+// handled=false when no stamp pins an identity (nothing is hidden) or when the
+// parent env does not pin one (resolving would mint a throwaway that owns
+// nothing — pointless on the gate's hot path). Never mints on the explicit
+// LOTO_AGENT_ID path; the session path reuses the parent's cached record.
+func EnsureParent(ctx context.Context) (*Agent, bool, error) {
+	if !SubagentIDPins(os.Getenv("LOTO_SUBAGENT_ID")) {
+		return nil, false, nil
+	}
+	if !envIdentityBinding().pinsForAuthority() {
+		return nil, false, nil
+	}
+	a, err := ensureUnstamped(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	return a, true, nil
+}
+
+// ensureUnstamped is Ensure minus the subagent stamp: the env-binding
+// resolution every identity-bearing process goes through.
+func ensureUnstamped(ctx context.Context) (*Agent, error) {
 	// The remaining precedence — LOTO_AGENT_ID (explicit vs blank-ephemeral) →
 	// CLAUDE_CODE_SESSION_ID → unbound — is classified in ONE place so the
 	// fail-open/closed gates read the same decision Ensure resolves by, instead

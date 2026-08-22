@@ -110,3 +110,35 @@ func TestAcquire_OtherOwnerSharedOverExclusiveBlocks(t *testing.T) {
 		t.Errorf("row mode = %s, want exclusive", l.EffectiveMode())
 	}
 }
+
+// TestAcquire_KinExclusiveDoesNotBlockBeacon (loto-wofb): a stamped sibling's
+// beacon must sit beside the exclusive lock its parent identity took from
+// Bash; without kin the beacon is refused and two siblings on one
+// parent-locked file are never serialized. A third owner is still refused.
+func TestAcquire_KinExclusiveDoesNotBlockBeacon(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	parent := mkFileLock(t, "a.go", tcAlice, time.Hour)
+	parent.Mode = domain.ModeExclusive
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{parent}, liveProbe); err != nil {
+		t.Fatalf("parent acquire: %v", err)
+	}
+
+	beacon := mkFileLock(t, "a.go", tcBob, time.Minute)
+	beacon.Target = parent.Target // mkFileLock mints a fresh dir per call
+	beacon.Mode, beacon.PID, beacon.Beacon = domain.ModeShared, 0, true
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{beacon}, liveProbe); err == nil {
+		t.Fatal("without kin, the parent's exclusive lock must refuse the beacon")
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{beacon}, liveProbe, tcAlice); err != nil {
+		t.Fatalf("with the parent as kin, the beacon must be minted: %v", err)
+	}
+
+	other := mkFileLock(t, "a.go", "cccccccc-cccc-4ccc-8ccc-cccccccccccc", time.Minute)
+	other.Target = parent.Target
+	other.Mode, other.PID, other.Beacon = domain.ModeShared, 0, true
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{other}, liveProbe, tcBob); err == nil {
+		t.Fatal("kin must not widen past the named owner: the parent's lock still refuses a third owner")
+	}
+}

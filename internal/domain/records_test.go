@@ -66,3 +66,25 @@ func TestConflicts_TruthTable(t *testing.T) {
 		})
 	}
 }
+
+// Kin (loto-wofb): the parent identity behind a subagent stamp counts as self
+// for conflicts — in either mode — while any other owner still conflicts.
+func TestConflicts_KinNeverConflicts(t *testing.T) {
+	ec := EvalContext{Now: time.Now(), Kin: []AgentUUID{"parent"}}
+	cases := []struct {
+		name string
+		a, l LockRecord
+		want bool
+	}{
+		{"kin excl vs incoming shared", mk("sib", ModeShared), mk("parent", ModeExclusive), false},
+		{"kin excl vs incoming excl", mk("sib", ModeExclusive), mk("parent", ModeExclusive), false},
+		{"non-kin excl still conflicts", mk("sib", ModeShared), mk("other", ModeExclusive), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ec.Conflicts(c.a, c.l); got != c.want {
+				t.Fatalf("Conflicts = %v, want %v", got, c.want)
+			}
+		})
+	}
+}

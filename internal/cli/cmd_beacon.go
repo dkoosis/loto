@@ -114,7 +114,16 @@ func cmdBeacon(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 	now := time.Now()
 	recs := buildBeaconRecords(targets, rt, now, *ttl)
-	acquired, err := rt.Store.AcquireLocks(rt.Ctx, recs, memoLiveProbe(rt.liveProbe()))
+	// Under a subagent stamp the parent's exclusive lock is kin, not a blocker:
+	// a worker locks from Bash (unstamped → parent-owned) and then writes through
+	// the hook (stamped). Refusing the beacon here would leave two siblings on
+	// one parent-locked file unserialized — the loto-fs84 hole, one layer up.
+	kin, err := parentKin(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return 3
+	}
+	acquired, err := rt.Store.AcquireLocks(rt.Ctx, recs, memoLiveProbe(rt.liveProbe()), kin...)
 	if err != nil {
 		return emitBeaconErr(err, stdout, stderr)
 	}
