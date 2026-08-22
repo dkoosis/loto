@@ -257,7 +257,7 @@ func runCheckGate(ctx context.Context, paths []string, base, repoTop string, std
 // LOTO_SUBAGENT_ID stamp hides, or nothing (identity.EnsureParent).
 func parentKin(ctx context.Context) ([]domain.AgentUUID, error) {
 	parent, ok, err := identity.EnsureParent(ctx)
-	if err != nil || !ok {
+	if err != nil || !ok || parent == nil {
 		return nil, err
 	}
 	return []domain.AgentUUID{domain.AgentUUID(parent.UUID)}, nil
