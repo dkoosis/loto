@@ -172,13 +172,30 @@ func TestBeginTxResetsBusyTimeoutOnRelease(t *testing.T) {
 	// Pin the pool to a single conn so we observe the same conn back.
 	s.db.SetMaxOpenConns(1)
 
-	// Run a tx with a near-zero deadline → busy_timeout scales to 1ms.
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(500*time.Microsecond))
+	// Run a tx under a deadline short enough that busy_timeout scales well
+	// below the DSN default, but long enough that beginTx's own I/O (Conn +
+	// PRAGMA + BEGIN IMMEDIATE) cannot exhaust it. A sub-ms deadline makes
+	// beginTx itself return context.DeadlineExceeded under load, which tests
+	// nothing about the release path.
+	const scaledMs = 2000
+	ctx, cancel := context.WithTimeout(context.Background(), scaledMs*time.Millisecond)
 	defer cancel()
-	_, cleanup, err := s.beginTx(ctx)
+	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
 		t.Fatalf("beginTx: %v", err)
 	}
+
+	// The tx runs on the conn beginTx scaled, so reading the PRAGMA here
+	// observes the pre-release value — without it the reset assertion below
+	// would pass even if scaling never happened.
+	var scaled int
+	if err := tx.QueryRow(`PRAGMA busy_timeout`).Scan(&scaled); err != nil {
+		t.Fatalf("PRAGMA in tx: %v", err)
+	}
+	if scaled <= 0 || scaled > scaledMs {
+		t.Errorf("busy_timeout in tx = %d, want in (0, %d]", scaled, scaledMs)
+	}
+
 	cleanup()
 
 	// Pull the same conn back via the pool and check PRAGMA.
