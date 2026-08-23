@@ -16,6 +16,7 @@ const (
 	tcSHA2      = "2222222222222222222222222222222222222222"
 	tcBaseline  = "b000000000000000000000000000000000000000"
 	tcBaseline2 = "b111111111111111111111111111111111111111"
+	tcOtherGo   = "internal/other.go"
 )
 
 // scanOf wraps observations as one whole-tree pass against tcBaseline — the
@@ -604,5 +605,91 @@ func TestMigrate_ScopesTheOpenViolationIndexToWorktree(t *testing.T) {
 	// Re-probing is a no-op — the steady-state fast path depends on it.
 	if pending, err := ensureViolationsOpenIndexScoped(ctx, s.db, false); err != nil || pending {
 		t.Errorf("re-probe pending=%v err=%v, want false/nil", pending, err)
+	}
+}
+
+// A violation recorded before rows carried a checkout must keep blocking
+// EVERY checkout. Calling it "primary" would let a linked worktree upgrade
+// straight past its own sticky violation — and if it has since leased the
+// path, its own scan records nothing new, so the contaminated content
+// submits clean (Codex #283 P1).
+func TestMigrate_LegacyOpenViolationBlocksEveryCheckout(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	// A row from before the column: no worktree, one open, one acked.
+	rec, err := s.RecordViolations(ctx, []ObservedViolation{
+		{PathCanonical: tcRogueGo, Fingerprint: tcSHA1, Baseline: tcBaseline, LeaseState: LeaseStateUnleased},
+		{PathCanonical: tcOtherGo, Fingerprint: tcSHA2, Baseline: tcBaseline, LeaseState: LeaseStateUnleased},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec) != 2 {
+		t.Fatalf("seed recorded %d rows, want 2", len(rec))
+	}
+	var ackedID string
+	for i := range rec {
+		if rec[i].PathCanonical == tcOtherGo {
+			ackedID = rec[i].ID
+		}
+	}
+	if err := s.ResolveViolation(ctx, ackedID, "legitimate, staying"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE violations SET worktree = ''`); err != nil {
+		t.Fatalf("rewind to the pre-worktree shape: %v", err)
+	}
+
+	// mustOpen already migrated, so rewind the whole table to its
+	// pre-worktree shape — index first, the column is inside it — and then
+	// drive migrate's two steps in their real order.
+	for _, stmt := range []string{
+		`DROP INDEX IF EXISTS idx_violations_open_path_wt`,
+		`ALTER TABLE violations DROP COLUMN worktree`,
+		`CREATE UNIQUE INDEX idx_violations_open_path ON violations(path_canonical) WHERE resolved_at IS NULL`,
+	} {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("rewind %q: %v", stmt, err)
+		}
+	}
+	if pending, err := ensureViolationsWorktree(ctx, s.db, false); err != nil || !pending {
+		t.Fatalf("probe on a pre-worktree table: pending=%v err=%v", pending, err)
+	}
+	for _, step := range []func(context.Context, sqlExecQuerier, bool) (bool, error){
+		ensureViolationsWorktree, ensureViolationsOpenIndexScoped,
+	} {
+		if _, err := step(ctx, s.db, true); err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+	}
+
+	// Every checkout sees the open legacy row...
+	for _, wt := range []string{"", "agent-b"} {
+		open, err := s.UnresolvedViolationPaths(ctx, wt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, blocked := open[tcRogueGo]; !blocked {
+			t.Errorf("legacy violation invisible to checkout %q: %+v", wt, open)
+		}
+	}
+	// ...and any checkout's clean pass can still clear it, exactly as before
+	// the column existed.
+	res, err := s.ReconcileScan(ctx, scanFrom("agent-b"), liveEval())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Resolved != 1 {
+		t.Errorf("a clean pass resolved %d legacy rows, want 1", res.Resolved)
+	}
+	// The acked row keeps '': widening an ack to every checkout is the
+	// permissive direction, so it is deliberately not backfilled.
+	var wt string
+	if err := s.db.QueryRowContext(ctx, `SELECT worktree FROM violations WHERE id = ?`, ackedID).Scan(&wt); err != nil {
+		t.Fatal(err)
+	}
+	if wt != "" {
+		t.Errorf("resolved row backfilled to %q, want the primary checkout", wt)
 	}
 }

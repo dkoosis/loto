@@ -660,11 +660,22 @@ func ensureViolationsBaseline(ctx context.Context, db sqlExecQuerier, apply bool
 // ensureViolationsWorktree adds the worktree column to a violations table
 // created before checkouts were distinguished (loto-nper). Same precedent as
 // ensureViolationsBaseline: probe pragma_table_info, ALTER, never bump
-// user_version. Existing rows default to ” — the primary worktree — which is
-// where every row written before this column came from.
+// user_version.
+//
+// ‡ Open rows are moved to WorktreeLegacy, not left at the column default. A
+// pre-upgrade scan could run from ANY checkout, so calling those rows
+// "primary" asserts an origin the DB never recorded — and asserting it wrong
+// hands a linked checkout a clean admission over its own sticky violation
+// (Codex #283 P1). The ALTER and the backfill run inside migrate's single tx,
+// so no row is ever readable in the intermediate state.
+//
+// Resolved rows are left alone: they carry acknowledgements, and widening an
+// ack to every checkout is the permissive direction. A linked checkout will
+// re-flag content the primary acked — noisy, never unsafe.
 func ensureViolationsWorktree(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	return ensureColumn(ctx, db, apply, "violations", "worktree",
-		`ALTER TABLE violations ADD COLUMN worktree TEXT NOT NULL DEFAULT ''`)
+		`ALTER TABLE violations ADD COLUMN worktree TEXT NOT NULL DEFAULT ''`,
+		`UPDATE violations SET worktree = '`+WorktreeLegacy+`' WHERE resolved_at IS NULL`)
 }
 
 // ensureViolationsOpenIndexScoped widens the open-violation uniqueness key
@@ -702,8 +713,11 @@ func ensureViolationsOpenIndexScoped(ctx context.Context, db sqlExecQuerier, app
 
 // ensureColumn is the shared body ensureLocksEpoch / ensureViolationsBaseline
 // each hand-duplicated: probe pragma_table_info for the column, run the
-// caller's ALTER if absent, never touch user_version.
-func ensureColumn(ctx context.Context, db sqlExecQuerier, apply bool, table, column, alter string) (bool, error) {
+// caller's ALTER if absent, never touch user_version. Trailing statements run
+// in the same apply: a backfill a new column needs is part of adding it, and
+// splitting the two into separate steps would make the un-backfilled state
+// reachable by a probe that then skips it.
+func ensureColumn(ctx context.Context, db sqlExecQuerier, apply bool, table, column, alter string, after ...string) (bool, error) {
 	var n int
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`, table, column,
@@ -714,8 +728,10 @@ func ensureColumn(ctx context.Context, db sqlExecQuerier, apply bool, table, col
 		return false, nil
 	}
 	if apply {
-		if _, err := db.ExecContext(ctx, alter); err != nil {
-			return false, err
+		for _, stmt := range append([]string{alter}, after...) {
+			if _, err := db.ExecContext(ctx, stmt); err != nil {
+				return false, err
+			}
 		}
 		return false, nil // applied: no longer outstanding
 	}

@@ -44,6 +44,23 @@ const (
 	LeaseStateExpired = "expired-lease"
 )
 
+// WorktreeLegacy marks an open violation recorded before rows carried a
+// checkout — its origin is genuinely unknown, and guessing is unsafe in one
+// direction only.
+//
+// ‡ Assigning legacy rows to the primary worktree (”) would let a linked
+// checkout upgrade straight past a sticky violation it had itself recorded:
+// its scoped intersect stops seeing the row, and if it has since taken a
+// lease on that path its own scan records nothing new (a leaseholder's edit
+// is not a violation) — so the contaminated content submits clean. That is
+// precisely the laundering the record exists to stop (Codex #283 P1).
+//
+// A legacy row therefore blocks EVERY checkout's admission, and any
+// checkout's clean pass may resolve it — which is exactly how these rows
+// behaved before the column existed, so the migration makes admission
+// strictly safer and resolution no harder.
+const WorktreeLegacy = "?"
+
 // Resolutions a violation row can close with.
 const (
 	// ResolutionReverted: a later scan found the path's content back in
@@ -196,7 +213,9 @@ func (s *Store) UnresolvedViolations(ctx context.Context) ([]Violation, error) {
 func (s *Store) UnresolvedViolationsIn(ctx context.Context, worktree string) ([]Violation, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, path_canonical, observed_at, fingerprint, baseline, lease_state, expected_owner, worktree, resolved_at, resolution
-		   FROM violations WHERE resolved_at IS NULL AND worktree = ? ORDER BY path_canonical, id`, worktree)
+		   FROM violations
+		  WHERE resolved_at IS NULL AND (worktree = ? OR worktree = ?)
+		  ORDER BY path_canonical, id`, worktree, WorktreeLegacy)
 	if err != nil {
 		return nil, err
 	}
@@ -302,8 +321,8 @@ func (s *Store) ResolveViolationsForPaths(ctx context.Context, worktree string, 
 	for _, p := range paths {
 		res, err := tx.ExecContext(ctx,
 			`UPDATE violations SET resolved_at = ?, resolution = ?
-			  WHERE path_canonical = ? AND worktree = ? AND resolved_at IS NULL`,
-			nowNs, resolution, p, worktree)
+			  WHERE path_canonical = ? AND (worktree = ? OR worktree = ?) AND resolved_at IS NULL`,
+			nowNs, resolution, p, worktree, WorktreeLegacy)
 		if err != nil {
 			return 0, err
 		}
