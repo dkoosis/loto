@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	tcBranchName = "loto-ovno.11-gate-contract-tests"
-	tcSelfPath   = "/repo"
-	tcAgentPath  = "/repo/.claude/worktrees/agent-a88"
+	tcShortBranch = "loto-ovno.11"
+	tcBranchName  = "loto-ovno.11-gate-contract-tests"
+	tcSelfPath    = "/repo"
+	tcAgentPath   = "/repo/.claude/worktrees/agent-a88"
 )
 
 // withPidLive swaps the process oracle for one test.
@@ -94,7 +95,7 @@ func TestDecideBranch_UnheldAndSelfHeldAreFree(t *testing.T) {
 func TestDecideBranch_MatchesTheWholeRefNotAPrefix(t *testing.T) {
 	withPidLive(t, true)
 	recs := []worktreeRec{holding(tcAgentPath, "(pid 1)", true)}
-	if got := decideBranch(recs, "loto-ovno.11", tcSelfPath); len(got) != 0 {
+	if got := decideBranch(recs, tcShortBranch, tcSelfPath); len(got) != 0 {
 		t.Errorf("prefix matched a longer branch: %+v", got)
 	}
 }
@@ -167,5 +168,48 @@ func TestCheckBranch_RefusesPathFlagsAlongsideIt(t *testing.T) {
 		if code != 2 {
 			t.Errorf("%v: exit=%d, want 2; out=%q", args, code, stdout+stderr)
 		}
+	}
+}
+
+// The two obvious ways a sweeper gets a branch into a variable —
+// `git symbolic-ref HEAD` and `git for-each-ref` — both emit the full ref.
+// Before normalization it matched nothing, the report said holders=0, and
+// the caller read a clean bill of health for a branch an agent was in.
+func TestNormalizeBranch(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"short name", tcShortBranch, tcShortBranch, false},
+		{"what git symbolic-ref emits", branchRefPrefix + tcShortBranch, tcShortBranch, false},
+		{"a slashed branch name survives", branchRefPrefix + "loto/c1o3", "loto/c1o3", false},
+		{"refs/heads/ with nothing after it", branchRefPrefix, "", true},
+		{"a remote ref is not a local branch", "refs/remotes/origin/main", "", true},
+		{"a tag is not a branch", "refs/tags/v1", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeBranch(tt.in)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("normalizeBranch(%q) err = %v, wantErr %v", tt.in, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("normalizeBranch(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// End to end through the command: a ref shape the gate cannot resolve exits
+// 2 and never prints a ✓, because a ✓ is permission to publish.
+func TestCheckBranch_UnresolvableRefIsRefusedNotCleared(t *testing.T) {
+	stdout, stderr, code := executeCommand(tcCmdCheck, tcFlagBranch, "refs/remotes/origin/main")
+	if code != 2 {
+		t.Errorf("exit=%d, want 2", code)
+	}
+	if strings.Contains(stdout+stderr, "✓") {
+		t.Errorf("an unresolvable ref reported success: %q", stdout+stderr)
 	}
 }

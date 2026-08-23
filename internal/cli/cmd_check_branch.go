@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -47,6 +48,40 @@ const (
 //
 //nolint:gochecknoglobals // test seam, mirrors identity's own killFn precedent
 var pidLive = identity.PIDAlive
+
+// branchRefPrefix is the namespace a local branch lives in.
+const branchRefPrefix = "refs/heads/"
+
+// normalizeBranch turns what a caller typed into the short branch name
+// decideBranch matches on, or refuses.
+//
+// ‡ `refs/heads/x` is accepted because `git symbolic-ref HEAD` and
+// `git for-each-ref` — the two obvious ways a sweeper gets a branch name into
+// a variable — both emit it. Without this, the full ref matched nothing, the
+// report said "holders=0", and the caller read a clean bill of health for a
+// branch an agent was sitting in. Same failure shape as an empty --branch:
+// an input the gate does not understand must never be answered with a ✓.
+//
+// Any OTHER refs/ namespace is refused rather than trimmed. A caller passing
+// refs/remotes/origin/x probably means the local branch x, but "probably" is
+// not a basis for telling them nobody is holding it.
+func normalizeBranch(branch string) (string, error) {
+	if short, ok := strings.CutPrefix(branch, branchRefPrefix); ok {
+		if short == "" {
+			return "", errBranchUnreadable
+		}
+		return short, nil
+	}
+	if strings.HasPrefix(branch, "refs/") {
+		return "", errBranchNotLocal
+	}
+	return branch, nil
+}
+
+var (
+	errBranchUnreadable = errors.New("loto: --branch names no branch")
+	errBranchNotLocal   = errors.New("loto: --branch wants a local branch, not a full ref outside refs/heads/")
+)
 
 // decideBranch judges every checkout holding branch (a short name, e.g.
 // "loto-ovno.11") and returns the verdicts in deterministic path order.
@@ -133,6 +168,12 @@ func runCheckBranch(ctx context.Context, branch string, stdout, stderr io.Writer
 		fmt.Fprintln(stderr, "✗ --branch needs a branch name")
 		return 2
 	}
+	short, err := normalizeBranch(branch)
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return 2
+	}
+	branch = short
 	repoTop, err := repoTopForCwd(ctx)
 	if err != nil || repoTop == "" {
 		fmt.Fprintln(stderr, "✗ not inside a git repository")
