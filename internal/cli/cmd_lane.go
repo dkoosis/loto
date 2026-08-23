@@ -172,12 +172,21 @@ func runLaneCommit(rt *runtime, repoTop, ref, base, msg, closes string, targets 
 	}
 
 	// loto-5aug: the write-set the caller listed and the working tree they
-	// verified can legitimately differ — that's what a lane is for. Warn (never
-	// block) when an untracked file shares a directory with a listed one: the
-	// commit may reference a symbol that exists only there. A scan failure is
-	// non-fatal — the commit already landed on the lane ref, and turning an
-	// advisory into a way to fail every lane would cost more than it warns about.
-	if siblings, serr := lane.SiblingUntracked(rt.Ctx, repoTop, writeSet); serr != nil {
+	// verified can legitimately differ — that's what a lane is for. Warn
+	// (never block) when a file in a listed file's directory is absent from
+	// the commit's own tree: the commit may reference a symbol that exists
+	// only there. The scan is asked against commit^ — the ACTUAL parent
+	// buildLaneTree seeded from (Base, or an earlier wave's tip; commit^ is
+	// right either way, no first-wave/later-wave branch needed here) — not
+	// against Base directly, since dk's #286 review found `git status` alone
+	// missed a sibling committed at HEAD after Base: `--base main` from a
+	// checkout ahead of main is ordinary usage, and status reports relative
+	// to HEAD, not Base. A scan failure is non-fatal — the commit already
+	// landed on the lane ref, and turning an advisory into a way to fail
+	// every lane would cost more than it warns about.
+	if parent, perr := gitResolveCommit(rt.Ctx, repoTop, commit+"^"); perr != nil {
+		fmt.Fprintf(stdout, "⚠ lane sibling-scan failed ref=loto/%s commit=%s: resolve parent: %v\n", ref, commit, perr)
+	} else if siblings, serr := lane.SiblingUntracked(rt.Ctx, repoTop, parent, writeSet); serr != nil {
 		fmt.Fprintf(stdout, "⚠ lane sibling-scan failed ref=loto/%s commit=%s: %v\n", ref, commit, serr)
 	} else if len(siblings) > 0 {
 		emitLaneUnlistedSiblings(stdout, ref, commit, siblings)
@@ -293,14 +302,25 @@ func emitLaneUnlistedSiblings(w io.Writer, ref, commit string, siblings []lane.U
 	sort.Slice(siblings, func(i, j int) bool { return siblings[i].Path < siblings[j].Path })
 	fmt.Fprintf(w, "⚠ lane-unlisted-new count=%d ref=loto/%s commit=%s\n", len(siblings), ref, commit)
 	for _, s := range siblings {
-		reason := "untracked-sibling-not-in-write-set"
-		if s.Staged {
-			reason = "staged-new-sibling-not-in-write-set"
-		}
-		fmt.Fprintf(w, "⚠ target=%s dir=%s reason=%s\n", s.Path, s.Dir, reason)
+		fmt.Fprintf(w, "⚠ target=%s dir=%s reason=%s\n", s.Path, s.Dir, siblingReason(s.Origin))
 	}
-	fmt.Fprintf(w, "ℹ a new file (untracked or staged, either way absent from every commit) sharing a directory with a listed file may hold a symbol commit %s references but never carries; list it (git add first if untracked), delete it, or confirm it's unrelated\n", commit)
+	fmt.Fprintf(w, "ℹ a file this commit will not carry (untracked, staged, or committed after --base) shares a directory with a listed file and may hold a symbol commit %s references but never carries; list it (git add first if untracked), delete it, or confirm it's unrelated\n", commit)
 	fmt.Fprintln(w, "ℹ for a stronger check: loto lane ... --build")
+}
+
+// siblingReason maps a SiblingOrigin to its row's reason token — an explicit
+// case per value (exhaustive-checked) so a new SiblingOrigin can't silently
+// fall through to the wrong wording.
+func siblingReason(o lane.SiblingOrigin) string {
+	switch o {
+	case lane.OriginStaged:
+		return "staged-new-sibling-not-in-write-set"
+	case lane.OriginCommittedAfterParent:
+		return "committed-after-base-sibling-not-in-write-set"
+	case lane.OriginUntracked:
+		return "untracked-sibling-not-in-write-set"
+	}
+	return "untracked-sibling-not-in-write-set"
 }
 
 // emitLaneBuildFailed renders a --build failure (loto-5aug thorough path): the

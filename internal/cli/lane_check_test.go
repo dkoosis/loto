@@ -119,6 +119,53 @@ func TestLane_WarnsStagedNewSiblingAndNamesItStaged(t *testing.T) {
 	}
 }
 
+// TestLane_WarnsSiblingCommittedAfterBase is dk's #286 follow-up on commit
+// 145a550 (Codex, sibling.go:95): `git status` reports relative to HEAD, not
+// to --base. A checkout AHEAD of --base is ordinary usage — parallel.go here
+// lands as a normal, fully committed change on HEAD, so `git status` shows it
+// clean; the round-2 fix (untracked+staged only) would have missed it
+// entirely. It is still absent from `base`'s tree, so the lane commit (built
+// from base, not HEAD) omits it exactly like the untracked/staged cases.
+func TestLane_WarnsSiblingCommittedAfterBase(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	base := commitAllInRepo(t, repo, "init")
+
+	if err := os.MkdirAll(filepath.Join(repo, tcDirFerret), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, tcFileMain), []byte("package main\n\nfunc main() { ParallelCmd() }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := Run([]string{tcCmdLock, tcFileMain, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock %s failed", tcFileMain)
+	}
+	if err := os.WriteFile(filepath.Join(repo, tcFileParallel), []byte("package main\n\nfunc ParallelCmd() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Commit ONLY parallel.go to HEAD, ahead of base — main.go (locked, about
+	// to be the lane's write-set) stays uncommitted on disk. `git add -A`
+	// would sweep main.go in too, so add the one file by name.
+	if out, err := exec.Command("git", "-C", repo, "add", tcFileParallel).CombinedOutput(); err != nil {
+		t.Fatalf("git add %s: %v\n%s", tcFileParallel, err, out)
+	}
+	if out, err := exec.Command("git", "-C", repo, "commit", "-qm", "feat: add parallel.go (lands on HEAD, not on base)").CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+
+	var out, errB bytes.Buffer
+	code := Run([]string{tcCmdLane, tcFileMain, tcFlagRef, "ferret-ahead", tcFlagBase, base, "-m", tcMsgRegister, tcFlagCloses, tcClosesNone}, &out, &errB)
+	if code != 0 {
+		t.Fatalf("lane exit %d; out=%q err=%q", code, out.String(), errB.String())
+	}
+	if !strings.Contains(out.String(), "⚠ lane-unlisted-new count=1") {
+		t.Errorf("missing sibling-warning triage line: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "reason=committed-after-base-sibling-not-in-write-set") {
+		t.Errorf("row must name the sibling as committed-after-base: %q", out.String())
+	}
+}
+
 // TestLane_SilentOnUnrelatedUntrackedFileElsewhere is the false-alarm guard at
 // the CLI layer: an untracked file in a directory the write-set never touches
 // must not warn. A false alarm on a legitimate lane is nearly as expensive as
