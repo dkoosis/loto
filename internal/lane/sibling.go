@@ -8,44 +8,49 @@ import (
 	"strings"
 )
 
-// UnlistedSibling is an untracked file living in the same directory as a
-// write-set entry, but absent from the write-set itself.
+// UnlistedSibling is a file new to the repo's history — untracked or freshly
+// staged, either way absent from every commit — living in the same directory
+// as a write-set entry, but absent from the write-set itself.
 type UnlistedSibling struct {
-	// Path is the untracked file, repo-relative and slash-separated.
+	// Path is the file, repo-relative and slash-separated.
 	Path string
 	// Dir is the shared directory (repo-relative), i.e. path.Dir(Path).
 	Dir string
 }
 
-// untrackedStatusCode is the two-letter `git status --porcelain=v1` code for a
-// file git has never seen — the only code SiblingUntracked matches.
-const untrackedStatusCode = "??"
-
-// SiblingUntracked finds untracked files (never `git add`-ed, so absent from
-// every commit and from any lane's write-set) that live in the SAME directory
-// as a writeSet entry.
+// SiblingUntracked finds files new to the repo's history — never committed,
+// whether or not they have since been `git add`-ed — that live in the SAME
+// directory as a writeSet entry.
 //
 // This is the cheap half of loto-5aug: `loto lane` commits an exact,
 // hand-listed write-set by plumbing — the working tree the author verified
 // and the tree the commit records can legitimately differ, that's the whole
 // point of a lane. The gap: nothing said so. The incident this reproduces —
 // cmd/ferret/main.go registered a command whose body lived in
-// cmd/ferret/parallel.go, an untracked leftover from an abandoned branch; the
-// lane listed main.go, not parallel.go, and the commit carried a reference to
+// cmd/ferret/parallel.go, a leftover from an abandoned branch; the lane
+// listed main.go, not parallel.go, and the commit carried a reference to
 // ParallelCmd that existed nowhere in its own tree. `make check` on the
 // working tree was green and correct; the commit never was.
 //
-// Scope is deliberately narrow — untracked only, directory-adjacency only, no
-// compiler:
-//   - Untracked, not "any dirty file in the directory": two lanes routinely
-//     edit different EXISTING files in one package concurrently (this repo's
-//     whole model — parallel sessions, disjoint write-sets, one shared tree).
-//     A peer's in-flight edit to a tracked neighbor never reaches this commit
-//     — buildLaneTree seeds the index from the PARENT, so an unlisted tracked
-//     file's committed content is the parent's, unaffected by what's dirty on
-//     disk. A brand-new file nobody has ever committed is the narrow,
-//     high-signal case: it is exactly what an abandoned-branch leftover looks
-//     like, and normal concurrent editing of existing files never produces it.
+// Scope is deliberately narrow — new-to-history only, directory-adjacency
+// only, no compiler:
+//   - New to history ("??" untracked OR "A?" staged-new), not "any dirty file
+//     in the directory": two lanes routinely edit different EXISTING,
+//     already-committed files in one package concurrently (this repo's whole
+//     model — parallel sessions, disjoint write-sets, one shared tree). A
+//     peer's in-flight edit to a tracked neighbor never reaches this commit —
+//     buildLaneTree seeds the index from the PARENT COMMIT, so an unlisted
+//     tracked file's committed content is the parent's, unaffected by what's
+//     dirty on disk or staged in the shared index. Staging the leftover with
+//     `git add` changes nothing about that: a staged-but-uncommitted NEW file
+//     is exactly as absent from buildLaneTree's parent-seeded tree as an
+//     untracked one, so "A" (added-to-index) is matched right alongside "??"
+//     (codex #286 finding 1 — a single `git add` on the leftover used to
+//     silence this check with no change to whether the commit builds). "M" /
+//     an "M" on an already-tracked file's Y side stays excluded, deliberately
+//     — that is the routine concurrent-edit-of-an-existing-file shape above,
+//     not a brand-new leftover, and warning on it would fire constantly in
+//     this repo's normal operating mode.
 //   - Directory adjacency, not import/symbol analysis: Go's directory-is-package
 //     convention makes "same directory" a free, language-native proxy for "same
 //     package" with no parse step. It over-warns for a same-dir file the listed
@@ -67,13 +72,30 @@ func SiblingUntracked(ctx context.Context, repoTop string, writeSet []string) ([
 		listedDirs[path.Dir(p)] = true
 	}
 
+	fields := strings.Split(strings.TrimSuffix(out, "\x00"), "\x00")
 	var siblings []UnlistedSibling
-	for entry := range strings.SplitSeq(strings.TrimSuffix(out, "\x00"), "\x00") {
-		// Untracked entries are exactly "?? <path>" — porcelain=v1 has no rename
-		// payload for "??" (renames only apply to tracked R/C codes), so no
-		// second NUL-delimited field to skip here.
-		p, ok := strings.CutPrefix(entry, untrackedStatusCode+" ")
-		if !ok || listed[p] {
+	for i := 0; i < len(fields); i++ {
+		entry := fields[i]
+		if len(entry) < 3 {
+			continue
+		}
+		x, y := entry[0], entry[1]
+		// A rename/copy entry carries a second NUL-delimited field (the
+		// original path) immediately after this one in -z output — consume
+		// and skip it. Neither code this function matches ("??", "A?") is
+		// ever a rename/copy, so this branch only ever fires for entries this
+		// loop would skip anyway; it exists so a rename's ORIGINAL path can
+		// never be misread as its own status line on the next iteration (an
+		// old path starting with 'A' would otherwise spoof "added").
+		if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
+			i++
+			continue
+		}
+		if entry[:2] != "??" && x != 'A' {
+			continue
+		}
+		p := entry[3:]
+		if listed[p] {
 			continue
 		}
 		if dir := path.Dir(p); listedDirs[dir] {

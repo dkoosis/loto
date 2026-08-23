@@ -6,12 +6,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"loto/internal/domain"
 )
 
 const (
 	tcDirFerret    = "cmd/ferret"
 	tcFileMain     = "cmd/ferret/main.go"
 	tcFileParallel = "cmd/ferret/parallel.go"
+	tcMsgRegister  = "cmd/ferret: register command"
 )
 
 // lane_check_test.go is the executable spec for loto-5aug: `loto lane` commits
@@ -50,7 +53,7 @@ func TestLane_WarnsUnlistedUntrackedSiblingInSamePackage(t *testing.T) {
 	}
 
 	var out, errB bytes.Buffer
-	code := Run([]string{tcCmdLane, tcFileMain, tcFlagRef, "ferret-1", tcFlagBase, base, "-m", "cmd/ferret: register command", tcFlagCloses, tcClosesNone}, &out, &errB)
+	code := Run([]string{tcCmdLane, tcFileMain, tcFlagRef, "ferret-1", tcFlagBase, base, "-m", tcMsgRegister, tcFlagCloses, tcClosesNone}, &out, &errB)
 	if code != 0 {
 		t.Fatalf("lane exit %d; out=%q err=%q", code, out.String(), errB.String())
 	}
@@ -132,7 +135,7 @@ func TestLane_BuildFlagCatchesUndefinedSymbolFromUnlistedFile(t *testing.T) {
 	// here — the lane's write-set (main.go alone) must fail to build on its own.
 
 	var out, errB bytes.Buffer
-	code := Run([]string{tcCmdLane, tcFileMain, tcFlagRef, "ferret-build", tcFlagBase, base, "-m", "cmd/ferret: register command", tcFlagCloses, tcClosesNone, "--build"}, &out, &errB)
+	code := Run([]string{tcCmdLane, tcFileMain, tcFlagRef, "ferret-build", tcFlagBase, base, "-m", tcMsgRegister, tcFlagCloses, tcClosesNone, "--build"}, &out, &errB)
 	if code != 1 {
 		t.Fatalf("lane --build exit %d, want 1; out=%q err=%q", code, out.String(), errB.String())
 	}
@@ -141,5 +144,63 @@ func TestLane_BuildFlagCatchesUndefinedSymbolFromUnlistedFile(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "undefined: ParallelCmd") && !strings.Contains(out.String(), "undefined:") {
 		t.Errorf("build output does not name the undefined symbol: %q", out.String())
+	}
+}
+
+// TestLane_TaintedReportSuppressesSiblingWarning pins codex #286 finding 3:
+// the post-commit lock re-assertion must run BEFORE the sibling scan, not
+// after. The scan shells to `git status`, which can burn up to gitTimeout on
+// a wedged repo; sampling lock state only after that window would let a lease
+// that expired DURING the scan report lane-tainted for a transition that
+// provably could not have touched the recorded tree. This test proves the
+// ORDER, not the timing (a synchronous lock-drop is enough): with an
+// untracked sibling present AND a lock lost mid-flight, the output must show
+// ONLY the tainted report — no ⚠ lane-unlisted-new line. Before the fix (scan
+// first, reassert after), both lines appeared; the operator's actual next
+// move here is to discard the tainted ref, making an advisory about its
+// contents moot.
+func TestLane_TaintedReportSuppressesSiblingWarning(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	base := commitAllInRepo(t, repo, "init")
+
+	if err := os.MkdirAll(filepath.Join(repo, tcDirFerret), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, tcFileMain), []byte("package main\n\nfunc main() { ParallelCmd() }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := Run([]string{tcCmdLock, tcFileMain, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock %s failed", tcFileMain)
+	}
+	// The untracked sibling the scan WOULD warn about, if it ran.
+	if err := os.WriteFile(filepath.Join(repo, tcFileParallel), []byte("package main\n\nfunc ParallelCmd() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a peer reclaiming the lock between the pre-assert and staging —
+	// same seam TestLane_PostAssertCatchesLostLock (cmd_lane_test.go) uses.
+	laneAfterPreAssert = func(rt *runtime) {
+		tgt, err := domain.Canonicalize(tcFileMain)
+		if err != nil {
+			t.Errorf("hook canonicalize: %v", err)
+			return
+		}
+		if _, err := rt.Store.ReleaseLocks(rt.Ctx, []domain.Target{tgt}, domain.AgentUUID(rt.Agent.UUID), rt.liveProbe()); err != nil {
+			t.Errorf("hook release: %v", err)
+		}
+	}
+	defer func() { laneAfterPreAssert = nil }()
+
+	var out, errB bytes.Buffer
+	code := Run([]string{tcCmdLane, tcFileMain, tcFlagRef, "ferret-taint", tcFlagBase, base, "-m", tcMsgRegister, tcFlagCloses, tcClosesNone}, &out, &errB)
+	if code != 1 {
+		t.Fatalf("lane exit %d, want 1 (tainted); out=%q err=%q", code, out.String(), errB.String())
+	}
+	if !strings.HasPrefix(out.String(), "✗ lane-tainted ") {
+		t.Errorf("missing tainted triage line: %q", out.String())
+	}
+	if strings.Contains(out.String(), "lane-unlisted-new") {
+		t.Errorf("sibling scan ran despite the commit being tainted (ordering regression): %q", out.String())
 	}
 }

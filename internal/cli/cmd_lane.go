@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -145,22 +146,17 @@ func runLaneCommit(rt *runtime, repoTop, ref, base, msg, closes string, targets 
 		return 3
 	}
 
-	// loto-5aug: the write-set the caller listed and the working tree they
-	// verified can legitimately differ — that's what a lane is for. Warn (never
-	// block) when an untracked file shares a directory with a listed one: the
-	// commit may reference a symbol that exists only there. A scan failure is
-	// non-fatal — the commit already landed on the lane ref, and turning an
-	// advisory into a way to fail every lane would cost more than it warns about.
-	if siblings, serr := lane.SiblingUntracked(rt.Ctx, repoTop, writeSet); serr != nil {
-		fmt.Fprintf(stdout, "⚠ lane sibling-scan failed ref=loto/%s commit=%s: %v\n", ref, commit, serr)
-	} else if len(siblings) > 0 {
-		emitLaneUnlistedSiblings(stdout, ref, commit, siblings)
-	}
-
 	// Post-assert: re-check the same locks are still held, live, exclusive, and
 	// the SAME lock instance (acquire-time unchanged). A discrepancy means the
 	// hold did not span staging — the commit may carry a peer's edit, so report
 	// the lane tainted and point at the ref to discard.
+	//
+	// This runs BEFORE the sibling scan below, not after (codex #286 finding 3):
+	// the scan shells out to `git status`, which can burn up to gitTimeout (30s)
+	// on a wedged repo. Sampling lock state only after that window would let a
+	// lease that expired DURING the scan — after staging genuinely finished —
+	// report lane-tainted for a transition that provably could not have touched
+	// the recorded tree.
 	ec.Now = time.Now()
 	tainted, err := reassertLocksHeld(rt, ec, targets, owner, heldAt)
 	if err != nil {
@@ -175,6 +171,18 @@ func runLaneCommit(rt *runtime, repoTop, ref, base, msg, closes string, targets 
 		return 1
 	}
 
+	// loto-5aug: the write-set the caller listed and the working tree they
+	// verified can legitimately differ — that's what a lane is for. Warn (never
+	// block) when an untracked file shares a directory with a listed one: the
+	// commit may reference a symbol that exists only there. A scan failure is
+	// non-fatal — the commit already landed on the lane ref, and turning an
+	// advisory into a way to fail every lane would cost more than it warns about.
+	if siblings, serr := lane.SiblingUntracked(rt.Ctx, repoTop, writeSet); serr != nil {
+		fmt.Fprintf(stdout, "⚠ lane sibling-scan failed ref=loto/%s commit=%s: %v\n", ref, commit, serr)
+	} else if len(siblings) > 0 {
+		emitLaneUnlistedSiblings(stdout, ref, commit, siblings)
+	}
+
 	if build {
 		res, verr := lane.Verify(rt.Ctx, repoTop, commit, []string{"go", "build", "./..."})
 		if verr != nil {
@@ -182,7 +190,7 @@ func runLaneCommit(rt *runtime, repoTop, ref, base, msg, closes string, targets 
 			return 3
 		}
 		if !res.Passed {
-			emitLaneBuildFailed(stdout, ref, commit, res.Output)
+			emitLaneBuildFailed(rt.Ctx, stdout, stderr, repoTop, ref, base, commit, res.Output)
 			return 1
 		}
 	}
@@ -287,12 +295,77 @@ func emitLaneUnlistedSiblings(w io.Writer, ref, commit string, siblings []lane.U
 // emitLaneBuildFailed renders a --build failure (loto-5aug thorough path): the
 // commit already landed on the lane ref but `go build ./...` failed against it
 // in a throwaway worktree, so the author learns before push rather than from CI.
-func emitLaneBuildFailed(w io.Writer, ref, commit, output string) {
+// emitLaneBuildFailed renders a --build failure (loto-5aug thorough path): the
+// commit already landed on the lane ref but `go build ./...` failed against it
+// in a throwaway worktree, so the author learns before push rather than from CI.
+//
+// The fix block is a compare-and-swap against commit (the ref's known-bad
+// current value), never a bare `-d` delete: resolveParent makes a lane's Nth
+// wave a child of its (N-1)th, so refs/heads/loto/<ref> can carry earlier
+// SUCCESSFUL waves this failed commit is stacked on top of. An unconditional
+// delete would erase those too (codex #286 finding 2) — a fix block that
+// loses work is worse than none, and an agent under time pressure will paste
+// it without checking. laneBuildFailRemediation resolves the right shape; if
+// it can't (git failure resolving parent/base), this prints an explicit "no
+// safe command" notice rather than ever guessing wrong.
+func emitLaneBuildFailed(ctx context.Context, w, errw io.Writer, repoTop, ref, base, commit, output string) {
 	fmt.Fprintf(w, "✗ lane-build-failed ref=loto/%s commit=%s\n", ref, commit)
 	if body := strings.TrimRight(output, "\n"); body != "" {
 		fmt.Fprintln(w, body)
 	}
-	fmt.Fprintf(w, "```bash\ngit update-ref -d refs/heads/loto/%s\n```\n", ref)
+	fixCmd, err := laneBuildFailRemediation(ctx, repoTop, ref, base, commit)
+	if err != nil {
+		fmt.Fprintf(errw, "⚠ lane build-fail remediation: %v\n", err)
+		fmt.Fprintf(w, "ℹ could not compute a safe fix command; inspect refs/heads/loto/%s by hand before deleting it — it may carry earlier successful waves\n", ref)
+		return
+	}
+	fmt.Fprintf(w, "```bash\n%s\n```\n", fixCmd)
+}
+
+// laneBuildFailRemediation returns the compare-and-swap `git update-ref`
+// command that safely undoes a failed --build commit: reset to the commit's
+// own parent when the ref carried a prior wave (preserving it), or an
+// outright — still CAS-guarded — delete only when this was genuinely the
+// first wave (parent equals the lane's own Base, so nothing preceded it on
+// the ref). Returns an error, never a guess, if parent or base cannot be
+// resolved — a wrong guess here is a silent data-loss command.
+func laneBuildFailRemediation(ctx context.Context, repoTop, ref, base, commit string) (string, error) {
+	parent, err := gitResolveCommit(ctx, repoTop, commit+"^")
+	if err != nil {
+		return "", fmt.Errorf("resolve %s^: %w", commit, err)
+	}
+	baseSHA, err := gitResolveCommit(ctx, repoTop, base+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("resolve base %q: %w", base, err)
+	}
+	refName := "refs/heads/loto/" + ref
+	if parent == baseSHA {
+		// First wave: nothing preceded this commit on the ref. Deleting
+		// restores the pre-commit state (the ref did not exist), not merely
+		// "some earlier tip" — still CAS-guarded against commit.
+		return fmt.Sprintf("git update-ref -d %s %s", refName, commit), nil
+	}
+	// A prior successful wave sits at parent; reset to it instead of deleting
+	// so that wave survives. CAS-guarded: a no-op if something else already
+	// moved the ref off commit.
+	return fmt.Sprintf("git update-ref %s %s %s", refName, parent, commit), nil
+}
+
+// gitResolveCommit resolves rev to a commit SHA in repoTop, or an error if it
+// does not resolve. gitTimeout (runtime.go) bounds it against a wedged repo.
+func gitResolveCommit(ctx context.Context, repoTop, rev string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+	c := exec.CommandContext(cctx, "git", "rev-parse", "--verify", "--quiet", rev)
+	c.Dir = repoTop
+	out, err := c.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse %s: %w", rev, err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // resolveLaneWriteSet canonicalizes each arg to a repo-relative target and
