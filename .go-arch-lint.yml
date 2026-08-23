@@ -5,6 +5,16 @@ exclude:
   - .sandbox
   - bin
   - docs
+  # Agent worktrees (loto-t5ns). Worktree-isolated agents check out at
+  # .claude/worktrees/agent-<id>/ INSIDE the repo, so without this the linter
+  # walks a full copy of the tree per agent and reports every file in it as
+  # unmatched — 100 findings, zero of them real, observed with three agents
+  # running. arch failure is a hard non-zero, so `make check` stayed red for
+  # the whole duration of any multi-agent run: the one signal that says "safe
+  # to open a PR" was unavailable exactly when several PRs were in flight.
+  # Scoped to .claude, NOT a blanket mute — scripts/arch_worktree_test.sh
+  # proves a real violation in internal/ is still reported.
+  - .claude
   # bugclasses pack (ccp-sbp): ruleguard DSL, not part of the layered graph.
   - .golangci-rules
 
