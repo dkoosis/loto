@@ -20,7 +20,7 @@ include .sandbox/lib/Makefile.cross.mk
 
 .PHONY: help scan check audit deploy report report-human \
         vet lint arch test race demo demo-v vuln dupl nilcheck stress scriptcheck \
-        selfcheck build install tidy clean hooks
+        docscheck selfcheck build install tidy clean hooks
 
 BIN_DIR := bin
 BIN     := $(BIN_DIR)/loto
@@ -60,7 +60,7 @@ help: ## Show this help
 		/^## [^-]/ { printf "\n%s\n", substr($$0, 4) } \
 		/^[a-zA-Z0-9_-]+:.*?## / { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-check: vet lint arch test build scriptcheck selfcheck ## Full repo: vet + lint + arch + test + build + scripts + conform
+check: vet lint arch test build docscheck scriptcheck selfcheck ## Full repo: vet + lint + arch + test + build + docs + scripts + conform
 	@echo "=== check pass ==="
 
 # Dogfood the fleet gate (sd-th5.15): conform is pinned as a go.mod tool
@@ -68,8 +68,16 @@ check: vet lint arch test build scriptcheck selfcheck ## Full repo: vet + lint +
 selfcheck: ## Run conform (fleet SDLC checker) against this repo
 	go tool conform
 
+# Catches README drift against the Makefile/CLI it describes (loto-qo0y):
+# a documented `make <target>` that no longer exists, a `# go ...` comment
+# whose claimed flags aren't in the target's actual recipe, or a documented
+# `loto <cmd>` no longer in `loto --help`. Runs after `build` so bin/loto
+# exists for the command check.
+docscheck: ## README's documented commands still match the Makefile/CLI
+	@bash scripts/docs_check.sh --loto-bin $(BIN)
+
 scriptcheck: ## Test the build-tooling shell scripts (scripts/*_test.sh)
-	@bash scripts/gate_test.sh
+	@for t in scripts/*_test.sh; do bash "$$t"; done
 
 audit: check race vuln dupl nilcheck demo ## Exhaustive: +race +vuln +dupl +nilcheck +demo
 	@echo "=== audit pass ==="
