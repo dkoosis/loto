@@ -25,6 +25,13 @@ func scanOf(obs ...gate.Observation) gate.Scan {
 	return gate.Scan{Baseline: tcBaseline, Observations: obs}
 }
 
+// scanFrom is scanOf for a named checkout — the linked-worktree half of the
+// sharing the store documents (store.go: "two worktrees of one repo share a
+// store").
+func scanFrom(worktree string, obs ...gate.Observation) gate.Scan {
+	return gate.Scan{Baseline: tcBaseline, Worktree: worktree, Observations: obs}
+}
+
 func liveEval() domain.EvalContext {
 	return domain.EvalContext{Now: time.Now(), Live: liveProbe}
 }
@@ -153,7 +160,7 @@ func TestReconcileScan_ViolationIsStickyAcrossALaterLease(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	open, err := s.UnresolvedViolationPaths(ctx)
+	open, err := s.UnresolvedViolationPaths(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,5 +392,217 @@ func TestReconcileScan_DeletionIsAViolationWithNoFingerprint(t *testing.T) {
 	}
 	if res.Recorded[0].Fingerprint != "" {
 		t.Errorf("fingerprint = %q, want empty for a deletion", res.Recorded[0].Fingerprint)
+	}
+}
+
+// A clean pass from one checkout must not resolve another checkout's
+// violations. The store is shared across worktrees by design, so a row that
+// cannot say WHICH tree it came from lets a dispatch worktree launder the
+// main checkout's contamination away while the rogue content is still on
+// disk (Codex #276 round 2, loto-nper).
+func TestReconcileScan_AnotherWorktreesCleanPassLeavesTheRowOpen(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	if _, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcRogueGo, Fingerprint: tcSHA1}), liveEval()); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.ReconcileScan(ctx, scanFrom("agent-b"), liveEval())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Resolved != 0 {
+		t.Errorf("a clean pass from agent-b resolved %d row(s) belonging to the primary worktree", res.Resolved)
+	}
+	open, err := s.UnresolvedViolations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 || open[0].PathCanonical != tcRogueGo {
+		t.Fatalf("primary worktree's violation gone: %+v", open)
+	}
+	// ...and the primary's own clean pass still resolves it, so scoping did
+	// not simply disable auto-resolution.
+	res, err = s.ReconcileScan(ctx, scanOf(), liveEval())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Resolved != 1 {
+		t.Errorf("primary's own clean pass resolved %d, want 1", res.Resolved)
+	}
+}
+
+// Each checkout keeps its own open row for the same path. Before the open
+// index carried worktree, the second insert hit the unique index and was
+// dropped by INSERT OR IGNORE — one tree's contamination going unrecorded
+// because another tree got there first (loto-nper).
+func TestRecordViolations_TwoWorktreesEachHoldARowForOnePath(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	if _, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcRogueGo, Fingerprint: tcSHA1}), liveEval()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReconcileScan(ctx, scanFrom("agent-b", gate.Observation{Path: tcRogueGo, Fingerprint: tcSHA2}), liveEval()); err != nil {
+		t.Fatal(err)
+	}
+	open, err := s.UnresolvedViolations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 2 {
+		t.Fatalf("want one open row per worktree, got %d: %+v", len(open), open)
+	}
+	got := map[string]string{}
+	for i := range open {
+		got[open[i].Worktree] = open[i].Fingerprint
+	}
+	if got[""] != tcSHA1 || got["agent-b"] != tcSHA2 {
+		t.Errorf("rows not attributed per worktree: %+v", got)
+	}
+}
+
+// Admission's intersect is scoped too. Without it, agent-b's contamination
+// would refuse the primary checkout's legitimate submit on a path whose
+// content the primary never touched (loto-nper).
+func TestUnresolvedViolationPaths_ScopedToTheAskingCheckout(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	if _, err := s.ReconcileScan(ctx, scanFrom("agent-b", gate.Observation{Path: tcRogueGo, Fingerprint: tcSHA1}), liveEval()); err != nil {
+		t.Fatal(err)
+	}
+	primary, err := s.UnresolvedViolationPaths(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, blocked := primary[tcRogueGo]; blocked {
+		t.Errorf("agent-b's violation blocks the primary checkout's submit: %+v", primary)
+	}
+	b, err := s.UnresolvedViolationPaths(ctx, "agent-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, blocked := b[tcRogueGo]; !blocked {
+		t.Errorf("agent-b's own violation does not block agent-b: %+v", b)
+	}
+}
+
+// A resolve that commits AFTER the scan read acks and BEFORE it inserts must
+// still win: the operator was told the violation was cleared, and a row that
+// reopens itself with no explanation is worse than no resolve at all (Codex
+// #276 round 2, loto-njaj).
+func TestRecordViolations_AckCommittedAfterTheSnapshotStillSuppressesTheInsert(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	obs := ObservedViolation{PathCanonical: tcRogueGo, Fingerprint: tcSHA1, Baseline: tcBaseline, LeaseState: LeaseStateUnleased}
+
+	// 1. The scan reads acks: nothing is acked for this path yet.
+	acked, err := s.ackedFingerprints(ctx, []string{tcRogueGo}, tcBaseline, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acked) != 0 {
+		t.Fatalf("precondition: want an empty ack snapshot, got %+v", acked)
+	}
+
+	// 2. Concurrently, the operator records and resolves this exact content.
+	rec, err := s.RecordViolations(ctx, []ObservedViolation{obs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec) != 1 {
+		t.Fatalf("seed insert recorded %d rows, want 1", len(rec))
+	}
+	if err := s.ResolveViolation(ctx, rec[0].ID, "legitimate, staying"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. The scan proceeds on its stale view and tries to insert anyway.
+	again, err := s.RecordViolations(ctx, []ObservedViolation{obs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("stale ack snapshot reopened a resolved violation: %+v", again)
+	}
+	open, err := s.UnresolvedViolations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 0 {
+		t.Errorf("violation is open again after a successful resolve: %+v", open)
+	}
+}
+
+// The re-check is keyed on content, not path: a DIFFERENT fingerprint on an
+// acked path is a new mutation and must still be recorded.
+func TestRecordViolations_AckReCheckDoesNotSwallowANewMutation(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	rec, err := s.RecordViolations(ctx, []ObservedViolation{
+		{PathCanonical: tcRogueGo, Fingerprint: tcSHA1, Baseline: tcBaseline, LeaseState: LeaseStateUnleased},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ResolveViolation(ctx, rec[0].ID, "legitimate, staying"); err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.RecordViolations(ctx, []ObservedViolation{
+		{PathCanonical: tcRogueGo, Fingerprint: tcSHA2, Baseline: tcBaseline, LeaseState: LeaseStateUnleased},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again) != 1 {
+		t.Fatalf("new content on an acked path was swallowed: %+v", again)
+	}
+}
+
+// A DB carrying the violations table's first shape gets the worktree column
+// and the widened open-path index. The old index is not merely redundant:
+// while it stands, two checkouts cannot each hold an open row for one path,
+// so the second one's contamination is silently dropped (loto-nper).
+func TestMigrate_ScopesTheOpenViolationIndexToWorktree(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	// Rewind to the pre-worktree shape: the old index back, the new one gone.
+	for _, stmt := range []string{
+		`DROP INDEX IF EXISTS idx_violations_open_path_wt`,
+		`CREATE UNIQUE INDEX idx_violations_open_path ON violations(path_canonical) WHERE resolved_at IS NULL`,
+	} {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("rewind %q: %v", stmt, err)
+		}
+	}
+	pending, err := ensureViolationsOpenIndexScoped(ctx, s.db, false)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if !pending {
+		t.Fatal("probe says nothing to do on a pre-worktree index")
+	}
+	if _, err := ensureViolationsOpenIndexScoped(ctx, s.db, true); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	var stale, scoped int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_violations_open_path'`).Scan(&stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_violations_open_path_wt'`).Scan(&scoped); err != nil {
+		t.Fatal(err)
+	}
+	if stale != 0 || scoped != 1 {
+		t.Fatalf("index state after migrate: stale=%d scoped=%d, want 0/1", stale, scoped)
+	}
+	// Re-probing is a no-op — the steady-state fast path depends on it.
+	if pending, err := ensureViolationsOpenIndexScoped(ctx, s.db, false); err != nil || pending {
+		t.Errorf("re-probe pending=%v err=%v, want false/nil", pending, err)
 	}
 }

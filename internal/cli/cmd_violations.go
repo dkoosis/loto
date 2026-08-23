@@ -32,6 +32,11 @@ Reverting the change (git checkout refs/loto/integration -- <path>) resolves
 it automatically on the next scan. Use resolve for a change that is
 legitimate and staying.
 
+A scan speaks only for the checkout it runs in. Worktrees of one repo share
+one store, so a row records which tree it was seen in (worktree=<name> on the
+listing, absent for the primary one), and a clean pass from one checkout never
+resolves another's.
+
 examples:
   loto violations
   loto violations scan
@@ -229,7 +234,7 @@ func unresolvedViolationRows(rt *runtime) ([]render.ViolationRow, error) {
 		v := &vs[i]
 		rows[i] = render.ViolationRow{
 			ID: v.ID, Path: v.PathCanonical, ObservedAt: time.Unix(0, v.ObservedAt),
-			LeaseState: v.LeaseState, Fingerprint: v.Fingerprint,
+			LeaseState: v.LeaseState, Fingerprint: v.Fingerprint, Worktree: v.Worktree,
 		}
 	}
 	return rows, nil

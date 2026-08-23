@@ -16,6 +16,12 @@ type ViolationRow struct {
 	ObservedAt  time.Time
 	LeaseState  string
 	Fingerprint string
+	// Worktree is the checkout the violation was observed in, "" for the
+	// primary one. Rendered only when non-empty: two worktrees of one repo
+	// can each hold an open row for the same path, and without the name the
+	// operator cannot tell which tree to go clean (loto-nper). Omitting it in
+	// the single-checkout case keeps that output exactly as it was.
+	Worktree string
 }
 
 // EmitViolations renders the full `loto violations` report: triage count
@@ -34,8 +40,8 @@ func EmitViolations(w io.Writer, rows []ViolationRow) {
 	sortViolationRows(rows)
 	fmt.Fprintf(w, "✗ violations count=%d\n", len(rows))
 	for _, r := range rows {
-		fmt.Fprintf(w, "✗ path=%s id=%s state=%s observed=%s\n",
-			r.Path, r.ID, r.LeaseState, r.ObservedAt.UTC().Format(time.RFC3339))
+		fmt.Fprintf(w, "✗ path=%s id=%s state=%s observed=%s%s\n",
+			r.Path, r.ID, r.LeaseState, r.ObservedAt.UTC().Format(time.RFC3339), worktreeField(r.Worktree))
 	}
 	fmt.Fprintln(w, "```bash")
 	fmt.Fprintln(w, "git diff refs/loto/integration -- <path>   # look before you clear it")
@@ -68,6 +74,20 @@ func sortViolationRows(rows []ViolationRow) {
 		if rows[i].Path != rows[j].Path {
 			return rows[i].Path < rows[j].Path
 		}
+		if rows[i].Worktree != rows[j].Worktree {
+			return rows[i].Worktree < rows[j].Worktree
+		}
 		return rows[i].ID < rows[j].ID
 	})
+}
+
+// worktreeField renders the checkout a row belongs to, and nothing at all for
+// the primary one. A `worktree=` on every line of a single-checkout repo
+// would be a field that never varies — noise the report's reader has to skip
+// (.claude/rules/design.md: no repeated field names per row).
+func worktreeField(worktree string) string {
+	if worktree == "" {
+		return ""
+	}
+	return " worktree=" + worktree
 }

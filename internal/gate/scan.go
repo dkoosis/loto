@@ -31,6 +31,11 @@ var ErrHashCountMismatch = errors.New("gate: scan: hash-object returned the wron
 // violation as reverted. The caller owns that distinction (Codex #276 P1).
 var ErrNoBaseline = errors.New("gate: scan: refs/loto/integration does not resolve")
 
+// ErrGitDirPair reports rev-parse returning something other than the two dir
+// lines WorktreeID asks for — a shape mismatch that would otherwise be read
+// as a worktree identity.
+var ErrGitDirPair = errors.New("gate: scan: rev-parse did not return both git dirs")
+
 // Observation is one worktree path whose content no longer matches the
 // integration ref. It is a raw sensor reading, NOT a violation: the sensor
 // cannot see lease state, and a leaseholder editing its own leased file is
@@ -101,7 +106,49 @@ func ScanWorktree(ctx context.Context, repoTop string) (Scan, error) {
 		obs = append(obs, Observation{Path: p, Deleted: true})
 	}
 	sort.Slice(obs, func(i, j int) bool { return obs[i].Path < obs[j].Path })
-	return Scan{Baseline: baseline, Observations: obs}, nil
+	wt, err := WorktreeID(ctx, repoTop)
+	if err != nil {
+		return Scan{}, err
+	}
+	return Scan{Baseline: baseline, Worktree: wt, Observations: obs}, nil
+}
+
+// WorktreeID names the checkout a reading was taken from: "" for the repo's
+// primary worktree, otherwise git's own name for the linked one.
+//
+// ‡ Needed because the store is SHARED across worktrees by design
+// (internal/store/store.go: "StateDir keys the DB by origin-remote slug, so
+// two worktrees of one repo share a store"), while a whole-tree scan speaks
+// only for the tree it walked. Without this, a clean scan from one checkout
+// reads as proof that another checkout's contamination was reverted — the
+// exact laundering path the violation record exists to close (Codex #276
+// round 2, loto-nper).
+//
+// git guarantees linked-worktree names are unique within a repository, so
+// the basename of the per-worktree git dir is a stable identity. The primary
+// worktree deliberately maps to "" rather than to a path: it is the common
+// case, its rows predate this column, and an empty default keeps them valid.
+func WorktreeID(ctx context.Context, repoTop string) (string, error) {
+	g := gitRunner{repoTop: repoTop}
+	out, err := g.run(ctx, "rev-parse", "--git-dir", "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("gate: scan: resolve git dir: %w", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 {
+		return "", fmt.Errorf("%w: got %d lines", ErrGitDirPair, len(lines))
+	}
+	// The two values are compared exactly as git prints them, with no Abs or
+	// symlink resolution: git emits BOTH relative in the primary worktree
+	// (".git" twice) and BOTH absolute in a linked one, so string equality is
+	// git's own answer to "am I linked". Resolving the paths ourselves would
+	// reintroduce the /tmp -> /private/tmp asymmetry that comparing an
+	// --absolute-git-dir against a joined relative one produces on macOS.
+	gitDir, common := filepath.Clean(lines[0]), filepath.Clean(lines[1])
+	if gitDir == common {
+		return "", nil
+	}
+	return filepath.Base(gitDir), nil
 }
 
 // Scan is one whole-tree sensor pass: what differed, and what it differed
@@ -110,7 +157,11 @@ func ScanWorktree(ctx context.Context, repoTop string) (Scan, error) {
 // acknowledgement of "this delta is fine" is only meaningful against the
 // baseline it was given.
 type Scan struct {
-	Baseline     string
+	Baseline string
+	// Worktree is the checkout this pass walked — "" for the primary one.
+	// A reading is a statement about ONE tree, and the store it lands in is
+	// shared by all of them (loto-nper).
+	Worktree     string
 	Observations []Observation
 }
 

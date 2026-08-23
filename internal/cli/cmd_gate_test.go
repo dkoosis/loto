@@ -34,10 +34,18 @@ func TestGateStats_FreshRepoEnumeratesEveryClassAtZero(t *testing.T) {
 	}
 	for _, class := range []string{
 		"violation-intersect", "stale-preimage", "unauthorized-path", "gate-bypass",
-		"verify-red", "verify-infrastructure", "promotion-race",
 	} {
-		if !strings.Contains(out, "ℹ class="+class+" count=0") {
+		if !strings.Contains(out, "ℹ class="+class+" count=0 wired=yes") {
 			t.Errorf("missing zero row for %s: %q", class, out)
+		}
+	}
+	// The promotion half is computed by gate.Promote but recorded by nobody
+	// — there is no promote verb. Its zero says "cannot fire", not "never
+	// fired here", and the row must not let a reader confuse the two
+	// (loto-a7qt).
+	for _, class := range []string{"verify-red", "verify-infrastructure", "promotion-race"} {
+		if !strings.Contains(out, "⚠ class="+class+" count=0 wired=no") {
+			t.Errorf("unwired class %s not marked: %q", class, out)
 		}
 	}
 }

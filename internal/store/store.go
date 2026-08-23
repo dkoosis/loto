@@ -348,6 +348,8 @@ var migrationEnsures = []struct {
 	{"add candidate_claims table", ensureCandidateClaimsTable},
 	{"add violations table", ensureViolationsTable},
 	{"add violations.baseline", ensureViolationsBaseline},
+	{"add violations.worktree", ensureViolationsWorktree},
+	{"scope violations open index to worktree", ensureViolationsOpenIndexScoped},
 }
 
 // schemaCurrent reports whether a re-migrate would be a pure no-op — the gate
@@ -648,6 +650,71 @@ func ensureViolationsBaseline(ctx context.Context, db sqlExecQuerier, apply bool
 	}
 	if apply {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE violations ADD COLUMN baseline TEXT NOT NULL DEFAULT ''`); err != nil {
+			return false, err
+		}
+		return false, nil // applied: no longer outstanding
+	}
+	return true, nil
+}
+
+// ensureViolationsWorktree adds the worktree column to a violations table
+// created before checkouts were distinguished (loto-nper). Same precedent as
+// ensureViolationsBaseline: probe pragma_table_info, ALTER, never bump
+// user_version. Existing rows default to ” — the primary worktree — which is
+// where every row written before this column came from.
+func ensureViolationsWorktree(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	return ensureColumn(ctx, db, apply, "violations", "worktree",
+		`ALTER TABLE violations ADD COLUMN worktree TEXT NOT NULL DEFAULT ''`)
+}
+
+// ensureViolationsOpenIndexScoped widens the open-violation uniqueness key
+// from (path_canonical) to (path_canonical, worktree).
+//
+// ‡ Must run AFTER ensureViolationsWorktree — the index it creates names that
+// column. The old index is not merely redundant: while it stands, two
+// checkouts of one repo cannot each hold an open row for the same path, so
+// the second one's violation is silently dropped by RecordViolations' INSERT
+// OR IGNORE and the contamination goes unrecorded. Dropping it is the whole
+// migration; SQLite has no ALTER INDEX.
+func ensureViolationsOpenIndexScoped(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	var name string
+	err := db.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_violations_open_path_wt'`).Scan(&name)
+	if err == nil {
+		return false, nil // already scoped
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if apply {
+		if _, err := db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_violations_open_path`); err != nil {
+			return false, err
+		}
+		if _, err := db.ExecContext(ctx,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_violations_open_path_wt
+			   ON violations(path_canonical, worktree) WHERE resolved_at IS NULL`); err != nil {
+			return false, err
+		}
+		return false, nil // applied: no longer outstanding
+	}
+	return true, nil
+}
+
+// ensureColumn is the shared body ensureLocksEpoch / ensureViolationsBaseline
+// each hand-duplicated: probe pragma_table_info for the column, run the
+// caller's ALTER if absent, never touch user_version.
+func ensureColumn(ctx context.Context, db sqlExecQuerier, apply bool, table, column, alter string) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`, table, column,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return false, nil
+	}
+	if apply {
+		if _, err := db.ExecContext(ctx, alter); err != nil {
 			return false, err
 		}
 		return false, nil // applied: no longer outstanding

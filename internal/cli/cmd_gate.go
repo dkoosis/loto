@@ -80,7 +80,7 @@ func gateStats(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	// sort key, so the same window always renders byte-identically.
 	classes := make([]render.GateStatsClass, len(gate.RejectionReasons))
 	for i, r := range gate.RejectionReasons {
-		classes[i] = render.GateStatsClass{Class: string(r), Count: st.ByClass[r]}
+		classes[i] = render.GateStatsClass{Class: string(r), Count: st.ByClass[r], Wired: r.Wired()}
 	}
 	render.EmitGateStats(stdout, *since, st.Accepted, st.Rejected, st.Bypassed, classes)
 	return 0
