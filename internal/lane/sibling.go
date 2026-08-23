@@ -8,14 +8,22 @@ import (
 	"strings"
 )
 
-// UnlistedSibling is a file new to the repo's history — untracked or freshly
-// staged, either way absent from every commit — living in the same directory
-// as a write-set entry, but absent from the write-set itself.
+// UnlistedSibling is a file new to the repo's history — absent from every
+// commit, whether or not it has since been `git add`-ed — living in the same
+// directory as a write-set entry, but absent from the write-set itself.
 type UnlistedSibling struct {
 	// Path is the file, repo-relative and slash-separated.
 	Path string
 	// Dir is the shared directory (repo-relative), i.e. path.Dir(Path).
 	Dir string
+	// Staged is true when the file is already `git add`-ed (git status "A "),
+	// false when it is merely untracked ("??"). Both are equally invisible to
+	// buildLaneTree's parent-seeded commit — the distinction changes nothing
+	// about the risk — but it changes what the reader does next: staged means
+	// list it; untracked means stage-or-delete it, then list it. A report
+	// that calls a staged file "untracked" sends the reader chasing a git
+	// status mismatch instead of the actual fix.
+	Staged bool
 }
 
 // SiblingUntracked finds files new to the repo's history — never committed,
@@ -91,7 +99,9 @@ func SiblingUntracked(ctx context.Context, repoTop string, writeSet []string) ([
 			i++
 			continue
 		}
-		if entry[:2] != "??" && x != 'A' {
+		untracked := entry[:2] == "??"
+		staged := x == 'A'
+		if !untracked && !staged {
 			continue
 		}
 		p := entry[3:]
@@ -99,7 +109,7 @@ func SiblingUntracked(ctx context.Context, repoTop string, writeSet []string) ([
 			continue
 		}
 		if dir := path.Dir(p); listedDirs[dir] {
-			siblings = append(siblings, UnlistedSibling{Path: p, Dir: dir})
+			siblings = append(siblings, UnlistedSibling{Path: p, Dir: dir, Staged: staged})
 		}
 	}
 	sort.Slice(siblings, func(i, j int) bool { return siblings[i].Path < siblings[j].Path })

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -62,6 +63,59 @@ func TestLane_WarnsUnlistedUntrackedSiblingInSamePackage(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "target="+tcFileParallel) {
 		t.Errorf("warning does not name %s: %q", tcFileParallel, out.String())
+	}
+	if !strings.Contains(out.String(), "reason=untracked-sibling-not-in-write-set") {
+		t.Errorf("row must say untracked for a never-`git add`-ed file: %q", out.String())
+	}
+	if strings.Contains(out.String(), "reason=staged-new-sibling-not-in-write-set") {
+		t.Errorf("row must not say staged for a file that was never `git add`-ed: %q", out.String())
+	}
+}
+
+// TestLane_WarnsStagedNewSiblingAndNamesItStaged is dk's #286 follow-up: a
+// STAGED sibling (`git add`-ed but uncommitted) must be reported as staged,
+// not flattened to the same "untracked" wording an untracked sibling gets.
+// `git status` on this file shows "A  cmd/ferret/parallel.go" — a row that
+// still said "untracked" would send a reader who checks that status chasing
+// a mismatch instead of the actual fix (list it; no staging needed, unlike
+// the untracked case). Guards against the staged/untracked rows drifting
+// back together.
+func TestLane_WarnsStagedNewSiblingAndNamesItStaged(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	base := commitAllInRepo(t, repo, "init")
+
+	if err := os.MkdirAll(filepath.Join(repo, tcDirFerret), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, tcFileMain), []byte("package main\n\nfunc main() { ParallelCmd() }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := Run([]string{tcCmdLock, tcFileMain, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock %s failed", tcFileMain)
+	}
+	if err := os.WriteFile(filepath.Join(repo, tcFileParallel), []byte("package main\n\nfunc ParallelCmd() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The one-line defeat codex #286 finding 1 pins: `git add` on the leftover
+	// must not change what the row says beyond naming it staged instead.
+	if out, err := exec.Command("git", "-C", repo, "add", tcFileParallel).CombinedOutput(); err != nil {
+		t.Fatalf("git add %s: %v\n%s", tcFileParallel, err, out)
+	}
+
+	var out, errB bytes.Buffer
+	code := Run([]string{tcCmdLane, tcFileMain, tcFlagRef, "ferret-staged", tcFlagBase, base, "-m", tcMsgRegister, tcFlagCloses, tcClosesNone}, &out, &errB)
+	if code != 0 {
+		t.Fatalf("lane exit %d; out=%q err=%q", code, out.String(), errB.String())
+	}
+	if !strings.Contains(out.String(), "⚠ lane-unlisted-new count=1") {
+		t.Errorf("missing sibling-warning triage line: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "reason=staged-new-sibling-not-in-write-set") {
+		t.Errorf("row must name the sibling as staged, not untracked: %q", out.String())
+	}
+	if strings.Contains(out.String(), "reason=untracked-sibling-not-in-write-set") {
+		t.Errorf("row must not say untracked for a `git add`-ed file: %q", out.String())
 	}
 }
 

@@ -45,6 +45,9 @@ func TestSiblingUntracked_FlagsFileInSameDirNotInWriteSet(t *testing.T) {
 	if got[0].Dir != "cmd/ferret" {
 		t.Errorf("Dir = %q, want cmd/ferret", got[0].Dir)
 	}
+	if got[0].Staged {
+		t.Errorf("Staged = true for a never-`git add`-ed file, want false")
+	}
 }
 
 // TestSiblingUntracked_FlagsStagedNewSibling pins codex #286 finding 1: a
@@ -66,6 +69,11 @@ func TestSiblingUntracked_FlagsStagedNewSibling(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Path != siblingParallelGo {
 		t.Fatalf("staging must not silence the warning: want [%s], got %+v", siblingParallelGo, got)
+	}
+	// dk review on #286: a staged sibling must be REPORTED as staged, not
+	// flattened to the same "untracked" word `git status` would contradict.
+	if !got[0].Staged {
+		t.Errorf("Staged = false for a `git add`-ed file, want true")
 	}
 }
 

@@ -282,13 +282,24 @@ func emitLaneTainted(w io.Writer, ref, commit string, tainted []laneBlock) {
 // non-fatal advisory, never a refusal — the ref is already committed and the
 // finding may be nothing (an unrelated new scratch file in the same
 // directory). ✓ glyph is ⚠, not ✗, matching design.md's non-fatal-advisory row.
+//
+// The reason token names staged vs untracked explicitly (dk review on #286):
+// `git status` on a staged sibling shows "A  path", and a row that still says
+// "untracked" reads as the tool looking at something else — a reader who
+// checks git status against a wrong reason wastes a whole investigation on
+// nothing. The distinction is also actionable, not just cosmetic: untracked
+// needs staging before it can be listed; staged needs only listing.
 func emitLaneUnlistedSiblings(w io.Writer, ref, commit string, siblings []lane.UnlistedSibling) {
 	sort.Slice(siblings, func(i, j int) bool { return siblings[i].Path < siblings[j].Path })
 	fmt.Fprintf(w, "⚠ lane-unlisted-new count=%d ref=loto/%s commit=%s\n", len(siblings), ref, commit)
 	for _, s := range siblings {
-		fmt.Fprintf(w, "⚠ target=%s dir=%s reason=untracked-sibling-not-in-write-set\n", s.Path, s.Dir)
+		reason := "untracked-sibling-not-in-write-set"
+		if s.Staged {
+			reason = "staged-new-sibling-not-in-write-set"
+		}
+		fmt.Fprintf(w, "⚠ target=%s dir=%s reason=%s\n", s.Path, s.Dir, reason)
 	}
-	fmt.Fprintf(w, "ℹ an untracked file sharing a directory with a listed file may hold a symbol commit %s references but never carries; list it, delete it, or confirm it's unrelated\n", commit)
+	fmt.Fprintf(w, "ℹ a new file (untracked or staged, either way absent from every commit) sharing a directory with a listed file may hold a symbol commit %s references but never carries; list it (git add first if untracked), delete it, or confirm it's unrelated\n", commit)
 	fmt.Fprintln(w, "ℹ for a stronger check: loto lane ... --build")
 }
 
