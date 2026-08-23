@@ -57,11 +57,16 @@ jobs:
       # Gate tooling — every pin read from one file (.sandbox/project.conf,
       # conform lint-pin rule). make check pipes vet/lint/test through fo and
       # runs go-arch-lint (make arch), so all three must be on PATH.
+      #
+      # golangci-lint arrives via `go install` against the pinned tag, not a
+      # piped install.sh — that script used to resolve from the repo's HEAD,
+      # so every CI run executed whatever a third party had just pushed
+      # (loto-bu8s). `go install` only ever runs code from the module proxy
+      # at the exact tagged version, checksummed against GOSUMDB.
       - name: gate tools (pinned in .sandbox/project.conf)
         run: |
           . ./.sandbox/project.conf
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
-            | sh -s -- -b "$(go env GOPATH)/bin" "$GOLANGCI_LINT_VERSION"
+          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VERSION"
           go install "github.com/dkoosis/fo/cmd/fo@$FO_VERSION"
           go install github.com/fe3dback/go-arch-lint@v1.15.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
