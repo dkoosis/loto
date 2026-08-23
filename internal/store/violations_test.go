@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -744,5 +745,56 @@ func rewindToPreWorktreeShape(t *testing.T, s *Store) {
 		if _, err := step(ctx, s.db, true); err != nil {
 			t.Fatalf("apply: %v", err)
 		}
+	}
+}
+
+// migrate runs schema.sql ahead of every ensure, so a re-migrate must not
+// leave the legacy index standing beside the scoped one. Two live constraints
+// mean RecordViolations' INSERT OR IGNORE silently eats the second checkout's
+// open row for a shared path — the nper hole, re-armed by a later migration
+// (Codex #283 P1).
+func TestMigrate_ReMigrateDoesNotResurrectTheLegacyIndex(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	// The base schema must not declare the unscoped index at all.
+	if strings.Contains(schemaSQL, "idx_violations_open_path\n") ||
+		strings.Contains(schemaSQL, "idx_violations_open_path ") {
+		t.Error("schema.sql still declares the unscoped open-violation index")
+	}
+
+	// Simulate the crash window: the schema tx committed, user_version never
+	// landed, and something put the legacy index back.
+	if _, err := s.db.ExecContext(ctx,
+		`CREATE UNIQUE INDEX idx_violations_open_path ON violations(path_canonical) WHERE resolved_at IS NULL`); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := ensureViolationsOpenIndexScoped(ctx, s.db, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pending {
+		t.Fatal("probe reports nothing to do while the legacy index is live beside the scoped one")
+	}
+	if _, err := ensureViolationsOpenIndexScoped(ctx, s.db, true); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := indexExists(ctx, s.db, "idx_violations_open_path"); err != nil || got {
+		t.Fatalf("legacy index survived: exists=%v err=%v", got, err)
+	}
+
+	// And the property it was breaking holds again.
+	if _, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcRogueGo, Fingerprint: tcSHA1}), liveEval()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReconcileScan(ctx, scanFrom("agent-b", gate.Observation{Path: tcRogueGo, Fingerprint: tcSHA2}), liveEval()); err != nil {
+		t.Fatal(err)
+	}
+	open, err := s.UnresolvedViolations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 2 {
+		t.Errorf("want one open row per checkout, got %d: %+v", len(open), open)
 	}
 }

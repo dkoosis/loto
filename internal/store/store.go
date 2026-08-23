@@ -685,17 +685,29 @@ func ensureViolationsWorktree(ctx context.Context, db sqlExecQuerier, apply bool
 // column. The old index is not merely redundant: while it stands, two
 // checkouts of one repo cannot each hold an open row for the same path, so
 // the second one's violation is silently dropped by RecordViolations' INSERT
-// OR IGNORE and the contamination goes unrecorded. Dropping it is the whole
-// migration; SQLite has no ALTER INDEX.
+// OR IGNORE and the contamination goes unrecorded. SQLite has no ALTER INDEX,
+// so the migration is a drop and a create.
+//
+// ‡ The two halves are probed SEPARATELY, and the drop is not conditional on
+// the create being outstanding. migrate runs schema.sql ahead of every ensure,
+// so any re-migrate — the crash window between committing the schema tx and
+// writing user_version, or simply the next ensure step somebody adds —
+// re-executes that file. A legacy index declared there would come back with
+// the scoped one already in place, and a probe that stopped at "scoped index
+// exists" would report nothing to do while both constraints were live (Codex
+// #283 P1). schema.sql no longer declares it, and this refuses to depend on
+// that staying true.
 func ensureViolationsOpenIndexScoped(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
-	var name string
-	err := db.QueryRowContext(ctx,
-		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_violations_open_path_wt'`).Scan(&name)
-	if err == nil {
-		return false, nil // already scoped
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	legacy, err := indexExists(ctx, db, "idx_violations_open_path")
+	if err != nil {
 		return false, err
+	}
+	scoped, err := indexExists(ctx, db, "idx_violations_open_path_wt")
+	if err != nil {
+		return false, err
+	}
+	if !legacy && scoped {
+		return false, nil
 	}
 	if apply {
 		if _, err := db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_violations_open_path`); err != nil {
@@ -709,6 +721,20 @@ func ensureViolationsOpenIndexScoped(ctx context.Context, db sqlExecQuerier, app
 		return false, nil // applied: no longer outstanding
 	}
 	return true, nil
+}
+
+// indexExists reports whether sqlite_master carries an index by that name.
+func indexExists(ctx context.Context, db sqlExecQuerier, name string) (bool, error) {
+	var got string
+	err := db.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&got)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return false, err
 }
 
 // ensureColumn is the shared body ensureLocksEpoch / ensureViolationsBaseline
