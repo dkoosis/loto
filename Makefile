@@ -77,7 +77,12 @@ docscheck: ## README's documented commands still match the Makefile/CLI
 	@bash scripts/docs_check.sh --loto-bin $(BIN)
 
 scriptcheck: ## Test the build-tooling shell scripts (scripts/*_test.sh)
-	@for t in scripts/*_test.sh; do bash "$$t"; done
+	@shopt -s nullglob; scripts=(scripts/*_test.sh); \
+	if [ $${#scripts[@]} -eq 0 ]; then \
+		echo "+ scriptcheck: no scripts/*_test.sh found — nothing to run"; \
+	else \
+		for t in "$${scripts[@]}"; do bash "$$t"; done; \
+	fi
 
 audit: check race vuln dupl nilcheck demo ## Exhaustive: +race +vuln +dupl +nilcheck +demo
 	@echo "=== audit pass ==="
