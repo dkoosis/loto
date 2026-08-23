@@ -136,11 +136,33 @@ func crossProcAwaitBarrier() error {
 // named role, exit with its verdict's code. Unset → a normal `go test` run;
 // TestMain never calls m.Run() (and so never parses testing flags) on the
 // child path, which is why spawnChild needs no -test.* arguments.
+//
+// The normal-run branch also installs loto-bt6c's structural guard: this
+// package IS the identity registry, so every one of its own tests that
+// forgets its own HOME redirect (t.Setenv("HOME", t.TempDir())) would mint
+// straight into dk's real ~/.loto/agents — the once-per-process GC walk and
+// every `loto` invocation's tax the bead describes. Repointing HOME here,
+// once, before any test runs, means an omission lands in a throwaway
+// directory instead. Individual tests keep their own per-test t.Setenv for
+// isolation FROM EACH OTHER; this is only the floor under all of them. A
+// re-exec'd child (the role branch above) is untouched — it must keep the
+// exact curated env its parent test built for it.
 func TestMain(m *testing.M) {
 	if role := os.Getenv(crossProcRoleEnv); role != "" {
 		os.Exit(runCrossProcRole(role))
 	}
-	os.Exit(m.Run())
+	fallback, err := os.MkdirTemp("", "loto-identity-testhome-*")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain: mkdir fallback HOME:", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("HOME", fallback); err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain: set fallback HOME:", err)
+		os.Exit(1)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(fallback)
+	os.Exit(code)
 }
 
 // runCrossProcRole arms the child self-watchdog — an orphan from a crashed
@@ -432,5 +454,25 @@ func TestCrossProc_Smoke(t *testing.T) {
 	// group should have no live members left.
 	if err := syscall.Kill(-c.cmd.Process.Pid, 0); err == nil {
 		t.Errorf("process group %d still has live members after wait", c.cmd.Process.Pid)
+	}
+}
+
+// realHomeAtProcessStart captures $HOME exactly as the test binary inherited
+// it, before TestMain's loto-bt6c guard above ever touches the env var —
+// var initializers run before TestMain, so this is the one legitimate read
+// of the pre-override value anywhere in the package.
+var realHomeAtProcessStart = os.Getenv("HOME")
+
+// TestHomeGuardCanary_HomeIsNeverTheRealOne is the regression test for the
+// loto-bt6c floor in TestMain: it makes no HOME redirect of its own, so it
+// only passes because TestMain already repointed HOME before this — or any
+// other — test in the package got to run. Weaken or delete that guard and
+// this goes red immediately instead of the leak silently resuming.
+func TestHomeGuardCanary_HomeIsNeverTheRealOne(t *testing.T) {
+	if realHomeAtProcessStart == "" {
+		t.Skip("no real $HOME in this environment to compare against")
+	}
+	if got := os.Getenv("HOME"); got == realHomeAtProcessStart {
+		t.Fatalf("HOME = %q, want anything but the real invoking-user home %q — the loto-bt6c isolation floor is not active", got, realHomeAtProcessStart)
 	}
 }

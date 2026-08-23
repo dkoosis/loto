@@ -74,6 +74,10 @@ func TestRunBehavior_CheckInvalidFlagReturnsUsageError(t *testing.T) {
 }
 
 func TestRunBehavior_CheckStagedOutsideRepoReturnsError(t *testing.T) {
+	// loto-bt6c: this test wants "no git repo", not "no HOME redirect" — it
+	// must still isolate identity state, or pinAgent mints into dk's real
+	// ~/.loto (it did: this is one of the leaks the bead found).
+	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())
 	pinAgent(t)
 
@@ -95,6 +99,8 @@ func TestRunBehavior_CheckStagedOutsideRepoReturnsError(t *testing.T) {
 // the message must name its own remedy per design.md's actionable-finding
 // convention, not just echo the raw git exec error.
 func TestRunBehavior_StatusOutsideRepoReturnsActionableError(t *testing.T) {
+	// loto-bt6c: same isolation gap as the sibling "outside repo" test above.
+	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())
 	pinAgent(t)
 
@@ -117,6 +123,8 @@ func TestRunBehavior_StatusOutsideRepoReturnsActionableError(t *testing.T) {
 // operator toward the wrong fix when the repo exists and it's git access
 // itself that's broken (missing binary, timeout, permission).
 func TestRunBehavior_StatusRealGitFailureIsNotMisreportedAsNotInRepo(t *testing.T) {
+	// loto-bt6c: same isolation gap as the two tests above.
+	t.Setenv("HOME", t.TempDir())
 	repo := t.TempDir()
 	initBareGitRepo(t, repo)
 	t.Chdir(repo)
