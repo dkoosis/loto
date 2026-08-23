@@ -23,9 +23,16 @@ Commit an exact write-set to refs/heads/loto/<ref> by git plumbing — no checko
 no HEAD move. Refuses unless THIS identity holds an exclusive loto lock on every
 listed file, held across staging. The commit message gains a Closes: trailer.
 
+A listed file can reference a symbol that lives only in an unlisted, uncommitted
+file — the tree you verified locally is not the tree that lands (loto-5aug).
+Every lane warns when an untracked file shares a directory with a listed file;
+pass --build to also build the committed ref in a throwaway worktree before
+returning (slower, off by default).
+
 examples:
   loto lane internal/store/store.go --ref impl-1 --base main -m "store: fix X" --closes loto-abc
   loto lane a.go b.go --ref impl-1 --base main -m "two files" --closes "loto-abc, loto-def"
+  loto lane a.go --ref impl-1 --base main -m "fix" --closes loto-abc --build
 `
 
 // laneAfterPreAssert is a test seam. When non-nil it runs after the write-set
@@ -54,6 +61,7 @@ func cmdLane(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	msg := fs.String("m", "", "commit message (required)")
 	fs.StringVar(msg, "message", "", "commit message (required)")
 	closes := fs.String("closes", "", `Closes: trailer ids, e.g. "loto-abc, loto-def" or "none" (required)`)
+	build := fs.Bool("build", false, "build the committed ref (go build ./...) in a throwaway worktree before returning; slower, catches what the default untracked-sibling warning misses")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
@@ -89,14 +97,14 @@ func cmdLane(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	defer rt.Close()
 
-	return runLaneCommit(rt, repoTop, *ref, *base, *msg, *closes, targets, stdout, stderr)
+	return runLaneCommit(rt, repoTop, *ref, *base, *msg, *closes, targets, *build, stdout, stderr)
 }
 
 // runLaneCommit brackets lane.Commit with a lock assertion on both sides so the
 // caller cannot stage a path it does not exclusively hold, and so a lock lost
 // across the stage (a peer reclaim) is caught. The lane.go doc states the engine
 // cannot close that TOCTOU window alone; this is the CLI half that closes it.
-func runLaneCommit(rt *runtime, repoTop, ref, base, msg, closes string, targets []domain.Target, stdout, stderr io.Writer) int {
+func runLaneCommit(rt *runtime, repoTop, ref, base, msg, closes string, targets []domain.Target, build bool, stdout, stderr io.Writer) int {
 	owner := domain.AgentUUID(rt.Agent.UUID)
 	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
 
@@ -137,6 +145,18 @@ func runLaneCommit(rt *runtime, repoTop, ref, base, msg, closes string, targets 
 		return 3
 	}
 
+	// loto-5aug: the write-set the caller listed and the working tree they
+	// verified can legitimately differ — that's what a lane is for. Warn (never
+	// block) when an untracked file shares a directory with a listed one: the
+	// commit may reference a symbol that exists only there. A scan failure is
+	// non-fatal — the commit already landed on the lane ref, and turning an
+	// advisory into a way to fail every lane would cost more than it warns about.
+	if siblings, serr := lane.SiblingUntracked(rt.Ctx, repoTop, writeSet); serr != nil {
+		fmt.Fprintf(stdout, "⚠ lane sibling-scan failed ref=loto/%s commit=%s: %v\n", ref, commit, serr)
+	} else if len(siblings) > 0 {
+		emitLaneUnlistedSiblings(stdout, ref, commit, siblings)
+	}
+
 	// Post-assert: re-check the same locks are still held, live, exclusive, and
 	// the SAME lock instance (acquire-time unchanged). A discrepancy means the
 	// hold did not span staging — the commit may carry a peer's edit, so report
@@ -153,6 +173,18 @@ func runLaneCommit(rt *runtime, repoTop, ref, base, msg, closes string, targets 
 	if len(tainted) > 0 {
 		emitLaneTainted(stdout, ref, commit, tainted)
 		return 1
+	}
+
+	if build {
+		res, verr := lane.Verify(rt.Ctx, repoTop, commit, []string{"go", "build", "./..."})
+		if verr != nil {
+			fmt.Fprintf(stderr, "✗ lane build-check aborted commit=%s: %v\n", commit, verr)
+			return 3
+		}
+		if !res.Passed {
+			emitLaneBuildFailed(stdout, ref, commit, res.Output)
+			return 1
+		}
 	}
 
 	fmt.Fprintf(stdout, "✓ lane committed ref=loto/%s commit=%s files=%d\n", ref, commit, len(writeSet))
@@ -235,6 +267,31 @@ func emitLaneTainted(w io.Writer, ref, commit string, tainted []laneBlock) {
 		fmt.Fprintf(w, "✗ target=%s reason=%s\n", b.Path, b.Reason)
 	}
 	fmt.Fprintf(w, "⚠ a lock did not hold across staging; commit %s may include edits made after it was lost\n", commit)
+	fmt.Fprintf(w, "```bash\ngit update-ref -d refs/heads/loto/%s\n```\n", ref)
+}
+
+// emitLaneUnlistedSiblings renders SiblingUntracked's findings (loto-5aug): a
+// non-fatal advisory, never a refusal — the ref is already committed and the
+// finding may be nothing (an unrelated new scratch file in the same
+// directory). ✓ glyph is ⚠, not ✗, matching design.md's non-fatal-advisory row.
+func emitLaneUnlistedSiblings(w io.Writer, ref, commit string, siblings []lane.UnlistedSibling) {
+	sort.Slice(siblings, func(i, j int) bool { return siblings[i].Path < siblings[j].Path })
+	fmt.Fprintf(w, "⚠ lane-unlisted-new count=%d ref=loto/%s commit=%s\n", len(siblings), ref, commit)
+	for _, s := range siblings {
+		fmt.Fprintf(w, "⚠ target=%s dir=%s reason=untracked-sibling-not-in-write-set\n", s.Path, s.Dir)
+	}
+	fmt.Fprintf(w, "ℹ an untracked file sharing a directory with a listed file may hold a symbol commit %s references but never carries; list it, delete it, or confirm it's unrelated\n", commit)
+	fmt.Fprintln(w, "ℹ for a stronger check: loto lane ... --build")
+}
+
+// emitLaneBuildFailed renders a --build failure (loto-5aug thorough path): the
+// commit already landed on the lane ref but `go build ./...` failed against it
+// in a throwaway worktree, so the author learns before push rather than from CI.
+func emitLaneBuildFailed(w io.Writer, ref, commit, output string) {
+	fmt.Fprintf(w, "✗ lane-build-failed ref=loto/%s commit=%s\n", ref, commit)
+	if body := strings.TrimRight(output, "\n"); body != "" {
+		fmt.Fprintln(w, body)
+	}
 	fmt.Fprintf(w, "```bash\ngit update-ref -d refs/heads/loto/%s\n```\n", ref)
 }
 

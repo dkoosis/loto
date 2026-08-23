@@ -4,11 +4,20 @@ Commit an exact write-set to refs/heads/loto/<ref> by git plumbing — no checko
 no HEAD move. Refuses unless THIS identity holds an exclusive loto lock on every
 listed file, held across staging. The commit message gains a Closes: trailer.
 
+A listed file can reference a symbol that lives only in an unlisted, uncommitted
+file — the tree you verified locally is not the tree that lands (loto-5aug).
+Every lane warns when an untracked file shares a directory with a listed file;
+pass --build to also build the committed ref in a throwaway worktree before
+returning (slower, off by default).
+
 examples:
   loto lane internal/store/store.go --ref impl-1 --base main -m "store: fix X" --closes loto-abc
   loto lane a.go b.go --ref impl-1 --base main -m "two files" --closes "loto-abc, loto-def"
+  loto lane a.go --ref impl-1 --base main -m "fix" --closes loto-abc --build
   -base string
     	base commit-ish the lane forks from (required)
+  -build
+    	build the committed ref (go build ./...) in a throwaway worktree before returning; slower, catches what the default untracked-sibling warning misses
   -closes string
     	Closes: trailer ids, e.g. "loto-abc, loto-def" or "none" (required)
   -m string
