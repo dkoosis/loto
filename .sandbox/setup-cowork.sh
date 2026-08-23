@@ -17,7 +17,11 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SANDBOX_DIR="$REPO_DIR/.sandbox"
 
 # --- Version pins (kept in sync with .sandbox/lib/Makefile.cross.mk) ---
-GO_VERSION="1.25.1"
+# GO_VERSION is derived from go.mod, not repeated here: GOTOOLCHAIN=local
+# (lib-activate.sh) means Go cannot self-correct a stale pin, so a second
+# literal drifts silently until a build fails with a toolchain mismatch
+# (loto-qo0y item 5).
+GO_VERSION="$(awk '/^go /{print $2}' "$REPO_DIR/go.mod")"
 GOLANGCI_LINT_VER="v2.11.4"
 GO_ARCH_LINT_VER="v1.14.0"
 GOVULNCHECK_VER="v1.1.4"
