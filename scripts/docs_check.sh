@@ -11,15 +11,23 @@
 # Two independent checks:
 #   1. every `make <target>` referenced inside a fenced code block in
 #      README.md is a real Makefile target; a trailing `# go ...` comment
-#      that claims a literal invocation must have every token present in
-#      that target's `make -n` dry-run output.
+#      that claims a literal invocation must have every WHOLE TOKEN present
+#      in that target's `make -n` dry-run output (a substring match would let
+#      `-count=1` pass against a recipe that actually says `-count=10` —
+#      exactly the flag-drift class this check exists to catch).
 #   2. every `loto <subcommand>` documented in README.md's "## commands"
-#      block is a word `loto --help` still knows about.
+#      block is a name in `loto --help`'s command-name column — not just a
+#      word anywhere in the help text (a bare word search would let a
+#      removed `lock` command pass because "lock" appears inside `check`'s
+#      *description*, "Check targets for lock conflicts").
 #
 # usage: docs_check.sh [--readme PATH] [--makefile-dir DIR] [--loto-bin PATH]
 #
 # Exit 0: nothing wrong (or nothing to check). Exit 1: at least one finding.
-# Exit 2: usage/setup error (bad flag, missing README).
+# Exit 2: usage/setup error (bad flag, missing value, missing README, the
+#   loto binary failed to execute) — distinct from "checked and found
+#   nothing wrong". A tool that didn't run must never be reported as though
+#   everything it would have checked passed, or failed.
 
 set -uo pipefail
 
@@ -30,14 +38,17 @@ loto_bin=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--readme)
+		[ $# -ge 2 ] || { printf 'docs_check.sh: --readme requires a value\n' >&2; exit 2; }
 		readme=$2
 		shift 2
 		;;
 	--makefile-dir)
+		[ $# -ge 2 ] || { printf 'docs_check.sh: --makefile-dir requires a value\n' >&2; exit 2; }
 		makefile_dir=$2
 		shift 2
 		;;
 	--loto-bin)
+		[ $# -ge 2 ] || { printf 'docs_check.sh: --loto-bin requires a value\n' >&2; exit 2; }
 		loto_bin=$2
 		shift 2
 		;;
@@ -94,10 +105,17 @@ while IFS= read -r line; do
 		recipe=$(make -C "$makefile_dir" -n "$target" 2>/dev/null)
 		missing=""
 		for tok in $comment; do
-			case "$recipe" in
-			*"$tok"*) ;;
-			*) missing="$missing $tok" ;;
-			esac
+			# Whole-token match against the recipe's own tokens — a
+			# substring test would let `-count=1` pass against a recipe
+			# that actually says `-count=10` (it's a string prefix).
+			found=0
+			for rtok in $recipe; do
+				if [ "$rtok" = "$tok" ]; then
+					found=1
+					break
+				fi
+			done
+			[ "$found" -eq 1 ] || missing="$missing $tok"
 		done
 		if [ -n "$missing" ]; then
 			fail "README's 'make $target' comment claims '$comment' but the recipe is missing:$missing"
@@ -120,7 +138,26 @@ fi
 if [ -z "$loto_bin" ]; then
 	printf 'ℹ loto binary not found (pass --loto-bin or run `make build` first) — skipping command check\n'
 else
-	help_text=$("$loto_bin" --help 2>&1 || true)
+	# The tool failing to execute is a hard setup error, not "0 findings" or
+	# "every documented command is missing" — those are two different facts
+	# and conflating them is exactly the trap a `||` guard around a real
+	# invocation sets (a broken/missing binary would otherwise report every
+	# single documented command as gone).
+	if ! help_text=$("$loto_bin" --help 2>&1); then
+		rc=$?
+		printf 'docs_check.sh: %s --help failed to run (exit %d) — cannot verify documented commands:\n%s\n' \
+			"$loto_bin" "$rc" "$help_text" >&2
+		exit 2
+	fi
+
+	# Command names live in the first column of every indented help line —
+	# anchoring there (not a bare word search over the whole help text)
+	# stops a documented command from validating against an unrelated
+	# command's description that happens to contain the same word (e.g. a
+	# removed `lock` command would otherwise pass because "lock" appears
+	# inside `check`'s description, "Check targets for lock conflicts").
+	known_cmds=$(printf '%s\n' "$help_text" | awk '/^[ \t]+[^ \t]/{print $1}')
+
 	mode=seek
 	checked_cmds=0
 	cmd_fails=0
@@ -146,8 +183,8 @@ else
 			'loto '*)
 				sub=$(printf '%s\n' "$line" | awk '{print $2}')
 				checked_cmds=$((checked_cmds + 1))
-				if ! printf '%s\n' "$help_text" | grep -qw -- "$sub"; then
-					fail "README documents 'loto $sub' but '$sub' does not appear in 'loto --help'"
+				if ! printf '%s\n' "$known_cmds" | grep -qxF -- "$sub"; then
+					fail "README documents 'loto $sub' but '$sub' is not a command name in 'loto --help'"
 					cmd_fails=$((cmd_fails + 1))
 				fi
 				;;

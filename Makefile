@@ -71,9 +71,11 @@ selfcheck: ## Run conform (fleet SDLC checker) against this repo
 # Catches README drift against the Makefile/CLI it describes (loto-qo0y):
 # a documented `make <target>` that no longer exists, a `# go ...` comment
 # whose claimed flags aren't in the target's actual recipe, or a documented
-# `loto <cmd>` no longer in `loto --help`. Runs after `build` so bin/loto
-# exists for the command check.
-docscheck: ## README's documented commands still match the Makefile/CLI
+# `loto <cmd>` no longer in `loto --help`. Depends on `build` explicitly —
+# under `make -j`, siblings in `check`'s prerequisite list run in parallel,
+# so left-to-right order there is not ordering; only an explicit prerequisite
+# here guarantees bin/loto exists before docs_check.sh needs it.
+docscheck: build ## README's documented commands still match the Makefile/CLI
 	@bash scripts/docs_check.sh --loto-bin $(BIN)
 
 scriptcheck: ## Test the build-tooling shell scripts (scripts/*_test.sh)
