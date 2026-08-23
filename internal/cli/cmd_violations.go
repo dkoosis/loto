@@ -37,6 +37,10 @@ one store, so a row records which tree it was seen in (worktree=<name> on the
 listing, absent for the primary one), and a clean pass from one checkout never
 resolves another's.
 
+worktree=? marks a row recorded before checkouts were distinguished. Its origin
+is unknown, so it blocks every checkout and no scan will auto-resolve it — look
+at the path and use resolve.
+
 examples:
   loto violations
   loto violations scan

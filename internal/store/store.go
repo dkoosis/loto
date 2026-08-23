@@ -662,20 +662,20 @@ func ensureViolationsBaseline(ctx context.Context, db sqlExecQuerier, apply bool
 // ensureViolationsBaseline: probe pragma_table_info, ALTER, never bump
 // user_version.
 //
-// ‡ Open rows are moved to WorktreeLegacy, not left at the column default. A
-// pre-upgrade scan could run from ANY checkout, so calling those rows
-// "primary" asserts an origin the DB never recorded — and asserting it wrong
-// hands a linked checkout a clean admission over its own sticky violation
-// (Codex #283 P1). The ALTER and the backfill run inside migrate's single tx,
-// so no row is ever readable in the intermediate state.
+// ‡ EVERY pre-existing row is moved to WorktreeLegacy, not left at the column
+// default. A pre-upgrade scan could run from any checkout, so calling those
+// rows "primary" asserts an origin the DB never recorded — wrong in both
+// directions at once: a linked checkout stops seeing its own open violation
+// (Codex #283 P1), and an ack it made starts suppressing the primary tree's
+// flags (Codex #283 P2). Resolved rows are backfilled for exactly that second
+// reason; see WorktreeLegacy for the rule the two share.
 //
-// Resolved rows are left alone: they carry acknowledgements, and widening an
-// ack to every checkout is the permissive direction. A linked checkout will
-// re-flag content the primary acked — noisy, never unsafe.
+// The ALTER and the backfill run inside migrate's single tx, so no row is
+// ever readable in the intermediate state.
 func ensureViolationsWorktree(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	return ensureColumn(ctx, db, apply, "violations", "worktree",
 		`ALTER TABLE violations ADD COLUMN worktree TEXT NOT NULL DEFAULT ''`,
-		`UPDATE violations SET worktree = '`+WorktreeLegacy+`' WHERE resolved_at IS NULL`)
+		`UPDATE violations SET worktree = '`+WorktreeLegacy+`'`)
 }
 
 // ensureViolationsOpenIndexScoped widens the open-violation uniqueness key

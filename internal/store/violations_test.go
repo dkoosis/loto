@@ -641,9 +641,91 @@ func TestMigrate_LegacyOpenViolationBlocksEveryCheckout(t *testing.T) {
 		t.Fatalf("rewind to the pre-worktree shape: %v", err)
 	}
 
-	// mustOpen already migrated, so rewind the whole table to its
-	// pre-worktree shape — index first, the column is inside it — and then
-	// drive migrate's two steps in their real order.
+	rewindToPreWorktreeShape(t, s)
+
+	// Every checkout sees the open legacy row...
+	for _, wt := range []string{"", "agent-b"} {
+		open, err := s.UnresolvedViolationPaths(ctx, wt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, blocked := open[tcRogueGo]; !blocked {
+			t.Errorf("legacy violation invisible to checkout %q: %+v", wt, open)
+		}
+	}
+	// ...and no checkout's clean pass may close it. A clean reading here says
+	// nothing about the tree the row actually came from, and clearing it on
+	// that basis is the laundering this record exists to stop (Codex #283 P1).
+	res, err := s.ReconcileScan(ctx, scanFrom("agent-b"), liveEval())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Resolved != 0 {
+		t.Errorf("a clean pass from agent-b resolved %d legacy rows, want 0", res.Resolved)
+	}
+	if res, err = s.ReconcileScan(ctx, scanOf(), liveEval()); err != nil {
+		t.Fatal(err)
+	}
+	if res.Resolved != 0 {
+		t.Errorf("a clean pass from the primary resolved %d legacy rows, want 0", res.Resolved)
+	}
+	// An explicit resolve is the only door, and it still works.
+	open, err := s.UnresolvedViolations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("want the legacy row still open, got %+v", open)
+	}
+	if err := s.ResolveViolation(ctx, open[0].ID, "looked, it was reverted"); err != nil {
+		t.Errorf("explicit resolve on a legacy row: %v", err)
+	}
+}
+
+// A legacy acknowledgement clears nothing anywhere. Left at the column
+// default it would read as an ack made in the primary checkout and suppress
+// that tree's flags on content it never approved (Codex #283 P2).
+func TestMigrate_LegacyAcknowledgementSuppressesNoCheckout(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	rec, err := s.RecordViolations(ctx, []ObservedViolation{
+		{PathCanonical: tcRogueGo, Fingerprint: tcSHA1, Baseline: tcBaseline, LeaseState: LeaseStateUnleased},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ResolveViolation(ctx, rec[0].ID, "legitimate, staying"); err != nil {
+		t.Fatal(err)
+	}
+	rewindToPreWorktreeShape(t, s)
+
+	var wt string
+	if err := s.db.QueryRowContext(ctx, `SELECT worktree FROM violations WHERE id = ?`, rec[0].ID).Scan(&wt); err != nil {
+		t.Fatal(err)
+	}
+	if wt != WorktreeLegacy {
+		t.Errorf("resolved row backfilled to %q, want %q", wt, WorktreeLegacy)
+	}
+	// The same path and content, observed now from the primary checkout, is
+	// flagged rather than waved through on that unattributable ack.
+	res, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcRogueGo, Fingerprint: tcSHA1}), liveEval())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Recorded) != 1 {
+		t.Errorf("a legacy ack suppressed the primary checkout's flag: recorded=%d", len(res.Recorded))
+	}
+}
+
+// rewindToPreWorktreeShape puts an already-migrated table back into its
+// pre-worktree shape — index first, since the column lives inside it — and
+// then drives migrate's two steps in their real order. Rewinding rather than
+// hand-building a legacy DB keeps the test honest about what migrate does to
+// rows that are already there.
+func rewindToPreWorktreeShape(t *testing.T, s *Store) {
+	t.Helper()
+	ctx := context.Background()
 	for _, stmt := range []string{
 		`DROP INDEX IF EXISTS idx_violations_open_path_wt`,
 		`ALTER TABLE violations DROP COLUMN worktree`,
@@ -662,34 +744,5 @@ func TestMigrate_LegacyOpenViolationBlocksEveryCheckout(t *testing.T) {
 		if _, err := step(ctx, s.db, true); err != nil {
 			t.Fatalf("apply: %v", err)
 		}
-	}
-
-	// Every checkout sees the open legacy row...
-	for _, wt := range []string{"", "agent-b"} {
-		open, err := s.UnresolvedViolationPaths(ctx, wt)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, blocked := open[tcRogueGo]; !blocked {
-			t.Errorf("legacy violation invisible to checkout %q: %+v", wt, open)
-		}
-	}
-	// ...and any checkout's clean pass can still clear it, exactly as before
-	// the column existed.
-	res, err := s.ReconcileScan(ctx, scanFrom("agent-b"), liveEval())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Resolved != 1 {
-		t.Errorf("a clean pass resolved %d legacy rows, want 1", res.Resolved)
-	}
-	// The acked row keeps '': widening an ack to every checkout is the
-	// permissive direction, so it is deliberately not backfilled.
-	var wt string
-	if err := s.db.QueryRowContext(ctx, `SELECT worktree FROM violations WHERE id = ?`, ackedID).Scan(&wt); err != nil {
-		t.Fatal(err)
-	}
-	if wt != "" {
-		t.Errorf("resolved row backfilled to %q, want the primary checkout", wt)
 	}
 }

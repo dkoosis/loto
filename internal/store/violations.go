@@ -44,21 +44,28 @@ const (
 	LeaseStateExpired = "expired-lease"
 )
 
-// WorktreeLegacy marks an open violation recorded before rows carried a
-// checkout — its origin is genuinely unknown, and guessing is unsafe in one
-// direction only.
+// WorktreeLegacy marks a violation recorded before rows carried a checkout —
+// its origin is genuinely unknown, and every lookup treats it accordingly.
 //
-// ‡ Assigning legacy rows to the primary worktree (”) would let a linked
-// checkout upgrade straight past a sticky violation it had itself recorded:
-// its scoped intersect stops seeing the row, and if it has since taken a
-// lease on that path its own scan records nothing new (a leaseholder's edit
-// is not a violation) — so the contaminated content submits clean. That is
-// precisely the laundering the record exists to stop (Codex #283 P1).
+// ‡ One rule: an unknown origin is matched by the lookup that DENIES and by
+// no lookup that CLEARS.
 //
-// A legacy row therefore blocks EVERY checkout's admission, and any
-// checkout's clean pass may resolve it — which is exactly how these rows
-// behaved before the column existed, so the migration makes admission
-// strictly safer and resolution no harder.
+//	admission's intersect   denies a submit    -> matches '?'
+//	auto-resolution         clears a row       -> never matches '?'
+//	the ack lookup          suppresses a flag  -> never matches '?'
+//
+// Assigning legacy rows to the primary worktree (”) breaks that rule in both
+// directions. A linked checkout stops seeing a sticky violation it recorded
+// itself, and if it has since leased the path its own scan records nothing
+// new — a leaseholder's edit is not a violation — so the contaminated content
+// submits clean (Codex #283 P1). In the other direction an ack made in a
+// linked tree starts suppressing flags in the primary one (Codex #283 P2).
+//
+// The cost is that a legacy row outlives every clean scan until a human runs
+// `loto violations resolve`. That is the correct direction for a record whose
+// whole point is that contamination cannot be cleared by working past it: no
+// checkout can testify about a tree it cannot see, so none of them gets to
+// close the row on the strength of its own cleanliness.
 const WorktreeLegacy = "?"
 
 // Resolutions a violation row can close with.
@@ -320,9 +327,15 @@ func (s *Store) ResolveViolationsForPaths(ctx context.Context, worktree string, 
 	total := 0
 	for _, p := range paths {
 		res, err := tx.ExecContext(ctx,
+			// worktree is matched exactly. A row of unknown origin
+			// (WorktreeLegacy) is not this checkout's to clear: a clean
+			// reading here is no evidence about the tree the row actually
+			// came from, and closing it on that basis is the laundering the
+			// record exists to stop (Codex #283 P1). It stays open until a
+			// human resolves it by id.
 			`UPDATE violations SET resolved_at = ?, resolution = ?
-			  WHERE path_canonical = ? AND (worktree = ? OR worktree = ?) AND resolved_at IS NULL`,
-			nowNs, resolution, p, worktree, WorktreeLegacy)
+			  WHERE path_canonical = ? AND worktree = ? AND resolved_at IS NULL`,
+			nowNs, resolution, p, worktree)
 		if err != nil {
 			return 0, err
 		}
@@ -459,6 +472,9 @@ func (s *Store) ackedFingerprints(ctx context.Context, paths []string, baseline,
 	if len(paths) == 0 {
 		return out, nil
 	}
+	// worktree is matched exactly, never widened to WorktreeLegacy: an ack is
+	// a clearance, and nothing may be cleared on the word of a tree nobody
+	// can name (Codex #283 P2).
 	placeholders, args := inClauseStrings(paths)
 	args = append(args, ResolutionReverted, baseline, worktree)
 	q := `SELECT path_canonical, fingerprint FROM violations` + //nolint:gosec // G202 placeholders are '?' chars only, all data via args
