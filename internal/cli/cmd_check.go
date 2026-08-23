@@ -32,9 +32,29 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 	fs.SetOutput(stderr)
 	staged := fs.Bool("staged", false, "read paths from git diff --cached")
 	gateFlag := fs.Bool("gate", false, "read-only deny gate: exit 1 if a foreign live claim or lock/beacon covers any path; never acquires, refreshes, or writes")
+	branch := fs.String("branch", "", "check a BRANCH instead of paths: exit 1 if another checkout has it and its owner is not provably gone")
 	cwdUnknown := fs.Bool("cwd-unknown", false, "the caller's working directory is not knowable here (e.g. mcp__trixi__agent_shell): refuse relative paths instead of resolving them against the wrong base")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return nil, "", "", false, 2, true
+	}
+
+	// --branch asks a different question than every other check flag: not
+	// "may I write these paths" but "may I publish this branch". It shares
+	// no path resolution, no store read, and no target machinery, so it
+	// branches out here — before any of it — the way --gate branches before
+	// openRuntime. Combining it with the path flags would be a caller who
+	// means one of the two and will be answered about the other.
+	// Keyed on whether --branch was TYPED, not on whether it is non-empty.
+	// `loto check --branch "$BRANCH"` with the variable unset would otherwise
+	// fall through to the path check, find no paths, and print "✓ no paths"
+	// — a green light to publish, handed out because the caller's shell
+	// expanded to nothing. It refuses instead.
+	if flagWasSet(fs, "branch") {
+		if fs.NArg() > 0 || *staged || *gateFlag || *cwdUnknown {
+			fmt.Fprintln(stderr, "✗ --branch takes no paths and no other check flag")
+			return nil, "", "", false, 2, true
+		}
+		return nil, "", "", false, runCheckBranch(ctx, *branch, stdout, stderr), true
 	}
 
 	// Resolve repoTop before shelling out to git so `git diff --cached` runs

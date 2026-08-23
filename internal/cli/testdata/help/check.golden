@@ -1,4 +1,6 @@
 Usage of check:
+  -branch string
+    	check a BRANCH instead of paths: exit 1 if another checkout has it and its owner is not provably gone
   -cwd-unknown
     	the caller's working directory is not knowable here (e.g. mcp__trixi__agent_shell): refuse relative paths instead of resolving them against the wrong base
   -gate

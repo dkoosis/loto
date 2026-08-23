@@ -459,7 +459,7 @@ func TestCheckStaged_FromSubdirStillResolvesGitTokens(t *testing.T) {
 	t.Setenv("LOTO_AGENT_ID", bob.UUID)
 	t.Chdir(filepath.Join(repo, "internal", "store"))
 	var out bytes.Buffer
-	code := Run([]string{tcCmdCheck, "--staged"}, &out, &bytes.Buffer{})
+	code := Run([]string{tcCmdCheck, tcFlagStaged}, &out, &bytes.Buffer{})
 	if strings.Contains(out.String(), "invalid") {
 		t.Fatalf("staged token was re-based on the cwd: %q", out.String())
 	}

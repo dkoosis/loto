@@ -191,14 +191,14 @@ func TestCheckGateOutputUnchangedByTerritoryTag(t *testing.T) {
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
 	var before bytes.Buffer
-	codeBefore := Run([]string{tcCmdCheck, "--gate", ttInsidePath}, &before, io.Discard)
+	codeBefore := Run([]string{tcCmdCheck, tcFlagGate, ttInsidePath}, &before, io.Discard)
 
 	t.Setenv("LOTO_AGENT_ID", bob.UUID)
 	runOK(t, tcCmdTag, ttDirPrefix, ttNoteText)
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
 	var after bytes.Buffer
-	codeAfter := Run([]string{tcCmdCheck, "--gate", ttInsidePath}, &after, io.Discard)
+	codeAfter := Run([]string{tcCmdCheck, tcFlagGate, ttInsidePath}, &after, io.Discard)
 
 	if codeBefore != codeAfter {
 		t.Errorf("a note must not change the gate's verdict: %d then %d", codeBefore, codeAfter)
