@@ -181,18 +181,13 @@ CREATE TABLE IF NOT EXISTS violations (
   -- tree is dirty (loto-nper).
   worktree       TEXT NOT NULL DEFAULT ''
 );
--- Partial unique index: at most ONE open row per path PER CHECKOUT, so two
--- loto processes scanning the same dirty tree concurrently cannot both
--- insert, while two different trees may each record the same path. Closed
--- rows are unconstrained — a path may be contaminated, reverted, and
--- contaminated again, and each episode is its own record.
---
--- ‡ Keyed (path_canonical, worktree), never path alone. The unscoped form is
--- idx_violations_open_path, which ensureViolationsOpenIndexScoped drops: while
--- it stands, the second checkout's open row for a shared path is silently
--- eaten by RecordViolations' INSERT OR IGNORE. It must not be declared here
--- either — migrate runs this file before every ensure, so a copy left in the
--- base schema is recreated on every re-migrate (Codex #283 P1).
-CREATE UNIQUE INDEX IF NOT EXISTS idx_violations_open_path_wt
-  ON violations(path_canonical, worktree) WHERE resolved_at IS NULL;
+-- ‡ NO unique index on the open set is declared here, and that is deliberate.
+-- The real one is keyed (path_canonical, worktree) — path alone lets the
+-- second checkout's open row for a shared path be eaten by RecordViolations'
+-- INSERT OR IGNORE (loto-nper) — but migrate runs this whole file BEFORE any
+-- ensure step, so on a DB whose violations table predates the worktree column
+-- a statement naming that column fails with "no such column" and every
+-- command that opens the store dies. ensureViolationsOpenIndexScoped creates
+-- it instead, after ensureViolationsWorktree has added the column, and drops
+-- the unscoped form wherever it is still standing (Codex #283 P1).
 CREATE INDEX IF NOT EXISTS idx_violations_open ON violations(resolved_at, path_canonical);

@@ -18,6 +18,12 @@ const (
 	tcBaseline  = "b000000000000000000000000000000000000000"
 	tcBaseline2 = "b111111111111111111111111111111111111111"
 	tcOtherGo   = "internal/other.go"
+
+	// The two statements that put an already-migrated violations table back
+	// into its pre-worktree shape. Named because three tests rewind, and a
+	// typo in one copy would quietly test nothing.
+	tcDropScopedIdx   = `DROP INDEX IF EXISTS idx_violations_open_path_wt`
+	tcCreateLegacyIdx = `CREATE UNIQUE INDEX idx_violations_open_path ON violations(path_canonical) WHERE resolved_at IS NULL`
 )
 
 // scanOf wraps observations as one whole-tree pass against tcBaseline — the
@@ -573,8 +579,8 @@ func TestMigrate_ScopesTheOpenViolationIndexToWorktree(t *testing.T) {
 
 	// Rewind to the pre-worktree shape: the old index back, the new one gone.
 	for _, stmt := range []string{
-		`DROP INDEX IF EXISTS idx_violations_open_path_wt`,
-		`CREATE UNIQUE INDEX idx_violations_open_path ON violations(path_canonical) WHERE resolved_at IS NULL`,
+		tcDropScopedIdx,
+		tcCreateLegacyIdx,
 	} {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			t.Fatalf("rewind %q: %v", stmt, err)
@@ -728,9 +734,9 @@ func rewindToPreWorktreeShape(t *testing.T, s *Store) {
 	t.Helper()
 	ctx := context.Background()
 	for _, stmt := range []string{
-		`DROP INDEX IF EXISTS idx_violations_open_path_wt`,
+		tcDropScopedIdx,
 		`ALTER TABLE violations DROP COLUMN worktree`,
-		`CREATE UNIQUE INDEX idx_violations_open_path ON violations(path_canonical) WHERE resolved_at IS NULL`,
+		tcCreateLegacyIdx,
 	} {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			t.Fatalf("rewind %q: %v", stmt, err)
@@ -757,16 +763,16 @@ func TestMigrate_ReMigrateDoesNotResurrectTheLegacyIndex(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 
-	// The base schema must not declare the unscoped index at all.
-	if strings.Contains(schemaSQL, "idx_violations_open_path\n") ||
-		strings.Contains(schemaSQL, "idx_violations_open_path ") {
-		t.Error("schema.sql still declares the unscoped open-violation index")
+	// The base schema must not create EITHER open-set unique index. The
+	// unscoped one re-arms the nper hole on every re-migrate; the scoped one
+	// names a column that does not exist yet when this file runs.
+	if strings.Contains(schemaSQL, "idx_violations_open_path") {
+		t.Error("schema.sql declares an open-violation unique index; it belongs in the guarded ensure")
 	}
 
 	// Simulate the crash window: the schema tx committed, user_version never
 	// landed, and something put the legacy index back.
-	if _, err := s.db.ExecContext(ctx,
-		`CREATE UNIQUE INDEX idx_violations_open_path ON violations(path_canonical) WHERE resolved_at IS NULL`); err != nil {
+	if _, err := s.db.ExecContext(ctx, tcCreateLegacyIdx); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := ensureViolationsOpenIndexScoped(ctx, s.db, false)
@@ -796,5 +802,67 @@ func TestMigrate_ReMigrateDoesNotResurrectTheLegacyIndex(t *testing.T) {
 	}
 	if len(open) != 2 {
 		t.Errorf("want one open row per checkout, got %d: %+v", len(open), open)
+	}
+}
+
+// A fresh DB still ends up with the scoped index. It now comes only from the
+// guarded ensure — the base schema cannot declare it — so the fresh path
+// needs its own assertion rather than riding on schema.sql.
+func TestMigrate_FreshDBGetsTheScopedOpenIndex(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	if got, err := indexExists(ctx, s.db, "idx_violations_open_path_wt"); err != nil || !got {
+		t.Errorf("fresh DB missing the scoped index: exists=%v err=%v", got, err)
+	}
+	if got, err := indexExists(ctx, s.db, "idx_violations_open_path"); err != nil || got {
+		t.Errorf("fresh DB carries the unscoped index: exists=%v err=%v", got, err)
+	}
+}
+
+// The whole upgrade path, driven through migrate itself rather than by
+// calling the ensures by hand. On a DB from before the worktree column,
+// migrate runs schema.sql BEFORE any ensure — so anything in that file that
+// names the column fails with "no such column: worktree" and every command
+// that opens the store dies (Codex #283 P1).
+func TestMigrate_UpgradesADBThatPredatesTheWorktreeColumn(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	if _, err := s.RecordViolations(ctx, []ObservedViolation{
+		{PathCanonical: tcRogueGo, Fingerprint: tcSHA1, Baseline: tcBaseline, LeaseState: LeaseStateUnleased},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		tcDropScopedIdx,
+		`ALTER TABLE violations DROP COLUMN worktree`,
+		tcCreateLegacyIdx,
+		`PRAGMA user_version = 0`,
+	} {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("rewind %q: %v", stmt, err)
+		}
+	}
+
+	if err := s.migrate(ctx); err != nil {
+		t.Fatalf("migrate a pre-worktree DB: %v", err)
+	}
+
+	if got, err := indexExists(ctx, s.db, "idx_violations_open_path"); err != nil || got {
+		t.Errorf("legacy index survived migrate: exists=%v err=%v", got, err)
+	}
+	if got, err := indexExists(ctx, s.db, "idx_violations_open_path_wt"); err != nil || !got {
+		t.Errorf("scoped index missing after migrate: exists=%v err=%v", got, err)
+	}
+	open, err := s.UnresolvedViolations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 || open[0].Worktree != WorktreeLegacy {
+		t.Fatalf("pre-upgrade row not carried to the unknown scope: %+v", open)
+	}
+	// A second migrate is a no-op, not a re-break.
+	if err := s.migrate(ctx); err != nil {
+		t.Errorf("re-migrate: %v", err)
 	}
 }
