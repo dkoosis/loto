@@ -45,10 +45,14 @@ full design contract.
 
 ## installation
 
+`go.mod` declares the bare module path `loto` (single-host personal
+tooling, not published to a proxy) — `go install` can't resolve it from
+outside a checkout. Clone and build instead:
+
 ```sh
-go install loto/cmd/loto@latest
-# or build from source:
-make install
+git clone https://github.com/dkoosis/loto.git
+cd loto
+make install   # installs to $GOPATH/bin
 ```
 
 ## commands
