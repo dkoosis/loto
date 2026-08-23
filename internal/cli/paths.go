@@ -20,6 +20,11 @@ const unnamedSlug = "unnamed"
 // StateDir returns the state directory for the project rooted at repoTop:
 // $XDG_STATE_HOME/loto/projects/<slug>/. LOTO_BASE overrides everything.
 func StateDir(repoTop string) string {
+	// LOTO_BASE wins outright, and it is the supported way to give a second
+	// CLONE of one repo its own store: the slug below is derived from the
+	// origin remote, so two clones otherwise land on one DB with nothing
+	// recorded to tell their checkouts apart (loto-n7xb, reasoned out on
+	// store.Store.repoTop).
 	if v := os.Getenv("LOTO_BASE"); v != "" {
 		return v
 	}

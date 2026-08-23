@@ -131,9 +131,10 @@ func ScanWorktree(ctx context.Context, repoTop string) (Scan, error) {
 //
 // ‡ Unique within ONE clone, and no further. The store is keyed by origin
 // slug, so two clones of a repo share it — and both their primaries answer
-// "" here. Distinguishing them needs an identity the store does not have for
-// anything (locks and candidate claims carry none either), so it is a
-// decision above this function: loto-n7xb.
+// "" here. That is declared out of frame, not overlooked: git-gate.md:53
+// commits to one checkout, the agent pattern is linked worktrees of one
+// clone, and a clone that wants its own store sets LOTO_BASE. The reasoning
+// and the two rejected alternatives live on store.Store.repoTop (loto-n7xb).
 func WorktreeID(ctx context.Context, repoTop string) (string, error) {
 	g := gitRunner{repoTop: repoTop}
 	out, err := g.run(ctx, "rev-parse", "--git-dir", "--git-common-dir")
