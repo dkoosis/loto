@@ -125,7 +125,7 @@ func TestCheckCwdUnknown_StagedPathsAreNotRefused(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	code := Run([]string{tcCmdCheck, tcFlagGate, tcFlagCwdUnknown, "--staged"}, &out, &bytes.Buffer{})
+	code := Run([]string{tcCmdCheck, tcFlagGate, tcFlagCwdUnknown, tcFlagStaged}, &out, &bytes.Buffer{})
 	if strings.Contains(out.String(), "unresolvable") {
 		t.Fatalf("staged paths carry a known base and must not be refused: %q", out.String())
 	}

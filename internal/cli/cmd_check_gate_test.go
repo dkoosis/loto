@@ -13,7 +13,11 @@ import (
 	"loto/internal/render"
 )
 
-const tcFlagGate = "--gate"
+const (
+	tcFlagGate   = "--gate"
+	tcFlagStaged = "--staged"
+	tcFlagBranch = "--branch"
+)
 
 // gateDecide unit tests (loto-vr2, gate-design.md component 4). Pure —
 // domain.LockRecord/domain.ClaimRecord fixtures in, []render.GateDenyRow

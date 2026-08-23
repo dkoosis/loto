@@ -6,6 +6,28 @@
 
 ‡ **store Open / race-path fixes → ALWAYS via PR, never direct-to-main.** linux `-race` runs only on CI, not local macOS. Even a no-op refactor touching `internal/store/*` or `internal/identity/registry.go` goes through a PR (#170 honored this).
 
+‡ **Before publishing a branch you did not author, check it.** A local branch
+with no PR is not evidence of abandoned work — it may be checked out in a live
+agent's worktree, and git guards only the DESTRUCTIVE half: `worktree remove`
+and `branch -D` refuse and name the holder, while `git push`, `gh pr create`
+and `gh pr merge` sail straight through. A sweeper published and merged a
+branch out from under a live agent this way; it survived on ten minutes of
+timing (loto-c1o3).
+
+```bash
+loto check --branch <name> || echo "someone is in it — ask before touching"
+```
+
+exit 1 = a checkout has it and its owner is not provably gone. Only a
+provably-dead holder clears; unlocked-but-occupied and an unreadable lock both
+refuse, because a wrong green light ships someone's mid-revision tree to main.
+✗ `git worktree remove -f -f` to get past a refusal — the message prints that
+escalation and it destroys live work.
+
+φ `loto pr` needs none of this: it builds branches from `refs/loto/integration`
+and never reads a working tree, so publication through the gate cannot ship
+unpromoted work. The check is the backstop for branch-shaped publication.
+
 ‡ **Parallel sessions are routine here.** `git fetch` before judging any branch's state — a branch that looks like cruft may be live unmerged work. Verify with `git cherry main origin/<branch>`: `+` = unapplied, `-` = already applied. (#166–169 merged out from under a session mid-review.)
 
 ‡ **Stacked PRs: merge children BEFORE deleting the parent branch.** Deleting a PR's base branch (e.g. `--delete-branch` on the parent) auto-CLOSES every PR stacked on it, and GitHub won't reopen a PR whose base is gone. Recovery: `git rebase --onto main <parent-tip-sha> <child>` to drop the now-squashed parent commit, force-push, open fresh PRs. Better: base stacked PRs on `main` from the start, or merge bottom-up before any branch delete. (#177→#179/#180 hit this; recovered as #181/#182.)
