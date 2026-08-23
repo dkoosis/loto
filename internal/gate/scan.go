@@ -128,6 +128,12 @@ func ScanWorktree(ctx context.Context, repoTop string) (Scan, error) {
 // the basename of the per-worktree git dir is a stable identity. The primary
 // worktree deliberately maps to "" rather than to a path: it is the common
 // case, its rows predate this column, and an empty default keeps them valid.
+//
+// ‡ Unique within ONE clone, and no further. The store is keyed by origin
+// slug, so two clones of a repo share it — and both their primaries answer
+// "" here. Distinguishing them needs an identity the store does not have for
+// anything (locks and candidate claims carry none either), so it is a
+// decision above this function: loto-n7xb.
 func WorktreeID(ctx context.Context, repoTop string) (string, error) {
 	g := gitRunner{repoTop: repoTop}
 	out, err := g.run(ctx, "rev-parse", "--git-dir", "--git-common-dir")
