@@ -80,9 +80,18 @@ scriptcheck: ## Test the build-tooling shell scripts (scripts/*_test.sh)
 	@shopt -s nullglob; scripts=(scripts/*_test.sh); \
 	if [ $${#scripts[@]} -eq 0 ]; then \
 		echo "+ scriptcheck: no scripts/*_test.sh found — nothing to run"; \
-	else \
-		for t in "$${scripts[@]}"; do bash "$$t"; done; \
-	fi
+		exit 0; \
+	fi; \
+	rc=0; failed=""; \
+	for t in "$${scripts[@]}"; do \
+		if ! bash "$$t"; then \
+			rc=1; failed="$$failed $$t"; \
+		fi; \
+	done; \
+	if [ $$rc -ne 0 ]; then \
+		echo "✗ scriptcheck: failed:$$failed"; \
+	fi; \
+	exit $$rc
 
 audit: check race vuln dupl nilcheck demo ## Exhaustive: +race +vuln +dupl +nilcheck +demo
 	@echo "=== audit pass ==="

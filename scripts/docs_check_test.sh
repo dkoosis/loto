@@ -157,3 +157,4 @@ if [ "$fails" -ne 0 ]; then
 	exit 1
 fi
 printf '\n✓ docs_check_test.sh: %d checks passed\n' "$ran"
+exit 0
