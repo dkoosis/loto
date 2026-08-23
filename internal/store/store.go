@@ -348,6 +348,8 @@ var migrationEnsures = []struct {
 	{"add candidate_claims table", ensureCandidateClaimsTable},
 	{"add violations table", ensureViolationsTable},
 	{"add violations.baseline", ensureViolationsBaseline},
+	{"add violations.worktree", ensureViolationsWorktree},
+	{"scope violations open index to worktree", ensureViolationsOpenIndexScoped},
 }
 
 // schemaCurrent reports whether a re-migrate would be a pure no-op — the gate
@@ -649,6 +651,113 @@ func ensureViolationsBaseline(ctx context.Context, db sqlExecQuerier, apply bool
 	if apply {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE violations ADD COLUMN baseline TEXT NOT NULL DEFAULT ''`); err != nil {
 			return false, err
+		}
+		return false, nil // applied: no longer outstanding
+	}
+	return true, nil
+}
+
+// ensureViolationsWorktree adds the worktree column to a violations table
+// created before checkouts were distinguished (loto-nper). Same precedent as
+// ensureViolationsBaseline: probe pragma_table_info, ALTER, never bump
+// user_version.
+//
+// ‡ EVERY pre-existing row is moved to WorktreeLegacy, not left at the column
+// default. A pre-upgrade scan could run from any checkout, so calling those
+// rows "primary" asserts an origin the DB never recorded — wrong in both
+// directions at once: a linked checkout stops seeing its own open violation
+// (Codex #283 P1), and an ack it made starts suppressing the primary tree's
+// flags (Codex #283 P2). Resolved rows are backfilled for exactly that second
+// reason; see WorktreeLegacy for the rule the two share.
+//
+// The ALTER and the backfill run inside migrate's single tx, so no row is
+// ever readable in the intermediate state.
+func ensureViolationsWorktree(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	return ensureColumn(ctx, db, apply, "violations", "worktree",
+		`ALTER TABLE violations ADD COLUMN worktree TEXT NOT NULL DEFAULT ''`,
+		`UPDATE violations SET worktree = '`+WorktreeLegacy+`'`)
+}
+
+// ensureViolationsOpenIndexScoped widens the open-violation uniqueness key
+// from (path_canonical) to (path_canonical, worktree).
+//
+// ‡ Must run AFTER ensureViolationsWorktree — the index it creates names that
+// column. The old index is not merely redundant: while it stands, two
+// checkouts of one repo cannot each hold an open row for the same path, so
+// the second one's violation is silently dropped by RecordViolations' INSERT
+// OR IGNORE and the contamination goes unrecorded. SQLite has no ALTER INDEX,
+// so the migration is a drop and a create.
+//
+// ‡ The two halves are probed SEPARATELY, and the drop is not conditional on
+// the create being outstanding. migrate runs schema.sql ahead of every ensure,
+// so any re-migrate — the crash window between committing the schema tx and
+// writing user_version, or simply the next ensure step somebody adds —
+// re-executes that file. A legacy index declared there would come back with
+// the scoped one already in place, and a probe that stopped at "scoped index
+// exists" would report nothing to do while both constraints were live (Codex
+// #283 P1). schema.sql no longer declares it, and this refuses to depend on
+// that staying true.
+func ensureViolationsOpenIndexScoped(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	legacy, err := indexExists(ctx, db, "idx_violations_open_path")
+	if err != nil {
+		return false, err
+	}
+	scoped, err := indexExists(ctx, db, "idx_violations_open_path_wt")
+	if err != nil {
+		return false, err
+	}
+	if !legacy && scoped {
+		return false, nil
+	}
+	if apply {
+		if _, err := db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_violations_open_path`); err != nil {
+			return false, err
+		}
+		if _, err := db.ExecContext(ctx,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_violations_open_path_wt
+			   ON violations(path_canonical, worktree) WHERE resolved_at IS NULL`); err != nil {
+			return false, err
+		}
+		return false, nil // applied: no longer outstanding
+	}
+	return true, nil
+}
+
+// indexExists reports whether sqlite_master carries an index by that name.
+func indexExists(ctx context.Context, db sqlExecQuerier, name string) (bool, error) {
+	var got string
+	err := db.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&got)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return false, err
+}
+
+// ensureColumn is the shared body ensureLocksEpoch / ensureViolationsBaseline
+// each hand-duplicated: probe pragma_table_info for the column, run the
+// caller's ALTER if absent, never touch user_version. Trailing statements run
+// in the same apply: a backfill a new column needs is part of adding it, and
+// splitting the two into separate steps would make the un-backfilled state
+// reachable by a probe that then skips it.
+func ensureColumn(ctx context.Context, db sqlExecQuerier, apply bool, table, column, alter string, after ...string) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`, table, column,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return false, nil
+	}
+	if apply {
+		for _, stmt := range append([]string{alter}, after...) {
+			if _, err := db.ExecContext(ctx, stmt); err != nil {
+				return false, err
+			}
 		}
 		return false, nil // applied: no longer outstanding
 	}

@@ -268,3 +268,41 @@ func TestScanWorktree_RenameReportsBothPaths(t *testing.T) {
 		t.Errorf("destination renamed.go = %+v, want observed as present", dst)
 	}
 }
+
+// The primary worktree is "" — the value every row written before checkouts
+// were distinguished already carries, so the migration needs no backfill.
+func TestWorktreeID_PrimaryCheckoutIsEmpty(t *testing.T) {
+	repoTop := scanRepo(t)
+	got, err := WorktreeID(context.Background(), repoTop)
+	if err != nil {
+		t.Fatalf("WorktreeID: %v", err)
+	}
+	if got != "" {
+		t.Errorf("primary worktree id = %q, want %q", got, "")
+	}
+}
+
+// A linked worktree reports git's own name for it, and a scan taken there
+// carries that identity. Without it the shared store cannot tell whose tree
+// is dirty, and a clean pass from here would resolve the primary checkout's
+// violations (loto-nper).
+func TestWorktreeID_LinkedCheckoutCarriesItsName(t *testing.T) {
+	repoTop := scanRepo(t)
+	linked := filepath.Join(t.TempDir(), "agent-b")
+	gitT(t, repoTop, "worktree", "add", "--detach", linked, IntegrationRef)
+
+	got, err := WorktreeID(context.Background(), linked)
+	if err != nil {
+		t.Fatalf("WorktreeID: %v", err)
+	}
+	if got != "agent-b" {
+		t.Errorf("linked worktree id = %q, want %q", got, "agent-b")
+	}
+	scan, err := ScanWorktree(context.Background(), linked)
+	if err != nil {
+		t.Fatalf("ScanWorktree: %v", err)
+	}
+	if scan.Worktree != "agent-b" {
+		t.Errorf("scan.Worktree = %q, want %q", scan.Worktree, "agent-b")
+	}
+}

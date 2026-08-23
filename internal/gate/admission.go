@@ -55,7 +55,8 @@ const (
 // RejectionReasons is the taxonomy in report order — cheap structural classes
 // first, then contamination, then the promotion half. `loto gate stats`
 // iterates THIS list so a class with zero counts still prints: a taxonomy
-// that hides its empty classes teaches nothing about what never fires.
+// that hides its empty classes teaches nothing about what never fires. A
+// class nothing can yet produce prints too, marked unwired — see Wired.
 //
 //nolint:gochecknoglobals // the taxonomy itself, iterated by the stats reporter
 var RejectionReasons = []RejectionReason{
@@ -70,6 +71,35 @@ var RejectionReasons = []RejectionReason{
 	ReasonVerifyRed,
 	ReasonVerifyInfrastructure,
 	ReasonPromotionRace,
+}
+
+// unwiredReasons are taxonomy classes no code path can currently record.
+// Promote computes all three as OutcomeClass values (promotion.go), but
+// nothing converts a PromoteResult into an audit event because there is no
+// promote verb yet — gate.Promote's only caller is a test.
+//
+// ‡ This exists so `loto gate stats` can tell "never fired here" from "cannot
+// fire at all". The report's whole value is the zero reading — which classes
+// have never once triggered is what decides whether the contamination story
+// needs a stronger mechanism — and a structurally unwireable counter makes
+// that reading a lie (Codex #276 round 2, loto-a7qt).
+//
+// ∇ Delete this set the moment a promote verb records its outcomes; the
+// Wired test in admission_test.go names the same three, so removing one here
+// without wiring it fails loudly rather than silently re-arming the lie.
+//
+//nolint:gochecknoglobals // taxonomy metadata, read by the stats reporter
+var unwiredReasons = map[RejectionReason]struct{}{
+	ReasonVerifyRed:            {},
+	ReasonVerifyInfrastructure: {},
+	ReasonPromotionRace:        {},
+}
+
+// Wired reports whether any code path can currently produce this class. A
+// class that cannot is reported as unwired rather than as a count of zero.
+func (r RejectionReason) Wired() bool {
+	_, unwired := unwiredReasons[r]
+	return !unwired
 }
 
 // Decision is Admit's verdict. Reason and Detail are zero-value on Accepted.

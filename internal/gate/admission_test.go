@@ -416,3 +416,21 @@ func TestRejectionReasons_AreDistinctAndComplete(t *testing.T) {
 		}
 	}
 }
+
+// The taxonomy says which classes nothing can produce. This names the same
+// three independently, so wiring a promote verb without clearing the marker
+// — or clearing the marker without wiring it — fails here rather than
+// letting `loto gate stats` present an unwireable counter as an observation
+// (loto-a7qt).
+func TestRejectionReason_OnlyThePromotionHalfIsUnwired(t *testing.T) {
+	unwired := map[RejectionReason]bool{
+		ReasonVerifyRed:            true,
+		ReasonVerifyInfrastructure: true,
+		ReasonPromotionRace:        true,
+	}
+	for _, r := range RejectionReasons {
+		if got, want := r.Wired(), !unwired[r]; got != want {
+			t.Errorf("%s.Wired() = %v, want %v", r, got, want)
+		}
+	}
+}

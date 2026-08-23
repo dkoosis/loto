@@ -239,7 +239,17 @@ func submitViolationScan(rt *runtime, repoTop string, stderr io.Writer) map[stri
 	} else if len(res.Recorded) > 0 {
 		fmt.Fprintf(stderr, "⚠ violations recorded=%d by this scan\n", len(res.Recorded))
 	}
-	unresolved, err := rt.Store.UnresolvedViolationPaths(rt.Ctx)
+	// Scoped to this checkout: a candidate proposes content from ONE tree,
+	// and worktrees of a repo share the store (loto-nper). An unknown
+	// checkout degrades like a read failure rather than guessing "primary",
+	// which would intersect a linked worktree's submit against rows that
+	// belong to a tree it cannot see.
+	wt, err := gate.WorktreeID(rt.Ctx, repoTop)
+	if err != nil {
+		fmt.Fprintf(stderr, "⚠ violation read skipped: %v\n", err)
+		return nil
+	}
+	unresolved, err := rt.Store.UnresolvedViolationPaths(rt.Ctx, wt)
 	if err != nil {
 		fmt.Fprintf(stderr, "⚠ violation read skipped: %v\n", err)
 		return nil

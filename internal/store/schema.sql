@@ -175,12 +175,19 @@ CREATE TABLE IF NOT EXISTS violations (
   lease_state    TEXT NOT NULL DEFAULT '',
   expected_owner TEXT NOT NULL DEFAULT '',
   resolved_at    INTEGER,
-  resolution     TEXT NOT NULL DEFAULT ''
+  resolution     TEXT NOT NULL DEFAULT '',
+  -- Which checkout the observation was taken in, '' for the primary one.
+  -- Worktrees of a repo share this DB, so a row without it cannot say whose
+  -- tree is dirty (loto-nper).
+  worktree       TEXT NOT NULL DEFAULT ''
 );
--- Partial unique index: at most ONE open row per path, so two loto processes
--- scanning the same dirty tree concurrently cannot both insert. Closed rows
--- are unconstrained — a path may be contaminated, reverted, and contaminated
--- again, and each episode is its own record.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_violations_open_path
-  ON violations(path_canonical) WHERE resolved_at IS NULL;
+-- ‡ NO unique index on the open set is declared here, and that is deliberate.
+-- The real one is keyed (path_canonical, worktree) — path alone lets the
+-- second checkout's open row for a shared path be eaten by RecordViolations'
+-- INSERT OR IGNORE (loto-nper) — but migrate runs this whole file BEFORE any
+-- ensure step, so on a DB whose violations table predates the worktree column
+-- a statement naming that column fails with "no such column" and every
+-- command that opens the store dies. ensureViolationsOpenIndexScoped creates
+-- it instead, after ensureViolationsWorktree has added the column, and drops
+-- the unscoped form wherever it is still standing (Codex #283 P1).
 CREATE INDEX IF NOT EXISTS idx_violations_open ON violations(resolved_at, path_canonical);

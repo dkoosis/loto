@@ -25,10 +25,11 @@ CREATE TABLE IF NOT EXISTS violations (
   lease_state    TEXT NOT NULL DEFAULT '',
   expected_owner TEXT NOT NULL DEFAULT '',
   resolved_at    INTEGER,
-  resolution     TEXT NOT NULL DEFAULT ''
+  resolution     TEXT NOT NULL DEFAULT '',
+  worktree       TEXT NOT NULL DEFAULT ''
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_violations_open_path
-  ON violations(path_canonical) WHERE resolved_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_violations_open_path_wt
+  ON violations(path_canonical, worktree) WHERE resolved_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_violations_open ON violations(resolved_at, path_canonical);`
 
 // Lease states a violation can be observed under. Both mean "nothing
@@ -42,6 +43,30 @@ const (
 	// authorization lapsed before the content was observed changed.
 	LeaseStateExpired = "expired-lease"
 )
+
+// WorktreeLegacy marks a violation recorded before rows carried a checkout —
+// its origin is genuinely unknown, and every lookup treats it accordingly.
+//
+// ‡ One rule: an unknown origin is matched by the lookup that DENIES and by
+// no lookup that CLEARS.
+//
+//	admission's intersect   denies a submit    -> matches '?'
+//	auto-resolution         clears a row       -> never matches '?'
+//	the ack lookup          suppresses a flag  -> never matches '?'
+//
+// Assigning legacy rows to the primary worktree (”) breaks that rule in both
+// directions. A linked checkout stops seeing a sticky violation it recorded
+// itself, and if it has since leased the path its own scan records nothing
+// new — a leaseholder's edit is not a violation — so the contaminated content
+// submits clean (Codex #283 P1). In the other direction an ack made in a
+// linked tree starts suppressing flags in the primary one (Codex #283 P2).
+//
+// The cost is that a legacy row outlives every clean scan until a human runs
+// `loto violations resolve`. That is the correct direction for a record whose
+// whole point is that contamination cannot be cleared by working past it: no
+// checkout can testify about a tree it cannot see, so none of them gets to
+// close the row on the strength of its own cleanliness.
+const WorktreeLegacy = "?"
 
 // Resolutions a violation row can close with.
 const (
@@ -79,8 +104,13 @@ type Violation struct {
 	Baseline      string
 	LeaseState    string
 	ExpectedOwner string
-	ResolvedAt    *int64
-	Resolution    string
+	// Worktree is the checkout the observation was taken in — "" for the
+	// primary one. Two worktrees of one repo share this store, so a row
+	// without it cannot say WHOSE tree is dirty, and a clean pass from one
+	// checkout would resolve the other's rows (loto-nper).
+	Worktree   string
+	ResolvedAt *int64
+	Resolution string
 }
 
 // Resolved reports whether this row has been closed.
@@ -94,6 +124,7 @@ type ObservedViolation struct {
 	Baseline      string
 	LeaseState    string
 	ExpectedOwner string
+	Worktree      string
 }
 
 func newViolationID() string { return newID("v-") }
@@ -128,12 +159,26 @@ func (s *Store) RecordViolations(ctx context.Context, obs []ObservedViolation) (
 			ID: newViolationID(), PathCanonical: o.PathCanonical, ObservedAt: nowNs,
 			Fingerprint: o.Fingerprint, Baseline: o.Baseline,
 			LeaseState: o.LeaseState, ExpectedOwner: o.ExpectedOwner,
+			Worktree: o.Worktree,
 		}
+		// The NOT EXISTS clause re-checks the acknowledgement INSIDE this
+		// transaction. ReconcileScan reads acks before it gets here, and a
+		// `loto violations resolve` committing in that window would leave the
+		// scan inserting a fresh open row for content the operator was just
+		// told was cleared — a resolve that visibly un-resolves itself
+		// (Codex #276 round 2, loto-njaj). The stale snapshot can only ever
+		// be too permissive, so re-asking at write time closes the window
+		// without needing the read inside the same tx.
 		res, err := tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO violations
-			   (id, path_canonical, observed_at, fingerprint, baseline, lease_state, expected_owner, resolved_at, resolution)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, NULL, '')`,
-			v.ID, v.PathCanonical, v.ObservedAt, v.Fingerprint, v.Baseline, v.LeaseState, v.ExpectedOwner)
+			   (id, path_canonical, observed_at, fingerprint, baseline, lease_state, expected_owner, worktree, resolved_at, resolution)
+			 SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, ''
+			  WHERE NOT EXISTS (
+			        SELECT 1 FROM violations
+			         WHERE path_canonical = ? AND fingerprint = ? AND baseline = ? AND worktree = ?
+			           AND resolved_at IS NOT NULL AND resolution != ?)`,
+			v.ID, v.PathCanonical, v.ObservedAt, v.Fingerprint, v.Baseline, v.LeaseState, v.ExpectedOwner, v.Worktree,
+			v.PathCanonical, v.Fingerprint, v.Baseline, v.Worktree, ResolutionReverted)
 		if err != nil {
 			return nil, err
 		}
@@ -153,8 +198,31 @@ func (s *Store) RecordViolations(ctx context.Context, obs []ObservedViolation) (
 // (.claude/rules/design.md: same input, byte-identical output).
 func (s *Store) UnresolvedViolations(ctx context.Context) ([]Violation, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, path_canonical, observed_at, fingerprint, baseline, lease_state, expected_owner, resolved_at, resolution
+		`SELECT id, path_canonical, observed_at, fingerprint, baseline, lease_state, expected_owner, worktree, resolved_at, resolution
 		   FROM violations WHERE resolved_at IS NULL ORDER BY path_canonical, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanViolations(rows)
+}
+
+// UnresolvedViolationsIn returns the open rows recorded from ONE checkout.
+//
+// ‡ The scoped read, not the repo-wide one, is what auto-resolution and
+// admission consume. Two worktrees of one repo share this store, and a
+// whole-tree pass speaks only for the tree it walked: reconciling against
+// every row would let a clean checkout close a dirty one's findings, and
+// intersecting against every row would refuse a clean checkout's submit for
+// contamination sitting in a tree it cannot even see (loto-nper). The
+// operator-facing report keeps using UnresolvedViolations — a human asking
+// "what is dirty here" means the repo.
+func (s *Store) UnresolvedViolationsIn(ctx context.Context, worktree string) ([]Violation, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, path_canonical, observed_at, fingerprint, baseline, lease_state, expected_owner, worktree, resolved_at, resolution
+		   FROM violations
+		  WHERE resolved_at IS NULL AND (worktree = ? OR worktree = ?)
+		  ORDER BY path_canonical, id`, worktree, WorktreeLegacy)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +235,7 @@ func (s *Store) UnresolvedViolations(ctx context.Context) ([]Violation, error) {
 // surface can read back is not a record.
 func (s *Store) ViolationByID(ctx context.Context, id string) (Violation, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, path_canonical, observed_at, fingerprint, baseline, lease_state, expected_owner, resolved_at, resolution
+		`SELECT id, path_canonical, observed_at, fingerprint, baseline, lease_state, expected_owner, worktree, resolved_at, resolution
 		   FROM violations WHERE id = ?`, id)
 	if err != nil {
 		return Violation{}, err
@@ -183,12 +251,17 @@ func (s *Store) ViolationByID(ctx context.Context, id string) (Violation, error)
 	return vs[0], nil
 }
 
-// UnresolvedViolationPaths returns path -> open violation id, the exact shape
-// admission's violation-intersect check consumes. A map rather than a slice
-// because the check is a membership test per write-set path, and the id is
-// what the rejection detail must name so the operator can act on it.
-func (s *Store) UnresolvedViolationPaths(ctx context.Context) (map[string]string, error) {
-	vs, err := s.UnresolvedViolations(ctx)
+// UnresolvedViolationPaths returns path -> open violation id for one
+// checkout, the exact shape admission's violation-intersect check consumes. A
+// map rather than a slice because the check is a membership test per
+// write-set path, and the id is what the rejection detail must name so the
+// operator can act on it.
+//
+// Scoped to worktree for the same reason the scan is: a candidate proposes
+// content from ONE tree, so contamination in another one neither taints it
+// nor may block it (loto-nper).
+func (s *Store) UnresolvedViolationPaths(ctx context.Context, worktree string) (map[string]string, error) {
+	vs, err := s.UnresolvedViolationsIn(ctx, worktree)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +310,7 @@ func (s *Store) ResolveViolation(ctx context.Context, id, resolution string) err
 //
 // Unlike ResolveViolation, a path with no open row is not an error: the
 // caller is reconciling a set, not acting on a specific record.
-func (s *Store) ResolveViolationsForPaths(ctx context.Context, paths []string, resolution string) (int, error) {
+func (s *Store) ResolveViolationsForPaths(ctx context.Context, worktree string, paths []string, resolution string) (int, error) {
 	if len(paths) == 0 {
 		return 0, nil
 	}
@@ -254,8 +327,15 @@ func (s *Store) ResolveViolationsForPaths(ctx context.Context, paths []string, r
 	total := 0
 	for _, p := range paths {
 		res, err := tx.ExecContext(ctx,
-			`UPDATE violations SET resolved_at = ?, resolution = ? WHERE path_canonical = ? AND resolved_at IS NULL`,
-			nowNs, resolution, p)
+			// worktree is matched exactly. A row of unknown origin
+			// (WorktreeLegacy) is not this checkout's to clear: a clean
+			// reading here is no evidence about the tree the row actually
+			// came from, and closing it on that basis is the laundering the
+			// record exists to stop (Codex #283 P1). It stays open until a
+			// human resolves it by id.
+			`UPDATE violations SET resolved_at = ?, resolution = ?
+			  WHERE path_canonical = ? AND worktree = ? AND resolved_at IS NULL`,
+			nowNs, resolution, p, worktree)
 		if err != nil {
 			return 0, err
 		}
@@ -275,7 +355,7 @@ func scanViolations(rows *sql.Rows) ([]Violation, error) {
 		var v Violation
 		var resolvedAt sql.NullInt64
 		if err := rows.Scan(&v.ID, &v.PathCanonical, &v.ObservedAt, &v.Fingerprint,
-			&v.Baseline, &v.LeaseState, &v.ExpectedOwner, &resolvedAt, &v.Resolution); err != nil {
+			&v.Baseline, &v.LeaseState, &v.ExpectedOwner, &v.Worktree, &resolvedAt, &v.Resolution); err != nil {
 			return nil, err
 		}
 		if resolvedAt.Valid {
@@ -304,12 +384,18 @@ type ScanResult struct {
 // stated residual hole: a rogue edit INSIDE a held file is indistinguishable
 // from the holder's work (git-gate.md Outcome 1).
 //
-// The same pass auto-closes any open row whose path is absent from obs. That
-// is sound only because ScanWorktree is whole-tree: absence means the content
-// agrees with integration again, i.e. the contamination was reverted. Feeding
-// this a PARTIAL observation set would silently resolve every violation it
-// did not look at — hence the whole-tree contract, stated here and enforced
-// by having exactly one producer.
+// The same pass auto-closes any open row whose path is absent from obs, and
+// only among the rows recorded from scan.Worktree. That is sound only because
+// ScanWorktree is whole-tree: absence means the content agrees with
+// integration again, i.e. the contamination was reverted. Feeding this a
+// PARTIAL observation set would silently resolve every violation it did not
+// look at — hence the whole-tree contract, stated here and enforced by having
+// exactly one producer.
+//
+// ‡ "Whole-tree" is whole ONE tree. Worktrees of a repo share this store, so
+// a pass is scoped to the checkout it walked: without that, running a scan
+// from a dispatch worktree closes the main checkout's findings while the
+// contaminated content is still sitting on its disk (loto-nper).
 func (s *Store) ReconcileScan(ctx context.Context, scan gate.Scan, ec domain.EvalContext) (ScanResult, error) {
 	obs := scan.Observations
 	res := ScanResult{Observed: len(obs)}
@@ -322,7 +408,7 @@ func (s *Store) ReconcileScan(ctx context.Context, scan gate.Scan, ec domain.Eva
 	for _, o := range obs {
 		paths = append(paths, o.Path)
 	}
-	acked, err := s.ackedFingerprints(ctx, paths, scan.Baseline)
+	acked, err := s.ackedFingerprints(ctx, paths, scan.Baseline, scan.Worktree)
 	if err != nil {
 		return res, err
 	}
@@ -347,7 +433,7 @@ func (s *Store) ReconcileScan(ctx context.Context, scan gate.Scan, ec domain.Eva
 		state, owner := s.lapsedLeaseWitness(ctx, o.Path, ec)
 		candidates = append(candidates, ObservedViolation{
 			PathCanonical: o.Path, Fingerprint: o.Fingerprint, Baseline: scan.Baseline,
-			LeaseState: state, ExpectedOwner: owner,
+			LeaseState: state, ExpectedOwner: owner, Worktree: scan.Worktree,
 		})
 	}
 
@@ -357,7 +443,7 @@ func (s *Store) ReconcileScan(ctx context.Context, scan gate.Scan, ec domain.Eva
 	// means a mid-pass failure leaves stale-but-open rows rather than
 	// prematurely-closed ones — the conservative direction for a check whose
 	// whole job is to fail closed.
-	open, err := s.UnresolvedViolations(ctx)
+	open, err := s.UnresolvedViolationsIn(ctx, scan.Worktree)
 	if err != nil {
 		return res, err
 	}
@@ -367,7 +453,7 @@ func (s *Store) ReconcileScan(ctx context.Context, scan gate.Scan, ec domain.Eva
 			reverted = append(reverted, open[i].PathCanonical)
 		}
 	}
-	if res.Resolved, err = s.ResolveViolationsForPaths(ctx, reverted, ResolutionReverted); err != nil {
+	if res.Resolved, err = s.ResolveViolationsForPaths(ctx, scan.Worktree, reverted, ResolutionReverted); err != nil {
 		return res, err
 	}
 	if res.Recorded, err = s.RecordViolations(ctx, candidates); err != nil {
@@ -381,16 +467,19 @@ func (s *Store) ReconcileScan(ctx context.Context, scan gate.Scan, ec domain.Eva
 // the machine ResolutionReverted — i.e. every fingerprint someone has looked
 // at and said is legitimate. Membership is the only operation the caller
 // needs, hence the flat key rather than a nested map.
-func (s *Store) ackedFingerprints(ctx context.Context, paths []string, baseline string) (map[string]struct{}, error) {
+func (s *Store) ackedFingerprints(ctx context.Context, paths []string, baseline, worktree string) (map[string]struct{}, error) {
 	out := map[string]struct{}{}
 	if len(paths) == 0 {
 		return out, nil
 	}
+	// worktree is matched exactly, never widened to WorktreeLegacy: an ack is
+	// a clearance, and nothing may be cleared on the word of a tree nobody
+	// can name (Codex #283 P2).
 	placeholders, args := inClauseStrings(paths)
-	args = append(args, ResolutionReverted, baseline)
+	args = append(args, ResolutionReverted, baseline, worktree)
 	q := `SELECT path_canonical, fingerprint FROM violations` + //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 		` WHERE path_canonical IN (` + placeholders + `) AND resolved_at IS NOT NULL` +
-		` AND resolution != ? AND baseline = ?`
+		` AND resolution != ? AND baseline = ? AND worktree = ?`
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
