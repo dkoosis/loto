@@ -33,6 +33,22 @@ type Store struct {
 	// slug, so two worktrees of one repo share a store; repoTop means "validate
 	// against MY checkout", the same semantics statFileTargetReason has had
 	// since loto-cqk.
+	//
+	// ‡ The sharing boundary is the SLUG, which is coarser than "one repo".
+	// Two independent CLONES resolve the same origin remote to the same slug
+	// and therefore share this store, with nothing recorded to tell them
+	// apart: every clone's primary checkout answers "" to gate.WorktreeID, and
+	// git only makes linked-worktree names unique within one clone. A clean
+	// scan in one clone can then resolve a violation belonging to the other
+	// (loto-n7xb).
+	//
+	// That is declared OUT OF FRAME rather than fixed. git-gate.md:53 commits
+	// to "N agents land concurrently from one checkout", the agent pattern
+	// here is linked worktrees of one clone (which the worktree column does
+	// scope correctly), and giving every primary checkout a clone-specific id
+	// would put a digest on every row to separate a configuration nobody runs.
+	// A second clone that genuinely wants its own store sets LOTO_BASE, which
+	// StateDir honors ahead of the slug — see cli.StateDir.
 	repoTop string
 }
 
