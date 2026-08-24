@@ -121,8 +121,14 @@ $XDG_STATE_HOME/loto/
     ├── loto.db             # SQLite: locks
     └── lock-op.flock       # short-lived DB op serializer
 
-~/.loto/agents/<uuid>.json  # host-global session identity
+~/.loto/
+├── agents/<uuid>.json      # host-global agent identity
+├── session/<sid>.json      # session id -> agent uuid cache
+└── peers/<uuid>.json       # live sibling sessions
 ```
+
+`LOTO_BASE` overrides **both** roots — lock store at `$LOTO_BASE/`, identity
+at `$LOTO_BASE/{agents,session,peers}/`.
 
 The project slug is derived from `git remote get-url origin` (normalized).
 

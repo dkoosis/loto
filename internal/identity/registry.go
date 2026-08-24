@@ -103,12 +103,33 @@ func homeDir() string {
 	return "/tmp" // both lookups failed; /tmp keeps paths absolute
 }
 
+// lotoHome returns the root directory for loto's per-user identity state
+// (agents/session/peers): ~/.loto normally, or LOTO_BASE when set.
+//
+// LOTO_BASE already redirects the lock store (StateDir, internal/cli/paths.go)
+// for tests and isolated runs; before this fix it did NOT reach identity, so a
+// test setting LOTO_BASE (and even overriding CLAUDE_CODE_SESSION_ID) still
+// minted agent files and session-cache files under the real ~/.loto —
+// home/hooks/shared-main-guard.test.sh in the sdlc repo left
+// somebody-else-<pid>.json behind on every run (sd-kx5). Any caller that does
+// NOT override CLAUDE_CODE_SESSION_ID (e.g. a `loto whoami` from outside a
+// test harness) writes into the live ~/.loto/session/<sid>.json for real, so
+// this was a correctness bug beyond stray test files. One knob now covers the
+// whole state dir: the lock store lands in LOTO_BASE directly (loto.db); identity
+// lands in LOTO_BASE/agents, /session, /peers — same root, disjoint subpaths.
+func lotoHome() string {
+	if v := os.Getenv("LOTO_BASE"); v != "" {
+		return v
+	}
+	return filepath.Join(homeDir(), ".loto")
+}
+
 func registryDir() string {
-	return filepath.Join(homeDir(), ".loto", "agents")
+	return filepath.Join(lotoHome(), "agents")
 }
 
 func sessionDir() string {
-	return filepath.Join(homeDir(), ".loto", "session")
+	return filepath.Join(lotoHome(), "session")
 }
 
 var (
@@ -759,6 +780,40 @@ func GCSessions(now time.Time, keepSID string, pinned map[string]struct{}) (reap
 		}
 	}
 	return reaped, residual, nil
+}
+
+// sessionGCMarker records the last time GCSessionsIfDue actually ran a pass,
+// so repeated write-verb calls (openRuntimeGC) can skip the ReadDir sweep
+// between runs at the cost of one os.Stat.
+const sessionGCMarkerName = ".session-gc-at"
+
+// sessionGCMinInterval bounds how often GCSessionsIfDue runs a real pass.
+// Before this, GCSessions only ran from `loto doctor` (cmd_doctor.go) — a
+// verb dk has to remember to invoke — so ~/.loto/session grew unbounded in
+// practice (3,877 files observed with no automatic reaper, sd-kx5) even
+// though the reap logic itself has always existed. Gating on a marker file's
+// mtime keeps the added cost on the write-verb hot path to a single stat
+// call in the common case, while still converging the directory back under
+// agentsGCMaxAge without a human remembering to run doctor.
+var sessionGCMinInterval = 24 * time.Hour
+
+// GCSessionsIfDue runs GCSessions at most once per sessionGCMinInterval,
+// tracked by a marker file's mtime under lotoHome(). ran=false means the
+// marker was fresh and no sweep happened this call — reaped/residual are
+// zero and err is nil. Errors touching the marker are non-fatal: session
+// hygiene is hygiene, not invariant, matching GCSessions itself.
+func GCSessionsIfDue(now time.Time, keepSID string, pinned map[string]struct{}) (ran bool, reaped, residual int, err error) {
+	marker := filepath.Join(lotoHome(), sessionGCMarkerName)
+	if fi, statErr := os.Stat(marker); statErr == nil {
+		if now.Sub(fi.ModTime()) < sessionGCMinInterval {
+			return false, 0, 0, nil
+		}
+	}
+	reaped, residual, err = GCSessions(now, keepSID, pinned)
+	if mkErr := mkdirAllSync(lotoHome()); mkErr == nil {
+		_ = os.WriteFile(marker, []byte(now.UTC().Format(time.RFC3339)+"\n"), 0o600)
+	}
+	return true, reaped, residual, err
 }
 
 // isStaleSessionCandidate reports whether e is a session cache file eligible
