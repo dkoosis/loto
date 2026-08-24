@@ -181,6 +181,52 @@ func TestRunVerifyCmdNonZeroExitIsResult(t *testing.T) {
 	}
 }
 
+// TestRunVerifyCmdNeutralizesGOWORK pins codex #286 finding 4: a caller with
+// GOWORK exported to an absolute path must not have it reach the verify
+// command — GOWORK there would resolve modules against that external
+// workspace instead of dir's own go.mod, quietly voiding Verify's "isolated
+// to this commit's tree" guarantee. No go.work exists in this repo today; the
+// test sets GOWORK itself to prove the override actually reaches the child,
+// rather than relying on this repo's own absence of a go.work file.
+func TestRunVerifyCmdNeutralizesGOWORK(t *testing.T) {
+	t.Setenv("GOWORK", "/nonexistent/some.work")
+	out, passed, err := runVerifyCmd(context.Background(), t.TempDir(), []string{"sh", "-c", "echo GOWORK=$GOWORK"})
+	if err != nil {
+		t.Fatalf("runVerifyCmd: %v", err)
+	}
+	if !passed {
+		t.Fatalf("probe command failed:\n%s", out)
+	}
+	if !strings.Contains(out, "GOWORK=off") {
+		t.Errorf("GOWORK not neutralized in the verify child's environment: %q", out)
+	}
+}
+
+// TestRunVerifyCmdPWDMatchesDir pins the fix required alongside GOWORK: once
+// Env is set explicitly (as neutralizing GOWORK requires), Go's implicit
+// "auto-inject PWD to match Dir when Env is nil" no longer applies. Without
+// PWD=dir set explicitly here too, the child inherits this TEST PROCESS's own
+// (unrelated) PWD; a shell's `pwd` builtin finds that stale PWD doesn't match
+// its actual cwd and falls back to a raw getcwd() — printing dir's
+// symlink-RESOLVED form (macOS: /var -> /private/var) instead of the literal
+// path scrubPaths knows how to strip, leaking an absolute path into --build
+// output (caught as a real regression: TestVerifyScrubsWorktreeAndGitDirPaths
+// went from 3/3 pass to 3/3 fail the moment GOWORK's fix set Env without also
+// setting PWD).
+func TestRunVerifyCmdPWDMatchesDir(t *testing.T) {
+	dir := t.TempDir()
+	out, passed, err := runVerifyCmd(context.Background(), dir, []string{"sh", "-c", "pwd"})
+	if err != nil {
+		t.Fatalf("runVerifyCmd: %v", err)
+	}
+	if !passed {
+		t.Fatalf("probe command failed:\n%s", out)
+	}
+	if got := strings.TrimSpace(out); got != dir {
+		t.Errorf("pwd = %q, want dir verbatim %q (a symlink-resolved mismatch defeats scrubPaths)", got, dir)
+	}
+}
+
 func TestVerifyValidatesInput(t *testing.T) {
 	repoTop, base := newBaseRepo(t)
 	cases := []struct {

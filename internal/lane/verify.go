@@ -104,7 +104,13 @@ func Verify(ctx context.Context, repoTop, commit string, cmd []string) (VerifyRe
 // non-zero exit returns (output, false, nil) — a verify result, not an infra
 // failure. A start error or ctx-expiry returns a non-nil error. The command
 // inherits the parent environment so it finds the global, content-addressed Go
-// caches (GOCACHE/GOMODCACHE) — a fresh worktree reuses them.
+// caches (GOCACHE/GOMODCACHE) — a fresh worktree reuses them. GOWORK is
+// overridden to "off" (codex #286 finding 4): a caller with GOWORK exported to
+// an absolute path in the source checkout would make cmd resolve modules
+// against that workspace file instead of the throwaway worktree's own go.mod
+// — quietly voiding the "this is the commit's tree, isolated" guarantee
+// Verify sells. No go.work exists in this repo today, so this guards a real
+// but not-yet-triggered failure mode, not one observed here.
 func runVerifyCmd(ctx context.Context, dir string, cmd []string) (string, bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -115,6 +121,23 @@ func runVerifyCmd(ctx context.Context, dir string, cmd []string) (string, bool, 
 	//nolint:gosec // G204: cmd is the caller-supplied verify command (go test / vet / lint / build), run exec-only in a detached worktree; never shell-interpreted here.
 	c := exec.CommandContext(ctx, cmd[0], cmd[1:]...)
 	c.Dir = dir
+	// append, not assign: os.Environ() first so a later, duplicate key wins
+	// (Go's exec passes duplicate env keys through to the OS, which applies
+	// the LAST occurrence) — this overrides two entries the caller's shell may
+	// have exported, not a fresh environment.
+	//
+	// PWD=dir is required alongside GOWORK, not cosmetic: when Env is left nil,
+	// Go's exec auto-injects a PWD matching Dir for us; the moment ANY Env is
+	// set explicitly, that auto-injection stops, and the child inherits our
+	// PARENT's (stale, unrelated-directory) PWD instead. A shell's `pwd`
+	// builtin trusts a stale-but-`stat`-valid PWD over the real cwd — sh finds
+	// the inherited PWD doesn't match dir, falls back to a raw getcwd(), and
+	// prints the SYMLINK-RESOLVED form (macOS: /var -> /private/var) rather
+	// than the literal dir string scrubPaths knows how to strip, leaking an
+	// absolute path into --build output. Setting PWD=dir ourselves is what
+	// nil-Env was already doing implicitly; this line preserves that, not a
+	// new behavior.
+	c.Env = append(os.Environ(), "GOWORK=off", "PWD="+dir)
 	var buf bytes.Buffer
 	c.Stdout = &buf
 	c.Stderr = &buf
