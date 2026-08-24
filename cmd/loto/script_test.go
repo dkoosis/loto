@@ -69,12 +69,17 @@ func TestScripts(t *testing.T) {
 
 			// Pre-mint two persisted agents so scripts can swap personas via
 			// `env LOTO_AGENT_ID=$ALICE`. Written directly to disk to avoid
-			// racing on os.Setenv across parallel scripts.
-			alice, err := mintAgentFile(home, "AliceTester")
+			// racing on os.Setenv across parallel scripts. Minted straight
+			// under LOTO_BASE/agents, not HOME/.loto/agents: identity's
+			// registryDir resolves through LOTO_BASE when set, with no
+			// ".loto" segment inserted (sd-kx5) — a fixture written under
+			// HOME would sit at a path the code never reads.
+			agentsDir := filepath.Join(base, "agents")
+			alice, err := mintAgentFile(agentsDir, "AliceTester")
 			if err != nil {
 				return err
 			}
-			bob, err := mintAgentFile(home, "BobTester")
+			bob, err := mintAgentFile(agentsDir, "BobTester")
 			if err != nil {
 				return err
 			}
@@ -109,7 +114,7 @@ func TestScripts(t *testing.T) {
 	})
 }
 
-func mintAgentFile(home, handle string) (string, error) {
+func mintAgentFile(dir, handle string) (string, error) {
 	type agent struct {
 		UUID      string    `json:"uuid"`
 		Handle    string    `json:"handle"`
@@ -122,7 +127,6 @@ func mintAgentFile(home, handle string) (string, error) {
 	}
 	uuid := "00000000-0000-4000-8000-" + hex.EncodeToString(buf[:])
 	a := agent{UUID: uuid, Handle: handle, CreatedAt: time.Now().UTC(), Host: "testscript"}
-	dir := filepath.Join(home, ".loto", "agents")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}

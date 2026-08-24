@@ -2,6 +2,13 @@
 // persists per-agent records at ~/.loto/agents/<uuid>.json. Ensure is the
 // entry point; LookupByUUID and NewUUID are supporting surfaces.
 //
+// LOTO_BASE, when set, redirects the whole ~/.loto tree (agents, session,
+// peers — see lotoHome in registry.go) the same way it redirects the lock
+// store (internal/cli.StateDir). A test or isolated run that sets LOTO_BASE
+// without also overriding CLAUDE_CODE_SESSION_ID used to still write into the
+// real ~/.loto/session/<sid>.json — this package ignored the var entirely
+// before sd-kx5.
+//
 // Governing principle: identity ambiguity is allowed for display, never for
 // authority. Anything that acquires, releases, or attributes a lock must run
 // under a stable, explicit, validated UUID binding. Heuristics are only

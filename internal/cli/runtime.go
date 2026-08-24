@@ -195,12 +195,21 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 // GC runs here, before the caller mutates anything: lockOwnerUUIDs must see
 // the lock rows that pin their owner agents, and an unlock --all has already
 // dropped them by the time it returns (gh#125 / loto-ffg).
+//
+// GCSessionsIfDue rides along, marker-gated to once per
+// identity.sessionGCMinInterval: session-cache reaping used to run only from
+// `loto doctor`, a verb nobody remembers to invoke, so ~/.loto/session grew
+// unbounded (3,877 stray files observed with no automatic reaper, sd-kx5).
+// The marker keeps the steady-state added cost on this write path to one
+// os.Stat; a real ReadDir sweep only happens once per interval per machine.
 func openRuntimeGC(ctx context.Context) (*runtime, error) {
 	rt, err := openRuntime(ctx)
 	if err != nil {
 		return nil, err
 	}
-	_ = identity.GCAgents(time.Now(), lockOwnerUUIDs(ctx, rt.Store))
+	pinned := lockOwnerUUIDs(ctx, rt.Store)
+	_, _, _, _ = identity.GCSessionsIfDue(time.Now(), string(rt.SessionUUID), pinned)
+	_ = identity.GCAgents(time.Now(), pinned)
 	return rt, nil
 }
 

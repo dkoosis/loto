@@ -173,8 +173,14 @@ func TestLiveProbeUnknownHostNeverPIDProbes(t *testing.T) {
 // --- openRuntime / openRuntimeGC verb split (loto-6pn6) ---------------------
 
 // agentFilePath returns the on-disk path of uuid's agent record under the
-// current $HOME.
+// current identity root. LOTO_BASE, when set, wins over $HOME (sd-kx5:
+// registryDir now resolves through LOTO_BASE with no ".loto" segment
+// inserted) — every caller in this package sets both via withTempProject, so
+// this must match that precedence or chtimes/os.Stat miss the real file.
 func agentFilePath(uuid string) string {
+	if base := os.Getenv("LOTO_BASE"); base != "" {
+		return filepath.Join(base, "agents", uuid+".json")
+	}
 	return filepath.Join(os.Getenv("HOME"), ".loto", "agents", uuid+".json")
 }
 

@@ -79,7 +79,9 @@ func (p Peer) Live(ctx context.Context) bool {
 	return p.SessionVerdict(ctx).Liveness != SessionDead
 }
 
-func peersDir() string { return filepath.Join(homeDir(), ".loto", "peers") }
+// peersDir honors LOTO_BASE via lotoHome (registry.go) — same isolation
+// requirement as registryDir/sessionDir (sd-kx5).
+func peersDir() string { return filepath.Join(lotoHome(), "peers") }
 
 // tmpOrphanGrace bounds how long a *.tmp file in ~/.loto/peers may linger
 // before Peers treats it as crash debris rather than an in-flight publish.
