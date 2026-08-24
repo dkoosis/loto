@@ -20,7 +20,7 @@ include .sandbox/lib/Makefile.cross.mk
 
 .PHONY: help scan check audit deploy report report-human \
         vet lint arch test race demo demo-v vuln dupl nilcheck stress scriptcheck \
-        selfcheck build install tidy clean hooks
+        docscheck selfcheck build install tidy clean hooks
 
 BIN_DIR := bin
 BIN     := $(BIN_DIR)/loto
@@ -60,7 +60,7 @@ help: ## Show this help
 		/^## [^-]/ { printf "\n%s\n", substr($$0, 4) } \
 		/^[a-zA-Z0-9_-]+:.*?## / { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-check: vet lint arch test build scriptcheck selfcheck ## Full repo: vet + lint + arch + test + build + scripts + conform
+check: vet lint arch test build docscheck scriptcheck selfcheck ## Full repo: vet + lint + arch + test + build + docs + scripts + conform
 	@echo "=== check pass ==="
 
 # Dogfood the fleet gate (sd-th5.15): conform is pinned as a go.mod tool
@@ -68,8 +68,32 @@ check: vet lint arch test build scriptcheck selfcheck ## Full repo: vet + lint +
 selfcheck: ## Run conform (fleet SDLC checker) against this repo
 	go tool conform
 
+# Catches README drift against the Makefile/CLI it describes (loto-qo0y):
+# a documented `make <target>` that no longer exists, a `# go ...` comment
+# whose claimed flags aren't in the target's actual recipe, or a documented
+# `loto <cmd>` no longer in `loto --help`. Depends on `build` explicitly —
+# under `make -j`, siblings in `check`'s prerequisite list run in parallel,
+# so left-to-right order there is not ordering; only an explicit prerequisite
+# here guarantees bin/loto exists before docs_check.sh needs it.
+docscheck: build ## README's documented commands still match the Makefile/CLI
+	@bash scripts/docs_check.sh --loto-bin $(BIN)
+
 scriptcheck: ## Test the build-tooling shell scripts (scripts/*_test.sh)
-	@bash scripts/gate_test.sh
+	@shopt -s nullglob; scripts=(scripts/*_test.sh); \
+	if [ $${#scripts[@]} -eq 0 ]; then \
+		echo "+ scriptcheck: no scripts/*_test.sh found — nothing to run"; \
+		exit 0; \
+	fi; \
+	rc=0; failed=""; \
+	for t in "$${scripts[@]}"; do \
+		if ! bash "$$t"; then \
+			rc=1; failed="$$failed $$t"; \
+		fi; \
+	done; \
+	if [ $$rc -ne 0 ]; then \
+		echo "✗ scriptcheck: failed:$$failed"; \
+	fi; \
+	exit $$rc
 
 audit: check race vuln dupl nilcheck demo ## Exhaustive: +race +vuln +dupl +nilcheck +demo
 	@echo "=== audit pass ==="

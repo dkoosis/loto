@@ -45,10 +45,14 @@ full design contract.
 
 ## installation
 
+`go.mod` declares the bare module path `loto` (single-host personal
+tooling, not published to a proxy) — `go install` can't resolve it from
+outside a checkout. Clone and build instead:
+
 ```sh
-go install loto/cmd/loto@latest
-# or build from source:
-make install
+git clone https://github.com/dkoosis/loto.git
+cd loto
+make install   # installs to $GOPATH/bin
 ```
 
 ## commands
@@ -75,7 +79,7 @@ Output is Claude-optimized KV — one record per line, fixed glyphs (`✓` /
 |------|-----------|--------------|--------|
 | Tag (record-tier) | `locks` row with non-zero, unexpired `expires_at` | row + TTL (lazy GC) | shipped |
 | Enforcement (chmod) | strip-write on acquire; restore on release | filesystem mode bits | retired (loto-zssw) |
-| Harness gate | PreToolUse hook refuses a write over a peer's held path | `locks` + `claims` rows | shipped |
+| Harness gate | PreToolUse hook refuses a write over a peer's held path | `locks` + `claims` rows | shipped in the `loto@sdlc` Claude Code plugin (`hooks/hooks.json` → `scripts/pre-tool-use.sh`), globally enabled via `~/.claude/settings.json` — a fresh clone of *this* repo gets no PreToolUse hook |
 | Op-flock (internal) | flock on `lock-op.flock`, held only during an op | flock | shipped |
 | File flock (foreground) | flock(2) exclusive held by the editing process | flock | deferred |
 | Global lock | flock(2) on a project-wide handle | flock | deferred |
@@ -190,6 +194,7 @@ See `docs/DESIGN.md` for the full contract.
 
 ```sh
 make check    # fmt + vet + test + build
-make test     # go test -race ./...
+make test     # go test -json -count=1 -cover ./...
+make race     # go test -race -json -timeout=20m -count=1 ./...
 make install  # install to $GOPATH/bin
 ```
