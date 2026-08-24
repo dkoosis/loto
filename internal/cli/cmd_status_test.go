@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -152,6 +153,53 @@ func TestStatusDeadVerdictMatchesReclaim(t *testing.T) {
 	pinAgent(t) // agent B (re-pin swaps active identity)
 	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatal("bob should reclaim the dead-verdict lock with no doctor")
+	}
+}
+
+// TestStatusDeadLockRendersDistinctFromLive pins sd-kck: a dead/expired lock
+// row must not carry the same ✓ mark as a live one, the whole-repo summary
+// must split live from expired, and the row must name the reclaim command —
+// the defect was `loto status` printing ✓ on every row regardless of the
+// liveness= it had already computed, so a pile of 49 expired locks read as
+// "53 healthy".
+func TestStatusDeadLockRendersDistinctFromLive(t *testing.T) {
+	repo := withTempProject(t)
+	if err := os.WriteFile(filepath.Join(repo, tcTargetB), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOTO_PID", "") // PID-0 sentinel → TTL-only liveness
+	pinAgent(t)              // agent A — dead lock
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagTTL, tcTTL1ms},
+		&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice lock failed")
+	}
+	time.Sleep(20 * time.Millisecond) // lease expired → lock now dead
+	pinAgent(t)                       // agent B — live lock, distinct target
+	if code := Run([]string{tcCmdLock, tcTargetB, "-t", tcIntentTest},
+		&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("bob lock failed")
+	}
+
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdStatus}, &out, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("status exit: %q", out.String())
+	}
+	s := out.String()
+
+	if !strings.Contains(s, "⚠ locks count=2 held=1 expired=1") {
+		t.Errorf("summary must split live vs expired counts: %q", s)
+	}
+	if !strings.Contains(s, "✗ target=a.go") {
+		t.Errorf("dead row must carry a mark distinct from ✓: %q", s)
+	}
+	if strings.Contains(s, "✓ target=a.go") {
+		t.Errorf("dead row must NOT render with the live ✓ mark: %q", s)
+	}
+	if !strings.Contains(s, "✓ target=b.go") {
+		t.Errorf("live row keeps the ✓ mark: %q", s)
+	}
+	if !strings.Contains(s, "loto doctor --repair") {
+		t.Errorf("status must name the reclaim command: %q", s)
 	}
 }
 

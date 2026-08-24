@@ -227,8 +227,26 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord) {
 		fmt.Fprintln(stdout, "✓ no locks")
 		return
 	}
-	fmt.Fprintf(stdout, "✓ locks count=%d\n", len(all))
 	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
+	// Classify every row up front so the summary line and the per-row marks
+	// agree on the same verdict (sd-kck) — a lock past its TTL backstop or
+	// whose holder is provably gone is DEAD, and printing ✓ on it read as "53
+	// healthy locks" when 49 of them were reclaimable rows nobody was
+	// enforcing for. dead=%d makes the reclaim gap visible without opening a
+	// single row; live/unknown fold together as "held" (both are non-stale —
+	// Classify's own docstring).
+	dead := 0
+	for i := range all {
+		if ec.Classify(all[i]) == domain.LivenessDead {
+			dead++
+		}
+	}
+	if dead == 0 {
+		fmt.Fprintf(stdout, "✓ locks count=%d\n", len(all))
+	} else {
+		fmt.Fprintf(stdout, "⚠ locks count=%d held=%d expired=%d — reclaim: loto doctor --repair\n",
+			len(all), len(all)-dead, dead)
+	}
 	canonicals := make([]domain.Canonical, len(all))
 	for i := range all {
 		canonicals[i] = domain.Canonical(all[i].Target.Canonical)
@@ -242,16 +260,31 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord) {
 		if l.Branch != "" {
 			branch = " branch=" + l.Branch
 		}
+		// mark distinguishes a DEAD row from a live/unknown one at a glance —
+		// the same ✓ on every row (regardless of liveness=) is exactly the
+		// defect: a reader scanning the left column saw 53 healthy locks when
+		// 49 were expired, owner gone, file still 0444 (sd-kck).
+		mark := "✓"
+		verdict := ec.Classify(*l)
+		if verdict == domain.LivenessDead {
+			mark = "✗"
+		}
 		// epoch= is the generation half of this hold's identity: joined to
 		// owner= as `owner@epoch` it is the token `unlock --force
 		// --expect-holder` compares against (loto-tqcw). Printed as its own
 		// field rather than a pre-joined `hold=` so no row repeats the owner.
-		fmt.Fprintf(stdout, "✓ target=%s owner=%s epoch=%d mode=%s intent=%q held_since=%s ttl_remaining=%s liveness=%s host=%s pid=%d%s\n",
-			relPath(l.Target.Canonical), l.OwnerUUID, l.Epoch, l.EffectiveMode(), l.Intent,
+		fmt.Fprintf(stdout, "%s target=%s owner=%s epoch=%d mode=%s intent=%q held_since=%s ttl_remaining=%s liveness=%s host=%s pid=%d%s\n",
+			mark, relPath(l.Target.Canonical), l.OwnerUUID, l.Epoch, l.EffectiveMode(), l.Intent,
 			l.CreatedAt.UTC().Format(time.RFC3339),
-			fmtTTL(ec.RemainingTTL(*l)), ec.Classify(*l),
+			fmtTTL(ec.RemainingTTL(*l)), verdict,
 			l.Host, l.PID, branch)
 		render.EmitTagRows(stdout, tagsByTarget[l.Target.Canonical])
+	}
+	if dead > 0 {
+		fmt.Fprintln(stdout, "‡ reclaim the expired locks above (restores file mode too):")
+		fmt.Fprintln(stdout, "```bash")
+		fmt.Fprintln(stdout, "loto doctor --repair")
+		fmt.Fprintln(stdout, "```")
 	}
 }
 
