@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -577,7 +578,7 @@ func syncApplyOne(ctx context.Context, repoTop string, d syncDiff) (bool, error)
 		return false, fmt.Errorf("cat-file %s: %w", d.OID, err)
 	}
 	full := filepath.Join(repoTop, filepath.FromSlash(d.Path))
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+	if err := syncMkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return false, err
 	}
 	mode := os.FileMode(0o644)
@@ -585,6 +586,44 @@ func syncApplyOne(ctx context.Context, repoTop string, d syncDiff) (bool, error)
 		mode = 0o755
 	}
 	return syncAtomicReplace(full, blob, mode)
+}
+
+// syncMkdirAll is os.MkdirAll plus a durable fsync of every newly created
+// level's parent, so a crash mid-repair can't leave a directory that
+// MkdirAll reported as created but whose entry never reached disk — the
+// same durability class the rename below closes (loto-8sic PR review,
+// Codex). φ internal/identity's mkdirAllSync; duplicated rather than shared
+// because identity is a leaf package (no internal imports) and this one
+// routes through syncFull for the darwin F_FULLFSYNC barrier.
+func syncMkdirAll(dir string, perm os.FileMode) error {
+	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+		return nil
+	}
+	// Levels that don't exist yet, deepest first, up to the first existing
+	// ancestor (or the filesystem root).
+	var created []string
+	for p := dir; ; {
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			break
+		}
+		created = append(created, p)
+		parent := filepath.Dir(p)
+		if parent == p {
+			break
+		}
+		p = parent
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	// Fsync top-down (shallowest first): a level's entry must be durable in
+	// its parent before a crash could otherwise orphan it.
+	for _, p := range slices.Backward(created) {
+		if err := syncParentDirFn(filepath.Dir(p)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // syncAtomicReplace prepares the complete replacement beside path, including
@@ -615,7 +654,7 @@ func syncAtomicReplace(path string, data []byte, mode os.FileMode) (bool, error)
 	if err := tmp.Chmod(mode); err != nil {
 		return false, err
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := syncFull(tmp); err != nil {
 		return false, err
 	}
 	if err := tmp.Close(); err != nil {
@@ -636,7 +675,7 @@ func syncParentDir(dir string) error {
 		return err
 	}
 	defer d.Close()
-	return d.Sync()
+	return syncFull(d)
 }
 
 // emitSyncReport renders the normal (non-special-cased) sync report:

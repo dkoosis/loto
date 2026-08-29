@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -677,5 +678,58 @@ func TestSync_MidApplyFailureReportsWhatItWrote(t *testing.T) {
 	}
 	if got := readFileT(t, zPath); got != "drift\n" {
 		t.Errorf("z.go changed despite pre-publication failure: %q", got)
+	}
+}
+
+// TestSyncMkdirAll_FsyncsEveryCreatedLevel pins the loto-8sic PR review fix
+// (Codex): repairing a path whose parent directories were also deleted must
+// fsync each newly created level's parent, not just the deepest directory —
+// otherwise a crash can drop the repaired hierarchy even though the file
+// write itself reported success. φ atomicfile's
+// TestMkdirAllSyncFsyncsEveryCreatedParent.
+func TestSyncMkdirAll_FsyncsEveryCreatedLevel(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "a", "b", "c")
+
+	var synced []string
+	original := syncParentDirFn
+	syncParentDirFn = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	t.Cleanup(func() { syncParentDirFn = original })
+
+	if err := syncMkdirAll(target, 0o755); err != nil {
+		t.Fatalf("syncMkdirAll: %v", err)
+	}
+
+	// Created: root/a, root/a/b, root/a/b/c — so their parents, in that order.
+	want := []string{root, filepath.Join(root, "a"), filepath.Join(root, "a", "b")}
+	if !slices.Equal(synced, want) {
+		t.Errorf("fsynced dirs = %v, want %v", synced, want)
+	}
+	if fi, err := os.Stat(target); err != nil || !fi.IsDir() {
+		t.Errorf("target dir not created: stat=%v err=%v", fi, err)
+	}
+}
+
+// TestSyncMkdirAll_SkipsExistingDir asserts the no-op path: an
+// already-existing directory gets no fsync calls at all.
+func TestSyncMkdirAll_SkipsExistingDir(t *testing.T) {
+	root := t.TempDir()
+
+	var synced []string
+	original := syncParentDirFn
+	syncParentDirFn = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	t.Cleanup(func() { syncParentDirFn = original })
+
+	if err := syncMkdirAll(root, 0o755); err != nil {
+		t.Fatalf("syncMkdirAll: %v", err)
+	}
+	if len(synced) != 0 {
+		t.Errorf("fsynced %v for an already-existing dir, want none", synced)
 	}
 }
