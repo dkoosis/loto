@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -75,6 +77,24 @@ const (
 // hash-object returning a different oid count than the paths fed to it is
 // infrastructure trouble (a stdin/stdout framing bug), not an expected verdict.
 var errHashObjectCountMismatch = errors.New("git hash-object: oid count mismatch")
+
+// errSyncIntegrationChanged refuses a stale repair plan when promotion moved
+// refs/loto/integration after divergence was computed.
+var errSyncIntegrationChanged = errors.New("sync: integration changed during repair")
+
+// syncBeforeApplyFn pauses sync after its coordination-state read and decision.
+// Nil in production; tests use it to make the lease-acquire TOCTOU deterministic.
+var syncBeforeApplyFn func() //nolint:gochecknoglobals // production-nil concurrency test seam
+
+// syncWriteFn indirects the temporary-file write so tests can force a short
+// write before publication.
+var syncWriteFn = func(f *os.File, data []byte) (int, error) { //nolint:gochecknoglobals // fault-injection seam
+	return f.Write(data)
+}
+
+// syncParentDirFn is the post-rename durability seam. Tests force this final
+// step to fail and assert the already-published path remains in the report.
+var syncParentDirFn = syncParentDir //nolint:gochecknoglobals // fault-injection seam
 
 func cmdSync(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
@@ -147,7 +167,7 @@ func runSync(rt *runtime, repoTop string, stdout, stderr io.Writer) int {
 
 	skipped, decidable := partitionSkipped(diffs)
 
-	synced, conflicts, code := syncStoreDecideApply(rt, repoTop, decidable, stderr)
+	synced, conflicts, code := syncStoreDecideApply(rt, repoTop, integSHA, decidable, stderr)
 	if code != 0 {
 		// A mid-apply failure leaves the tree PARTIALLY fast-forwarded. Naming
 		// the files that already changed is the whole report the operator gets
@@ -156,7 +176,7 @@ func runSync(rt *runtime, repoTop string, stdout, stderr io.Writer) int {
 		if len(synced) > 0 {
 			fmt.Fprintf(stdout, "⚠ sync synced=%d partial=true — the tree is partially fast-forwarded\n", len(synced))
 			for _, p := range synced {
-				fmt.Fprintf(stdout, "✓ target=%s action=fast-forward\n", p)
+				fmt.Fprintf(stdout, "✓ target=%s action=fast-forward\n", syncPathField(p))
 			}
 		}
 		return code
@@ -170,40 +190,44 @@ func runSync(rt *runtime, repoTop string, stdout, stderr io.Writer) int {
 }
 
 // syncStoreDecideApply reads live lock/claim/candidate-claim state, decides,
-// and applies — split out of runSync to keep it under the funlen gate. Store
-// reads run here, immediately before apply — narrows the read→write TOCTOU
-// window to milliseconds (plan Decision log; fully closing it needs the
-// store op-flock, out of scope this bead).
+// and applies while the store holds the project operation flock. Every path
+// that acquires one of those protections uses the same flock, so a peer cannot
+// acquire after the decision and before the filesystem mutation.
 // ‡ On a non-zero code the returned synced slice is still meaningful: apply is
-// not atomic, so it names the files already written before the failure.
-func syncStoreDecideApply(rt *runtime, repoTop string, decidable []syncDiff, stderr io.Writer) (synced []string, conflicts []syncConflict, code int) {
-	locks, err := rt.Store.ListLocks(rt.Ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return nil, nil, 3
-	}
-	claims, err := rt.Store.ListClaims(rt.Ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return nil, nil, 3
-	}
+// not atomic, so it names the files already published before the failure.
+func syncStoreDecideApply(rt *runtime, repoTop, expectedIntegration string, decidable []syncDiff, stderr io.Writer) (synced []string, conflicts []syncConflict, code int) {
 	paths := make([]string, len(decidable))
 	for i, d := range decidable {
 		paths[i] = d.Path
 	}
-	cands, err := rt.Store.CandidateClaimsForPaths(rt.Ctx, paths)
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return nil, nil, 3
-	}
 
-	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe())}
-	apply, conflicts := syncDecide(decidable, locks, claims, cands, ec)
+	err := rt.Store.WithStableCoordinationState(rt.Ctx, paths, func(
+		locks []domain.LockRecord,
+		claims []domain.ClaimRecord,
+		cands []domain.CandidateClaim,
+	) error {
+		currentIntegration, exists, err := syncIntegrationSHA(rt.Ctx, repoTop)
+		if err != nil {
+			return err
+		}
+		if !exists || currentIntegration != expectedIntegration {
+			return fmt.Errorf("%w: expected=%s actual=%s", errSyncIntegrationChanged, expectedIntegration, currentIntegration)
+		}
 
-	// ‡ syncApply returns what it wrote BEFORE it failed. Discarding that on
-	// the error path is what loto-8sic was opened about: the tree is left
-	// partially fast-forwarded and the caller cannot say which files moved.
-	synced, err = syncApply(rt.Ctx, repoTop, apply)
+		ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe())}
+		apply, decidedConflicts := syncDecide(decidable, locks, claims, cands, ec)
+		conflicts = decidedConflicts
+		if syncBeforeApplyFn != nil {
+			syncBeforeApplyFn()
+		}
+
+		// ‡ syncApply returns what it published BEFORE it failed. Discarding
+		// that on the error path leaves the caller unable to name which files
+		// moved in a partially fast-forwarded tree.
+		var applyErr error
+		synced, applyErr = syncApply(rt.Ctx, repoTop, apply)
+		return applyErr
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return synced, nil, 3
@@ -407,32 +431,72 @@ func compareExisting(ctx context.Context, repoTop string, existing []syncEntry) 
 	return diffs, nil
 }
 
-// batchHashObject runs one `git hash-object --stdin-paths` over paths
-// (already sorted by the caller) and returns each path's current worktree
-// blob OID. Newline-delimited, not -z: hash-object has no -z switch (unlike
-// ls-tree/diff), so this — like plain `git diff --name-only` elsewhere in the
-// tree — trusts paths don't embed a literal newline.
+// batchHashObject hashes ordinary paths in one newline-delimited
+// `git hash-object --stdin-paths` call. Git offers no NUL-delimited form, so
+// paths containing LF or CR are passed individually as argv after `--`.
 func batchHashObject(ctx context.Context, repoTop string, paths []string) (map[string]string, error) {
+	result := make(map[string]string, len(paths))
+	var ordinary, exceptional []string
+	for _, p := range paths {
+		if strings.ContainsAny(p, "\n\r") {
+			exceptional = append(exceptional, p)
+		} else {
+			ordinary = append(ordinary, p)
+		}
+	}
+
 	c, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(c, "git", "hash-object", "--stdin-paths")
+	if err := hashOrdinaryPaths(c, repoTop, ordinary, result); err != nil {
+		return nil, err
+	}
+	for _, p := range exceptional {
+		oid, err := hashExceptionalPath(c, repoTop, p)
+		if err != nil {
+			return nil, err
+		}
+		result[p] = oid
+	}
+	return result, nil
+}
+
+func hashOrdinaryPaths(ctx context.Context, repoTop string, paths []string, result map[string]string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "git", "hash-object", "--stdin-paths")
 	cmd.Dir = repoTop
 	cmd.Stdin = strings.NewReader(strings.Join(paths, "\n") + "\n")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git hash-object: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("git hash-object: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	oids := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 	if len(oids) != len(paths) {
-		return nil, fmt.Errorf("%w: got %d oids for %d paths", errHashObjectCountMismatch, len(oids), len(paths))
+		return fmt.Errorf("%w: got %d oids for %d paths", errHashObjectCountMismatch, len(oids), len(paths))
 	}
-	result := make(map[string]string, len(paths))
 	for i, p := range paths {
 		result[p] = oids[i]
 	}
-	return result, nil
+	return nil
+}
+
+func hashExceptionalPath(ctx context.Context, repoTop, path string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "hash-object", "--", path)
+	cmd.Dir = repoTop
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git hash-object %q: %w: %s", path, err, strings.TrimSpace(stderr.String()))
+	}
+	oids := strings.Fields(string(out))
+	if len(oids) != 1 {
+		return "", fmt.Errorf("%w: got %d oids for exceptional path %q", errHashObjectCountMismatch, len(oids), path)
+	}
+	return oids[0], nil
 }
 
 // syncDecide partitions divergent, decidable diffs into apply (safe to
@@ -491,38 +555,127 @@ func syncConflictFor(path string, locks []domain.LockRecord, claims []domain.Cla
 
 // syncApply fast-forwards every apply path to integration content, in sorted
 // order: cat-file blob → MkdirAll (restores a path whose directory went with
-// it) → write → chmod. Stops at the first failure — a write failure is
-// infrastructure, exit 3, not a partial report.
+// it) → atomic publish. Stops at the first failure. If publication succeeded
+// before a later durability error, the current path is included in synced.
 func syncApply(ctx context.Context, repoTop string, apply []syncDiff) (synced []string, err error) {
 	sorted := append([]syncDiff(nil), apply...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
 	for _, d := range sorted {
-		if err := syncApplyOne(ctx, repoTop, d); err != nil {
-			return synced, fmt.Errorf("sync %s: %w", d.Path, err)
+		published, applyErr := syncApplyOne(ctx, repoTop, d)
+		if published {
+			synced = append(synced, d.Path)
 		}
-		synced = append(synced, d.Path)
+		if applyErr != nil {
+			return synced, fmt.Errorf("sync %s: %w", syncPathField(d.Path), applyErr)
+		}
 	}
 	return synced, nil
 }
 
-func syncApplyOne(ctx context.Context, repoTop string, d syncDiff) error {
+func syncApplyOne(ctx context.Context, repoTop string, d syncDiff) (bool, error) {
 	blob, err := gitOutputBytes(ctx, repoTop, "cat-file", "blob", d.OID)
 	if err != nil {
-		return fmt.Errorf("cat-file %s: %w", d.OID, err)
+		return false, fmt.Errorf("cat-file %s: %w", d.OID, err)
 	}
 	full := filepath.Join(repoTop, filepath.FromSlash(d.Path))
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-		return err
-	}
-	//nolint:gosec // G306: this perm is a placeholder — WriteFile's mode argument only applies when it CREATES the file (the fast-forward-over case leaves an existing file's mode untouched), so the Chmod immediately below is what actually sets the final, mode-correct permission.
-	if err := os.WriteFile(full, blob, 0o644); err != nil {
-		return err
+	if err := syncMkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return false, err
 	}
 	mode := os.FileMode(0o644)
 	if d.Mode == "100755" {
 		mode = 0o755
 	}
-	return os.Chmod(full, mode)
+	return syncAtomicReplace(full, blob, mode)
+}
+
+// syncMkdirAll is os.MkdirAll plus a durable fsync of every newly created
+// level's parent, so a crash mid-repair can't leave a directory that
+// MkdirAll reported as created but whose entry never reached disk — the
+// same durability class the rename below closes (loto-8sic PR review,
+// Codex). φ internal/identity's mkdirAllSync; duplicated rather than shared
+// because identity is a leaf package (no internal imports) and this one
+// routes through syncFull for the darwin F_FULLFSYNC barrier.
+func syncMkdirAll(dir string, perm os.FileMode) error {
+	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+		return nil
+	}
+	// Levels that don't exist yet, deepest first, up to the first existing
+	// ancestor (or the filesystem root).
+	var created []string
+	for p := dir; ; {
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			break
+		}
+		created = append(created, p)
+		parent := filepath.Dir(p)
+		if parent == p {
+			break
+		}
+		p = parent
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	// Fsync top-down (shallowest first): a level's entry must be durable in
+	// its parent before a crash could otherwise orphan it.
+	for _, p := range slices.Backward(created) {
+		if err := syncParentDirFn(filepath.Dir(p)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// syncAtomicReplace prepares the complete replacement beside path, including
+// its final mode and a file fsync, before one rename publishes it. Failures
+// before rename leave the old target intact; a parent-directory fsync failure
+// after rename reports published=true so the partial-sync report names path.
+func syncAtomicReplace(path string, data []byte, mode os.FileMode) (bool, error) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".loto-sync-*")
+	if err != nil {
+		return false, err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	// The write seam targets only the unpublished temporary file: even an
+	// injected short write can damage no existing worktree bytes.
+	n, err := syncWriteFn(tmp, data)
+	if err != nil {
+		return false, err
+	}
+	if n != len(data) {
+		return false, io.ErrShortWrite
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		return false, err
+	}
+	if err := syncFull(tmp); err != nil {
+		return false, err
+	}
+	if err := tmp.Close(); err != nil {
+		return false, err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return false, err
+	}
+	if err := syncParentDirFn(dir); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func syncParentDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return syncFull(d)
 }
 
 // emitSyncReport renders the normal (non-special-cased) sync report:
@@ -539,13 +692,13 @@ func emitSyncReport(w io.Writer, synced []string, conflicts []syncConflict, skip
 
 	rows := make([]syncReportRow, 0, len(synced)+len(conflicts)+len(skipped))
 	for _, p := range synced {
-		rows = append(rows, syncReportRow{path: p, line: fmt.Sprintf("✓ target=%s action=fast-forward", p)})
+		rows = append(rows, syncReportRow{path: p, line: fmt.Sprintf("✓ target=%s action=fast-forward", syncPathField(p))})
 	}
 	for _, c := range conflicts {
 		rows = append(rows, syncReportRow{path: c.Path, line: formatSyncConflictRow(c)})
 	}
 	for _, d := range skipped {
-		rows = append(rows, syncReportRow{path: d.Path, line: fmt.Sprintf("⚠ target=%s reason=unsupported-mode", d.Path)})
+		rows = append(rows, syncReportRow{path: d.Path, line: fmt.Sprintf("⚠ target=%s reason=unsupported-mode", syncPathField(d.Path))})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].path < rows[j].path })
 	for _, r := range rows {
@@ -570,10 +723,21 @@ type syncReportRow struct {
 // candidate-claim row — the two blocker kinds are addressed differently
 // (unlock/wait vs. wait on candidate resolution).
 func formatSyncConflictRow(c syncConflict) string {
+	path := syncPathField(c.Path)
 	if c.Reason == syncReasonCandidateClaim {
-		return fmt.Sprintf("✗ target=%s reason=%s candidate=%s", c.Path, c.Reason, c.Holder)
+		return fmt.Sprintf("✗ target=%s reason=%s candidate=%s", path, c.Reason, c.Holder)
 	}
-	return fmt.Sprintf("✗ target=%s reason=%s holder=%s", c.Path, c.Reason, shortUUID(c.Holder))
+	return fmt.Sprintf("✗ target=%s reason=%s holder=%s", path, c.Reason, shortUUID(c.Holder))
+}
+
+// syncPathField keeps one report row per path. Ordinary names retain the
+// existing unquoted output; control characters use Go quoting so legal Git
+// names containing a newline cannot inject a second row.
+func syncPathField(path string) string {
+	if strings.ContainsAny(path, "\n\r\t") {
+		return strconv.Quote(path)
+	}
+	return path
 }
 
 // shortUUID truncates a UUID to its first 8 hex characters for compact
