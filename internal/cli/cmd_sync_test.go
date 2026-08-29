@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -16,6 +18,8 @@ import (
 const (
 	tcCmdSync = "sync"
 )
+
+var errInjectedSyncIO = errors.New("injected sync I/O failure")
 
 func syncGitT(t *testing.T, dir string, args ...string) string {
 	t.Helper()
@@ -147,6 +151,68 @@ func TestSync_RestoresDeletedPath(t *testing.T) {
 }
 
 // --- Step 3: conflict red ---
+
+// TestSync_LeaseAcquireCannotRaceFinalApply pauses sync after its final state
+// read and proves a peer cannot acquire the target until publication finishes.
+func TestSync_LeaseAcquireCannotRaceFinalApply(t *testing.T) {
+	repo := syncBaseRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("drift\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, err := openRuntime(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+
+	readDone := make(chan struct{})
+	resume := make(chan struct{})
+	syncBeforeApplyFn = func() {
+		close(readDone)
+		<-resume
+	}
+	t.Cleanup(func() { syncBeforeApplyFn = nil })
+
+	diff := syncDiff{
+		syncEntry: syncEntry{Path: tcTargetA, Mode: "100644", OID: syncGitT(t, repo, "rev-parse", "refs/loto/integration:"+tcTargetA)},
+		State:     syncModified,
+	}
+	done := make(chan int, 1)
+	expectedIntegration := syncGitT(t, repo, "rev-parse", "refs/loto/integration")
+	go func() {
+		_, _, code := syncStoreDecideApply(rt, repo, expectedIntegration, []syncDiff{diff}, io.Discard)
+		done <- code
+	}()
+	<-readDone
+
+	acquireCtx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	now := time.Now()
+	_, acquireErr := rt.Store.AcquireLocks(acquireCtx, []domain.LockRecord{{
+		Target:      domain.Target{Canonical: tcTargetA},
+		OwnerUUID:   "racing-owner",
+		SessionUUID: "racing-session",
+		Intent:      "edit while sync is deciding",
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(time.Hour),
+		Host:        rt.Host,
+		PID:         os.Getpid(),
+	}}, nil)
+	if !errors.Is(acquireErr, context.DeadlineExceeded) {
+		close(resume)
+		<-done
+		t.Fatalf("lease acquire during sync final apply = %v, want context deadline while op-flock is held", acquireErr)
+	}
+
+	close(resume)
+	if code := <-done; code != 0 {
+		t.Fatalf("sync exit %d, want 0", code)
+	}
+	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != "" {
+		t.Errorf("sync did not restore integration content: %q", got)
+	}
+}
 
 // TestSync_RefusesLeasedPath: a divergent path under a live lease is refused
 // and left untouched.
@@ -420,19 +486,150 @@ func TestSyncDecide_ConflictTable(t *testing.T) {
 	}
 }
 
+func TestSync_RefusesStaleIntegrationSnapshot(t *testing.T) {
+	repo := syncBaseRepo(t)
+	expectedIntegration := syncGitT(t, repo, "rev-parse", "refs/loto/integration")
+	oldOID := syncGitT(t, repo, "rev-parse", expectedIntegration+":"+tcTargetA)
+
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("promoted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	syncGitT(t, repo, "add", "--", tcTargetA)
+	syncGitT(t, repo, "commit", "-q", "-m", "advance integration")
+	syncGitT(t, repo, "update-ref", "refs/loto/integration", "HEAD")
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("worktree\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, err := openRuntime(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	var errBuf bytes.Buffer
+	synced, _, code := syncStoreDecideApply(rt, repo, expectedIntegration, []syncDiff{{
+		syncEntry: syncEntry{Path: tcTargetA, Mode: "100644", OID: oldOID},
+		State:     syncModified,
+	}}, &errBuf)
+	if code != 3 || !strings.Contains(errBuf.String(), errSyncIntegrationChanged.Error()) {
+		t.Fatalf("stale sync = code %d synced=%v err=%q, want refusal", code, synced, errBuf.String())
+	}
+	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != "worktree\n" {
+		t.Errorf("stale sync overwrote current worktree bytes: %q", got)
+	}
+}
+
+func TestSync_WriteFailurePreservesExistingFile(t *testing.T) {
+	repo := syncBaseRepo(t)
+	path := filepath.Join(repo, tcTargetA)
+	const old = "work in progress\n"
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oid := syncGitT(t, repo, "rev-parse", "refs/loto/integration:"+tcTargetA)
+
+	writeErr := errInjectedSyncIO
+	originalWrite := syncWriteFn
+	syncWriteFn = func(f *os.File, _ []byte) (int, error) {
+		n, err := f.WriteString("x")
+		if err != nil {
+			return n, err
+		}
+		return n, writeErr
+	}
+	t.Cleanup(func() { syncWriteFn = originalWrite })
+
+	published, err := syncApplyOne(t.Context(), repo, syncDiff{
+		syncEntry: syncEntry{Path: tcTargetA, Mode: "100644", OID: oid},
+		State:     syncModified,
+	})
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("syncApplyOne error = %v, want %v", err, writeErr)
+	}
+	if published {
+		t.Error("failed pre-publication write reported the target as published")
+	}
+	if got := readFileT(t, path); got != old {
+		t.Errorf("failed replacement changed target: got %q want %q", got, old)
+	}
+	matches, err := filepath.Glob(filepath.Join(repo, ".loto-sync-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("temporary files remain after failure: %v", matches)
+	}
+}
+
+func TestSync_NewlinePath(t *testing.T) {
+	repo := syncBaseRepo(t)
+	const path = "line\nbreak.txt"
+	full := filepath.Join(repo, path)
+	if err := os.WriteFile(full, []byte("integrated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	syncGitT(t, repo, "add", "--", path)
+	syncGitT(t, repo, "commit", "-q", "-m", "add newline path")
+	syncGitT(t, repo, "update-ref", "refs/loto/integration", "HEAD")
+	if err := os.WriteFile(full, []byte("drift\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if got := readFileT(t, full); got != "integrated\n" {
+		t.Errorf("newline path content = %q, want integration content", got)
+	}
+	wantRow := "✓ target=\"line\\nbreak.txt\" action=fast-forward\n"
+	if !strings.Contains(out.String(), wantRow) {
+		t.Errorf("newline path missing from success report: %q", out.String())
+	}
+	if strings.Contains(out.String(), "target="+path) {
+		t.Errorf("newline path injected a second output row: %q", out.String())
+	}
+}
+
+func TestSync_PostPublishFailureReportsCurrentPath(t *testing.T) {
+	repo := syncBaseRepo(t)
+	path := filepath.Join(repo, tcTargetA)
+	if err := os.WriteFile(path, []byte("drift\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oid := syncGitT(t, repo, "rev-parse", "refs/loto/integration:"+tcTargetA)
+
+	syncErr := errInjectedSyncIO
+	originalSyncParentDir := syncParentDirFn
+	syncParentDirFn = func(string) error { return syncErr }
+	t.Cleanup(func() { syncParentDirFn = originalSyncParentDir })
+
+	synced, err := syncApply(t.Context(), repo, []syncDiff{{
+		syncEntry: syncEntry{Path: tcTargetA, Mode: "100644", OID: oid},
+		State:     syncModified,
+	}})
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("syncApply error = %v, want %v", err, syncErr)
+	}
+	if len(synced) != 1 || synced[0] != tcTargetA {
+		t.Errorf("published paths = %v, want [%s]", synced, tcTargetA)
+	}
+	if got := readFileT(t, path); got != "" {
+		t.Errorf("published content = %q, want integration content", got)
+	}
+}
+
 // TestSync_MidApplyFailureReportsWhatItWrote is the loto-8sic regression.
 // syncApply is not atomic: it stops at the first write failure, having already
 // fast-forwarded everything before it. That list used to be discarded, so the
 // operator got exit 3 and a bare error while the tree sat half-changed — the
 // opposite of what design.md asks stdout to be.
 //
-// The failure is forced by making one target read-only on disk, so the blob
-// write hits EACCES. Targets are applied in sorted order, so a.go is written
-// before z.go fails.
+// The failure is injected into the second temporary-file write. Targets are
+// applied in sorted order, so a.go is published before z.go fails, while z.go's
+// pre-sync bytes remain intact.
 func TestSync_MidApplyFailureReportsWhatItWrote(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("permission bits do not gate root")
-	}
 	repo := syncBaseRepo(t)
 	zPath := filepath.Join(repo, "z.go")
 	if err := os.WriteFile(zPath, []byte("zed\n"), 0o644); err != nil {
@@ -442,17 +639,24 @@ func TestSync_MidApplyFailureReportsWhatItWrote(t *testing.T) {
 	syncGitT(t, repo, "commit", "-q", "-m", "add z")
 	syncGitT(t, repo, "update-ref", "refs/loto/integration", "HEAD")
 
-	// Diverge both paths, then take write permission off z.go.
+	// Diverge both paths, then fail the second atomic-replacement write.
 	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("junk\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(zPath, []byte("drift\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(zPath, 0o444); err != nil {
-		t.Fatal(err)
+	writeErr := errInjectedSyncIO
+	originalWrite := syncWriteFn
+	calls := 0
+	syncWriteFn = func(f *os.File, data []byte) (int, error) {
+		calls++
+		if calls == 2 {
+			return 0, writeErr
+		}
+		return f.Write(data)
 	}
-	t.Cleanup(func() { _ = os.Chmod(zPath, 0o644) })
+	t.Cleanup(func() { syncWriteFn = originalWrite })
 
 	var out, errBuf bytes.Buffer
 	code := Run([]string{tcCmdSync}, &out, &errBuf)
@@ -470,5 +674,8 @@ func TestSync_MidApplyFailureReportsWhatItWrote(t *testing.T) {
 	}
 	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != "" {
 		t.Errorf("a.go should have been fast-forwarded before the failure, got %q", got)
+	}
+	if got := readFileT(t, zPath); got != "drift\n" {
+		t.Errorf("z.go changed despite pre-publication failure: %q", got)
 	}
 }
