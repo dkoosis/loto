@@ -243,8 +243,8 @@ hooks: ## Route git hooks to the tracked .githooks/ dir (bd integration, ccp-th5
 
 scan: ## Vet + lint + test changed packages only (fast inner loop)
 	@set -o pipefail; \
-	PKGS=$$( { git diff --name-only HEAD -- '*.go'; git ls-files --others --exclude-standard -- '*.go'; } \
-		| xargs dirname 2>/dev/null | sort -u | sed 's|^|./|' | grep -v '^\./$$' || true); \
+	PKGS=$$( { git diff --name-only HEAD -- '*.go' && git ls-files --others --exclude-standard -- '*.go'; } \
+		| awk '{ if (sub(/\/[^\/]*$$/, "") == 0 || $$0 == ".") next; print "./" $$0 }' | sort -u) || exit 1; \
 	if [ -z "$$PKGS" ]; then \
 		echo "no changed Go packages"; \
 	else \
