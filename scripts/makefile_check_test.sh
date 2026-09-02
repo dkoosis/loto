@@ -125,6 +125,25 @@ printf 'include loop.mk\ny:\n\t@echo hi\n' >"$tmp/lib/cross.mk"
 want_pass "an include cycle terminates" \
 	"$(printf 'include lib/loop.mk\n\nx:\n\t@echo hi')"
 
+# --- scope: what an exemption actually covers ----------------------------
+# Codex flagged both of these on PR #295. Each is a shape the guard used to
+# call clean while make 4.x and make 3.81 genuinely disagree about it.
+
+want_fail "a pipe inside a quoted command substitution still diverges" \
+	"$(printf 'demo:\n\t@out="$$(producer | renderer)"; echo "$$out"')"
+
+want_pass "pipefail on the line covers the substitution too" \
+	"$(printf 'demo:\n\t@set -o pipefail; out="$$(producer | renderer)"; echo "$$out"')"
+
+want_fail "a trailing || true does not excuse an earlier pipeline" \
+	"$(printf 'demo:\n\t@false | true; echo advisory | cat || true')"
+
+want_pass "every segment opting out on its own is clean" \
+	"$(printf 'demo:\n\t@echo a | cat || true; echo b | cat || true')"
+
+want_pass "a ; inside quotes does not split a segment" \
+	"$(printf 'demo:\n\t@echo "x | y; z" | cat || true')"
+
 # --- the real thing ------------------------------------------------------
 if out=$(bash "$checker" "$repo_root/Makefile" 2>&1); then
 	ok "the repo's own Makefile passes"

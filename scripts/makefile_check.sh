@@ -18,9 +18,17 @@
 # that pipes says `set -o pipefail;` itself, so it behaves the same under both
 # makes. This script is the regression guard for that rule.
 #
-# A line is exempt when it says `set -o pipefail` / `set -euo pipefail`, when
-# it ends in `|| true` (deliberately non-gating), or when it carries the
-# marker `# make-strict: ok` with a reason.
+# Exemptions, each scoped the way the shell actually scopes it. `set -o
+# pipefail` / `set -euo pipefail` is a shell-wide setting, so it clears the
+# whole logical line; so does an explicit `# make-strict: ok` marker. `|| true`
+# discards the status of its own pipeline and nothing else, so it is judged per
+# `;`-separated segment — a trailing advisory fallback does not excuse an
+# earlier gating pipeline on the same line.
+#
+# A `$$( )` command substitution is judged on its own, because it runs in a
+# subshell that inherits pipefail and the usual form buries it in double quotes
+# (`out="$$(producer | renderer)"`), where the quote-stripping pass would
+# otherwise hide the pipeline.
 #
 # The scan follows `include` lines, so a recipe in .sandbox/lib/*.mk is held
 # to the same rule as one in the root Makefile.
@@ -79,15 +87,12 @@ collect() {
 	done <"$f"
 }
 
-flush() {
-	local text=$1 at=$2
-	[ -z "$text" ] && return 0
-
-	# Look for a pipe that make's shell would actually honor. Two things are
-	# not that: `||` (a fallback, not a pipe), and a `|` inside a quoted
-	# program argument — jq filters and awk scripts are full of them, and the
-	# shell never sees those as pipes.
-	local probe=$text
+# real_pipe <text> — 0 when the text carries a pipe make's shell would honor.
+# Two things are not that: `||` (a fallback, not a pipe), and a `|` inside a
+# quoted program argument — jq filters and awk scripts are full of them, and
+# the shell never sees those as pipes.
+real_pipe() {
+	local probe=$1
 	# Double-quoted spans come out FIRST: an apostrophe inside one (`fo's`)
 	# would otherwise mis-pair the single-quote pass and expose a `|` that is
 	# really inside a jq filter.
@@ -97,23 +102,124 @@ flush() {
 	# read as two pipes. A literal placeholder is version-proof.
 	probe=${probe//\|\|/_OR_}
 	case "$probe" in
-	*"|"*) ;;
-	*) return 0 ;;
+	*"|"*) return 0 ;;
 	esac
+	return 1
+}
 
+# subs_split <text> — sets SUBS to every `$$( )` body and SUB_REST to the text
+# with those bodies removed.
+#
+# `$$(` is what a recipe writes for a SHELL command substitution; a single `$(`
+# is a make function, expanded by make before any shell runs, so it is not this
+# guard's business. Bodies are pulled out before the quote-stripping pass in
+# real_pipe, because the common form is `out="$$(producer | renderer)"` — the
+# pipeline lives inside double quotes and stripping the span would hide it.
+subs_split() {
+	local s=$1
+	local i=0 n=${#s} c depth body
+	SUBS=()
+	SUB_REST=""
+	while [ "$i" -lt "$n" ]; do
+		if [ "${s:i:3}" = '$$(' ]; then
+			depth=1
+			i=$((i + 3))
+			body=""
+			while [ "$i" -lt "$n" ] && [ "$depth" -gt 0 ]; do
+				c=${s:i:1}
+				case "$c" in
+				'(') depth=$((depth + 1)) ;;
+				')') depth=$((depth - 1)) ;;
+				esac
+				if [ "$depth" -gt 0 ]; then
+					body+=$c
+				fi
+				i=$((i + 1))
+			done
+			SUBS+=("$body")
+			continue
+		fi
+		SUB_REST+=${s:i:1}
+		i=$((i + 1))
+	done
+}
+
+# split_segments <text> — print each `;`-separated command segment, one per
+# line. Quote state is tracked so a `;` inside a jq program or a quoted message
+# does not split one segment into two.
+split_segments() {
+	local s=$1
+	local i=0 n=${#s} q="" c seg=""
+	while [ "$i" -lt "$n" ]; do
+		c=${s:i:1}
+		if [ -z "$q" ]; then
+			case "$c" in
+			\' | \")
+				q=$c
+				;;
+			\\)
+				seg+=$c
+				i=$((i + 1))
+				c=${s:i:1}
+				;;
+			\;)
+				printf '%s\n' "$seg"
+				seg=""
+				i=$((i + 1))
+				continue
+				;;
+			esac
+		elif [ "$c" = "$q" ]; then
+			q=""
+		fi
+		seg+=$c
+		i=$((i + 1))
+	done
+	printf '%s\n' "$seg"
+}
+
+report() {
+	rows+=("✗ $rel:$1 pipe-without-pipefail recipe=${2:0:72}")
+	findings=$((findings + 1))
+}
+
+flush() {
+	local text=$1 at=$2
+	[ -z "$text" ] && return 0
+
+	# Line-scoped exemptions. `set -o pipefail` is a shell-wide setting: once
+	# the recipe says it, it holds for every later command in the same shell,
+	# so it clears the whole logical line. So does an explicit marker.
 	case "$text" in
 	*"set -o pipefail"* | *"set -euo pipefail"*) return 0 ;;
 	*"# make-strict: ok"*) return 0 ;;
 	esac
 
-	# A line that ends by discarding its own status is opting out on purpose.
-	local trimmed=${text%%[[:space:]]}
-	case "$trimmed" in
-	*"|| true") return 0 ;;
-	esac
+	local -a SUBS=()
+	local SUB_REST="" body seg trimmed
+	subs_split "$text"
 
-	rows+=("✗ $rel:$at pipe-without-pipefail recipe=${text:0:72}")
-	findings=$((findings + 1))
+	# A command substitution runs in a subshell that inherits pipefail, so a
+	# pipe inside one diverges between the two makes exactly like a bare one.
+	for body in ${SUBS+"${SUBS[@]}"}; do
+		if real_pipe "$body"; then
+			report "$at" "$body"
+		fi
+	done
+
+	# `|| true` discards the status of ITS OWN pipeline and nothing else, so —
+	# unlike pipefail — it is judged per `;`-separated segment. A trailing
+	# advisory fallback must not excuse an earlier gating pipeline on the same
+	# line: `@false | true; echo advisory | cat || true` exits at the first
+	# pipeline under make 4.x and runs straight through under 3.81.
+	while IFS= read -r seg; do
+		real_pipe "$seg" || continue
+		trimmed=${seg%"${seg##*[![:space:]]}"}
+		case "$trimmed" in
+		*"|| true") continue ;;
+		esac
+		report "$at" "$seg"
+	done < <(split_segments "$SUB_REST")
 }
 
 # scan <makefile> runs the recipe walk over one file. `rel` is what the rows
