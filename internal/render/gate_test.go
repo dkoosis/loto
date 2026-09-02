@@ -13,7 +13,6 @@ import (
 // (no takeover verb exists — deliberate) while a lock-kind row carries the
 // existing `loto unlock --force` fix block mirroring printCheckConflicts.
 func TestEmitGateDeny_ByteExact(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // empty registry -> holderTag falls back to bare UUID
 	expires := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	rows := []GateDenyRow{
 		{

@@ -1,54 +1,11 @@
 package identity
 
 import (
-	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
-	"time"
 )
-
-const (
-	oracleUUID   = "aaaaaaaa-2222-4333-8444-555555555555"
-	oracleHandle = "OracleTest"
-	agentIDX     = "x@team"
-	agentIDOther = "other@team"
-	parentSessA  = "sess-a"
-	parentSessB  = "sess-b"
-	topLevelArgv = "claude --permission-mode auto"
-
-	// The oracle's machine-stable reason tokens, named here so a rename in
-	// liveness.go shows up as one compile-time diff rather than scattered strings.
-	reasonNoSocket          = "no-socket-recorded"
-	reasonSocketMissing     = "socket-missing"
-	reasonSocketOnly        = "socket-only"
-	reasonPIDDead           = "pid-dead"
-	reasonSocketPID         = "socket+pid"
-	reasonPSMatch           = "socket+ps-match"
-	reasonArgvMismatch      = "argv-mismatch"
-	reasonNoRecord          = "no-peer-record"
-	reasonProcStartMismatch = "procstart-mismatch"
-	reasonProcStartMatch    = "socket+procstart"
-
-	livenessUnknown = "unknown"
-)
-
-// stubArgv replaces the proc-table read for one test, so the argv branch of the
-// oracle is exercised without a real process carrying the flags. It also
-// tracks whether the argv read fired at all, so a test can pin that the
-// start-time short-circuit (D3) skips it on a match.
-func stubArgv(t *testing.T, argv string) *bool {
-	t.Helper()
-	called := false
-	prev := procArgv
-	procArgv = func(context.Context, int) string {
-		called = true
-		return argv
-	}
-	t.Cleanup(func() { procArgv = prev })
-	return &called
-}
 
 // stubProcStart replaces the start-time reader for one test, so the
 // start-time branch of the oracle is exercised deterministically — no real
@@ -75,8 +32,7 @@ func deadPID(t *testing.T) int {
 }
 
 // existingSocket writes a plain file at a short path. The oracle's witness test
-// is os.Stat, so any existing file stands in for a listening socket; peer_test's
-// liveSocket covers the real-listener shape.
+// is os.Stat, so any existing file stands in for a listening socket.
 func existingSocket(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "s.sock")
@@ -86,356 +42,122 @@ func existingSocket(t *testing.T) string {
 	return path
 }
 
+// procStartStub is one stubbed start-time read for a TestSessionVerdict row.
+type procStartStub struct {
+	val int64
+	ok  bool
+}
+
 func TestSessionVerdict(t *testing.T) {
-	sock := existingSocket(t)
-	gone := filepath.Join(t.TempDir(), "gone.sock")
-	self := os.Getpid()
-	dead := deadPID(t)
-
-	tests := []struct {
-		name         string
-		socket       string
-		pid          int
-		agentID      string
-		parentSess   string
-		argv         string
-		wantLiveness SessionLiveness
-		wantReason   string
+	live := os.Getpid()
+	cases := []struct {
+		name   string
+		rec    SessionRecord
+		stub   *procStartStub
+		want   SessionLiveness
+		reason string
 	}{
-		{
-			name:         "no socket recorded",
-			socket:       "",
-			pid:          self,
-			wantLiveness: SessionUnknown,
-			wantReason:   reasonNoSocket,
-		},
-		{
-			name:         "socket path gone",
-			socket:       gone,
-			pid:          self,
-			wantLiveness: SessionDead,
-			wantReason:   reasonSocketMissing,
-		},
-		{
-			name:         "socket without a pid",
-			socket:       sock,
-			pid:          0,
-			wantLiveness: SessionLive,
-			wantReason:   reasonSocketOnly,
-		},
-		{
-			name:         "pid reaped",
-			socket:       sock,
-			pid:          dead,
-			wantLiveness: SessionDead,
-			wantReason:   reasonPIDDead,
-		},
-		{
-			name:         "proc table unreadable",
-			socket:       sock,
-			pid:          self,
-			agentID:      agentIDX,
-			argv:         "",
-			wantLiveness: SessionLive,
-			wantReason:   reasonSocketPID,
-		},
-		{
-			name:         "argv carries the recorded agent id",
-			socket:       sock,
-			pid:          self,
-			agentID:      agentIDX,
-			argv:         "claude --agent-id " + agentIDX,
-			wantLiveness: SessionLive,
-			wantReason:   reasonPSMatch,
-		},
-		{
-			name:         "argv equals form",
-			socket:       sock,
-			pid:          self,
-			agentID:      agentIDX,
-			argv:         "claude --agent-id=" + agentIDX,
-			wantLiveness: SessionLive,
-			wantReason:   reasonPSMatch,
-		},
-		{
-			name:         "argv carries a different agent id",
-			socket:       sock,
-			pid:          self,
-			agentID:      agentIDX,
-			argv:         "claude --agent-id " + agentIDOther,
-			wantLiveness: SessionDead,
-			wantReason:   reasonArgvMismatch,
-		},
-		{
-			name:         "recycled pid dropped the agent-id flag",
-			socket:       sock,
-			pid:          self,
-			agentID:      agentIDX,
-			argv:         topLevelArgv,
-			wantLiveness: SessionDead,
-			wantReason:   reasonArgvMismatch,
-		},
-		{
-			name:         "top-level session recorded no flags",
-			socket:       sock,
-			pid:          self,
-			argv:         "some --other process --agent-id " + agentIDOther,
-			wantLiveness: SessionLive,
-			wantReason:   reasonPSMatch,
-		},
-		{
-			name:         "parent session id matches",
-			socket:       sock,
-			pid:          self,
-			parentSess:   parentSessA,
-			argv:         "claude --parent-session-id " + parentSessA,
-			wantLiveness: SessionLive,
-			wantReason:   reasonPSMatch,
-		},
-		{
-			name:         "parent session id differs",
-			socket:       sock,
-			pid:          self,
-			parentSess:   parentSessA,
-			argv:         "claude --parent-session-id " + parentSessB,
-			wantLiveness: SessionDead,
-			wantReason:   reasonArgvMismatch,
-		},
+		{"socket missing → dead", SessionRecord{Socket: filepath.Join(t.TempDir(), "gone.sock"), PID: live}, nil, SessionDead, reasonSocketMissing},
+		{"socket only → live", SessionRecord{Socket: existingSocket(t)}, nil, SessionLive, reasonSocketOnly},
+		{"nothing recorded → unknown", SessionRecord{}, nil, SessionUnknown, reasonNoWitness},
+		{"pid dead → dead", SessionRecord{PID: deadPID(t)}, nil, SessionDead, reasonPIDDead},
+		{"pid alive, no start-time → live", SessionRecord{PID: live}, nil, SessionLive, reasonPID},
+		{"socket + pid alive → live", SessionRecord{Socket: existingSocket(t), PID: live}, nil, SessionLive, "socket+" + reasonPID},
+		{"start-time match → live", SessionRecord{PID: live, ProcStart: 100}, &procStartStub{100, true}, SessionLive, reasonProcStart},
+		{"socket + start-time match → live", SessionRecord{Socket: existingSocket(t), PID: live, ProcStart: 100}, &procStartStub{100, true}, SessionLive, "socket+" + reasonProcStart},
+		{"start-time mismatch → dead (recycled pid)", SessionRecord{PID: live, ProcStart: 100}, &procStartStub{101, true}, SessionDead, reasonProcStartMismatch},
+		{"start-time unreadable → no signal, live on pid", SessionRecord{PID: live, ProcStart: 100}, &procStartStub{0, false}, SessionLive, reasonPID},
 	}
-
-	for _, tc := range tests {
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			stubArgv(t, tc.argv)
-			p := &Peer{
-				UUID:            oracleUUID,
-				Handle:          oracleHandle,
-				Socket:          tc.socket,
-				PID:             tc.pid,
-				AgentID:         tc.agentID,
-				ParentSessionID: tc.parentSess,
+			if tc.stub != nil {
+				stubProcStart(t, tc.stub.val, tc.stub.ok)
 			}
-			got := p.SessionVerdict(context.Background())
-			if got.Liveness != tc.wantLiveness || got.Reason != tc.wantReason {
-				t.Fatalf("SessionVerdict = %s/%s, want %s/%s",
-					got.Liveness, got.Reason, tc.wantLiveness, tc.wantReason)
+			got := tc.rec.Verdict()
+			if got.Liveness != tc.want || got.Reason != tc.reason {
+				t.Errorf("verdict = %s/%s, want %s/%s", got.Liveness, got.Reason, tc.want, tc.reason)
 			}
-			// Value receiver: the verdict carries a copy of the record it
-			// consulted, so identity is by content, not pointer.
-			if got.Peer == nil || got.Peer.UUID != p.UUID || got.Peer.PID != p.PID {
-				t.Fatalf("verdict must carry the record it consulted; got %+v", got.Peer)
-			}
-			// Live() is the boolean face of the same oracle: unknown is not dead.
-			if want := tc.wantLiveness != SessionDead; p.Live(context.Background()) != want {
-				t.Fatalf("Live() = %v, want %v for verdict %s", p.Live(context.Background()), want, got.Liveness)
+			if got.Record == nil {
+				t.Error("verdict must carry the record it judged")
 			}
 		})
 	}
 }
 
-// TestSessionVerdictUnknownStartTimeStaysLive is the bead's AC-2, the property
-// that must never regress: an indeterminate start-time read is an absence of
-// evidence, never a reason to declare dead. Table row 3 additionally pins
-// D3's short-circuit — a matching start-time must skip the ps exec entirely.
-func TestSessionVerdictUnknownStartTimeStaysLive(t *testing.T) {
-	sock := existingSocket(t)
-	self := os.Getpid()
-
-	t.Run("unreadable proc table falls through to argv", func(t *testing.T) {
-		called := stubArgv(t, topLevelArgv)
-		stubProcStart(t, 0, false)
-		p := &Peer{UUID: oracleUUID, Handle: oracleHandle, Socket: sock, PID: self, ProcStart: 12345}
-		got := p.SessionVerdict(context.Background())
-		if got.Liveness != SessionLive || got.Reason != reasonPSMatch {
-			t.Fatalf("SessionVerdict = %s/%s, want live/%s", got.Liveness, got.Reason, reasonPSMatch)
-		}
-		if !*called {
-			t.Fatal("an unreadable start-time must still fall through to the argv check")
-		}
-	})
-
-	t.Run("legacy record (ProcStart == 0) is byte-identical to main", func(t *testing.T) {
-		stubArgv(t, topLevelArgv)
-		p := &Peer{UUID: oracleUUID, Handle: oracleHandle, Socket: sock, PID: self, ProcStart: 0}
-		got := p.SessionVerdict(context.Background())
-		if got.Liveness != SessionLive || got.Reason != reasonPSMatch {
-			t.Fatalf("SessionVerdict = %s/%s, want live/%s", got.Liveness, got.Reason, reasonPSMatch)
-		}
-	})
-
-	t.Run("matching start-time short-circuits the ps exec", func(t *testing.T) {
-		called := stubArgv(t, topLevelArgv)
-		stubProcStart(t, 12345, true)
-		p := &Peer{UUID: oracleUUID, Handle: oracleHandle, Socket: sock, PID: self, ProcStart: 12345}
-		got := p.SessionVerdict(context.Background())
-		if got.Liveness != SessionLive || got.Reason != reasonProcStartMatch {
-			t.Fatalf("SessionVerdict = %s/%s, want live/%s", got.Liveness, got.Reason, reasonProcStartMatch)
-		}
-		if *called {
-			t.Fatal("a start-time match must short-circuit the ps exec (D3); procArgv must not be called")
-		}
-	})
+// TestProbeSessionWithoutRecord: no file → unknown, and the caller's own
+// degraded signal governs. Never dead.
+func TestProbeSessionWithoutRecord(t *testing.T) {
+	clearIdentityEnv(t)
+	v := ProbeSession(tcSessionA)
+	if v.Liveness != SessionUnknown || v.Reason != reasonNoRecord || v.Record != nil {
+		t.Errorf("verdict = %+v", v)
+	}
+	if v := ProbeSession("../escape"); v.Liveness != SessionUnknown {
+		t.Errorf("traversal-shaped sid must read unknown, got %s", v.Liveness)
+	}
 }
 
-// TestSessionVerdictLegacyRecordUnchanged pins "legacy path is untouched" as a
-// mechanical claim: the full pre-existing token matrix, re-run with ProcStart
-// left at 0, must still produce every token unchanged.
-func TestSessionVerdictLegacyRecordUnchanged(t *testing.T) {
-	sock := existingSocket(t)
-	gone := filepath.Join(t.TempDir(), "gone.sock")
-	self := os.Getpid()
-	dead := deadPID(t)
+// TestProbeSessionReadsWhatRecordSessionWrote is the round trip the lock
+// liveness probe depends on: whoami records the live session pid, and a later
+// process asking about that session reads it back as live; kill the witness
+// and the same record reads dead.
+func TestProbeSessionReadsWhatRecordSessionWrote(t *testing.T) {
+	clearIdentityEnv(t)
+	t.Setenv("CLAUDE_CODE_SESSION_ID", tcSessionA)
+	t.Setenv("LOTO_PID", "0")
+	unsetEnv(t, "CLAUDE_PID")
+	socket := existingSocket(t)
+	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", socket)
 
-	tests := []struct {
-		name         string
-		socket       string
-		pid          int
-		agentID      string
-		argv         string
-		wantLiveness SessionLiveness
-		wantReason   string
-	}{
-		{"no socket recorded", "", self, "", "", SessionUnknown, reasonNoSocket},
-		{"socket path gone", gone, self, "", "", SessionDead, reasonSocketMissing},
-		{"socket without a pid", sock, 0, "", "", SessionLive, reasonSocketOnly},
-		{"pid reaped", sock, dead, "", "", SessionDead, reasonPIDDead},
-		{"proc table unreadable", sock, self, agentIDX, "", SessionLive, reasonSocketPID},
-		{"argv matches", sock, self, agentIDX, "claude --agent-id " + agentIDX, SessionLive, reasonPSMatch},
-		{"argv mismatch", sock, self, agentIDX, "claude --agent-id " + agentIDOther, SessionDead, reasonArgvMismatch},
+	if _, err := RecordSession(&Agent{UUID: tcSessionA}); err != nil {
+		t.Fatal(err)
 	}
+	if v := ProbeSession(tcSessionA); v.Liveness != SessionLive {
+		t.Errorf("live session read %s (%s)", v.Liveness, v.Reason)
+	}
+	if err := os.Remove(socket); err != nil {
+		t.Fatal(err)
+	}
+	if v := ProbeSession(tcSessionA); v.Liveness != SessionDead || v.Reason != reasonSocketMissing {
+		t.Errorf("session whose socket vanished read %s (%s)", v.Liveness, v.Reason)
+	}
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			stubArgv(t, tc.argv)
-			p := &Peer{UUID: oracleUUID, Handle: oracleHandle, Socket: tc.socket, PID: tc.pid, AgentID: tc.agentID, ProcStart: 0}
-			got := p.SessionVerdict(context.Background())
-			if got.Liveness != tc.wantLiveness || got.Reason != tc.wantReason {
-				t.Fatalf("SessionVerdict = %s/%s, want %s/%s", got.Liveness, got.Reason, tc.wantLiveness, tc.wantReason)
-			}
-		})
+// TestProbeSessionDoesNotPruneDeadRecord: the oracle is a pure observer. A
+// DEAD answer must leave the file in place — a session restarting inside the
+// verdict window republishes its record, and an unlink here would delete the
+// fresh one (the loto-gj1z race, one layer up).
+func TestProbeSessionDoesNotPruneDeadRecord(t *testing.T) {
+	clearIdentityEnv(t)
+	path := plantSession(t, tcSessionA, tcSessionA, 0)
+	body := `{"session_id":"` + tcSessionA + `","uuid":"` + tcSessionA + `","socket":"` + filepath.Join(t.TempDir(), "gone.sock") + `"}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if v := ProbeSession(tcSessionA); v.Liveness != SessionDead {
+		t.Fatalf("want dead, got %s", v.Liveness)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("oracle must not unlink the record it judged: %v", err)
 	}
 }
 
 func TestSessionLivenessString(t *testing.T) {
-	tests := []struct {
-		liveness SessionLiveness
-		want     string
-	}{
-		{SessionLive, "live"},
-		{SessionDead, "dead"},
-		{SessionUnknown, livenessUnknown},
-		{SessionLiveness(99), livenessUnknown},
-	}
-	for _, tc := range tests {
-		if got := tc.liveness.String(); got != tc.want {
-			t.Errorf("SessionLiveness(%d).String() = %q, want %q", tc.liveness, got, tc.want)
+	for s, want := range map[SessionLiveness]string{SessionLive: "live", SessionDead: "dead", SessionUnknown: livenessUnknownName, SessionLiveness(99): livenessUnknownName} {
+		if got := s.String(); got != want {
+			t.Errorf("%d.String() = %q, want %q", int(s), got, want)
 		}
 	}
 }
 
 func TestPIDAlive(t *testing.T) {
-	if PIDAlive(0) || PIDAlive(-1) {
-		t.Error("a non-positive pid is never alive")
-	}
 	if !PIDAlive(os.Getpid()) {
-		t.Error("the test process must read alive")
+		t.Error("own pid must be alive")
 	}
 	if PIDAlive(deadPID(t)) {
-		t.Error("a reaped child must read dead")
+		t.Error("reaped pid must be dead")
 	}
-}
-
-func TestAgentLiveWithoutRecord(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	tests := []struct {
-		name string
-		uuid string
-	}{
-		{"no record on disk", oracleUUID},
-		{"unusable uuid", "../../etc/passwd"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := AgentLive(context.Background(), tc.uuid)
-			if got.Liveness != SessionUnknown || got.Reason != reasonNoRecord {
-				t.Fatalf("AgentLive = %s/%s, want unknown/no-peer-record", got.Liveness, got.Reason)
-			}
-			if got.Peer != nil {
-				t.Fatalf("no record means no peer to carry; got %+v", got.Peer)
-			}
-		})
-	}
-}
-
-func TestAgentLiveDelegatesToSessionVerdict(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	sock := existingSocket(t)
-	stubArgv(t, "claude --agent-id "+agentIDX)
-
-	p := &Peer{
-		UUID:    oracleUUID,
-		Handle:  oracleHandle,
-		Socket:  sock,
-		PID:     os.Getpid(),
-		AgentID: agentIDX,
-		SeenAt:  time.Now().UTC(),
-	}
-	if err := writePeer(p); err != nil {
-		t.Fatal(err)
-	}
-
-	got := AgentLive(context.Background(), oracleUUID)
-	if got.Liveness != SessionLive || got.Reason != reasonPSMatch {
-		t.Fatalf("AgentLive = %s/%s, want live/socket+ps-match", got.Liveness, got.Reason)
-	}
-	if got.Peer == nil || got.Peer.Handle != oracleHandle {
-		t.Fatalf("verdict must carry the record read from disk; got %+v", got.Peer)
-	}
-
-	// Same record, socket now gone: the oracle reads the death.
-	if err := os.Remove(sock); err != nil {
-		t.Fatal(err)
-	}
-	if got = AgentLive(context.Background(), oracleUUID); got.Liveness != SessionDead || got.Reason != reasonSocketMissing {
-		t.Fatalf("AgentLive = %s/%s, want dead/socket-missing", got.Liveness, got.Reason)
-	}
-}
-
-// The oracle is a pure observer: asking whether an agent is live must never
-// unlink its record, or a liveness question asked mid-restart deletes the fresh
-// record (the gj1z race). Pruning is Peers()' job alone.
-func TestAgentLiveDoesNotPruneDeadRecord(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	stubArgv(t, topLevelArgv)
-
-	p := &Peer{
-		UUID:   oracleUUID,
-		Handle: oracleHandle,
-		Socket: filepath.Join(t.TempDir(), "gone.sock"), // never created
-		PID:    os.Getpid(),
-		SeenAt: time.Now().UTC(),
-	}
-	if err := writePeer(p); err != nil {
-		t.Fatal(err)
-	}
-	record := filepath.Join(home, ".loto", "peers", oracleUUID+".json")
-
-	if got := AgentLive(context.Background(), oracleUUID); got.Liveness != SessionDead {
-		t.Fatalf("AgentLive = %s, want dead", got.Liveness)
-	}
-	if _, err := os.Stat(record); err != nil {
-		t.Fatalf("AgentLive must not unlink a dead record: stat err = %v", err)
-	}
-
-	// Contrast: listing peers is the pruning path, and it does remove it.
-	peers, err := Peers(context.Background(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(peers) != 0 {
-		t.Fatalf("Peers(false) = %+v, want empty", peers)
-	}
-	if _, err := os.Stat(record); !os.IsNotExist(err) {
-		t.Fatalf("Peers must prune the dead record; stat err = %v", err)
+	if PIDAlive(0) || PIDAlive(-1) {
+		t.Error("non-positive pids are never alive")
 	}
 }

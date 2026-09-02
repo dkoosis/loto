@@ -9,7 +9,7 @@
 # ~/.loto instead of a temp HOME. This script finds them by SHAPE, not by
 # having watched a run happen: a real agent or session record's filename is
 # always the UUID v4 hex layout identity.newUUID emits — see
-# internal/identity/registry.go's agentIDShape — because CLAUDE_CODE_SESSION_ID
+# internal/identity/uuid.go's agentIDShape — because CLAUDE_CODE_SESSION_ID
 # for a genuine Claude Code session is itself a UUID. Anything else under
 # agents/ or session/ (pin-<nanos>-<n>, alice-*, somebody-else-<pid>,
 # short-hex fragments, ...) cannot be a legitimate record and is residue by
@@ -36,7 +36,7 @@
 
 set -uo pipefail
 
-# uuidShape mirrors internal/identity/registry.go's agentIDShape: the exact
+# uuidShape mirrors internal/identity/uuid.go's agentIDShape: the exact
 # hex layout newUUID emits. It is deliberately not a strict RFC 4122 v4
 # check (no version/variant bit enforcement) for the same reason the Go
 # regex isn't — a filename either has this shape or it wasn't minted by

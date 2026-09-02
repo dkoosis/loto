@@ -26,8 +26,10 @@ Three options were evaluated:
 scoped under `projects/<slug>/` so multiple projects on the same host don't
 pollute each other.
 
-Agent identity lives separately at `~/.loto/agents/<uuid>.json` (host-global,
-per ADR 0001 / NS identity amendment) — not under `projects/<slug>/`.
+Per-session liveness records live separately at `~/.loto/session/<sid>.json`
+(host-global, per ADR 0001 / NS identity amendment) — not under
+`projects/<slug>/`. (Was `~/.loto/agents/<uuid>.json` until the agent registry
+was retired, loto-jnid.)
 
 ## slug derivation
 
@@ -72,4 +74,4 @@ The warning is suppressed if `LOTO_SUPPRESS_LEGACY_WARNING=1`.
 - Sibling worktrees of the same project now share a coordination directory.
 - `loto status` from any worktree shows the full project lock picture.
 - `defaultBase()` in `cmd/loto/main.go` changes; `LOTO_BASE` override remains.
-- `~/.loto/agents/` coexists at the parent level (host-global identity).
+- `~/.loto/session/` coexists at the parent level (host-global identity).

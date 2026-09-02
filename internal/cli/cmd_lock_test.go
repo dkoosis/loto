@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,7 +77,7 @@ func withTempProject(t *testing.T) string {
 func pinAgent(t *testing.T) *identity.Agent {
 	t.Helper()
 	os.Unsetenv("LOTO_AGENT_ID")
-	t.Setenv("CLAUDE_CODE_SESSION_ID", fmt.Sprintf("pin-%d-%d", time.Now().UnixNano(), pinCounter.Add(1)))
+	t.Setenv("CLAUDE_CODE_SESSION_ID", identity.NewUUID())
 	a, err := identity.Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -86,8 +85,6 @@ func pinAgent(t *testing.T) *identity.Agent {
 	t.Setenv("LOTO_AGENT_ID", a.UUID)
 	return a
 }
-
-var pinCounter atomic.Int64
 
 // tcIntentAliceClaim is the shared claim intent string for loto-qoq's
 // foreign-claim advisory tests (cmd_lock_test.go + cmd_check_test.go).
@@ -98,7 +95,7 @@ const tcIntentAliceClaim = "alice-claim"
 func threeAgents(t *testing.T) (alice, bob, carol *identity.Agent) {
 	t.Helper()
 	alice, bob = twoAgents(t)
-	t.Setenv("CLAUDE_CODE_SESSION_ID", fmt.Sprintf("carol-%d-%d", time.Now().UnixNano(), pinCounter.Add(1)))
+	t.Setenv("CLAUDE_CODE_SESSION_ID", identity.NewUUID())
 	c, err := identity.Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -124,12 +121,12 @@ func TestLockHappyPath(t *testing.T) {
 func twoAgents(t *testing.T) (alice, bob *identity.Agent) {
 	t.Helper()
 	os.Unsetenv("LOTO_AGENT_ID")
-	t.Setenv("CLAUDE_CODE_SESSION_ID", fmt.Sprintf("alice-%d-%d", time.Now().UnixNano(), pinCounter.Add(1)))
+	t.Setenv("CLAUDE_CODE_SESSION_ID", identity.NewUUID())
 	a, err := identity.Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CLAUDE_CODE_SESSION_ID", fmt.Sprintf("bob-%d-%d", time.Now().UnixNano(), pinCounter.Add(1)))
+	t.Setenv("CLAUDE_CODE_SESSION_ID", identity.NewUUID())
 	b, err := identity.Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)

@@ -18,7 +18,7 @@
 //     be enforced at a layer the writer cannot ignore by accident — POSIX
 //     file mode, kernel flock, or filesystem-level immutability.
 //   - The tag records who holds it, the stated intent, the expiry, and
-//     enough identity to make a useful blocker report (handle, host, pid,
+//     enough identity to make a useful blocker report (owner, host, pid,
 //     branch).
 //
 // Both halves are required. A tag without a lock is the post-it. A lock

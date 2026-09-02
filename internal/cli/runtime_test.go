@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,7 +25,10 @@ import (
 // non-empty subagent id wrongly pinned, feeding release --all a throwaway UUID →
 // the loto-pody false-success. Post-loto-ai5 this predicate lives beside Ensure
 // and dispatches on the SAME classifier, so it can't drift from resolution.
-const tcSessID = "sess-1" // representative CLAUDE_CODE_SESSION_ID value
+const (
+	tcSessID  = "sess-1"    // representative CLAUDE_CODE_SESSION_ID value
+	tcSibling = "sibling-1" // representative LOTO_SUBAGENT_ID stamp
+)
 
 func TestPinnedByEnv(t *testing.T) {
 	set := func(s string) *string { return &s } // present-with-value; nil = truly unset
@@ -38,13 +43,16 @@ func TestPinnedByEnv(t *testing.T) {
 		{"blank-agent-id-unpinned", set(""), "", "", false},
 		{"agent-id-pins", set("agent-x"), "", "", true},
 		{"malformed-subagent-unpinned", nil, "../escape", "", false},
-		{"valid-subagent-pins", nil, "sibling-1", "", true},
+		{"valid-subagent-pins", nil, tcSibling, tcSessID, true},
+		// A stamp derives its owner FROM the session id, so without one there
+		// is nothing to derive from and it falls open (loto-jnid).
+		{"subagent-without-session-unpinned", nil, tcSibling, "", false},
 		{"session-id-pins", nil, "", tcSessID, true},
 		// Ensure branches on LOTO_AGENT_ID set-ness BEFORE the session id, so a
 		// set-but-empty agent id → throwaway even when a session id is present.
 		// The predicate must not let the session leg rescue it (loto-s3l P1).
 		{"blank-agent-id-shadows-session", set(""), "", tcSessID, false},
-		{"valid-subagent-beats-blank-agent-id", set(""), "sibling-1", tcSessID, true},
+		{"valid-subagent-beats-blank-agent-id", set(""), tcSibling, tcSessID, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -170,125 +178,101 @@ func TestLiveProbeUnknownHostNeverPIDProbes(t *testing.T) {
 	}
 }
 
-// --- openRuntime / openRuntimeGC verb split (loto-6pn6) ---------------------
+// --- openRuntime / openRuntimeGC verb split (loto-6pn6, loto-jnid) ---------
 
-// agentFilePath returns the on-disk path of uuid's agent record under the
-// current identity root. LOTO_BASE, when set, wins over $HOME (sd-kx5:
-// registryDir now resolves through LOTO_BASE with no ".loto" segment
-// inserted) — every caller in this package sets both via withTempProject, so
-// this must match that precedence or chtimes/os.Stat miss the real file.
-func agentFilePath(uuid string) string {
-	if base := os.Getenv("LOTO_BASE"); base != "" {
-		return filepath.Join(base, "agents", uuid+".json")
-	}
-	return filepath.Join(os.Getenv("HOME"), ".loto", "agents", uuid+".json")
-}
-
-// mintUnboundAgent mints a fresh, persisted, UNPINNED agent record — no
-// LOTO_AGENT_ID and no session cache references it — so backdating its file
-// is the only thing standing between it and GC.
-func mintUnboundAgent(t *testing.T) *identity.Agent {
-	t.Helper()
-	os.Unsetenv("LOTO_AGENT_ID")
-	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
-	os.Unsetenv("LOTO_SUBAGENT_ID")
-	a, err := identity.Ensure(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return a
-}
-
-func backdate(t *testing.T, path string, age time.Duration) {
-	t.Helper()
-	old := time.Now().Add(-age)
-	if err := os.Chtimes(path, old, old); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// gcVerbSplitFixture sets up one live lock (owned by a pinned "holder"
-// identity, via a real `loto lock` invocation) plus one unpinned agent
-// record backdated past agentsGCMaxAge — the shared fixture for
-// TestOpenRuntimeDoesNotReapAgents / TestOpenRuntimeGCReapsAgents. Restores
-// LOTO_AGENT_ID to holder afterward (mintUnboundAgent unset it to mint the
-// orphan cleanly) so the caller's own openRuntime/openRuntimeGC call
-// resolves the same identity that owns the lock, matching production shape.
-func gcVerbSplitFixture(t *testing.T) (holder *identity.Agent, orphanPath string) {
-	t.Helper()
+// TestOpenRuntimeGCRefusesUnpinned is the authority half of "ambiguity allowed
+// for display, never for authority": a write verb with nothing in the env
+// naming an owner must refuse before touching the store, naming the env vars
+// that would fix it. Read verbs (openRuntime) keep working on a throwaway.
+func TestOpenRuntimeGCRefusesUnpinned(t *testing.T) {
 	withTempProject(t)
-	holder = pinAgent(t)
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("lock setup failed, exit %d", code)
+	unsetEnvForTest(t, "LOTO_AGENT_ID")
+	unsetEnvForTest(t, "CLAUDE_CODE_SESSION_ID")
+	unsetEnvForTest(t, "LOTO_SUBAGENT_ID")
+
+	if _, err := openRuntimeGC(context.Background()); !errors.Is(err, identity.ErrUnpinned) {
+		t.Fatalf("openRuntimeGC unpinned: err=%v, want identity.ErrUnpinned", err)
 	}
-
-	orphan := mintUnboundAgent(t)
-	orphanPath = agentFilePath(orphan.UUID)
-	backdate(t, orphanPath, 90*24*time.Hour)
-
-	t.Setenv("LOTO_AGENT_ID", holder.UUID)
-	return holder, orphanPath
-}
-
-// TestOpenRuntimeDoesNotReapAgents is the perf fix expressed as a behavioral
-// assertion, not a benchmark: openRuntime is the read path (check, check
-// --gate, guard, status) and must never run identity GC (loto-6pn6).
-func TestOpenRuntimeDoesNotReapAgents(t *testing.T) {
-	_, orphanPath := gcVerbSplitFixture(t)
 
 	rt, err := openRuntime(context.Background())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("openRuntime unpinned must still open on a throwaway: %v", err)
 	}
 	defer rt.Close()
-
-	if _, err := os.Stat(orphanPath); err != nil {
-		t.Fatalf("openRuntime must not GC agents on the read path; orphan gone: %v", err)
+	if rt.AgentPinned {
+		t.Error("openRuntime unpinned: AgentPinned = true, want false — a throwaway must never scope a release --all")
+	}
+	if rt.Agent == nil || rt.Agent.UUID == "" {
+		t.Errorf("openRuntime unpinned: Agent = %+v, want a throwaway id for display", rt.Agent)
 	}
 }
 
-// TestOpenRuntimeGCReapsAgents is TestOpenRuntimeDoesNotReapAgents' pair:
-// same fixture, openRuntimeGC → the unpinned stale record is gone.
-// identity.ResetGCOnceForTests clears the process-wide once-per-process GC
-// guard, which an earlier write-verb test in this binary has near-certainly
-// already consumed.
-func TestOpenRuntimeGCReapsAgents(t *testing.T) {
-	_, orphanPath := gcVerbSplitFixture(t)
-	identity.ResetGCOnceForTests()
-
-	rt, err := openRuntimeGC(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rt.Close()
-
-	if _, err := os.Stat(orphanPath); !os.IsNotExist(err) {
-		t.Fatalf("openRuntimeGC must reap an unpinned stale agent; err=%v", err)
-	}
-}
-
-// TestOpenRuntimeGCPinsLockOwners is the gh#125/loto-ffg regression at the
-// CLI boundary: a backdated agent record that is the owner of a live lock
-// row must survive openRuntimeGC — direct proof the verb split did not drop
-// the pin set.
-func TestOpenRuntimeGCPinsLockOwners(t *testing.T) {
+// TestLockRefusesUnpinned is the same rule at the CLI surface: `loto lock` on a
+// bare shell exits 3 with one ✗ line naming CLAUDE_CODE_SESSION_ID and
+// LOTO_AGENT_ID, and writes nothing.
+func TestLockRefusesUnpinned(t *testing.T) {
 	withTempProject(t)
-	holder := pinAgent(t)
+	unsetEnvForTest(t, "LOTO_AGENT_ID")
+	unsetEnvForTest(t, "CLAUDE_CODE_SESSION_ID")
+	unsetEnvForTest(t, "LOTO_SUBAGENT_ID")
+
+	var out, errBuf bytes.Buffer
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &out, &errBuf); code != 3 {
+		t.Fatalf("unpinned lock exit %d, want 3; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	for _, want := range []string{"✗", "CLAUDE_CODE_SESSION_ID", "LOTO_AGENT_ID"} {
+		if !strings.Contains(errBuf.String(), want) {
+			t.Errorf("refusal must carry %q: %q", want, errBuf.String())
+		}
+	}
+
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "observer-"+tcSessID)
+	var status bytes.Buffer
+	if code := Run([]string{"status"}, &status, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("status exit %d", code)
+	}
+	if strings.Contains(status.String(), tcTargetA) {
+		t.Errorf("a refused lock must not leave a row behind: %q", status.String())
+	}
+}
+
+// TestLockOwnerIsTheSessionID pins the ownership contract (loto-jnid): a lock
+// taken under one CLAUDE_CODE_SESSION_ID is owned by that id verbatim, a
+// second session is refused, and `loto check` names the holder by it.
+func TestLockOwnerIsTheSessionID(t *testing.T) {
+	withTempProject(t)
+	unsetEnvForTest(t, "LOTO_AGENT_ID")
+	unsetEnvForTest(t, "LOTO_SUBAGENT_ID")
+	const (
+		sessA = "aaaaaaaa-0000-4000-8000-00000000000a"
+		sessB = "bbbbbbbb-0000-4000-8000-00000000000b"
+	)
+	t.Setenv("CLAUDE_CODE_SESSION_ID", sessA)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid())) // a live holder, so check hard-blocks
 	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("lock setup failed")
+		t.Fatalf("session A lock exit %d", code)
 	}
-	holderPath := agentFilePath(holder.UUID)
-	backdate(t, holderPath, 90*24*time.Hour)
 
-	identity.ResetGCOnceForTests()
-	rt, err := openRuntimeGC(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	t.Setenv("CLAUDE_CODE_SESSION_ID", sessB)
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &out, &bytes.Buffer{}); code != 1 {
+		t.Fatalf("session B lock exit %d, want 1 (conflict); out=%q", code, out.String())
 	}
-	defer rt.Close()
+	if !strings.Contains(out.String(), "blocker="+sessA) {
+		t.Errorf("conflict row must name the holder by session id %q: %q", sessA, out.String())
+	}
+	out.Reset()
+	if code := Run([]string{"check", tcTargetA}, &out, &bytes.Buffer{}); code != 1 {
+		t.Fatalf("check exit %d, want 1; out=%q", code, out.String())
+	}
+	if !strings.Contains(out.String(), sessA) {
+		t.Errorf("check must name the holder by session id %q: %q", sessA, out.String())
+	}
 
-	if _, err := os.Stat(holderPath); err != nil {
-		t.Fatalf("openRuntimeGC must not reap a live lock's own owner agent (gh#125/loto-ffg): %v", err)
+	// Re-entrant from the owning session: the same id is the same owner.
+	t.Setenv("CLAUDE_CODE_SESSION_ID", sessA)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("session A re-lock exit %d, want 0 (re-entrant)", code)
 	}
 }
 
@@ -374,39 +358,40 @@ func TestMemoLiveProbe_NilPassesThrough(t *testing.T) {
 
 // --- loto-2lj5: a dead sibling must not condemn a live sibling's lock -------
 
-// writeDeadPeer plants a peer record for uuid whose socket path does not exist.
-// SessionVerdict's first probe is a stat of that socket, so the record reads
-// DEAD with reason=socket-missing — the cheapest honest way to stage "one
-// sibling session has ended" without killing a real process.
-func writeDeadPeer(t *testing.T, uuid, sessionID string) {
+// writeDeadSession plants a session record for sid whose socket path does not
+// exist. SessionRecord.Verdict's first probe is a stat of that socket, so the
+// record reads DEAD with reason=socket-missing — the cheapest honest way to
+// stage "one sibling session has ended" without killing a real process.
+func writeDeadSession(t *testing.T, sid, owner string) {
 	t.Helper()
-	dir := filepath.Join(os.Getenv("HOME"), ".loto", "peers")
+	dir := filepath.Join(os.Getenv("HOME"), ".loto", "session")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	body := fmt.Sprintf(
-		`{"uuid":%q,"handle":"sibling-1","session_id":%q,"socket":%q,"seen_at":%q}`,
-		uuid, sessionID, filepath.Join(t.TempDir(), "gone.sock"), time.Now().Format(time.RFC3339),
+		`{"session_id":%q,"uuid":%q,"socket":%q,"recorded_at":%q}`,
+		sid, owner, filepath.Join(t.TempDir(), "gone.sock"), time.Now().Format(time.RFC3339),
 	)
-	if err := os.WriteFile(filepath.Join(dir, uuid+".json"), []byte(body), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, sid+".json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// Peer records are keyed on agent uuid alone (identity.peerPath), but sibling
-// sessions sharing one LOTO_AGENT_ID are supported (loto-81n). So one dead
-// sibling leaves one DEAD peer record standing for every live sibling too, and
-// before loto-2lj5 the oracle handed that verdict straight back for locks the
-// live siblings hold — classifying them stale, which lets two agents write one
-// file. The gate: a DEAD verdict counts only for the session it names.
+// Sibling sessions sharing one LOTO_AGENT_ID are supported (loto-81n), so one
+// owner uuid can have several live sessions. The oracle is keyed on the lock
+// row's SESSION id, not its owner: a dead sibling's record condemns only the
+// locks that sibling's session took. Before loto-2lj5 the verdict was handed
+// back for every lock the owner held — classifying live siblings' locks stale,
+// which lets two agents write one file.
 func TestLiveProbeDeadSiblingDoesNotCondemnLiveSession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	unsetEnvForTest(t, "LOTO_BASE")
 	const (
 		agentUUID = "11111111-2222-3333-4444-555555555555"
 		deadSess  = "session-1-that-died"
 		liveSess  = "session-2-still-running"
 	)
-	writeDeadPeer(t, agentUUID, deadSess)
+	writeDeadSession(t, deadSess, agentUUID)
 
 	rt := &runtime{Ctx: context.Background(), Host: "testhost", HostKnown: true}
 	probe := rt.liveProbe()
@@ -421,45 +406,22 @@ func TestLiveProbeDeadSiblingDoesNotCondemnLiveSession(t *testing.T) {
 	}
 
 	if got := probe(rec(deadSess)); got != domain.LivenessDead {
-		t.Errorf("lock held by the session the peer record names: got %v, want %v — gating the verdict must not disable reclaim for the session that actually died", got, domain.LivenessDead)
+		t.Errorf("lock held by the session whose record died: got %v, want %v", got, domain.LivenessDead)
 	}
 	if got := probe(rec(liveSess)); got == domain.LivenessDead {
-		t.Errorf("lock held by a DIFFERENT session of the same agent: got %v, want anything but dead — a sibling's death is no evidence about this holder, and a false dead lets two agents write one file", got)
+		t.Errorf("lock held by a DIFFERENT session of the same owner: got %v, want anything but dead — a sibling's death is no evidence about this holder", got)
+	}
+	if got := probe(rec("")); got == domain.LivenessDead {
+		t.Errorf("legacy row with no session id: got %v, want anything but dead — nothing to look up, TTL governs", got)
 	}
 }
 
-// peerSpeaksFor is the whole gate, so pin its edges directly. The both-empty
-// case is load-bearing: direct CLI use and legacy rows carry no session id on
-// either side, and reclaim must keep working there rather than silently
-// falling back to TTL for every pre-existing lock.
-func TestPeerSpeaksFor(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		peer   *identity.Peer
-		record domain.SessionUUID
-		want   bool
-	}{
-		{"no peer record", nil, "s1", false},
-		{"same session", &identity.Peer{SessionID: "s1"}, "s1", true},
-		{"different session", &identity.Peer{SessionID: "s1"}, "s2", false},
-		{"both empty — not a Claude session on either side", &identity.Peer{}, "", true},
-		{"peer has none, record does", &identity.Peer{}, "s1", false},
-		{"record has none, peer does", &identity.Peer{SessionID: "s1"}, "", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := peerSpeaksFor(tc.peer, tc.record); got != tc.want {
-				t.Errorf("peerSpeaksFor = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-// The gate above is only meaningful if a record's SessionUUID is actually the
+// The oracle above is only meaningful if a record's SessionUUID is actually the
 // session's id. It was not: nothing has ever exported LOTO_SESSION_ID, so
 // sessionUUID minted a fresh UUID per INVOCATION and two locks taken by one
 // Claude session carried different ids. CLAUDE_CODE_SESSION_ID is the id
-// identity.RecordPeer already writes into Peer.SessionID, so sourcing it here
-// is what makes the two sides comparable by construction (loto-2lj5).
+// identity.RecordSession keys the session record by, so sourcing it here is
+// what makes the two sides comparable by construction (loto-2lj5).
 func TestSessionUUIDSourcesTheClaudeSessionID(t *testing.T) {
 	t.Run("explicit override wins", func(t *testing.T) {
 		t.Setenv("LOTO_SESSION_ID", "explicit")

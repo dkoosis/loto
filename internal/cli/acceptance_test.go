@@ -18,7 +18,7 @@ func TestAcceptance_GoldenHappyPath(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"whoami"}, "handle:"},
+		{[]string{"whoami"}, "uuid:"},
 		{[]string{tcCmdLock, tcTargetA, tcFlagIntent, "smoke"}, "✓ locked count=1"},
 		{[]string{tcCmdStatus, tcFlagMine}, tcTargetA},
 		{[]string{tcCmdUnlock, tcTargetA, "-t", tcIntentDone}, "✓ unlocked count=1"},

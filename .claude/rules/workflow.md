@@ -4,7 +4,7 @@
 
 ‡ Go symbol questions → `snipe` (def/refs/callers/pack/impact/tests) before rg/Grep. rg = non-symbol text only.
 
-‡ **store Open / race-path fixes → ALWAYS via PR, never direct-to-main.** linux `-race` runs only on CI, not local macOS. Even a no-op refactor touching `internal/store/*` or `internal/identity/registry.go` goes through a PR (#170 honored this).
+‡ **store Open / race-path fixes → ALWAYS via PR, never direct-to-main.** linux `-race` runs only on CI, not local macOS. Even a no-op refactor touching `internal/store/*` or `internal/identity/*` goes through a PR (#170 honored this). The rule keyed on `registry.go` until loto-jnid deleted it; the whole package is the trigger now, so the rule cannot be disarmed by a rename.
 
 ‡ **Before publishing a branch you did not author, check it.** A local branch
 with no PR is not evidence of abandoned work — it may be checked out in a live

@@ -1,10 +1,22 @@
-# Identity round-trip: pinned LOTO_AGENT_ID surfaces the right handle.
+# Identity round-trip: a pinned LOTO_AGENT_ID is the owner id whoami reports,
+# with nothing on disk to resolve it against (loto-jnid).
 
 env LOTO_AGENT_ID=$ALICE
 loto whoami
-stdout 'AliceTester'
+stdout 'uuid:    '$ALICE
+! stdout 'handle:'
 
 env LOTO_AGENT_ID=$BOB
 loto whoami
-stdout 'BobTester'
-! stdout 'AliceTester'
+stdout 'uuid:    '$BOB
+! stdout $ALICE
+
+# Set-but-empty LOTO_AGENT_ID is the explicit throwaway: whoami answers on a
+# fresh id and records no session (testscript cannot unset a variable, so the
+# fully-unpinned case lives in internal/cli's TestWhoamiUnpinnedStillAnswers).
+env LOTO_AGENT_ID=
+env CLAUDE_CODE_SESSION_ID=
+loto whoami
+stdout 'uuid:'
+stdout 'session: -'
+! stdout $ALICE

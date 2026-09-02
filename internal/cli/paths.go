@@ -31,7 +31,7 @@ func StateDir(repoTop string) string {
 	return filepath.Join(xdgStateHome(), "loto", "projects", ResolveAndPinProjectSlug(repoTop))
 }
 
-// xdgStateHome mirrors identity.homeDir's cascade (registry.go): prefer
+// xdgStateHome mirrors identity.homeDir's cascade (home.go): prefer
 // os.UserHomeDir ($HOME), fall back to os/user.Current().HomeDir (getpwuid_r)
 // when $HOME is unset, and only then /tmp. Duplicated rather than shared —
 // identity must import no internal package (.go-arch-lint.yml) — but this

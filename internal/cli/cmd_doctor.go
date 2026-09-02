@@ -112,16 +112,11 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
 
-	// Identity-registry hygiene: sessions first, agents second, so records the
-	// session reap unpins are reapable in the same run (loto-6pn6). doctor
-	// forces an unconditional sweep, unlike write verbs' GCSessionsIfDue
-	// (openRuntimeGC, sd-kx5) which skips most calls via a marker file — this
-	// is the "fix it now" tool, so it must not defer to that marker. The read
-	// path runs neither. Sequenced explicitly here rather than via
-	// openRuntimeGC — agentsGCOnce fires once per process, so an agents pass
-	// at open time would consume it before this session reap ran.
+	// Session-record hygiene. doctor forces an unconditional sweep, unlike
+	// write verbs' GCSessionsIfDue (openRuntimeGC, sd-kx5) which skips most
+	// calls via a marker file — this is the "fix it now" tool, so it must not
+	// defer to that marker. The read path runs neither.
 	sessionsReaped, sessionsResidual, _ := identity.GCSessions(time.Now(), string(rt.SessionUUID), lockOwnerUUIDs(ctx, rt.Store))
-	_ = identity.GCAgents(time.Now(), lockOwnerUUIDs(ctx, rt.Store))
 
 	live := rt.liveProbe()
 

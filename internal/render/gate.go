@@ -47,7 +47,6 @@ type GateDenyRow struct {
 // are per-file), so it isn't repeated as a separate field.
 func EmitGateDeny(w io.Writer, rows []GateDenyRow) {
 	cwd := getCwd()
-	holders := &holderMemo{}
 	sorted := append([]GateDenyRow(nil), rows...)
 	sort.Slice(sorted, func(i, j int) bool {
 		if sorted[i].Path != sorted[j].Path {
@@ -66,13 +65,13 @@ func EmitGateDeny(w io.Writer, rows []GateDenyRow) {
 		r := &sorted[i]
 		if r.Kind == GateKindClaim {
 			fmt.Fprintf(w, "✗ path=%s kind=%s blocker=%s prefix=%s intent=%q expires_at=%s\n",
-				relToCwd(r.Path, cwd), r.Kind, holders.tag(r.HolderUUID), relToCwd(r.BlockerPath, cwd),
+				relToCwd(r.Path, cwd), r.Kind, holderTag(r.HolderUUID), relToCwd(r.BlockerPath, cwd),
 				r.Intent, r.ExpiresAt.UTC().Format(time.RFC3339))
 			fmt.Fprintln(w, "ℹ options=wait|pick-other-work|message-holder")
 			continue
 		}
 		fmt.Fprintf(w, "✗ path=%s kind=%s blocker=%s intent=%q expires_at=%s\n",
-			relToCwd(r.Path, cwd), r.Kind, holders.tag(r.HolderUUID), r.Intent,
+			relToCwd(r.Path, cwd), r.Kind, holderTag(r.HolderUUID), r.Intent,
 			r.ExpiresAt.UTC().Format(time.RFC3339))
 		fmt.Fprintln(w, "```bash")
 		fmt.Fprintf(w, "loto unlock --force -t \"unblock\" %s\n", relToCwd(r.BlockerPath, cwd))
