@@ -218,28 +218,79 @@ func TestEnsureSubagentIDPrecedesAgentID(t *testing.T) {
 	}
 }
 
-// TestEnsureSubagentIDFailsOpen: a stamp with no session id to derive from, or
-// a traversal-shaped stamp, is ignored rather than erroring — the stamp is
-// never load-bearing.
+// TestEnsureSubagentIDFailsOpen: a stamp with no owner to derive from is
+// ignored rather than erroring — the stamp is never load-bearing.
 func TestEnsureSubagentIDFailsOpen(t *testing.T) {
 	clearIdentityEnv(t)
 
 	t.Setenv("LOTO_SUBAGENT_ID", tcStamp)
 	if _, err := Ensure(context.Background()); !errors.Is(err, ErrUnpinned) {
-		t.Errorf("stamp without a session id: err = %v, want ErrUnpinned (fell open to unbound)", err)
+		t.Errorf("stamp with nothing to derive from: err = %v, want ErrUnpinned (fell open to unbound)", err)
 	}
 	if SubagentIDPins(tcStamp) {
-		t.Error("SubagentIDPins must be false with no session id")
+		t.Error("SubagentIDPins must be false with no parent owner")
 	}
+}
 
+// TestEnsureSubagentIDNeedsNoShape: the stamp reaches deriveUUID and nothing
+// else — it names no file and no render field — so a traversal-shaped stamp
+// must still yield a DISTINCT sibling owner. Rejecting it would collapse that
+// sibling onto the parent, which is the collision loto-fs84 exists to stop.
+func TestEnsureSubagentIDNeedsNoShape(t *testing.T) {
+	clearIdentityEnv(t)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", tcSessionA)
 	t.Setenv("LOTO_SUBAGENT_ID", "../escape")
+
 	a, err := Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.UUID != tcSessionA {
-		t.Errorf("malformed stamp must fall open to the session owner, got %q", a.UUID)
+	if a.UUID == tcSessionA {
+		t.Error("traversal-shaped stamp collapsed onto the session owner")
+	}
+	if !agentIDShape.MatchString(a.UUID) {
+		t.Errorf("derived owner %q is not uuid-shaped", a.UUID)
+	}
+}
+
+// TestSubagentPinsUnderAgentIDBinding: a dispatcher that pins LOTO_AGENT_ID and
+// stamps each sibling gets distinct owners with no session id in play. A
+// session-only precondition silently collapsed this case (loto-jnid review).
+func TestSubagentPinsUnderAgentIDBinding(t *testing.T) {
+	clearIdentityEnv(t)
+	t.Setenv("LOTO_AGENT_ID", tcPinnedID)
+
+	t.Setenv("LOTO_SUBAGENT_ID", "sib-a")
+	if !SubagentIDPins("sib-a") {
+		t.Fatal("stamp under an explicit LOTO_AGENT_ID must pin")
+	}
+	a, err := Ensure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOTO_SUBAGENT_ID", "sib-b")
+	b, err := Ensure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.UUID == b.UUID {
+		t.Error("two stamped siblings collapsed onto one owner")
+	}
+	if a.UUID == tcPinnedID || b.UUID == tcPinnedID {
+		t.Error("sibling resolved to the inherited LOTO_AGENT_ID")
+	}
+}
+
+// TestSessionIDShapeRejectsIdentMetachars: the session id becomes a git author
+// ident and a field in single-line render rows, so a value carrying a space,
+// angle bracket or newline must be refused rather than spliced through.
+func TestSessionIDShapeRejectsIdentMetachars(t *testing.T) {
+	for _, bad := range []string{"a b", "a<c>", "a\nb", "a\tb", "a\"b"} {
+		clearIdentityEnv(t)
+		t.Setenv("CLAUDE_CODE_SESSION_ID", bad)
+		if _, err := Ensure(context.Background()); err == nil {
+			t.Errorf("CLAUDE_CODE_SESSION_ID=%q: want an error, got none", bad)
+		}
 	}
 }
 

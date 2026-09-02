@@ -101,14 +101,25 @@ func TestSessionEndHookReleasesLocks(t *testing.T) {
 	}
 }
 
-// TestSessionStartExportsAgentIDForSessionEnd guards the dependency the
-// SessionEnd hook leans on: SessionStart must export LOTO_AGENT_ID (the pin
-// that `unlock --all` requires, loto-pody). Without it the SessionEnd release
-// would refuse with exit 2 and locks would linger to TTL.
-func TestSessionStartExportsAgentIDForSessionEnd(t *testing.T) {
+// TestSessionStartExportsSessionIDForSessionEnd guards the dependency the
+// SessionEnd hook leans on: SessionStart must carry the owner pin that
+// `unlock --all` requires (loto-pody) into later hook shells. Without it the
+// SessionEnd release would refuse with exit 2 and locks would linger to TTL.
+//
+// The pin is CLAUDE_CODE_SESSION_ID, re-exported through $CLAUDE_ENV, NOT a
+// LOTO_AGENT_ID derived from `whoami` (loto-jnid): since the owner id IS the
+// session id, that export only re-routed the value into the STRICT
+// canonical-hex leg, which the session leg deliberately does not enforce — a
+// non-hex session id would then fail every write verb. Re-exporting the
+// variable under its own name is a no-op when Claude Code already propagates
+// it and a rescue when it does not.
+func TestSessionStartExportsSessionIDForSessionEnd(t *testing.T) {
 	s := loadSettingsHooks(t)
 	joined := commandsForEvent(s, "SessionStart")
-	if !strings.Contains(joined, "LOTO_AGENT_ID") {
-		t.Fatalf("SessionStart must export LOTO_AGENT_ID so SessionEnd's `unlock --all` is pinned; got:\n%s", joined)
+	if !strings.Contains(joined, "CLAUDE_CODE_SESSION_ID") {
+		t.Fatalf("SessionStart must carry CLAUDE_CODE_SESSION_ID so SessionEnd's `unlock --all` is pinned; got:\n%s", joined)
+	}
+	if strings.Contains(joined, "LOTO_AGENT_ID") {
+		t.Errorf("SessionStart must NOT export LOTO_AGENT_ID: the owner id is the session id, and that export forces it through the strict-hex leg; got:\n%s", joined)
 	}
 }

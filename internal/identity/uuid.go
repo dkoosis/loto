@@ -53,3 +53,13 @@ func formatUUID(b [16]byte) string {
 		hex.EncodeToString(b[6:8]), hex.EncodeToString(b[8:10]),
 		hex.EncodeToString(b[10:16]))
 }
+
+// sessionIDShape is the charset a CLAUDE_CODE_SESSION_ID must satisfy before
+// it may become an owner id. Deliberately looser than agentIDShape — Claude
+// Code emits UUIDs, but a test harness or an override may pin any opaque
+// token — and still tight enough that the value can be spliced into the
+// places an owner id reaches without changing their meaning: a git
+// author/committer email (cmd_lane.go laneIdentity; `git commit-tree` rejects
+// an ident containing a space, '<', '>' or a newline), a one-row-per-line
+// render surface the PreToolUse hook parses, and a session record filename.
+var sessionIDShape = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)

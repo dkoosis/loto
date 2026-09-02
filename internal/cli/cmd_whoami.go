@@ -35,9 +35,13 @@ func cmdWhoami(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 
 	a, err := identity.Ensure(ctx)
-	pinned := true
+	// pinned comes from PinnedByEnv, not from "Ensure returned no error":
+	// a set-but-empty LOTO_AGENT_ID resolves a throwaway WITHOUT an error
+	// (bindingAgentIDEphemeral), and treating that as pinned publishes a
+	// session record whose uuid no lock can ever match (loto-jnid review).
+	pinned := identity.PinnedByEnv()
 	if errors.Is(err, identity.ErrUnpinned) {
-		a, err, pinned = identity.Ephemeral(), nil, false
+		a, err = identity.Ephemeral(), nil
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ identity: %v\n", err)
@@ -49,9 +53,17 @@ func cmdWhoami(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	// per session instead of on every lock/check/status call. A write failure
 	// is a warning, never fatal — the record is evidence for OTHER sessions'
 	// reclaim decisions; identity is the authority and it already resolved.
-	rec, rerr := identity.RecordSession(a)
-	if rerr != nil {
-		fmt.Fprintf(stderr, "⚠ session not recorded: %v\n", rerr)
+	// Only a pinned owner gets a witness: a throwaway owns nothing, and a
+	// record filed under the real session id with a throwaway uuid would stop
+	// matching any live lock, so GCSessions reaps evidence live locks still
+	// probe through.
+	var rec *identity.SessionRecord
+	if pinned {
+		var rerr error
+		rec, rerr = identity.RecordSession(a)
+		if rerr != nil {
+			fmt.Fprintf(stderr, "⚠ session not recorded: %v\n", rerr)
+		}
 	}
 	session := "-"
 	if rec != nil {
