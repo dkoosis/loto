@@ -152,3 +152,41 @@ func TestCmdUnlock_FromSubdirReleasesTheFileTheCallerMeans(t *testing.T) {
 		t.Errorf("unlock must release the row lock minted: %q", st.String())
 	}
 }
+
+// TestCmdBeacon_RefusesShellToken is loto-bl66's CLI-level AC, and it pins
+// BOTH halves in one test because they pull against each other: beacon must
+// refuse a token that cannot be a path, while still accepting a well-formed
+// path that does not exist yet — the second is beacon's whole reason to exist,
+// so a fix that bought the first by giving up the second is not a fix.
+//
+// The live defect was a lock on the literal string "$FAKE_HOME", minted by the
+// PreToolUse gate. Nothing releases such a row but TTL: no scan can reconcile
+// a canonical that is not a path.
+func TestCmdBeacon_RefusesShellToken(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+
+	for _, tok := range []string{"$FAKE_HOME", "$PROBE_VAR", "`whoami`", " leading.go"} {
+		var out, errBuf bytes.Buffer
+		code := Run([]string{gateIntentBeacon, tok}, &out, &errBuf)
+		if code == 0 {
+			t.Errorf("beacon %q: exit=0, want a refusal", tok)
+		}
+		combined := out.String() + errBuf.String()
+		if !strings.Contains(combined, "not-a-path") {
+			t.Errorf("beacon %q: want reason=not-a-path, got %q", tok, combined)
+		}
+		// AC: the refusal is visible, never a silent skip.
+		if !strings.Contains(combined, "✗") {
+			t.Errorf("beacon %q: refusal must render a ✗ row, got %q", tok, combined)
+		}
+	}
+
+	// The other half, restated here so a regression on either shows up in one
+	// failing test rather than two unrelated ones.
+	var out, errBuf bytes.Buffer
+	if code := Run([]string{gateIntentBeacon, "still-uncreated.go"}, &out, &errBuf); code != 0 {
+		t.Fatalf("beacon on a well-formed missing path: exit=%d out=%q err=%q",
+			code, out.String(), errBuf.String())
+	}
+}
