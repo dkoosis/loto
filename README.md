@@ -112,6 +112,16 @@ A lock frees the instant its owner is provably gone — no manual `loto doctor`:
   lock so the cause of every verdict is visible. status is read-only — it never
   reaps.
 
+> **Upgrading past the identity retirement (loto-jnid).** The owner id used to
+> be a uuid minted into `~/.loto/agents/<session>.json`; it is now the Claude
+> Code session id itself. Locks taken by the OLD binary therefore carry an
+> owner the new binary no longer resolves to, and `loto unlock` on them
+> reports `state=not-owner`. They are not stuck: they free at TTL lapse, on
+> liveness reclaim once the old session is gone, or immediately via
+> `loto unlock --force`. Nothing else migrates — `~/.loto/agents/` and
+> `~/.loto/peers/` are dead data after the upgrade and can be deleted
+> (`rm -rf ~/.loto/agents ~/.loto/peers`).
+
 ## on-disk layout
 
 ```

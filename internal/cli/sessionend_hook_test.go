@@ -106,18 +106,28 @@ func TestSessionEndHookReleasesLocks(t *testing.T) {
 // `unlock --all` requires (loto-pody) into later hook shells. Without it the
 // SessionEnd release would refuse with exit 2 and locks would linger to TTL.
 //
-// The pin is CLAUDE_CODE_SESSION_ID, re-exported through $CLAUDE_ENV, NOT a
+// The pin is CLAUDE_CODE_SESSION_ID, published through $CLAUDE_ENV, NOT a
 // LOTO_AGENT_ID derived from `whoami` (loto-jnid): since the owner id IS the
 // session id, that export only re-routed the value into the STRICT
 // canonical-hex leg, which the session leg deliberately does not enforce — a
-// non-hex session id would then fail every write verb. Re-exporting the
-// variable under its own name is a no-op when Claude Code already propagates
-// it and a rescue when it does not.
+// non-hex session id would then fail every write verb.
+//
+// The value is read from the hook's stdin JSON (`session_id`), falling back to
+// the environment. Claude Code's hook reference documents the stdin field; it
+// does not document exporting the variable into hook command environments, so
+// stdin is the source that is guaranteed to be there.
 func TestSessionStartExportsSessionIDForSessionEnd(t *testing.T) {
 	s := loadSettingsHooks(t)
 	joined := commandsForEvent(s, "SessionStart")
 	if !strings.Contains(joined, "CLAUDE_CODE_SESSION_ID") {
 		t.Fatalf("SessionStart must carry CLAUDE_CODE_SESSION_ID so SessionEnd's `unlock --all` is pinned; got:\n%s", joined)
+	}
+	// It must come off the hook's stdin payload, not only off the hook's own
+	// environment: Claude Code documents session_id as a stdin JSON field and
+	// does NOT document exporting CLAUDE_CODE_SESSION_ID into hook commands,
+	// so an env-only read is unpinned on any build that does not export it.
+	if !strings.Contains(joined, "session_id") {
+		t.Errorf("SessionStart must read session_id from the hook's stdin JSON, not env alone; got:\n%s", joined)
 	}
 	if strings.Contains(joined, "LOTO_AGENT_ID") {
 		t.Errorf("SessionStart must NOT export LOTO_AGENT_ID: the owner id is the session id, and that export forces it through the strict-hex leg; got:\n%s", joined)

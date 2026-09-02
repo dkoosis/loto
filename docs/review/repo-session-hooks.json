@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "[ -n \"$CLAUDE_CODE_SESSION_ID\" ] && echo \"CLAUDE_CODE_SESSION_ID=$CLAUDE_CODE_SESSION_ID\" >> \"$CLAUDE_ENV\" 2>/dev/null || true",
+            "command": "python3 -c \"import sys,json,os\ntry:\n    d=json.loads(sys.stdin.read() or '{}')\nexcept Exception:\n    d={}\nv=d.get('session_id') or os.environ.get('CLAUDE_CODE_SESSION_ID','')\nif v: print('CLAUDE_CODE_SESSION_ID='+v)\" >> \"$CLAUDE_ENV\" 2>/dev/null || true",
             "type": "command"
           },
           {

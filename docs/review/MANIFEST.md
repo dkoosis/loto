@@ -36,7 +36,7 @@ Skip for humans. For an LLM, context is nearly free and these let it check behav
 
 Optional: `internal/domain/target.go` if you want path canonicalization scrutinized — symlink aliasing hides there.
 
-Deliberately excluded: `internal/identity/registry.go` (901 lines; its package doc states the contract), the rest of `internal/cli/*` (surface plumbing), `internal/store/store.go` (schema is already in `DESIGN.md`), and `.claude/rules/*` (house style, not architecture).
+Deliberately excluded: `internal/identity/ensure.go` and `session.go` (their package doc states the contract), the rest of `internal/cli/*` (surface plumbing), `internal/store/store.go` (schema is already in `DESIGN.md`), and `.claude/rules/*` (house style, not architecture).
 
 ## For humans
 

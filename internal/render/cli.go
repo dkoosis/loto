@@ -126,7 +126,7 @@ func EmitClaimSuccess(w io.Writer, rec domain.ClaimRecord) {
 }
 
 // EmitClaimConflict renders the blocked-claim block: count-first, ⚠ per
-// blocker, holder named via holderMemo, sorted prefix then created_at.
+// blocker, holder named by owner id, sorted prefix then created_at.
 func EmitClaimConflict(w io.Writer, ce *store.ClaimConflictError) {
 	cwd := getCwd()
 	blockers := append([]domain.ClaimRecord(nil), ce.Blockers...)
@@ -248,9 +248,10 @@ func EmitTagRows(w io.Writer, tags []store.Tag) {
 	}
 }
 
-// emitTagRow renders one tag line. cwd and holders are passed in so callers
-// hoist the os.Getwd() syscall and identity lookups out of their loops
-// (the file convention documented on relToCwd; loto-kyib).
+// emitTagRow renders one tag line. cwd is passed in so callers hoist the
+// os.Getwd() syscall out of their loops (the file convention documented on
+// relToCwd; loto-kyib). The identity lookup that used to be hoisted alongside
+// it is gone — a tagger is named by its owner id directly (loto-jnid).
 func emitTagRow(w io.Writer, t store.Tag, indent, cwd string) {
 	at := time.Unix(0, t.CreatedAt).UTC().Format(time.RFC3339)
 	fmt.Fprintf(w, "ℹ %stag id=%s at=%s from=%s target=%s text=%q\n",
