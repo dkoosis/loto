@@ -2,7 +2,6 @@ package render
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,22 +11,6 @@ import (
 	"loto/internal/domain"
 	"loto/internal/store"
 )
-
-// seedAgent writes a minimal agent record under home so holderTag/holderMemo
-// resolve uuid to "Handle(prefix)" — the friendly-tag path the bare-UUID
-// fallback tests don't exercise (loto-a8t). uuid must be canonical-hex shaped,
-// or loadByUUID rejects it before the read.
-func seedAgent(t *testing.T, home, uuid, handle string) {
-	t.Helper()
-	dir := filepath.Join(home, ".loto", "agents")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	body := fmt.Sprintf(`{"uuid":%q,"handle":%q,"created_at":"2026-05-10T18:00:00Z","host":"h"}`, uuid, handle)
-	if err := os.WriteFile(filepath.Join(dir, uuid+".json"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
 
 const (
 	aGo        = "a.go"
@@ -79,49 +62,12 @@ func TestEmitConflict_TriageFirst(t *testing.T) {
 	}
 }
 
-func TestHolderTag_FallsBackToUUIDWhenUnknown(t *testing.T) {
-	// HOME points to an empty dir → registry lookup returns ErrNotExist →
-	// holderTag returns the bare UUID.
-	t.Setenv("HOME", t.TempDir())
+func TestHolderTag_IsTheOwnerID(t *testing.T) {
+	// The owner id is the Claude Code session id — the address SendMessage
+	// already uses — so a report row prints it verbatim (loto-jnid).
 	uuid := "00000000-0000-0000-0000-000000000000"
 	if got := holderTag(uuid); got != uuid {
-		t.Errorf("expected fallback to UUID, got %q", got)
-	}
-}
-
-// TestHolderMemo_DedupsLookups is the N+1 guard: a render pass memoizes
-// identity resolution so a repeated UUID triggers exactly one underlying
-// lookup (ReadFile+Unmarshal), not one per row. The memo also caches the
-// formatted tag so distinct UUIDs each resolve once.
-func TestHolderMemo_DedupsLookups(t *testing.T) {
-	calls := map[string]int{}
-	m := &holderMemo{resolve: func(uuid string) string {
-		calls[uuid]++
-		return "H(" + uuid + ")"
-	}}
-	// Same UUID three times → one resolve. A second distinct UUID → one resolve.
-	for range 3 {
-		if got := m.tag("alice"); got != "H(alice)" {
-			t.Fatalf("tag(alice) = %q, want H(alice)", got)
-		}
-	}
-	m.tag("bob")
-	if calls["alice"] != 1 {
-		t.Errorf("alice resolved %d times, want 1 (memo miss = N+1 regression)", calls["alice"])
-	}
-	if calls["bob"] != 1 {
-		t.Errorf("bob resolved %d times, want 1", calls["bob"])
-	}
-}
-
-// TestHolderMemo_DefaultResolverFallsBack confirms a zero-value memo (nil
-// resolve) defaults to the real holderTag logic — bare UUID when unknown.
-func TestHolderMemo_DefaultResolverFallsBack(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	m := &holderMemo{}
-	uuid := "00000000-0000-0000-0000-000000000000"
-	if got := m.tag(uuid); got != uuid {
-		t.Errorf("default resolver should fall back to UUID, got %q", got)
+		t.Errorf("holderTag(%q) = %q, want the id itself", uuid, got)
 	}
 }
 
@@ -408,13 +354,10 @@ func TestEmitClaimsReleased(t *testing.T) {
 }
 
 // Both release surfaces name the holder on a not-owner row, matching the
-// conflict surface (loto-a8t): a resolvable UUID renders as Handle(prefix).
+// conflict surface (loto-a8t): the owner id, verbatim.
 func TestReleaseNotOwnerNamesHolder(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
 	const uuid = "aaaaaaaa-1111-4111-8111-111111111111"
-	seedAgent(t, home, uuid, "SunnyPorcupine")
-	want := "owner=SunnyPorcupine(aaaaaaaa)"
+	want := "owner=" + uuid
 
 	t.Run("lock release", func(t *testing.T) {
 		var buf bytes.Buffer
@@ -437,7 +380,6 @@ func TestReleaseNotOwnerNamesHolder(t *testing.T) {
 }
 
 func TestEmitClaimConflictNamesHolder(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // empty registry → holderTag falls back to UUID
 	now := time.Date(2026, 5, 10, 18, 0, 0, 0, time.UTC)
 	var buf bytes.Buffer
 	EmitClaimConflict(&buf, &store.ClaimConflictError{

@@ -2,16 +2,12 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/rogpeppe/go-internal/testscript"
 
@@ -52,7 +48,6 @@ func TestScripts(t *testing.T) {
 			// Clear inherited identity state so each script starts clean.
 			env.Setenv("LOTO_AGENT_ID", "")
 			env.Setenv("CLAUDE_CODE_SESSION_ID", "")
-			env.Setenv("LOTO_HANDLE", "")
 			// Stamp locks with the long-lived test binary PID so the staleness
 			// probe doesn't reclaim Alice's lock the instant her `loto` subprocess
 			// exits.
@@ -67,24 +62,13 @@ func TestScripts(t *testing.T) {
 			}
 			env.Setenv("REALHOOKS", realHooks)
 
-			// Pre-mint two persisted agents so scripts can swap personas via
-			// `env LOTO_AGENT_ID=$ALICE`. Written directly to disk to avoid
-			// racing on os.Setenv across parallel scripts. Minted straight
-			// under LOTO_BASE/agents, not HOME/.loto/agents: identity's
-			// registryDir resolves through LOTO_BASE when set, with no
-			// ".loto" segment inserted (sd-kx5) — a fixture written under
-			// HOME would sit at a path the code never reads.
-			agentsDir := filepath.Join(base, "agents")
-			alice, err := mintAgentFile(agentsDir, "AliceTester")
-			if err != nil {
-				return err
-			}
-			bob, err := mintAgentFile(agentsDir, "BobTester")
-			if err != nil {
-				return err
-			}
-			env.Setenv("ALICE", alice)
-			env.Setenv("BOB", bob)
+			// Two personas scripts swap between via `env LOTO_AGENT_ID=$ALICE`.
+			// An explicit LOTO_AGENT_ID is the owner with nothing on disk to
+			// resolve it against (loto-jnid), so a fixed uuid per persona is
+			// the whole fixture — scripts assert on `$ALICE` where they used
+			// to assert on a handle.
+			env.Setenv("ALICE", "aaaaaaaa-0000-4000-8000-00000000a11c")
+			env.Setenv("BOB", "bbbbbbbb-0000-4000-8000-000000000b0b")
 
 			// Init a git repo at $WORK so loto's repo-root resolver finds one.
 			return gitInit(env.WorkDir)
@@ -112,32 +96,6 @@ func TestScripts(t *testing.T) {
 			},
 		},
 	})
-}
-
-func mintAgentFile(dir, handle string) (string, error) {
-	type agent struct {
-		UUID      string    `json:"uuid"`
-		Handle    string    `json:"handle"`
-		CreatedAt time.Time `json:"created_at"`
-		Host      string    `json:"host"`
-	}
-	var buf [6]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return "", err
-	}
-	uuid := "00000000-0000-4000-8000-" + hex.EncodeToString(buf[:])
-	a := agent{UUID: uuid, Handle: handle, CreatedAt: time.Now().UTC(), Host: "testscript"}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	body, err := json.MarshalIndent(a, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(filepath.Join(dir, uuid+".json"), body, 0o600); err != nil {
-		return "", err
-	}
-	return uuid, nil
 }
 
 func gitInit(dir string) error {

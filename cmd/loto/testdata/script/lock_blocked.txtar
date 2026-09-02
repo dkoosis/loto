@@ -9,7 +9,7 @@ stdout '✓ locked count=1'
 env LOTO_AGENT_ID=$BOB
 ! loto lock internal/store/store.go -t 'second edit'
 stdout '✗ blocked'
-stdout 'AliceTester'
+stdout $ALICE
 stdout 'first edit'
 
 # Bob can still lock something unrelated.

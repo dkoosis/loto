@@ -38,7 +38,7 @@ loto check <paths>     loto status     loto unlock <paths> -t "done"
 **How it is built.**
 - Go CLI, no daemon, single host by design. Multi-host is an explicit non-goal.
 - State in SQLite under `$XDG_STATE_HOME/loto/projects/<slug>/loto.db`, project scoped by git-remote-derived slug so sibling worktrees of one repo coordinate transparently. A short-lived flock serializes DB operations only — it is never held across user work.
-- Agent identity is host-global (`~/.loto/agents/<uuid>.json`), exported once at session start; state is project-scoped.
+- Agent identity is the Claude Code session id (`CLAUDE_CODE_SESSION_ID`), host-global and never stored; `loto whoami` records the session's liveness witnesses at `~/.loto/session/<sid>.json` once at session start. State is project-scoped.
 - **Enforcement is cooperative plus one harness hook.** loto does not change file permissions. Earlier versions did `chmod` strip-write on acquire; that was retired because it locked out the holder too. Today a Claude Code `PreToolUse` hook refuses a *peer's* write over a held path. Anything that ignores the hook can still write.
 - **Liveness-primary reclaim.** Each lock stamps the owning session PID plus process start time (defeats PID reuse). A holder whose session is provably dead is reclaimed in-line on the next `lock` or `check`. A 30-minute TTL is the backstop for cases liveness cannot cover (bare shells, cron, host reboot). A provably-live session is never TTL-reaped mid-edit.
 - Output is machine-first: fixed glyphs, one record per line, deterministic order, because stdout's audience is an LLM.

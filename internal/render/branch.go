@@ -46,7 +46,6 @@ func EmitBranchCheck(w io.Writer, branch string, rows []BranchHolderRow) {
 		return
 	}
 	fmt.Fprintln(w, "```bash")
-	fmt.Fprintln(w, "loto who                      # who to ask before touching it")
 	fmt.Fprintln(w, "git worktree list             # where the checkout is")
 	fmt.Fprintln(w, "```")
 }

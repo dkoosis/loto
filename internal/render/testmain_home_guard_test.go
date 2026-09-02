@@ -15,7 +15,7 @@ import (
 var realHomeAtProcessStart = os.Getenv("HOME")
 
 // TestMain is loto-bt6c's structural backstop for this package: cli_test.go
-// and gate_test.go both resolve identity (holderTag → registryDir()) via
+// and gate_test.go used to resolve identity (holderTag → the agent registry) via
 // $HOME, so a future test that forgets its own t.Setenv("HOME", ...) would
 // mint straight into dk's real ~/.loto. Repointing HOME here, once, before
 // any test runs, means an omission lands in a throwaway directory instead —

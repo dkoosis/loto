@@ -59,22 +59,30 @@ func beat(t *testing.T) {
 }
 
 // actor is one performer in a demo. The Setenv pin survives until another
-// actor steps up or the test ends.
+// actor steps up or the test ends. handle is the short owner id, for the
+// narration only — there is no separate handle (loto-jnid).
 type actor struct {
 	handle string
 	agent  *identity.Agent
 }
 
+func shortID(uuid string) string {
+	if len(uuid) > 8 {
+		return uuid[:8]
+	}
+	return uuid
+}
+
 func cast(t *testing.T) (alice, bob actor) {
 	t.Helper()
 	a, b := twoAgents(t)
-	return actor{handle: a.Handle, agent: a}, actor{handle: b.Handle, agent: b}
+	return actor{handle: shortID(a.UUID), agent: a}, actor{handle: shortID(b.UUID), agent: b}
 }
 
 func solo(t *testing.T) actor {
 	t.Helper()
 	a := pinAgent(t)
-	return actor{handle: a.Handle, agent: a}
+	return actor{handle: shortID(a.UUID), agent: a}
 }
 
 // liveHolder pins LOTO_PID to this live test process so locks placed in the
@@ -92,12 +100,12 @@ func triCast(t *testing.T) (alice, bob, carol actor) {
 	t.Helper()
 	a, b := cast(t)
 	os.Unsetenv("LOTO_AGENT_ID")
-	t.Setenv("CLAUDE_CODE_SESSION_ID", fmt.Sprintf("carol-%d", time.Now().UnixNano()))
+	t.Setenv("CLAUDE_CODE_SESSION_ID", identity.NewUUID())
 	c, err := identity.Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return a, b, actor{handle: c.Handle, agent: c}
+	return a, b, actor{handle: shortID(c.UUID), agent: c}
 }
 
 // tryDo runs a loto command as the given actor and renders it as a single
@@ -219,7 +227,7 @@ func TestDemo_00_Index(t *testing.T) {
 // ─── 01-08 · primitives ──────────────────────────────────────────────────────
 
 func TestDemo_01_WhoAmI(t *testing.T) {
-	head(t, 1, "whoami — every session has a handle")
+	head(t, 1, "whoami — every session has an owner id")
 	withTempProject(t)
 	a := solo(t)
 
@@ -227,9 +235,9 @@ func TestDemo_01_WhoAmI(t *testing.T) {
 	say(t, "first question: what am I called here?")
 	beat(t)
 	_, out := a.do(t, "whoami")
-	mustContain(t, out, "handle:")
+	mustContain(t, out, "uuid:")
 	beat(t)
-	say(t, "that handle is what peers will see in conflict reports.")
+	say(t, "that id is the Claude Code session id — what peers see in conflict reports.")
 }
 
 func TestDemo_02_LockAndStatus(t *testing.T) {

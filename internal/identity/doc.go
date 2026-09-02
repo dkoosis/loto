@@ -1,47 +1,40 @@
-// Package identity resolves a stable agent UUID for the running process and
-// persists per-agent records at ~/.loto/agents/<uuid>.json. Ensure is the
-// entry point; LookupByUUID and NewUUID are supporting surfaces.
+// Package identity resolves the agent UUID that owns locks, claims and tags
+// for the running process, and records enough about the session behind it
+// to answer "is that holder still alive?" from a shell.
 //
-// LOTO_BASE, when set, redirects the whole ~/.loto tree (agents, session,
-// peers — see lotoHome in registry.go) the same way it redirects the lock
-// store (internal/cli.StateDir). A test or isolated run that sets LOTO_BASE
-// without also overriding CLAUDE_CODE_SESSION_ID used to still write into the
-// real ~/.loto/session/<sid>.json — this package ignored the var entirely
-// before sd-kx5.
+// There is no registry. Claude Code names sessions, lists peers and carries
+// messages between them natively (ListAgents / SendMessage, CC ≥ 2.1.224),
+// so loto no longer mints handles, keeps peer records, or answers `who` and
+// `alive` (loto-jnid). What remains is the authority half: one stable owner
+// id per session, derived from the environment Claude Code already exports.
 //
 // Governing principle: identity ambiguity is allowed for display, never for
-// authority. Anything that acquires, releases, or attributes a lock must run
-// under a stable, explicit, validated UUID binding. Heuristics are only
-// consulted as a last-resort interactive convenience and are bounded.
+// authority. Anything that acquires, releases, or attributes a lock runs
+// under a stable, explicit, validated owner id or is refused.
 //
 // Resolution order (Ensure):
 //
-//  1. LOTO_AGENT_ID=<uuid>: shape-validated against the RFC 4122 v4 form
-//     before any filesystem touch (prevents path escape). Must resolve to an
-//     existing registry record; an unresolvable uuid is a hard error
-//     (errStaleAgentID) — silently substituting an ephemeral identity would
-//     orphan every lock acquired in this session.
-//  2. LOTO_AGENT_ID="" (explicit empty): mint an ephemeral in-memory identity,
-//     no disk record. Fleet dispatchers export this to keep the registry from
-//     accumulating one orphan .json per subagent.
-//  3. LOTO_AGENT_ID unset, CLAUDE_CODE_SESSION_ID=<sid> set: bind the session
-//     to one agent via ~/.loto/session/<sid>.json. Concurrent first-use
-//     callers race an O_EXCL claim; losers drop their candidate record and
-//     adopt the winner's mapping (gh#28).
-//  4. LOTO_AGENT_ID and CLAUDE_CODE_SESSION_ID both unset: mint a fresh
-//     persistent agent. The prior heuristic that reused the most-recent
-//     local agent within a 24h window was removed (gh#121): a dead session's
-//     UUID could be adopted by a new process and silently re-attribute new
-//     locks to it, violating the v4 "ambiguity allowed for display, never
-//     for authority" invariant. Pin identity across processes by exporting
-//     CLAUDE_CODE_SESSION_ID or LOTO_AGENT_ID.
+//  1. LOTO_SUBAGENT_ID=<stamp> with a session id present: the owner is a UUID
+//     derived from (session id, stamp), so /team siblings that inherit one
+//     session diverge into distinct owners (loto-fs84). A stamp with no
+//     session id, or a malformed stamp, is ignored — fail-open by contract,
+//     the stamp is never load-bearing (see resolveSubagent).
+//  2. LOTO_AGENT_ID=<uuid>: an explicit pin, shape-validated. Nothing on disk
+//     is consulted; the value is the owner.
+//  3. LOTO_AGENT_ID="" (explicit empty): an ephemeral in-memory owner. Fleet
+//     dispatchers export this for throwaway processes.
+//  4. CLAUDE_CODE_SESSION_ID=<sid>: the owner IS the session id. Every
+//     shell-out from one Claude Code session shares it, so every lock a
+//     session takes is owned by one id with no cache to keep in sync.
+//  5. Nothing set: Ensure returns ErrUnpinned. Authority-bearing verbs refuse;
+//     read-only verbs substitute Ephemeral() for display. Non-Claude-Code
+//     callers (codex, `claude -p`, a raw shell) are not supported yet.
 //
-// LOTO_HANDLE preassigns the agent handle; its shape is validated in
-// handles.go but membership in the built-in word lists is not required.
-//
-// Ensure also runs a once-per-process GC pass over ~/.loto/agents/, deleting
-// records older than 30 days — except any uuid still referenced by a session
-// cache file. Preserving referenced uuids keeps the session→agent binding
-// from being broken from underneath a live session. Session cache files are
-// not themselves GC'd.
+// Liveness: `loto whoami` (run by the SessionStart hook) records the session
+// process — pid, start-time, messaging socket — at ~/.loto/session/<sid>.json
+// (LOTO_BASE/session when LOTO_BASE is set, sd-kx5). ProbeSession reads that
+// record to answer for a holder whose stamped lock pid is gone but whose
+// session is still up (loto-r11w); a lock row's own pid/proc_start remains
+// the fallback (internal/cli/runtime.go pidVerdict). A Go binary cannot call
+// ListAgents, so this file is the one presence fact loto still keeps.
 package identity

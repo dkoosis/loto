@@ -95,8 +95,14 @@ type runtime struct {
 	RepoTop       string             // absolute repo toplevel; roots canonical target resolution
 	SessionUUID   domain.SessionUUID // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID or CLAUDE_CODE_SESSION_ID
 	SessionPinned bool               // true iff either of those was in env; gates session-scoped semantics
-	AgentPinned   bool               // true iff a non-empty LOTO_AGENT_ID, a usable LOTO_SUBAGENT_ID (SubagentIDPins), or CLAUDE_CODE_SESSION_ID pins an identity; false → Ensure minted a throwaway UUID
+	AgentPinned   bool               // true iff a non-empty LOTO_AGENT_ID, a usable LOTO_SUBAGENT_ID (SubagentIDPins), or CLAUDE_CODE_SESSION_ID pins an identity; false → Agent is a display-only throwaway (identity.Ephemeral)
 }
+
+// errIdentityUnpinned is what a write verb prints when nothing in the
+// environment names an owner (identity.ErrUnpinned). One ✗ line, the two env
+// vars that would fix it, and the honest scope: callers outside Claude Code
+// are not supported yet (loto-jnid).
+var errIdentityUnpinned = fmt.Errorf("identity=unpinned: %w", identity.ErrUnpinned)
 
 // sessionUUID resolves the per-session id. LOTO_SESSION_ID is the explicit
 // override; CLAUDE_CODE_SESSION_ID is the id Claude Code already puts in the
@@ -117,10 +123,10 @@ type runtime struct {
 // false), ReleaseBySession, and — the reason this is being fixed now — any
 // attempt to ask whether a peer record speaks for a given record's session.
 //
-// identity.PeerFromEnv fills Peer.SessionID from identity.SessionIDFromEnv —
-// the same function called here — so the two sides are comparable BY
-// CONSTRUCTION rather than by convention. peerSpeaksFor below depends on
-// exactly that, and the convention version had already drifted: the peer read
+// identity.RecordSession keys the session record by identity.SessionIDFromEnv
+// — the same function called here — so the two sides are comparable BY
+// CONSTRUCTION rather than by convention. liveProbe below depends on exactly
+// that, and the convention version had already drifted: the peer record read
 // CLAUDE_CODE_SESSION_ID alone while this preferred LOTO_SESSION_ID, so with
 // the documented override set every DEAD verdict was discarded and PID-less
 // locks and claims stayed blockers until their TTL (loto-37xm, Codex #248).
@@ -133,15 +139,22 @@ func sessionUUID() (id string, pinned bool) {
 
 func openRuntime(ctx context.Context) (*runtime, error) {
 	// Capture whether an explicit identity env var was set before Ensure runs.
-	// Ensure mints a fresh throwaway UUID when neither is present; that UUID
-	// owns no locks and must not be used as an --all release scope — doing so
-	// produces a false-success that silently leaves real locks in place
-	// (loto-pody). AgentPinned mirrors the SessionPinned pattern for sessions.
+	// An unpinned read verb runs on a throwaway UUID that owns no locks and
+	// must not be used as an --all release scope — doing so produces a
+	// false-success that silently leaves real locks in place (loto-pody).
+	// AgentPinned mirrors the SessionPinned pattern for sessions.
 	// identity.PinnedByEnv is the single source shared with the gate probe and
 	// Ensure's own precedence (loto-ai5), so this can't drift from resolution.
 	agentPinned := identity.PinnedByEnv()
 
 	a, err := identity.Ensure(ctx)
+	if errors.Is(err, identity.ErrUnpinned) {
+		// This is the READ path (check, status, guard, doctor, sync, beacon
+		// gates itself): ambiguity is allowed for display, so render the table
+		// under a throwaway owner. Write verbs never reach here unpinned —
+		// openRuntimeGC refuses first.
+		a, err = identity.Ephemeral(), nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("identity: %w", err)
 	}
@@ -160,11 +173,10 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store.Open: %w", err)
 	}
-	// No identity GC here — openRuntime is the read path (check, check --gate,
+	// No session GC here — openRuntime is the read path (check, check --gate,
 	// guard, status) and must stay cheap. GC lives in openRuntimeGC (write
-	// verbs) and doctor's explicit two-phase pass; sessionReferencedUUIDs walks
-	// every ~/.loto/session/*.json, which cost 1.1s against a 15.5k-file dir on
-	// this hot path (loto-6pn6).
+	// verbs) and doctor's explicit pass; a ReadDir over ~/.loto/session cost
+	// 1.1s against a 15.5k-file dir on this hot path (loto-6pn6).
 	host, hostKnown := identity.HostID()
 	if !hostKnown {
 		// Announce the degradation: without a host id every lock recorded
@@ -187,29 +199,34 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 	}, nil
 }
 
-// openRuntimeGC is openRuntime plus the identity-registry GC pass, for verbs
-// that mutate coordination state (lock/unlock/tag/ack/claim/unclaim/lane/
-// downgrade/refresh). Read verbs — check, check --gate, guard, status — must
-// NOT use it: sessionReferencedUUIDs walks every ~/.loto/session/*.json, which
-// cost 1.1s on the PreToolUse gate path against a 15.5k-file dir (loto-6pn6).
-// GC runs here, before the caller mutates anything: lockOwnerUUIDs must see
-// the lock rows that pin their owner agents, and an unlock --all has already
-// dropped them by the time it returns (gh#125 / loto-ffg).
+// openRuntimeGC is openRuntime for verbs that mutate coordination state
+// (lock/unlock/tag/ack/claim/unclaim/lane/downgrade/refresh/submit/gate/
+// violations): it REFUSES an unpinned identity before opening the store, and
+// runs the session-record GC pass. Read verbs — check, check --gate, guard,
+// status — must NOT use it: a ReadDir over ~/.loto/session cost 1.1s on the
+// PreToolUse gate path against a 15.5k-file dir (loto-6pn6).
 //
-// GCSessionsIfDue rides along, marker-gated to once per
-// identity.sessionGCMinInterval: session-cache reaping used to run only from
-// `loto doctor`, a verb nobody remembers to invoke, so ~/.loto/session grew
-// unbounded (3,877 stray files observed with no automatic reaper, sd-kx5).
-// The marker keeps the steady-state added cost on this write path to one
-// os.Stat; a real ReadDir sweep only happens once per interval per machine.
+// The refusal is the authority half of "ambiguity allowed for display, never
+// for authority" (loto-jnid): a write attributed to a throwaway owner would be
+// unreleasable by its author and unreclaimable by anyone. GC runs before the
+// caller mutates anything: lockOwnerUUIDs must see the lock rows that pin
+// their owners' session records, and an unlock --all has already dropped them
+// by the time it returns (gh#125 / loto-ffg).
+//
+// GCSessionsIfDue is marker-gated to once per identity.sessionGCMinInterval:
+// session-record reaping used to run only from `loto doctor`, a verb nobody
+// remembers to invoke, so ~/.loto/session grew unbounded (3,877 stray files
+// observed with no automatic reaper, sd-kx5). The marker keeps the
+// steady-state added cost on this write path to one os.Stat.
 func openRuntimeGC(ctx context.Context) (*runtime, error) {
+	if !identity.PinnedByEnv() {
+		return nil, errIdentityUnpinned
+	}
 	rt, err := openRuntime(ctx)
 	if err != nil {
 		return nil, err
 	}
-	pinned := lockOwnerUUIDs(ctx, rt.Store)
-	_, _, _, _ = identity.GCSessionsIfDue(time.Now(), string(rt.SessionUUID), pinned)
-	_ = identity.GCAgents(time.Now(), pinned)
+	_, _, _, _ = identity.GCSessionsIfDue(time.Now(), string(rt.SessionUUID), lockOwnerUUIDs(ctx, rt.Store))
 	return rt, nil
 }
 
@@ -256,13 +273,16 @@ func (r *runtime) DeferredTagFooter(w io.Writer) {
 // oracle first, pid fallback. Centralizes the live-probe closure that otherwise
 // gets re-built at every lock/unlock/doctor call site.
 //
-// Layer 1 — the session-liveness oracle (identity.AgentLive, loto-ygty), keyed
-// on the lock's owner uuid. A LIVE verdict overrides the pid probe entirely:
+// Layer 1 — the session-liveness oracle (identity.ProbeSession, loto-ygty),
+// keyed on the lock's SESSION uuid — the record `loto whoami` wrote for the
+// session that took the lock. A LIVE verdict overrides the pid probe entirely:
 // a worktree/subagent holder whose stamped pid probes dead is still alive if
-// its session socket + ps identity check out (loto-r11w). A DEAD verdict
-// fast-reclaims without touching the pid.
+// its session socket + start-time check out (loto-r11w). A DEAD verdict
+// fast-reclaims without touching the pid. Keying on the session rather than
+// the owner is what makes one sibling's death no evidence about another's
+// lock (loto-2lj5): every session has its own record.
 //
-// Layer 2 — pid fallback, when the oracle has no peer record. Remote-host and
+// Layer 2 — pid fallback, when the oracle has no session record. Remote-host and
 // PID-0 locks are UNKNOWN (TTL is the sole authority — loto-t1tq/loto-j1bo).
 // Degraded mode (loto-u7e): when this process has no verifiable host id every
 // lock is UNKNOWN, including host-less records — two machines that both failed
@@ -280,56 +300,24 @@ func (r *runtime) liveProbe() domain.HolderLiveProbe {
 		if !r.HostKnown || l.Host != r.Host {
 			return domain.LivenessUnknown
 		}
-		v := identity.AgentLive(r.Ctx, string(l.OwnerUUID))
-		switch v.Liveness {
-		case identity.SessionLive:
-			return domain.LivenessAlive
-		case identity.SessionDead:
-			if peerSpeaksFor(v.Peer, l.SessionUUID) {
+		if l.SessionUUID != "" {
+			switch identity.ProbeSession(string(l.SessionUUID)).Liveness {
+			case identity.SessionLive:
+				return domain.LivenessAlive
+			case identity.SessionDead:
 				return domain.LivenessDead
+			case identity.SessionUnknown:
+				// no session record — fall through to the pid probe
 			}
-			// The peer record belongs to a DIFFERENT session of the same
-			// agent, so its death is no evidence about this record's holder.
-			// Fall through (loto-2lj5).
-		case identity.SessionUnknown:
-			// no peer record — fall through to the pid probe
 		}
 		return pidVerdict(l)
 	}
 }
 
-// peerSpeaksFor reports whether a peer record is evidence about the session
-// that took this record. Peer records are keyed on agent uuid alone
-// (identity.peerPath), but sibling sessions sharing one LOTO_AGENT_ID are a
-// supported, tested configuration (loto-81n) — so one agent uuid can have
-// several live sessions and exactly one peer record. When a sibling dies, that
-// record reads DEAD, and without this check every lock held by the still-live
-// siblings is classified stale: two agents write one file, the one failure
-// loto exists to prevent and the one direction that cannot be recovered from.
-//
-// ‡ Asymmetric by design, and the asymmetry is the safety argument. Only the
-// DEAD verdict is gated. A LIVE verdict from the wrong sibling keeps a lock
-// denying, which over-refuses — annoying, reversible, and strictly the safe
-// direction. Gating both would be tidier and would give up the loto-r11w
-// override, where a worktree/subagent holder whose stamped pid probes dead is
-// still alive because its session socket checks out.
-//
-// Both ids empty means the caller is not a Claude session at all (direct CLI
-// use, legacy rows): nothing to correspond, nothing to contradict, so the
-// verdict stands as before. A mismatch falls through to pidVerdict, which
-// answers from the record's own stamped pid, or UNKNOWN when there is none —
-// and then the TTL is the sole authority, exactly as the bead asks.
-func peerSpeaksFor(p *identity.Peer, session domain.SessionUUID) bool {
-	if p == nil {
-		return false
-	}
-	return p.SessionID == string(session)
-}
-
 // memoLiveProbe wraps a probe so each distinct holder is probed at most once
 // per CLI invocation (Codex #246). The gate evaluates its predicate per
-// (target × record), and a probe is not free: identity.AgentLive reads a peer
-// record off disk and the pid fallback can shell out to `ps`. One repo-root
+// (target × record), and a probe is not free: identity.ProbeSession reads a
+// session record off disk and re-reads a pid's start-time. One repo-root
 // claim over a 300-file staged set therefore paid 300 identical probes on the
 // pre-commit hot path.
 //
@@ -340,15 +328,15 @@ func peerSpeaksFor(p *identity.Peer, session domain.SessionUUID) bool {
 // for one target and DEAD for the next in the same verdict would be incoherent
 // anyway.
 //
-// ‡ The session leg is not decoration (loto-s0bb, Codex #248). liveProbe reads
-// l.SessionUUID through peerSpeaksFor: one agent uuid can carry several live
-// sibling sessions and exactly one peer record, so the SAME (host, owner, pid,
-// proc-start) yields DEAD for the session the record names and UNKNOWN for its
-// siblings. Sibling beacons and every claim share PID 0, which made them
-// collide on the old key: probe the dead sibling first and its DEAD verdict was
-// served to a live one, so check --gate, guard, and claim acquisition would all
-// hand a live agent's territory to a competing writer. That is the one loto
-// failure with no recovery — a false UNKNOWN only delays a reclaim.
+// ‡ The session leg is not decoration (loto-s0bb, Codex #248). liveProbe keys
+// the oracle on l.SessionUUID: one owner uuid can carry several live sibling
+// sessions, so the SAME (host, owner, pid, proc-start) yields DEAD for the
+// session whose record died and UNKNOWN or ALIVE for its siblings. Sibling
+// beacons and every claim share PID 0, which made them collide on the old key:
+// probe the dead sibling first and its DEAD verdict was served to a live one,
+// so check --gate, guard, and claim acquisition would all hand a live agent's
+// territory to a competing writer. That is the one loto failure with no
+// recovery — a false UNKNOWN only delays a reclaim.
 func memoLiveProbe(p domain.HolderLiveProbe) domain.HolderLiveProbe {
 	if p == nil {
 		return nil
@@ -376,12 +364,12 @@ func memoLiveProbe(p domain.HolderLiveProbe) domain.HolderLiveProbe {
 	}
 }
 
-// pidVerdict is liveProbe's layer-2 fallback for a local lock with no peer
+// pidVerdict is liveProbe's layer-2 fallback for a local lock with no session
 // record: PID-0 sentinel → unknown (TTL governs), dead pid → dead, live pid
 // with a recycled start-time (loto-kwlp) → dead, else alive.
 //
-// identity.ProcStart is the same reader the peer oracle now uses for its own
-// start-time witness (loto-uxhg, identity.SessionVerdict) — one implementation
+// identity.ProcStart is the same reader the session oracle uses for its own
+// start-time witness (loto-uxhg, SessionRecord.Verdict) — one implementation
 // for both liveness paths in the codebase.
 func pidVerdict(l domain.LockRecord) domain.Liveness {
 	if l.PID <= 0 {
@@ -399,11 +387,11 @@ func pidVerdict(l domain.LockRecord) domain.Liveness {
 }
 
 // lockOwnerUUIDs collects the set of owner_uuid values referenced by live
-// lock rows in s. Fed to identity.GCAgents so the agent-registry GC pass
-// pins agents that any live lock still depends on, closing gh#125
+// lock rows in s. Fed to identity.GCSessions so the session-record GC pass
+// pins records that any live lock still depends on, closing gh#125
 // (loto-ffg). A ListLocks failure is non-fatal: a nil set means GC runs
-// with only its built-in session-cache pin set — the worst case is the
-// same as the pre-fix behavior, not a regression.
+// with only its mtime and own-session pins — the worst case is the same as
+// the pre-fix behavior, not a regression.
 func lockOwnerUUIDs(ctx context.Context, s *store.Store) map[string]struct{} {
 	locks, err := s.ListLocks(ctx)
 	if err != nil {
@@ -412,7 +400,7 @@ func lockOwnerUUIDs(ctx context.Context, s *store.Store) map[string]struct{} {
 	out := make(map[string]struct{}, len(locks))
 	for i := range locks {
 		if locks[i].OwnerUUID != "" {
-			// GCAgents takes a plain map[string]struct{}: the identity package
+			// GCSessions takes a plain map[string]struct{}: the identity package
 			// is pinned to internal/identity → ∅ and cannot reference
 			// domain.AgentUUID, so the owner crosses back to a string here.
 			out[string(locks[i].OwnerUUID)] = struct{}{}

@@ -15,49 +15,15 @@ import (
 	"time"
 
 	"loto/internal/domain"
-	"loto/internal/identity"
 	"loto/internal/store"
 )
 
-// holderTag formats a UUID as "Handle(uuid-prefix)" when the agent record
-// resolves on this host; otherwise returns the bare UUID. Surfaces a
-// human-readable holder name in conflict reports (loto-b3o) without losing
-// the stable UUID key for fleet automation.
+// holderTag names a lock's holder in a report row. The owner id IS the
+// Claude Code session id (loto-jnid), which is what ListAgents and
+// SendMessage address, so it is printed verbatim — there is no friendlier
+// name loto could resolve it to that the caller does not already have.
 func holderTag(uuid string) string {
-	if a, err := identity.LookupByUUID(uuid); err == nil && a.Handle != "" {
-		short := uuid
-		if len(short) > 8 {
-			short = short[:8]
-		}
-		return a.Handle + "(" + short + ")"
-	}
 	return uuid
-}
-
-// holderMemo caches holderTag results within a single render pass. Each
-// EmitConflictWithTags / EmitTagFooter call resolves a given UUID once —
-// identity.LookupByUUID does a ReadFile+Unmarshal, so without the memo a
-// blocker list or tag footer sharing a holder UUID was an N+1 (loto-kyib).
-// The zero value is usable; a nil resolve defaults to holderTag.
-type holderMemo struct {
-	cache   map[string]string
-	resolve func(uuid string) string // overridable for tests; nil → holderTag
-}
-
-func (m *holderMemo) tag(uuid string) string {
-	if v, ok := m.cache[uuid]; ok {
-		return v
-	}
-	r := m.resolve
-	if r == nil {
-		r = holderTag
-	}
-	v := r(uuid)
-	if m.cache == nil {
-		m.cache = make(map[string]string)
-	}
-	m.cache[uuid] = v
-	return v
 }
 
 // relToCwd returns p relative to cwd when p is absolute and the relative form
@@ -120,7 +86,6 @@ func EmitBeaconSuccess(w io.Writer, recs []domain.LockRecord, ttl time.Duration)
 // the `⚠ target=…` line. Pass nil to suppress tag surfacing.
 func EmitConflictWithTags(w io.Writer, ce *store.MultiConflictError, tagsByTarget map[string][]store.Tag) {
 	cwd := getCwd()
-	holders := &holderMemo{}
 	blockers := append([]domain.LockRecord(nil), ce.Blockers...)
 	sort.Slice(blockers, func(i, j int) bool {
 		return blockers[i].Target.Canonical < blockers[j].Target.Canonical
@@ -136,10 +101,10 @@ func EmitConflictWithTags(w io.Writer, ce *store.MultiConflictError, tagsByTarge
 			branch = " branch=" + b.Branch
 		}
 		fmt.Fprintf(w, "⚠ target=%s blocker=%s intent=%q expires_at=%s%s\n",
-			relToCwd(b.Target.Canonical, cwd), holders.tag(string(b.OwnerUUID)), b.Intent,
+			relToCwd(b.Target.Canonical, cwd), holderTag(string(b.OwnerUUID)), b.Intent,
 			b.ExpiresAt.UTC().Format(time.RFC3339), branch)
 		for _, t := range tagsByTarget[b.Target.Canonical] {
-			emitTagRow(w, t, "  ", cwd, holders)
+			emitTagRow(w, t, "  ", cwd)
 		}
 	}
 }
@@ -164,7 +129,6 @@ func EmitClaimSuccess(w io.Writer, rec domain.ClaimRecord) {
 // blocker, holder named via holderMemo, sorted prefix then created_at.
 func EmitClaimConflict(w io.Writer, ce *store.ClaimConflictError) {
 	cwd := getCwd()
-	holders := &holderMemo{}
 	blockers := append([]domain.ClaimRecord(nil), ce.Blockers...)
 	sort.Slice(blockers, func(i, j int) bool {
 		if blockers[i].PathPrefix != blockers[j].PathPrefix {
@@ -176,7 +140,7 @@ func EmitClaimConflict(w io.Writer, ce *store.ClaimConflictError) {
 	for i := range blockers {
 		b := &blockers[i]
 		fmt.Fprintf(w, "⚠ prefix=%s blocker=%s intent=%q expires_at=%s\n",
-			relToCwd(b.PathPrefix, cwd), holders.tag(string(b.OwnerUUID)), b.Intent,
+			relToCwd(b.PathPrefix, cwd), holderTag(string(b.OwnerUUID)), b.Intent,
 			b.ExpiresAt.UTC().Format(time.RFC3339))
 	}
 }
@@ -228,10 +192,9 @@ func EmitTagFooter(w io.Writer, tags []store.Tag, ownerUUID string) {
 		return
 	}
 	cwd := getCwd()
-	holders := &holderMemo{}
-	fmt.Fprintf(w, "ℹ tags count=%d owner=%s\n", len(tags), holders.tag(ownerUUID))
+	fmt.Fprintf(w, "ℹ tags count=%d owner=%s\n", len(tags), holderTag(ownerUUID))
 	for _, t := range tags {
-		emitTagRow(w, t, "", cwd, holders)
+		emitTagRow(w, t, "", cwd)
 	}
 }
 
@@ -247,13 +210,12 @@ func EmitTerritoryTagRows(w io.Writer, notes []store.TerritoryTag, header, inden
 		return
 	}
 	cwd := getCwd()
-	holders := &holderMemo{}
 	if header != "" {
 		fmt.Fprintf(w, "%sℹ %s count=%d\n", indent, header, len(notes))
 	}
 	for _, n := range notes {
 		fmt.Fprintf(w, "%sℹ territory-tag id=%s from=%s prefix=%s expires_at=%s text=%q\n",
-			indent, n.ID, holders.tag(n.TaggerUUID), relToCwd(n.PathPrefix, cwd),
+			indent, n.ID, holderTag(n.TaggerUUID), relToCwd(n.PathPrefix, cwd),
 			time.Unix(0, n.ExpiresAt).UTC().Format(time.RFC3339), n.Text)
 	}
 }
@@ -269,11 +231,10 @@ func EmitExpiredTerritoryTags(w io.Writer, notes []store.TerritoryTag, now time.
 		return
 	}
 	cwd := getCwd()
-	holders := &holderMemo{}
 	for _, n := range notes {
 		age := now.Sub(time.Unix(0, n.ExpiresAt)).Round(time.Hour)
 		fmt.Fprintf(w, "⚠ expired_territory_tag id=%s prefix=%s from=%s expired_ago=%s text=%q\n",
-			n.ID, relToCwd(n.PathPrefix, cwd), holders.tag(n.TaggerUUID), age, n.Text)
+			n.ID, relToCwd(n.PathPrefix, cwd), holderTag(n.TaggerUUID), age, n.Text)
 	}
 }
 
@@ -282,19 +243,18 @@ func EmitExpiredTerritoryTags(w io.Writer, notes []store.TerritoryTag, now time.
 // names the target. Empty input emits nothing.
 func EmitTagRows(w io.Writer, tags []store.Tag) {
 	cwd := getCwd()
-	holders := &holderMemo{}
 	for _, t := range tags {
-		emitTagRow(w, t, "  ", cwd, holders)
+		emitTagRow(w, t, "  ", cwd)
 	}
 }
 
 // emitTagRow renders one tag line. cwd and holders are passed in so callers
 // hoist the os.Getwd() syscall and identity lookups out of their loops
 // (the file convention documented on relToCwd; loto-kyib).
-func emitTagRow(w io.Writer, t store.Tag, indent, cwd string, holders *holderMemo) {
+func emitTagRow(w io.Writer, t store.Tag, indent, cwd string) {
 	at := time.Unix(0, t.CreatedAt).UTC().Format(time.RFC3339)
 	fmt.Fprintf(w, "ℹ %stag id=%s at=%s from=%s target=%s text=%q\n",
-		indent, t.ID, at, holders.tag(t.TaggerUUID), relToCwd(string(t.TargetCanonical), cwd), t.Text)
+		indent, t.ID, at, holderTag(t.TaggerUUID), relToCwd(string(t.TargetCanonical), cwd), t.Text)
 }
 
 // InvalidTarget describes a pre-store rejection (bad path, wrong kind, dup).
@@ -323,7 +283,6 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 		return 0
 	}
 	cwd := getCwd()
-	holders := &holderMemo{}
 	sorted := append([]store.ReleaseResult(nil), results...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })
 	exit := writeReleaseTriageLine(w, sorted)
@@ -339,7 +298,7 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 		case store.StateNotOwner:
 			// Name the holder like EmitClaimConflict/EmitConflictWithTags do —
 			// a bare UUID here forked the release-surface convention (loto-a8t).
-			fmt.Fprintf(w, "✗ target=%s state=not-owner owner=%s\n", path, holders.tag(r.Owner))
+			fmt.Fprintf(w, "✗ target=%s state=not-owner owner=%s\n", path, holderTag(r.Owner))
 		}
 	}
 	return exit

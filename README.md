@@ -12,7 +12,7 @@ subagents, concurrent windows. Without coordination, two of them can edit
 loto answers: "Is it safe for me to edit this path right now, and if not,
 who's on it and what are they doing?"
 
-Acquire a lock with intent. The tag carries your handle, PID, branch, and
+Acquire a lock with intent. The tag carries your session id, PID, branch, and
 the one-line intent. The next agent that tries the same file sees the
 holder and decides: wait, work elsewhere, or break the lock.
 
@@ -23,7 +23,7 @@ loto lock internal/store/store.go -t "refactor query path"
 
 # from another session:
 loto status
-# (prints held rows with handle / intent / expires_at)
+# (prints held rows with owner / intent / expires_at)
 
 loto unlock internal/store/store.go -t "done"
 ```
@@ -63,8 +63,7 @@ loto unlock <path>... -t "<intent>"   # release; --force to break another's, --a
 loto check [<path>...]                # check targets for conflicts; --staged for git staged paths
 loto status                           # who holds what; --mine to filter
 loto doctor [--dry-run|--repair]      # detect and optionally repair stale locks
-loto whoami                           # session identity; --peer-name records its messaging name
-loto who [<handle>]                   # handle ↔ Claude Code peer name, for cross-session messaging
+loto whoami                           # this session's owner id; records its liveness witnesses
 loto violations [scan|resolve <id>]   # unauthorized writes to unleased paths; sticky until reverted or resolved
 loto gate stats [--since <dur>]       # admission verdicts per rejection class
 loto version                          # version
@@ -122,13 +121,11 @@ $XDG_STATE_HOME/loto/
     └── lock-op.flock       # short-lived DB op serializer
 
 ~/.loto/
-├── agents/<uuid>.json      # host-global agent identity
-├── session/<sid>.json      # session id -> agent uuid cache
-└── peers/<uuid>.json       # live sibling sessions
+└── session/<sid>.json      # per-session liveness witnesses (pid, start-time, socket)
 ```
 
-`LOTO_BASE` overrides **both** roots — lock store at `$LOTO_BASE/`, identity
-at `$LOTO_BASE/{agents,session,peers}/`.
+`LOTO_BASE` overrides **both** roots — lock store at `$LOTO_BASE/`, session
+records at `$LOTO_BASE/session/`.
 
 The project slug is derived from `git remote get-url origin` (normalized).
 
@@ -143,8 +140,18 @@ The project slug is derived from `git remote get-url origin` (normalized).
 
 ## session identity
 
-Each Claude session gets a persistent handle stored at
-`~/.loto/agents/<uuid>.json`. Set `LOTO_AGENT_ID` to re-attach.
+The owner of every lock is the Claude Code session id: `CLAUDE_CODE_SESSION_ID`,
+which Claude Code exports to every shell-out from one session. Nothing is
+minted and nothing is stored to get there — the same id is what `ListAgents`
+and `SendMessage` address, so a blocker report names a peer you can message
+directly. `LOTO_AGENT_ID=<uuid>` pins an explicit owner instead; a caller with
+neither (a bare shell, codex, `claude -p`) can read lock state but is refused
+on every verb that would write an owner.
+
+`loto whoami`, run by the SessionStart hook, records the session process's
+pid, start-time and messaging socket at `~/.loto/session/<sid>.json`. That is
+the evidence `loto lock`/`check`/`doctor` use to tell a holder whose session
+is still up from one whose session died, before the TTL backstop.
 
 ## what "lock-out / tag-out" means
 
@@ -182,7 +189,7 @@ an accident of naming.
 2. **Single host.** Canonical paths on this machine. No NFS, no remote.
 3. **No daemon.** State lives on disk; every operation is a fresh process.
 4. **Claude-optimized KV output.** Deterministic order, fixed glyphs.
-5. **Identity is per-session, not per-process.** Many shells, one handle.
+5. **Identity is per-session, not per-process.** Many shells, one owner id.
 6. **Reads are free.** loto coordinates writes only.
 7. **Cleanup is layered.** SessionEnd hook (eager) → lazy GC on next
    acquire (passive) → `loto doctor --repair` (manual).

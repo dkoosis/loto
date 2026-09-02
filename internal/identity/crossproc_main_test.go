@@ -15,9 +15,9 @@
 // This file carries only the spine — TestMain, the role table, spawnChild,
 // the pipe barrier, the JSON verdict, process-group cleanup, and the child
 // watchdog — plus one smoke test proving the mechanism, mirroring store's
-// PR-1 split exactly: Family role functions live in the family's own file
-// (crossproc_identity_test.go for C1 here) and only add rows to
-// crossProcRoles below, never a second TestMain.
+// PR-1 split exactly: a future family's role functions live in that family's
+// own file and only add rows to crossProcRoles below, never a second
+// TestMain.
 package identity
 
 import (
@@ -82,17 +82,13 @@ type crossProcVerdict struct {
 const crossProcRoleSmokeName = "smoke"
 
 // crossProcRoles is the role dispatch table. This file's spine owns exactly
-// one row (smoke); Family C1 (crossproc_identity_test.go) adds its own
-// rows here rather than opening a second TestMain — the role functions
-// themselves are defined in that file, same split as store's
-// crossproc_acquire_test.go.
+// one row (smoke). Families C1 (identity stability across ppid/exec/cwd
+// churn) and C2 (peer liveness) were retired with the registry they tested
+// (loto-jnid): the owner is now the session id read from env, so there is no
+// on-disk binding whose stability a child process could contradict. A future
+// family adds its rows here rather than opening a second TestMain.
 var crossProcRoles = map[string]func() crossProcVerdict{
-	crossProcRoleSmokeName:           crossProcRoleSmoke,
-	crossProcRoleEnsureName:          crossProcRoleEnsure,
-	crossProcRoleReexecName:          crossProcRoleReexec,
-	crossProcRoleSpawnGrandchildName: crossProcRoleSpawnGrandchild,
-	crossProcRoleParkName:            crossProcRolePark,
-	crossProcRoleGCHolderName:        crossProcRoleGCHolder,
+	crossProcRoleSmokeName: crossProcRoleSmoke,
 }
 
 // crossProcRoleSmoke reports its own pid/ppid after clearing the barrier —
@@ -138,9 +134,9 @@ func crossProcAwaitBarrier() error {
 // child path, which is why spawnChild needs no -test.* arguments.
 //
 // The normal-run branch also installs loto-bt6c's structural guard: this
-// package IS the identity registry, so every one of its own tests that
-// forgets its own HOME redirect (t.Setenv("HOME", t.TempDir())) would mint
-// straight into dk's real ~/.loto/agents — the once-per-process GC walk and
+// package owns the session-record dir, so every one of its own tests that
+// forgets its own HOME redirect (t.Setenv("HOME", t.TempDir())) would write
+// straight into dk's real ~/.loto/session — a session record written there and
 // every `loto` invocation's tax the bead describes. Repointing HOME here,
 // once, before any test runs, means an omission lands in a throwaway
 // directory instead. Individual tests keep their own per-test t.Setenv for
@@ -239,10 +235,9 @@ func spawnChild(t *testing.T, role, dir string, env map[string]string, extra ...
 
 // spawnChildArgs is spawnChild with control over the child's argv tail. The
 // role path in TestMain exits before m.Run(), so testing never parses these
-// arguments — they exist purely so the child's REAL command line carries the
-// identity flags Family C2's argv cases read back out of the proc table
-// (Peer.AgentID / Peer.ParentSessionID vs `ps -o command=`). Callers that
-// don't need an argv tail use spawnChild.
+// arguments — they exist purely so a child's REAL command line can carry
+// flags a role reads back out of the proc table. Callers that don't need an
+// argv tail use spawnChild.
 func spawnChildArgs(t *testing.T, role, dir string, env map[string]string, args []string, extra ...*os.File) *child {
 	t.Helper()
 
@@ -319,47 +314,6 @@ func (c *child) wait() (crossProcVerdict, error) {
 	return v, waitErr
 }
 
-// crossProcMustWait reaps c and decodes its verdict. A non-zero exit
-// (*exec.ExitError) is expected and NOT fatal — conflict/error/watchdog
-// outcomes exit non-zero by design (the exit-code table above). Anything
-// else (a verdict that never decoded — broken pipe, crashed before
-// printing) is a genuine harness failure.
-func crossProcMustWait(t *testing.T, c *child) crossProcVerdict {
-	t.Helper()
-	v, err := c.wait()
-	var exitErr *exec.ExitError
-	if err != nil && !errors.As(err, &exitErr) {
-		t.Fatalf("crossproc: child wait: %v", err)
-	}
-	return v
-}
-
-// crossProcKillAndReap SIGKILLs c's whole process group, reaps it, and
-// returns its pid — now a pid that provably no longer runs, which is what
-// Family C2's dead-holder case needs as an input rather than as a race. The
-// kill is completed and reaped before the caller asserts anything, so "the
-// holder is dead" is a fact by the time any verdict is taken. Reusing the
-// process-group path spawnChild's cleanup already uses means a deliberate
-// kill and a cleanup kill cannot diverge.
-func crossProcKillAndReap(t *testing.T, c *child) int {
-	t.Helper()
-	pid := c.cmd.Process.Pid
-	pgid, err := syscall.Getpgid(pid)
-	if err != nil {
-		t.Fatalf("crossproc: getpgid(%d): %v", pid, err)
-	}
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-		t.Fatalf("crossproc: kill process group %d: %v", pgid, err)
-	}
-	// A SIGKILLed child always exits non-zero and prints no verdict line, so
-	// the error here is expected and carries no information worth asserting.
-	_ = c.cmd.Wait()
-	if PIDAlive(pid) {
-		t.Fatalf("crossproc: pid %d still alive after kill+reap", pid)
-	}
-	return pid
-}
-
 // crossProcBarrier is the kernel-mediated release-N-processes-at-once
 // primitive cross-process contract tests use instead of a sleep (plan
 // §2.2). readyR/readyW: each child writes one byte when it reaches the
@@ -420,8 +374,8 @@ func (b *crossProcBarrier) release() {
 
 // TestCrossProc_Smoke proves the harness mechanism itself — role dispatch,
 // the pipe barrier, fd inheritance across exec, and process-group cleanup —
-// before any identity-contract logic runs. C1 builds on this spine in
-// crossproc_identity_test.go; nothing here asserts anything about identity.
+// before any contract logic runs; nothing here asserts anything about
+// identity.
 func TestCrossProc_Smoke(t *testing.T) {
 	if testing.Short() {
 		t.Skip("crossproc: cross-process harness skipped under -short")

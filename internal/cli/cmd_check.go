@@ -296,7 +296,7 @@ func printCheckConflicts(stdout io.Writer, rows []checkConflict) bool {
 				r.Blocker.ExpiresAt.UTC().Format(time.RFC3339))
 			// Prefer tag+defer: the breadcrumb surfaces in the holder's tag
 			// footer on their next loto command, so they can reach you directly
-			// (SendMessage; `loto who` maps the handle to a peer name) instead of
+			// (SendMessage — the blocker id is the session id it addresses) instead of
 			// you sitting on the lock. Force-break stays the escape hatch for a
 			// dead holder. Do NOT wait in place.
 			// Shell-quote the path: it lands in copy-pasted shell commands, and a

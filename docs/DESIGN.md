@@ -24,7 +24,7 @@ $XDG_STATE_HOME/loto/                     # canonical, shared across subtrees
     ├── loto.db                           # SQLite: locks
     └── lock-op.flock                     # short-lived DB op serializer
 
-~/.loto/agents/<uuid>.json                # host-global, session-persistent identities
+~/.loto/session/<sid>.json                # per-session liveness witnesses, written by `loto whoami`
 ```
 
 SQLite tables:
@@ -41,9 +41,10 @@ resolves it against the process CWD, which is the loto-qoic / loto-gc82
 bug class. This line is the contract those two beads were each an
 instance of missing.
 
-‡ **Identity is host-global, state is project-scoped.** Agent identity
-lives at `~/.loto/agents/`, not under any project — one Claude session
-touches many projects, and `LOTO_AGENT_ID` is exported once at SessionStart.
+‡ **Identity is host-global, state is project-scoped.** The owner id is the
+Claude Code session id (`CLAUDE_CODE_SESSION_ID`), the same across every
+project one session touches; the session's liveness record lives at
+`~/.loto/session/`, not under any project.
 
 ‡ **Single canonical base, project-scoped.** Without this, Claudes in
 sibling worktrees of the same repo can't see each other. With it, they
@@ -181,37 +182,37 @@ identity always rides on the error.
 
 ## what makes this Claude-friendly
 
-**Identity that survives `exec`.** Each Claude session gets one handle —
-adjective+noun, PascalCase, GitHub-style: `GreenCastle`, `BlueLake`. A
-SessionStart hook writes `~/.loto/agents/<uuid>.json` and exports
-`LOTO_AGENT_ID`. Every shell-out from that session inherits the env, so
-locks taken by `bash -c "loto lock ..."` and locks taken by a subagent
-worktree are owned by the same identity. This is the keystone — without
-it, "release my locks on session end" is meaningless.
+**Identity that survives `exec`.** The owner of every lock is the Claude
+Code session id. Claude Code exports `CLAUDE_CODE_SESSION_ID` to every
+shell-out from one session, so locks taken by `bash -c "loto lock ..."`
+and locks taken by a subagent worktree are owned by the same id with
+nothing minted and nothing cached (loto-jnid — the handle wordlist, agent
+registry and peer records that used to do this were retired once Claude
+Code shipped `ListAgents`/`SendMessage` natively). This is the keystone —
+without it, "release my locks on session end" is meaningless. A `/team`
+sibling stamped with `LOTO_SUBAGENT_ID` derives its own owner from
+(session id, stamp), so siblings serialize instead of collapsing onto one
+owner (loto-fs84). A caller with no session id and no `LOTO_AGENT_ID` is
+refused on every verb that writes an owner.
 
 **Useful holder reports.** When a Claude is blocked, it sees a KV row
-with everything it needs to decide: handle, intent, target, held_since,
-expires_at, branch, host, pid. The blocked Claude can then decide: wait
-or work elsewhere. Both are one command away.
+with everything it needs to decide: owner (a session id `SendMessage` can
+address), intent, target, held_since, expires_at, branch, host, pid. The
+blocked Claude can then decide: wait or work elsewhere. Both are one
+command away.
 
-**One liveness oracle.** "Is the session behind this agent still up?" is
-answered once, in `identity.AgentLive` (loto-ygty): messaging-socket
-existence, then a start-time identity check on the socket's pid — the OS
-start-time recorded at peer-record time must still match the pid's current
-start-time, so a recycled pid reads DEAD (loto-uxhg). Records with no
-recorded start-time (written before the field existed, or on a platform
-with no reader) fall back to matching `--agent-id` / `--parent-session-id`
-against the occupant's argv — which closes PID reuse for subagents only,
-since a top-level session carries neither flag. Verdicts: LIVE (socket +
-start-time or ps check out — overrides the lock-row pid probe, so a
+**One liveness oracle.** "Is the session behind this lock still up?" is
+answered once, in `identity.ProbeSession` (loto-ygty), from the record
+`loto whoami` leaves at `~/.loto/session/<sid>.json`: messaging-socket
+existence, then pid liveness, then a start-time identity check — the OS
+start-time recorded at whoami time must still match the pid's current
+start-time, so a recycled pid reads DEAD (loto-uxhg). Verdicts: LIVE
+(socket + start-time check out — overrides the lock-row pid probe, so a
 worktree agent whose stamped pid probes dead is not misread, loto-r11w),
-DEAD (socket gone, pid gone, start-time mismatch, or argv mismatch —
-fast-reclaim), UNKNOWN (no peer record — TTL is the sole authority; never
-treated as dead). `loto locks`' staleness, `loto who`'s pruning, and `loto
-alive` (the verb kill-class tooling like the bdx reaper calls) all consume
-this one check. A DEAD verdict is necessary but never sufficient for
-killing an agent: kill-class actions also
-require an idle/TaskStop signal from the harness.
+DEAD (socket gone, pid gone, or start-time mismatch — fast-reclaim),
+UNKNOWN (no session record — TTL is the sole authority; never treated as
+dead). The probe is keyed on the lock row's session id, so a dead
+sibling's record condemns only the locks that sibling took (loto-2lj5).
 
 **Soft-TTL on rows.** A `locks` row carries `expires_at`. Past expiry
 it's *soft-stale*: still present, flagged in status output, eligible for
@@ -273,8 +274,8 @@ stay separable. Same posture toward beads, snipe, etc.
 
 ## what 5 concurrent Claudes look like
 
-Imagine: BlueOak, GreenCastle, RedRiver, AmberFox, SilverPine all open in
-the same project. Each has a worktree under `~/Projects/foo-wt-<handle>/`.
+Imagine five Claude sessions open in the same project. Each has a
+worktree under `~/Projects/foo-wt-<n>/`.
 
 ```
 project-state ($XDG_STATE_HOME/loto/projects/foo/loto.db):
@@ -319,7 +320,7 @@ missed; `loto doctor --repair` mops up the rest.
 4. **Claude-optimized KV output.** Deterministic order, fixed glyphs per
    `.claude/rules/design.md`. Exit codes stable (`0` success, `1` advisory
    conflict, `2` usage, `3` IO/system).
-5. **Identity is per-session, not per-process.** Many shells, one handle.
+5. **Identity is per-session, not per-process.** Many shells, one owner id.
 6. **Reads are free.** loto coordinates writes. ✗ never gate reads.
    A lock is a row, not a mode change — the file on disk is untouched.
 7. **Cleanup is layered.** SessionEnd hook (eager) + lazy GC on next

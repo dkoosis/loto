@@ -14,9 +14,7 @@ commands:
   tag      Leave a note on a locked target, or pin one to unlocked territory
   violations  List, scan for, or resolve unauthorized writes to unleased paths
   ack      Dismiss a tag or territory tag by ID
-  whoami   Print agent identity
-  who      Map handles to Claude Code peer names — the address SendMessage needs
-  alive    Liveness verdict per agent; exit 1 if any is dead, 0 if none provably is
+  whoami   Print this session's owner id and record its liveness witnesses
   version  Print loto version
 
 lane choreography (engine verbs; used by the /team fleet harness):

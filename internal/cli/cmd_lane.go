@@ -433,9 +433,14 @@ func resolveLaneWriteSet(args []string, repoTop string) ([]domain.Target, []rend
 // laneIdentity maps the loto agent to a git author/committer principal.
 // commit-tree (used by lane.Commit) ignores git config, so both name and email
 // must be explicit; the UUID-bearing email keeps the commit traceable to the
-// exact agent record.
+// exact session, and the name carries its short form for `git log` at a
+// glance (there is no handle any more — loto-jnid).
 func laneIdentity(a *identity.Agent) lane.Identity {
-	return lane.Identity{Name: a.Handle, Email: a.UUID + "@loto.local"}
+	short := a.UUID
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	return lane.Identity{Name: "loto-" + short, Email: a.UUID + "@loto.local"}
 }
 
 // buildLaneMessage appends the repo's Closes: trailer to the body, separated by

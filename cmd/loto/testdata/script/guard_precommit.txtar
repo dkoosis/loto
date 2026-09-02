@@ -21,7 +21,7 @@ env LOTO_AGENT_ID=$BOB
 exec git add shared.go
 ! exec git commit -m 'bob: sweeps alice file'
 stderr 'refused'
-stderr 'AliceTester'
+stderr $ALICE
 stderr 'alice mid-edit'
 stderr 'LOTO_GUARD_OVERRIDE=1'
 

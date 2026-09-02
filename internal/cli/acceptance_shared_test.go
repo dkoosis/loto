@@ -3,10 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"os"
 	"testing"
-	"time"
 
 	"loto/internal/identity"
 )
@@ -17,7 +15,7 @@ import (
 func mintAgent(t *testing.T, name string) *identity.Agent {
 	t.Helper()
 	os.Unsetenv("LOTO_AGENT_ID")
-	t.Setenv("CLAUDE_CODE_SESSION_ID", fmt.Sprintf("%s-%d-%d", name, time.Now().UnixNano(), pinCounter.Add(1)))
+	t.Setenv("CLAUDE_CODE_SESSION_ID", identity.NewUUID())
 	a, err := identity.Ensure(context.Background())
 	if err != nil {
 		t.Fatalf("mint %s: %v", name, err)

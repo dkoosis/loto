@@ -50,7 +50,8 @@ func TestUnlockAll_NoPinnedIdentity_RefusesFalseSuccess(t *testing.T) {
 // into a throwaway ephemeral agent that owns zero locks. release --all then
 // scoped to that throwaway → released 0 → exit 0 false-success while the
 // caller's real locks stayed put, files write-stripped. Post-alignment blank
-// reads as unpinned → --all refuses (exit 2).
+// reads as unpinned → the write verb refuses before opening the store (exit 3,
+// loto-jnid: every authority-bearing verb, not just --all).
 func TestUnlockAll_BlankAgentID_RefusesFalseSuccess(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
@@ -64,8 +65,8 @@ func TestUnlockAll_BlankAgentID_RefusesFalseSuccess(t *testing.T) {
 
 	var out, errBuf bytes.Buffer
 	code := Run([]string{tcCmdUnlock, tcFlagAll, "-t", tcIntentDone}, &out, &errBuf)
-	if code != 2 {
-		t.Fatalf("expected exit 2 (pin-required refusal), got %d; stdout=%q stderr=%q",
+	if code != 3 {
+		t.Fatalf("expected exit 3 (unpinned refusal), got %d; stdout=%q stderr=%q",
 			code, out.String(), errBuf.String())
 	}
 	if !strings.Contains(errBuf.String(), "LOTO_AGENT_ID") {
@@ -78,7 +79,7 @@ func TestUnlockAll_BlankAgentID_RefusesFalseSuccess(t *testing.T) {
 // (resolveSubagent falls open), so with no other identity env Ensure mints a
 // throwaway. The pre-alignment `LOTO_SUBAGENT_ID != ""` pin let that throwaway
 // scope release --all → the same silent false-success as the blank case. The
-// shape-validated SubagentIDPins predicate refuses it (exit 2).
+// shape-validated SubagentIDPins predicate refuses it (exit 3).
 func TestUnlockAll_MalformedSubagentID_RefusesFalseSuccess(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
@@ -92,8 +93,8 @@ func TestUnlockAll_MalformedSubagentID_RefusesFalseSuccess(t *testing.T) {
 
 	var out, errBuf bytes.Buffer
 	code := Run([]string{tcCmdUnlock, tcFlagAll, "-t", tcIntentDone}, &out, &errBuf)
-	if code != 2 {
-		t.Fatalf("expected exit 2 (pin-required refusal), got %d; stdout=%q stderr=%q",
+	if code != 3 {
+		t.Fatalf("expected exit 3 (unpinned refusal), got %d; stdout=%q stderr=%q",
 			code, out.String(), errBuf.String())
 	}
 	if !strings.Contains(errBuf.String(), "LOTO_AGENT_ID") {
@@ -107,7 +108,7 @@ func TestUnlockAll_MalformedSubagentID_RefusesFalseSuccess(t *testing.T) {
 // id mints a throwaway even when a session id is present — the session leg
 // never rescues it. A flat `agentID != "" || session != ""` predicate would
 // wrongly pin this combo (the one fleet dispatchers export) and re-open the
-// false-success. The precedence-mirroring predicate refuses (exit 2).
+// false-success. The precedence-mirroring predicate refuses (exit 3).
 func TestUnlockAll_BlankAgentIDWithSessionSet_RefusesFalseSuccess(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
@@ -121,8 +122,8 @@ func TestUnlockAll_BlankAgentIDWithSessionSet_RefusesFalseSuccess(t *testing.T) 
 
 	var out, errBuf bytes.Buffer
 	code := Run([]string{tcCmdUnlock, tcFlagAll, "-t", tcIntentDone}, &out, &errBuf)
-	if code != 2 {
-		t.Fatalf("expected exit 2 (pin-required refusal), got %d; stdout=%q stderr=%q",
+	if code != 3 {
+		t.Fatalf("expected exit 3 (unpinned refusal), got %d; stdout=%q stderr=%q",
 			code, out.String(), errBuf.String())
 	}
 	if !strings.Contains(errBuf.String(), "LOTO_AGENT_ID") {
@@ -267,8 +268,8 @@ func TestUnlock_LiveForeignLock_StaysNotOwner(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("unlock of live foreign lock exit %d, want 1; out=%q err=%q", code, out.String(), errBuf.String())
 	}
-	// not-owner row names the holder via holderTag now (loto-a8t): Handle(prefix).
-	wantOwner := "owner=" + alice.Handle + "(" + alice.UUID[:8] + ")"
+	// not-owner row names the holder via holderTag (loto-a8t): the owner id.
+	wantOwner := "owner=" + alice.UUID
 	if !strings.Contains(out.String(), wantOwner) {
 		t.Errorf("expected not-owner row naming alice as %q: %q", wantOwner, out.String())
 	}

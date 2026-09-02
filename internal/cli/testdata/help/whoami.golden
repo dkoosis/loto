@@ -2,6 +2,4 @@ Usage of whoami:
   -ensure
     	ensure an identity exists (no-op: always ensured)
   -json
-    	emit identity as a single JSON object (uuid/handle/host/peer)
-  -peer-name string
-    	record this session's Claude Code peer name (its SendMessage address)
+    	emit identity as a single JSON object (uuid/host/session)

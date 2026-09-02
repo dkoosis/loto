@@ -12,7 +12,7 @@ stdout '✓ locked count=1'
 env LOTO_AGENT_ID=$BOB
 ! loto guard checkout -b refused-branch
 stderr '✗ blocked: git checkout refused'
-stderr 'AliceTester'
+stderr $ALICE
 stderr 'alice mid-edit'
 stderr 'LOTO_GUARD_OVERRIDE=1'
 exec git symbolic-ref --short HEAD
@@ -22,7 +22,7 @@ exec git symbolic-ref --short HEAD
 env LOTO_GUARD_OVERRIDE=1
 loto guard checkout -b override-branch
 stderr '⚠ override: LOTO_GUARD_OVERRIDE=1'
-stderr 'AliceTester'
+stderr $ALICE
 exec git symbolic-ref --short HEAD
 stdout '^override-branch$'
 env LOTO_GUARD_OVERRIDE=

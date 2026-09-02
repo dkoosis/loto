@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,11 +13,20 @@ import (
 
 func init() { register("whoami", cmdWhoami) } //nolint:gochecknoinits // command registry pattern
 
+// cmdWhoami prints the owner id this process resolves to and, inside a Claude
+// Code session, records the session's liveness witnesses (pid, start-time,
+// messaging socket) at ~/.loto/session/<sid>.json. The SessionStart hook is
+// its main caller: `loto whoami --ensure --json` feeds LOTO_AGENT_ID, and the
+// record it leaves is what identity.ProbeSession answers from for every later
+// stale-lock question about this session (loto-jnid).
+//
+// Outside a session — nothing pins an identity — it still answers, on a
+// throwaway id, with a ⚠ row saying so: whoami is the one verb that must work
+// from anywhere, including a bare shell asking "what would loto call me?".
 func cmdWhoami(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("whoami", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	asJSON := fs.Bool("json", false, "emit identity as a single JSON object (uuid/handle/host/peer)")
-	peerName := fs.String("peer-name", "", "record this session's Claude Code peer name (its SendMessage address)")
+	asJSON := fs.Bool("json", false, "emit identity as a single JSON object (uuid/host/session)")
 	// --ensure is the historical hook flag; identity.Ensure always runs, so it
 	// is accepted as a no-op for back-compat with the SessionStart hook.
 	_ = fs.Bool("ensure", false, "ensure an identity exists (no-op: always ensured)")
@@ -25,53 +35,55 @@ func cmdWhoami(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 
 	a, err := identity.Ensure(ctx)
+	pinned := true
+	if errors.Is(err, identity.ErrUnpinned) {
+		a, err, pinned = identity.Ephemeral(), nil, false
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ identity: %v\n", err)
 		return 3
 	}
 
-	// Presence is recorded here, not in openRuntime: whoami is the command the
-	// SessionStart hook already runs, so the peer table is written once per
-	// session instead of shelling out to `ps` on every lock/check/status call.
-	// A write failure is a warning, never fatal — presence is a convenience
-	// table; identity is the authority and it already resolved.
-	peer, perr := identity.RecordPeer(ctx, a, *peerName)
-	if perr != nil {
-		fmt.Fprintf(stderr, "∇ peer not recorded: %v\n", perr)
+	// Liveness witnesses are recorded here, not in openRuntime: whoami is the
+	// command the SessionStart hook already runs, so the record is written once
+	// per session instead of on every lock/check/status call. A write failure
+	// is a warning, never fatal — the record is evidence for OTHER sessions'
+	// reclaim decisions; identity is the authority and it already resolved.
+	rec, rerr := identity.RecordSession(a)
+	if rerr != nil {
+		fmt.Fprintf(stderr, "⚠ session not recorded: %v\n", rerr)
 	}
-	peerLabel := "-"
-	if peer != nil && peer.Named() {
-		peerLabel = peer.Name
+	session := "-"
+	if rec != nil {
+		session = rec.SessionID
+	}
+	if !pinned {
+		fmt.Fprintln(stderr, "⚠ identity=unpinned: this id is a throwaway; export CLAUDE_CODE_SESSION_ID or LOTO_AGENT_ID to own locks")
 	}
 
 	if *asJSON {
-		// Emit the identity fields the SessionStart hook consumes, plus the
-		// recorded peer name (omitted when this session has none). The key for
-		// the agent id is "uuid" (matches identity.Agent json tags), so the
-		// hook must read d["uuid"], not d["id"] (loto-u7b7).
+		// Emit the identity fields the SessionStart hook consumes. The key for
+		// the owner id is "uuid" (matches identity.Agent json tags), so the hook
+		// must read d["uuid"], not d["id"] (loto-u7b7).
 		enc := json.NewEncoder(stdout)
 		if encErr := enc.Encode(struct {
-			UUID   string `json:"uuid"`
-			Handle string `json:"handle"`
-			Host   string `json:"host"`
-			Peer   string `json:"peer,omitempty"`
-		}{a.UUID, a.Handle, a.Host, peerNameOrEmpty(peer)}); encErr != nil {
+			UUID    string `json:"uuid"`
+			Host    string `json:"host"`
+			Session string `json:"session,omitempty"`
+		}{a.UUID, a.Host, sessionOrEmpty(rec)}); encErr != nil {
 			fmt.Fprintf(stderr, "✗ encode: %v\n", encErr)
 			return 3
 		}
 		return 0
 	}
 
-	fmt.Fprintf(stdout, "handle: %s\nuuid:   %s\nhost:   %s\npeer:   %s\n", a.Handle, a.UUID, a.Host, peerLabel)
-	if peer != nil && !peer.Named() {
-		fmt.Fprintln(stdout, "∇ peer name not derivable here: run /rename "+a.Handle+" in this session, or loto whoami --peer-name <name>")
-	}
+	fmt.Fprintf(stdout, "uuid:    %s\nhost:    %s\nsession: %s\n", a.UUID, a.Host, session)
 	return 0
 }
 
-func peerNameOrEmpty(p *identity.Peer) string {
-	if p == nil {
+func sessionOrEmpty(r *identity.SessionRecord) string {
+	if r == nil {
 		return ""
 	}
-	return p.Name
+	return r.SessionID
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/identity"
 	"loto/internal/render"
 	"loto/internal/store"
 )
@@ -58,7 +59,7 @@ examples:
 // because the supervisor had snapshotted it by hand. loto's whole value
 // proposition is that this cannot happen.
 //
-// identity.resolveSubagent already mints a stable per-sibling identity from the
+// identity.resolveSubagent already derives a stable per-sibling identity from the
 // stamped LOTO_SUBAGENT_ID, so siblings arrive here as distinct owners. What was
 // missing is a row for them to collide on: agents write through Edit/Write, not
 // through `loto lock`, so absent a beacon there is nothing in the store to see.
@@ -105,6 +106,14 @@ func cmdBeacon(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 2
 	}
 
+	// A beacon is a lease with an owner; an unpinned one would be a row nobody
+	// can release. Refuse on the same env read openRuntimeGC uses (loto-jnid).
+	// openRuntime rather than openRuntimeGC because this is the PreToolUse hot
+	// path and must not pay the session GC sweep.
+	if !identity.PinnedByEnv() {
+		fmt.Fprintf(stderr, "✗ %v\n", errIdentityUnpinned)
+		return 3
+	}
 	rt, err := openRuntime(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
