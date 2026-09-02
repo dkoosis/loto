@@ -105,6 +105,26 @@ want_pass "a comment line holding a pipe is not a recipe" \
 want_pass "no recipes at all is clean, not a crash" \
 	"$(printf 'VAR := 1\n')"
 
+# --- the include graph ---------------------------------------------------
+# Codex on #295: the root Makefile includes .sandbox/lib/*.mk, and a pipe in
+# one of those is gated by make 4.x's pipefail exactly like a root recipe.
+mkdir -p "$tmp/lib"
+printf 'cross:\n\t@du -h bin/* | sort -rh\n' >"$tmp/lib/cross.mk"
+want_fail "a pipe in an included makefile is a finding" \
+	"$(printf 'include lib/cross.mk\n\nx:\n\t@echo hi')"
+
+printf 'cross:\n\t@set -o pipefail; du -h bin/* | sort -rh\n' >"$tmp/lib/cross.mk"
+want_pass "an included makefile that says pipefail is clean" \
+	"$(printf 'include lib/cross.mk\n\nx:\n\t@echo hi')"
+
+want_pass "a missing -include is make's no-op, not our crash" \
+	"$(printf -- '-include lib/absent.mk\n\nx:\n\t@echo hi')"
+
+printf 'include cross.mk\n' >"$tmp/lib/loop.mk"
+printf 'include loop.mk\ny:\n\t@echo hi\n' >"$tmp/lib/cross.mk"
+want_pass "an include cycle terminates" \
+	"$(printf 'include lib/loop.mk\n\nx:\n\t@echo hi')"
+
 # --- the real thing ------------------------------------------------------
 if out=$(bash "$checker" "$repo_root/Makefile" 2>&1); then
 	ok "the repo's own Makefile passes"

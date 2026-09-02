@@ -22,6 +22,9 @@
 # it ends in `|| true` (deliberately non-gating), or when it carries the
 # marker `# make-strict: ok` with a reason.
 #
+# The scan follows `include` lines, so a recipe in .sandbox/lib/*.mk is held
+# to the same rule as one in the root Makefile.
+#
 # Run: make makefilecheck   (or: bash scripts/makefile_check.sh [Makefile])
 
 set -uo pipefail
@@ -37,21 +40,44 @@ if [ ! -f "$makefile" ]; then
 	exit 2
 fi
 
-# Report paths relative to cwd when we can (design.md: prefer relative).
-rel=$makefile
-if [ "${makefile#"$PWD"/}" != "$makefile" ]; then
-	rel=${makefile#"$PWD"/}
-fi
-
 findings=0
 declare -a rows=()
+declare -a files=()
 
-# Join continuation lines: make hands one shell the whole backslash-continued
-# recipe line, so that joined form is the unit that either has pipefail or
-# does not. `start` remembers where the logical line began, for the report.
-joined=""
-start=0
-lineno=0
+# Walk make's include graph: `include a b`, `-include a b`, `sinclude a b`.
+# make resolves a relative include against its cwd, which is the including
+# file's directory whenever make runs at the repo root — how this repo runs
+# it. A missing `-include` is make's own no-op and a missing `include` is
+# make's own fatal error, so neither is ours to report; both are skipped.
+collect() {
+	local f=$1 dir line word p seen
+	for seen in "${files[@]-}"; do
+		[ "$seen" = "$f" ] && return 0
+	done
+	files+=("$f")
+	dir=$(dirname "$f")
+	while IFS= read -r line || [ -n "$line" ]; do
+		case "$line" in
+		include\ * | -include\ * | sinclude\ *) ;;
+		*) continue ;;
+		esac
+		line=${line#-}
+		line=${line#s}
+		line=${line#include}
+		for word in $line; do
+			case "$word" in
+			\#*) break ;;
+			*'$'*) continue ;;
+			esac
+			p=$word
+			case "$p" in
+			/*) ;;
+			*) p=$dir/$p ;;
+			esac
+			[ -f "$p" ] && collect "$p"
+		done
+	done <"$f"
+}
 
 flush() {
 	local text=$1 at=$2
@@ -90,59 +116,80 @@ flush() {
 	findings=$((findings + 1))
 }
 
-in_recipe=0
+# scan <makefile> runs the recipe walk over one file. `rel` is what the rows
+# print (design.md: prefer paths relative to cwd).
+scan() {
+	local makefile=$1 line
+	rel=$makefile
+	if [ "${makefile#"$PWD"/}" != "$makefile" ]; then
+		rel=${makefile#"$PWD"/}
+	fi
 
-while IFS= read -r line || [ -n "$line" ]; do
-	lineno=$((lineno + 1))
+	# Join continuation lines: make hands one shell the whole backslash-
+	# continued recipe line, so that joined form is the unit that either has
+	# pipefail or does not. `start` remembers where the logical line began.
+	joined=""
+	start=0
+	lineno=0
+	in_recipe=0
 
-	# Track whether a tab-indented line is a RECIPE line or the continuation
-	# of a variable assignment. Both are tab-indented; only the first is run
-	# by a shell. A rule line opens a recipe block; any other non-tab,
-	# non-blank line closes it. (REPORT_CMD's continuations are the case that
-	# makes this necessary — they pipe on purpose, under `set +e`.)
-	if [ "${line#	}" = "$line" ]; then
-		if [ -n "$joined" ]; then
-			:
-		elif [ -z "${line//[[:space:]]/}" ]; then
-			in_recipe=0
-			continue
-		else
-			case "$line" in
-			\#*) ;;
-			*:=* | *::=* | *+=* | *\?=*) in_recipe=0 ;;
-			*=*) in_recipe=0 ;;
-			*:*) in_recipe=1 ;;
-			*) in_recipe=0 ;;
-			esac
+	while IFS= read -r line || [ -n "$line" ]; do
+		lineno=$((lineno + 1))
+
+		# Track whether a tab-indented line is a RECIPE line or the continuation
+		# of a variable assignment. Both are tab-indented; only the first is run
+		# by a shell. A rule line opens a recipe block; any other non-tab,
+		# non-blank line closes it. (REPORT_CMD's continuations are the case that
+		# makes this necessary — they pipe on purpose, under `set +e`.)
+		if [ "${line#	}" = "$line" ]; then
+			if [ -n "$joined" ]; then
+				:
+			elif [ -z "${line//[[:space:]]/}" ]; then
+				in_recipe=0
+				continue
+			else
+				case "$line" in
+				\#*) ;;
+				*:=* | *::=* | *+=* | *\?=*) in_recipe=0 ;;
+				*=*) in_recipe=0 ;;
+				*:*) in_recipe=1 ;;
+				*) in_recipe=0 ;;
+				esac
+				continue
+			fi
+		fi
+
+		if [ -z "$joined" ] && [ "$in_recipe" -eq 0 ]; then
 			continue
 		fi
-	fi
 
-	if [ -z "$joined" ] && [ "$in_recipe" -eq 0 ]; then
-		continue
-	fi
+		if [ -z "$joined" ]; then
+			start=$lineno
+			joined=${line#	}
+		else
+			joined="$joined ${line#	}"
+		fi
 
-	if [ -z "$joined" ]; then
-		start=$lineno
-		joined=${line#	}
-	else
-		joined="$joined ${line#	}"
-	fi
+		# Still continued? keep accumulating.
+		if [ "${joined%\\}" != "$joined" ]; then
+			joined=${joined%\\}
+			continue
+		fi
 
-	# Still continued? keep accumulating.
-	if [ "${joined%\\}" != "$joined" ]; then
-		joined=${joined%\\}
-		continue
-	fi
+		flush "$joined" "$start"
+		joined=""
+	done <"$makefile"
 
 	flush "$joined" "$start"
-	joined=""
-done <"$makefile"
+}
 
-flush "$joined" "$start"
+collect "$makefile"
+for f in "${files[@]}"; do
+	scan "$f"
+done
 
 if [ "$findings" -eq 0 ]; then
-	echo "✓ makefilecheck: 0 recipe lines pipe without pipefail"
+	echo "✓ makefilecheck: 0 recipe lines pipe without pipefail files=${#files[@]}"
 	exit 0
 fi
 
