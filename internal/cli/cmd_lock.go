@@ -182,6 +182,8 @@ func classifyCanonicalizeErr(err error) string {
 		return "repo-escape"
 	case errors.Is(err, domain.ErrTargetIsGlob):
 		return "glob-not-supported"
+	case errors.Is(err, domain.ErrTargetUnspellable):
+		return "not-a-path"
 	case errors.Is(err, domain.ErrTargetIsRepoRoot):
 		return "repo-root"
 	default:

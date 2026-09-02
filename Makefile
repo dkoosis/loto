@@ -8,7 +8,18 @@
 
 .DEFAULT_GOAL := check
 
-# Strict shell for recipes: fail on first error, undefined var, or pipe failure.
+# Strict shell for recipes — but ONLY on GNU Make 3.82+, which is where
+# `.SHELLFLAGS` was introduced. macOS ships GNU Make 3.81 (Apple's last GPLv2
+# build, frozen in 2006) and ignores this variable outright, while CI runs
+# ubuntu-latest with make 4.3. So `-e` and `pipefail` are live in CI and dead
+# on dk's Mac (loto-uekt).
+#
+# ‡ Do not write a recipe that DEPENDS on the flags below. A recipe that pipes
+#   says `set -o pipefail;` itself, so it gates identically under both makes;
+#   `scripts/makefile_check.sh` (make makefilecheck) fails the build on any
+#   recipe line that regresses. The flags stay because they cost nothing and
+#   help on a modern make — they are a bonus, never the guarantee.
+#
 # REPORT_CMD opts out via `set +e;` so it can keep emitting output past
 # tool failures.
 SHELL := /bin/bash
@@ -20,7 +31,7 @@ include .sandbox/lib/Makefile.cross.mk
 
 .PHONY: help scan check audit deploy report report-human \
         vet lint arch test race demo demo-v vuln dupl nilcheck stress scriptcheck \
-        docscheck selfcheck build install tidy clean hooks
+        docscheck makefilecheck selfcheck build install tidy clean hooks
 
 BIN_DIR := bin
 BIN     := $(BIN_DIR)/loto
@@ -60,7 +71,7 @@ help: ## Show this help
 		/^## [^-]/ { printf "\n%s\n", substr($$0, 4) } \
 		/^[a-zA-Z0-9_-]+:.*?## / { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-check: vet lint arch test build docscheck scriptcheck selfcheck ## Full repo: vet + lint + arch + test + build + docs + scripts + conform
+check: vet lint arch test build docscheck scriptcheck makefilecheck selfcheck ## Full repo: vet + lint + arch + test + build + docs + scripts + conform
 	@echo "=== check pass ==="
 
 # Dogfood the fleet gate (sd-th5.15): conform is pinned as a go.mod tool
@@ -95,11 +106,17 @@ scriptcheck: ## Test the build-tooling shell scripts (scripts/*_test.sh)
 	fi; \
 	exit $$rc
 
+# Guards loto-uekt: a piped recipe line is gated by `pipefail` only on GNU
+# Make 3.82+, so one that does not say `set -o pipefail` itself passes on a Mac
+# and fails in CI. The script names every offender and the one-line fix.
+makefilecheck: ## Every piped recipe line gates the same under make 3.81 and 4.x
+	@bash scripts/makefile_check.sh
+
 audit: check race vuln dupl nilcheck demo ## Exhaustive: +race +vuln +dupl +nilcheck +demo
 	@echo "=== audit pass ==="
 
 demo: ## Run CLI primitive demos (fo-rendered: triage line, not the full transcript)
-	@go test -json -run Demo -count=1 ./internal/cli | fo --format llm
+	@set -o pipefail; go test -json -run Demo -count=1 ./internal/cli | fo --format llm
 
 demo-v: ## Run CLI primitive demos with the full narrated -v transcript
 	@go test -v -run Demo -count=1 ./internal/cli
@@ -128,7 +145,7 @@ arch: ## Enforce layering (.go-arch-lint.yml)
 		echo "go-arch-lint not installed; 'go install github.com/fe3dback/go-arch-lint@v1.15.0'"; \
 		exit 1; \
 	fi
-	@go-arch-lint check --json 2>/dev/null | tee /tmp/loto-archcheck.json | fo wrap archlint | fo --format llm
+	@set -o pipefail; go-arch-lint check --json 2>/dev/null | tee /tmp/loto-archcheck.json | fo wrap archlint | fo --format llm
 	@jq -e '.Payload.ArchHasWarnings == false' /tmp/loto-archcheck.json >/dev/null || { \
 		echo "✗ go-arch-lint found warnings the fo summary above did not render (loto-lu52 — fo's archlint wrapper drops ArchWarningsNotMatched into an empty SARIF results array):"; \
 		jq '.Payload | {ArchWarningsNotMatched, ArchWarningsDeps, ArchWarningsDeepScan}' /tmp/loto-archcheck.json; \
@@ -166,7 +183,7 @@ vuln: ## Scan for known vulnerabilities (fo-rendered)
 # line then ran the missing tool anyway and died on "command not found". The
 # same shape is safe under `exit 1` (arch, lint, vuln): make stops there.
 dupl: ## Detect duplicate code (jscpd; fo-rendered; skips if not installed — dev-only)
-	@if ! command -v jscpd >/dev/null 2>&1; then \
+	@set -o pipefail; if ! command -v jscpd >/dev/null 2>&1; then \
 		echo "+ dupl: jscpd not installed — skipped (npm i -g jscpd)"; \
 	else \
 		rm -rf .jscpd-tmp; \
@@ -225,8 +242,9 @@ hooks: ## Route git hooks to the tracked .githooks/ dir (bd integration, ccp-th5
 ## ---------------------------------------------------------------------
 
 scan: ## Vet + lint + test changed packages only (fast inner loop)
-	@PKGS=$$( { git diff --name-only HEAD -- '*.go'; git ls-files --others --exclude-standard -- '*.go'; } \
-		| xargs dirname 2>/dev/null | sort -u | sed 's|^|./|' | grep -v '^\./$$'); \
+	@set -o pipefail; \
+	PKGS=$$( { git diff --name-only HEAD -- '*.go' && git ls-files --others --exclude-standard -- '*.go'; } \
+		| awk '{ if (sub(/\/[^\/]*$$/, "") == 0 || $$0 == ".") next; print "./" $$0 }' | sort -u) || exit 1; \
 	if [ -z "$$PKGS" ]; then \
 		echo "no changed Go packages"; \
 	else \

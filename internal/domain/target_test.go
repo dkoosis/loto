@@ -110,3 +110,55 @@ func TestCanonicalizeRejectsTrailingSlash(t *testing.T) {
 		}
 	}
 }
+
+// TestCanonicalizeRejectsShellTokens pins loto-bl66: a token the shell would
+// have rewritten is not a path, and every verb must refuse it at the same
+// place. The live defect was a lock on the literal string "$FAKE_HOME",
+// minted by the PreToolUse gate and unreconcilable by any scan — the path does
+// not exist, so nothing releases it but TTL.
+func TestCanonicalizeRejectsShellTokens(t *testing.T) {
+	for _, in := range []string{
+		"$FAKE_HOME",
+		"$PROBE_VAR",
+		"a/$VAR/b.go",
+		"`whoami`",
+		`"quoted.go"`,
+		"'quoted.go'",
+		" leading.go",
+		"trailing.go ",
+		"two\nlines.go",
+		"tab\there.go",
+	} {
+		if _, err := Canonicalize(in); !errors.Is(err, ErrTargetUnspellable) {
+			t.Errorf("Canonicalize(%q) err = %v; want ErrTargetUnspellable", in, err)
+		}
+	}
+}
+
+// TestCanonicalizeKeepsAwkwardButLegalNames is the other half of the same
+// contract, and the reason the rule stops short of the PreToolUse hook's own
+// character class: an interior space is awkward but legal on every filesystem
+// loto runs on, and refusing it would regress `loto lock` on a file that
+// really exists.
+func TestCanonicalizeKeepsAwkwardButLegalNames(t *testing.T) {
+	for _, in := range []string{
+		"my file.go",
+		"dir with space/x.go",
+		"weird-but-fine!.go",
+		"at@sign.go",
+		"plus+name.go",
+	} {
+		if _, err := Canonicalize(in); err != nil {
+			t.Errorf("Canonicalize(%q) err = %v; want it accepted", in, err)
+		}
+	}
+}
+
+// TestCanonicalizePrefixInheritsShellTokenRule proves claim's surface cannot
+// drift from the file verbs': CanonicalizePrefix delegates, so one policy
+// source governs both (loto-bl66 AC #3).
+func TestCanonicalizePrefixInheritsShellTokenRule(t *testing.T) {
+	if _, err := CanonicalizePrefix("$FAKE_HOME/"); !errors.Is(err, ErrTargetUnspellable) {
+		t.Errorf("CanonicalizePrefix err = %v; want ErrTargetUnspellable", err)
+	}
+}
