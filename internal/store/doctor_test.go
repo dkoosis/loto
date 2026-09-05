@@ -815,7 +815,10 @@ func TestDoctorAudit_ListsExpiredClaims(t *testing.T) {
 // candidate_claims row with pid=0 and a session absent from the roster —
 // modeled here by liveProbe, which (like production's pidVerdict fallback)
 // answers UNKNOWN for any PID<=0 record — is named by --dry-run's audit and
-// swept by --repair, and a `loto lock` on its path succeeds afterward.
+// swept by --repair, and a `loto lock` on its path succeeds afterward. Aged
+// 10h, well past domain.CandidateClaimReclaimGrace (30m, PR #298 review) —
+// TestDoctorAudit_FreshCandidateClaimSurvivesGrace pins the fresh case this
+// fixture deliberately does not exercise.
 func TestDoctorRepair_ReclaimsAbandonedCandidateClaim(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
@@ -861,6 +864,47 @@ func TestDoctorRepair_ReclaimsAbandonedCandidateClaim(t *testing.T) {
 
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
 		t.Fatalf("lock must succeed once the candidate claim is reclaimed: %v", err)
+	}
+}
+
+// TestDoctorAudit_FreshCandidateClaimSurvivesGrace is the PR #298 review fix's
+// integration pin: a zero-evidence candidate claim (pid=0, probe UNKNOWN) that
+// is freshly minted — the documented shape for a degraded-mode submitter with
+// no durable LOTO_PID — must NOT be named by --dry-run or swept by --repair.
+// Without domain.CandidateClaimReclaimGrace this fixture reclaims exactly like
+// TestDoctorRepair_ReclaimsAbandonedCandidateClaim's 10h-old one; the only
+// difference between the two is age.
+func TestDoctorAudit_FreshCandidateClaimSurvivesGrace(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	l := mkFileLock(t, tcAGo, tcBob, time.Hour)
+
+	cc := domain.CandidateClaim{
+		PathCanonical: l.Target.Canonical, CandidateID: tcCand1,
+		OwnerUUID: tcAlice, SessionUUID: "session-absent-from-roster",
+		CreatedAt: time.Now(), Host: tcHost, PID: 0,
+	}
+	if err := s.insertCandidateClaimsUnguarded(ctx, []domain.CandidateClaim{cc}); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := s.DoctorAudit(ctx, tcHost, true, liveProbe, SidecarCheck{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.StaleCandidateClaims) != 0 {
+		t.Fatalf("a fresh zero-evidence candidate claim must not be reported stale (grace floor), got %+v", report.StaleCandidateClaims)
+	}
+
+	if err := s.DoctorRepair(ctx, "doctor-agent", liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := s.ListCandidateClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 1 {
+		t.Fatalf("repair must not remove a fresh candidate claim still inside the grace floor, got %d remaining: %+v", len(remaining), remaining)
 	}
 }
 

@@ -43,9 +43,9 @@ func renderDoctorReport(stdout io.Writer, report *store.DoctorReport) {
 		fmt.Fprintln(stdout, "✓ healthy")
 		return
 	}
-	fmt.Fprintf(stdout, "✗ stale_locks=%d expired_claims=%d stale_candidate_claims=%d expired_territory_tags=%d sidecar_findings=%d integrity=%s\n",
+	fmt.Fprintf(stdout, "✗ stale_locks=%d expired_claims=%d stale_candidate_claims=%d expired_territory_tags=%d sidecar_findings=%d integrity=%s candidate_claim_grace=%s\n",
 		len(staleLocks), len(report.ExpiredClaims), len(report.StaleCandidateClaims), len(report.ExpiredTerritoryTags),
-		len(sidecarFindings), report.IntegrityDetail)
+		len(sidecarFindings), report.IntegrityDetail, domain.CandidateClaimReclaimGrace)
 	for i := range staleLocks {
 		l := &staleLocks[i]
 		fmt.Fprintf(stdout, "✗ stale target=%s owner=%s expires_at=%s host=%s pid=%d\n",
@@ -156,8 +156,11 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		// would_gc_claims mirrors the repair tx's gcClaimsTx sweep (D3);
 		// would_gc_candidate_claims mirrors gcCandidateClaimsTx (loto-u2p7) — the
 		// dry-run names everything --repair would delete, not just lock rows.
-		fmt.Fprintf(stdout, "✓ dry-run would_reclaim=%d would_gc_claims=%d would_gc_candidate_claims=%d would_release_residue=%d\n",
-			len(report.StaleLocks), len(report.ExpiredClaims), len(report.StaleCandidateClaims), len(residue))
+		// candidate_claim_grace names the age floor a zero-evidence claim must
+		// clear before it counts (domain.CandidateClaimReclaimGrace, PR #298
+		// review) — so an operator sees why a fresh one didn't.
+		fmt.Fprintf(stdout, "✓ dry-run would_reclaim=%d would_gc_claims=%d would_gc_candidate_claims=%d would_release_residue=%d candidate_claim_grace=%s\n",
+			len(report.StaleLocks), len(report.ExpiredClaims), len(report.StaleCandidateClaims), len(residue), domain.CandidateClaimReclaimGrace)
 		if scanIncomplete {
 			return 3
 		}

@@ -194,28 +194,50 @@ func (c EvalContext) CandidateClaimIsDead(cc CandidateClaim) bool {
 	}) == LivenessDead
 }
 
+// CandidateClaimReclaimGrace bounds how young a zero-evidence candidate claim
+// (PID<=0, probe UNKNOWN — see CandidateClaimIsAbandoned) must be before
+// doctor's sweep will reclaim it. Set to the same 30-minute default the lock
+// layer already uses for its own TTL-only degraded mode (cmd_lock.go's and
+// cmd_refresh.go's `-ttl` default) — domain cannot import cli (arch layering:
+// domain → ∅), so the VALUE is restated here rather than imported; this is
+// the same policy number, not a new one.
+//
+// Without this floor, a claim minted seconds ago by a degraded-mode submitter
+// (no durable LOTO_PID — documented as the expected, silent case for a bare
+// shell/cron) or from another host (the probe reads UNKNOWN on host mismatch
+// before it ever inspects PID or session) would be reclaimed by a peer's very
+// next `loto doctor --repair` while genuinely still under review — violating
+// CandidateClaim's own "no natural deadline... reclaimable [only when]
+// provably killed" contract (PR #298 review). A provably DEAD claim (the
+// switch's other reclaiming branch) is exempt from this floor and reclaims at
+// any age — there the process is confirmed gone, not merely unread.
+const CandidateClaimReclaimGrace = 30 * time.Minute
+
 // CandidateClaimIsAbandoned is doctor's stale-candidate-claim reclaim
 // authority (loto-u2p7) — deliberately BROADER than CandidateClaimIsDead
 // above, and scoped to doctor's sweep alone: every other caller (admission's
 // authorizedPaths, promotion's re-validation) keeps the conservative
 // Dead-only predicate.
 //
-// A provably-DEAD claim is abandoned, same as CandidateClaimIsDead. In
-// addition, a claim minted with NO durable pid (PID<=0, the same
+// A provably-DEAD claim is abandoned at any age, same as CandidateClaimIsDead.
+// In addition, a claim minted with NO durable pid (PID<=0, the same
 // "no-durable-liveness-handle" sentinel IsBeacon/pidVerdict document
 // elsewhere) whose probe comes back UNKNOWN — no session record, no socket,
-// nothing to read — is ALSO abandoned: it carries zero evidence either way,
-// and unlike a LockRecord or a ClaimRecord it has no TTL backstop to
-// eventually self-heal on (CandidateClaim's own doc). Leaving that
-// combination un-reclaimed is precisely the bug loto-u2p7 reports — doctor
-// reporting healthy while a dead session's claim blocks `loto lock` on its
-// paths forever.
+// nothing to read — is ALSO abandoned, but only once it is at least
+// CandidateClaimReclaimGrace old: it carries zero evidence either way, and
+// unlike a LockRecord or a ClaimRecord it has no TTL backstop to eventually
+// self-heal on (CandidateClaim's own doc), so leaving the zero-evidence case
+// entirely un-reclaimed is the bug loto-u2p7 reports — doctor reporting
+// healthy while a dead session's claim blocks `loto lock` on its paths
+// forever. The grace floor is what keeps a claim that is merely YOUNG (not
+// dead) from reading the same as one that is abandoned.
 //
 // A claim with a durable pid (PID>0) that merely reads UNKNOWN — a foreign
-// host, say — is NOT reclaimed here: it still has a witness (the pid) this
-// vantage point just can't read, and the risk asymmetry that keeps
+// host, say — is NOT reclaimed here at any age: it still has a witness (the
+// pid) this vantage point just can't read, and the risk asymmetry that keeps
 // CandidateClaimIsDead conservative applies to it in full. Only the
-// zero-evidence, no-TTL-backstop combination gets the broader treatment.
+// zero-evidence, no-TTL-backstop combination gets the broader (grace-gated)
+// treatment.
 func (c EvalContext) CandidateClaimIsAbandoned(cc CandidateClaim) bool {
 	if c.Live == nil {
 		return false
@@ -230,7 +252,7 @@ func (c EvalContext) CandidateClaimIsAbandoned(cc CandidateClaim) bool {
 	case LivenessDead:
 		return true
 	case LivenessUnknown:
-		return cc.PID <= 0
+		return cc.PID <= 0 && !c.Now.Before(cc.CreatedAt.Add(CandidateClaimReclaimGrace))
 	case LivenessAlive:
 		return false
 	default:
