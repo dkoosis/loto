@@ -188,11 +188,12 @@ func runSubmit(rt *runtime, repoTop, bead, msg string, targets []domain.Target, 
 // and losing its breadcrumb must not change the exit code the caller sees.
 // An empty reason means accepted.
 //
-// created is the rejected candidate's created write-set — the attribution
-// `loto sync` deletes residue by (loto-ovno.13). Pass nil wherever no envelope
-// was ever built: attribution then fails closed, and sync reports the residue
-// as unattributed rather than deleting a file nothing vouches for.
-func recordVerdict(rt *runtime, candidateID string, reason gate.RejectionReason, created []string, stderr io.Writer) {
+// created is the rejected candidate's created write-set, each path bound to
+// the blob it proposed — the attribution `loto sync` deletes residue by
+// (loto-ovno.13). Pass nil wherever no envelope was ever built: attribution
+// then fails closed, and sync reports the residue as unattributed rather than
+// deleting a file nothing vouches for.
+func recordVerdict(rt *runtime, candidateID string, reason gate.RejectionReason, created []gate.CreatedPath, stderr io.Writer) {
 	if err := rt.Store.RecordAdmissionVerdict(rt.Ctx, rt.Agent.UUID, candidateID, reason, created); err != nil {
 		fmt.Fprintf(stderr, "⚠ verdict not recorded id=%s: %v\n", candidateID, err)
 	}

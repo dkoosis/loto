@@ -32,7 +32,28 @@ const (
 // fast-forward, never a deletion; a created path's is a file integration has
 // no entry for at all.
 type verdictDetail struct {
-	Created []string `json:"created"`
+	Created []createdEntry `json:"created"`
+}
+
+// createdEntry binds one created path to the blob the rejected candidate
+// proposed for it. Both halves are required: the path says WHERE the residue
+// is, the blob says the bytes there are still the rejected candidate's and not
+// a peer's later work at the same path.
+//
+// ‡ The `created` array once held bare path strings. That shape no longer
+// unmarshals here, and that is the point — an old row fails to parse and its
+// paths go unattributed, which leaves them on disk. Fail closed by
+// construction rather than by a version check somebody has to remember.
+type createdEntry struct {
+	Path string `json:"path"`
+	Blob string `json:"blob"`
+}
+
+// RejectedCreation is one attributed residue path's provenance: the rejection
+// that created it and the blob it was created with.
+type RejectedCreation struct {
+	CandidateID string
+	Blob        string
 }
 
 // RecordAdmissionVerdict appends the one audit row a judged candidate owes.
@@ -40,8 +61,9 @@ type verdictDetail struct {
 // candidate, and its write-set may be many paths or (on a malformed
 // candidate) none the store can trust.
 //
-// createdPaths is the rejected candidate's created write-set (gate.Envelope's
-// CreatedPaths). It is recorded ONLY on a rejection: an accepted candidate's
+// createdPaths is the rejected candidate's created write-set with each path's
+// proposal blob (gate.Envelope's CreatedPaths). It is recorded ONLY on a
+// rejection: an accepted candidate's
 // created files are live work, and a record that made them attributable to a
 // deleter would turn this audit row into a loaded gun. The kind switch below
 // is the enforcement — a caller passing paths with an empty reason gets an
@@ -51,7 +73,7 @@ type verdictDetail struct {
 // a verdict that has already been acted on. The caller surfaces the error;
 // it does not retry. A lost breadcrumb costs attribution, which fails closed:
 // the residue is reported unattributed and left on disk.
-func (s *Store) RecordAdmissionVerdict(ctx context.Context, actorUUID, candidateID string, reason gate.RejectionReason, createdPaths []string) error {
+func (s *Store) RecordAdmissionVerdict(ctx context.Context, actorUUID, candidateID string, reason gate.RejectionReason, createdPaths []gate.CreatedPath) error {
 	kind := EventCandidateAccepted
 	detail := ""
 	if reason != "" {
@@ -71,19 +93,36 @@ func (s *Store) RecordAdmissionVerdict(ctx context.Context, actorUUID, candidate
 	}})
 }
 
-// encodeVerdictDetail renders the created-path payload, sorted and
-// deduplicated so the same rejection always serializes to the same bytes. No
-// paths means an EMPTY payload, not `{"created":null}` — the
+// encodeVerdictDetail renders the created-path payload, sorted by path and
+// deduplicated so the same rejection always serializes to the same bytes.
+//
+// ‡ An entry missing either half is DROPPED, not recorded with a blank. A path
+// with no blob cannot be content-checked before deletion, so recording it
+// would hand sync an attribution it must refuse anyway — better it never
+// exists than that a later reader has to remember to distrust it.
+//
+// Nothing left to record means an EMPTY payload, not `{"created":null}`: the
 // unattributed case must be indistinguishable from a pre-column row, since
-// both mean the same thing to sync: delete nothing.
-func encodeVerdictDetail(createdPaths []string) (string, error) {
-	if len(createdPaths) == 0 {
+// both mean the same thing to sync — delete nothing.
+func encodeVerdictDetail(createdPaths []gate.CreatedPath) (string, error) {
+	entries := make([]createdEntry, 0, len(createdPaths))
+	for _, cp := range createdPaths {
+		if cp.Path == "" || cp.Blob == "" {
+			continue
+		}
+		entries = append(entries, createdEntry{Path: cp.Path, Blob: cp.Blob})
+	}
+	if len(entries) == 0 {
 		return "", nil
 	}
-	uniq := append([]string(nil), createdPaths...)
-	sort.Strings(uniq)
-	uniq = slices.Compact(uniq)
-	b, err := json.Marshal(verdictDetail{Created: uniq})
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Path != entries[j].Path {
+			return entries[i].Path < entries[j].Path
+		}
+		return entries[i].Blob < entries[j].Blob
+	})
+	entries = slices.Compact(entries)
+	b, err := json.Marshal(verdictDetail{Created: entries})
 	if err != nil {
 		return "", err
 	}
@@ -91,9 +130,10 @@ func encodeVerdictDetail(createdPaths []string) (string, error) {
 }
 
 // RejectedCandidateCreations maps each repo-relative path a REJECTED candidate
-// recorded as created to that candidate's id, over the rejections the events
-// table still holds (EventsRetentionAge / EventsRetentionMaxRows — that bound
-// IS the attribution horizon, and the caller prints it).
+// recorded as created to that rejection's id and the blob it wrote there, over
+// the rejections the events table still holds (EventsRetentionAge /
+// EventsRetentionMaxRows — that bound IS the attribution horizon, and the
+// caller prints it).
 //
 // ‡ Only candidate_rejected rows are read. An accepted candidate never carries
 // a payload (RecordAdmissionVerdict above), so no query filter alone is load-
@@ -102,10 +142,13 @@ func encodeVerdictDetail(createdPaths []string) (string, error) {
 //
 // A path claimed by more than one rejection resolves to the MOST RECENT one:
 // a resubmit that was rejected again is the honest attribution, and ordering
-// the scan by (created_at, id) makes the winner deterministic. A row whose
-// detail does not parse is skipped, not guessed at — an unreadable payload
-// leaves its paths unattributed, which leaves them on disk.
-func (s *Store) RejectedCandidateCreations(ctx context.Context) (map[string]string, error) {
+// the scan by (created_at, id) makes the winner deterministic.
+//
+// ‡ Three ways an entry drops out, all of them the same fail-closed answer —
+// no attribution, so no deletion: a row whose detail does not parse (including
+// every row written in the pre-blob payload shape), an entry missing its path,
+// and an entry missing its blob. None is guessed at.
+func (s *Store) RejectedCandidateCreations(ctx context.Context) (map[string]RejectedCreation, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT target_canonical, detail FROM events
 		  WHERE event_kind = ? AND detail <> ''
@@ -115,7 +158,7 @@ func (s *Store) RejectedCandidateCreations(ctx context.Context) (map[string]stri
 	}
 	defer rows.Close()
 
-	out := map[string]string{}
+	out := map[string]RejectedCreation{}
 	for rows.Next() {
 		var candidateID, detail string
 		if err := rows.Scan(&candidateID, &detail); err != nil {
@@ -125,11 +168,11 @@ func (s *Store) RejectedCandidateCreations(ctx context.Context) (map[string]stri
 		if err := json.Unmarshal([]byte(detail), &d); err != nil {
 			continue
 		}
-		for _, p := range d.Created {
-			if p == "" {
+		for _, e := range d.Created {
+			if e.Path == "" || e.Blob == "" {
 				continue
 			}
-			out[p] = candidateID
+			out[e.Path] = RejectedCreation{CandidateID: candidateID, Blob: e.Blob}
 		}
 	}
 	return out, rows.Err()

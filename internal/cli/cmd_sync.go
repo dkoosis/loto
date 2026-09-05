@@ -37,11 +37,14 @@ live territory claim, or an unresolved candidate claim is never written; it
 is reported as a conflict row instead.
 
 An untracked file is deleted ONLY when a rejected candidate's recorded
-write-set names it as a path that candidate created. Every other untracked
-file — build output, an editor dropping, a .env — is counted as unattributed
-and left alone; --verbose names them. Attribution comes from the events table,
-so it reaches back only as far as event retention: residue older than that
-window is unattributable and is never deleted.
+write-set names it as a path that candidate created AND the file still hashes
+to the blob that candidate wrote there. A file whose bytes have changed since
+is somebody's work now: it is counted as residue-modified and left alone.
+Every other untracked file — build output, an editor dropping, a .env — is
+counted as unattributed and left alone too; --verbose names both classes.
+Attribution comes from the events table, so it reaches back only as far as
+event retention: residue older than that window is unattributable and is never
+deleted.
 
 loto sync takes no positional arguments; run it from anywhere inside the repo.
 `
@@ -86,16 +89,30 @@ const (
 	// a conflict: nothing is wrong with the rest of the run, and the operator,
 	// not sync, decides what that object is.
 	syncReasonResidueNotFile = "residue-not-regular-file"
+	// syncReasonResidueModified refuses a deletion whose target no longer holds
+	// the bytes the rejected candidate wrote. Someone edited it, or re-created
+	// the same path with different content — either way it is that person's
+	// work now, not the rejection's residue.
+	syncReasonResidueModified = "residue-modified"
 )
 
 // syncResidue is one untracked worktree file a rejected candidate is on record
 // as having CREATED — the only shape of file `loto sync` may delete
 // (loto-ovno.13). CandidateID is the rejection the deletion is attributed to
 // and appears on the row, so no byte leaves the tree unaccounted for
-// (DESIGN.md invariant 8, "no silent dispossession").
+// (DESIGN.md invariant 8, "no silent dispossession"). Blob is the SHA that
+// rejection recorded for the path; the file on disk must still hash to it.
 type syncResidue struct {
 	Path        string
 	CandidateID string
+	Blob        string
+}
+
+// syncResidueMismatch is attributed residue whose bytes have moved on: Found
+// is what the worktree file hashes to now, against the recorded Blob.
+type syncResidueMismatch struct {
+	syncResidue
+	Found string
 }
 
 // syncOpts carries the two flags that only change what sync is allowed to do.
@@ -115,6 +132,7 @@ type syncOutcome struct {
 	Deleted      []syncResidue
 	Conflicts    []syncConflict
 	ResidueSkips []syncConflict
+	Modified     []syncResidueMismatch
 }
 
 // errHashObjectCountMismatch is batchHashObject's static sentinel — git
@@ -282,8 +300,8 @@ func syncScanResidue(rt *runtime, repoTop string) (residue []syncResidue, unattr
 		return nil, nil, err
 	}
 	for _, p := range untracked {
-		if id, ok := createdBy[p]; ok {
-			residue = append(residue, syncResidue{Path: p, CandidateID: id})
+		if rc, ok := createdBy[p]; ok {
+			residue = append(residue, syncResidue{Path: p, CandidateID: rc.CandidateID, Blob: rc.Blob})
 			continue
 		}
 		unattributed = append(unattributed, p)
@@ -393,12 +411,21 @@ func mergeSyncConflicts(a, b []syncConflict) []syncConflict {
 // ‡ Both appliers return what they completed BEFORE failing, and both results
 // are recorded on out even on the error path: a caller that cannot name the
 // files that moved in a partially repaired tree has no report to give.
+// ‡ The content check runs in BOTH modes, before either branch. --dry-run has
+// to answer "would this delete my file?", and it can only answer honestly if
+// it applies every test the real run does.
 func syncApplyDecision(ctx context.Context, repoTop string, apply []syncDiff, sweep []syncResidue, opts syncOpts, out *syncOutcome) error {
+	deletable, skips, modified, classifyErr := syncClassifyResidue(ctx, repoTop, sweep)
+	if classifyErr != nil {
+		return classifyErr
+	}
+	out.ResidueSkips, out.Modified = skips, modified
+
 	if opts.DryRun {
 		for _, d := range apply {
 			out.Synced = append(out.Synced, d.Path)
 		}
-		out.Deleted = sweep
+		out.Deleted = deletable
 		return nil
 	}
 	var applyErr error
@@ -407,8 +434,71 @@ func syncApplyDecision(ctx context.Context, repoTop string, apply []syncDiff, sw
 		return applyErr
 	}
 	var deleteErr error
-	out.Deleted, out.ResidueSkips, deleteErr = syncSweepResidue(repoTop, sweep)
+	var lateSkips []syncConflict
+	out.Deleted, lateSkips, deleteErr = syncDeleteResidue(repoTop, deletable)
+	out.ResidueSkips = append(out.ResidueSkips, lateSkips...)
+	sort.Slice(out.ResidueSkips, func(i, j int) bool { return out.ResidueSkips[i].Path < out.ResidueSkips[j].Path })
 	return deleteErr
+}
+
+// syncClassifyResidue decides which attributed residue is still the rejected
+// candidate's own bytes, and is therefore deletable.
+//
+// Two gates, in this order:
+//
+//  1. Lstat — the path must be an ordinary file. A directory or a symlink now
+//     standing where the candidate created a blob is not the thing this run
+//     was authorized to delete. Order matters: `git hash-object` FOLLOWS a
+//     symlink, so a dangling one would fail the whole run if hashing came
+//     first, and a live one would hash its target's bytes.
+//  2. Content — the file must still hash to the blob the rejection recorded.
+//
+// ‡ Gate 2 is the review's correction, and the asymmetry behind it is worth
+// stating: a fast-forward RESTORES a known-good state, so being wrong about it
+// costs an undo; a deletion restores nothing, so being wrong about it costs
+// the bytes. Same path, different content means a peer re-created that file
+// with their own work — the path matched, the file did not.
+func syncClassifyResidue(ctx context.Context, repoTop string, sweep []syncResidue) (deletable []syncResidue, skips []syncConflict, modified []syncResidueMismatch, err error) {
+	var hashable []syncResidue
+	for _, r := range sweep {
+		fi, statErr := os.Lstat(filepath.Join(repoTop, filepath.FromSlash(r.Path)))
+		switch {
+		case os.IsNotExist(statErr):
+			// Gone since the scan (a peer cleaned up, or the candidate's author
+			// did). Nothing to delete and nothing to report as done.
+			continue
+		case statErr != nil:
+			return nil, nil, nil, fmt.Errorf("lstat %s: %w", syncPathField(r.Path), statErr)
+		case !fi.Mode().IsRegular():
+			skips = append(skips, syncConflict{Path: r.Path, Reason: syncReasonResidueNotFile, Holder: r.CandidateID})
+			continue
+		}
+		hashable = append(hashable, r)
+	}
+	if len(hashable) == 0 {
+		return nil, skips, nil, nil
+	}
+
+	paths := make([]string, len(hashable))
+	for i, r := range hashable {
+		paths[i] = r.Path
+	}
+	// Same hasher the divergence scan uses, so "the bytes match" means exactly
+	// what it means everywhere else in this file, newline-bearing paths and all.
+	oids, err := batchHashObject(ctx, repoTop, paths)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, r := range hashable {
+		found := oids[r.Path]
+		if found == r.Blob {
+			deletable = append(deletable, r)
+			continue
+		}
+		modified = append(modified, syncResidueMismatch{syncResidue: r, Found: found})
+	}
+	sort.Slice(modified, func(i, j int) bool { return modified[i].Path < modified[j].Path })
+	return deletable, skips, modified, nil
 }
 
 // syncDecideResidue partitions attributed residue into what may be deleted and
@@ -436,25 +526,22 @@ func syncDecideResidue(residue []syncResidue, locks []domain.LockRecord, claims 
 	return sweep, conflicts
 }
 
-// syncSweepResidue deletes the attributed residue, in sorted order, stopping
-// at the first failure and returning what it had already removed.
+// syncDeleteResidue removes the classified-deletable residue, in sorted order,
+// stopping at the first failure and returning what it had already removed.
 //
-// ‡ Every path is re-checked with Lstat immediately before os.Remove and must
-// still be an ordinary file. Between the scan and here it could have become a
-// directory or a symlink — os.Remove would happily unlink the symlink, and an
-// object that is no longer the blob the candidate created is not the thing
-// this run was authorized to delete. It is reported and skipped.
+// ‡ Lstat runs AGAIN here, immediately before each os.Remove, even though
+// syncClassifyResidue already checked. Classification hashes the whole batch
+// first, so there is a real window in which a path can turn into a symlink or
+// a directory, and os.Remove would happily unlink the symlink.
 //
 // os.Remove, never RemoveAll: a directory is never a write-set path, and the
 // recursive form is a mistake this function must not be able to make.
-func syncSweepResidue(repoTop string, sweep []syncResidue) (deleted []syncResidue, skips []syncConflict, err error) {
-	for _, r := range sweep {
+func syncDeleteResidue(repoTop string, deletable []syncResidue) (deleted []syncResidue, skips []syncConflict, err error) {
+	for _, r := range deletable {
 		full := filepath.Join(repoTop, filepath.FromSlash(r.Path))
 		fi, statErr := os.Lstat(full)
 		switch {
 		case os.IsNotExist(statErr):
-			// Gone since the scan (a peer cleaned up, or the candidate's author
-			// did). Nothing to delete and nothing to report as done.
 			continue
 		case statErr != nil:
 			return deleted, skips, fmt.Errorf("lstat %s: %w", syncPathField(r.Path), statErr)
@@ -919,11 +1006,12 @@ func syncParentDir(dir string) error {
 // skipped — merged and sorted by path (byte-identical for the same input),
 // then the fix block when there are conflicts to act on.
 //
-// ‡ deleted= and unattributed= are on line 1 unconditionally. A deletion that
-// only shows up in the row list is a deletion a reader who greps the first
-// line can miss, and DESIGN.md invariant 8 forbids bytes leaving quietly. The
-// pair also reads as a ratio: how much untracked matter sync could account for
-// against how much it left alone.
+// ‡ deleted=, residue-modified= and unattributed= are on line 1
+// unconditionally. A deletion that only shows up in the row list is a deletion
+// a reader who greps the first line can miss, and DESIGN.md invariant 8
+// forbids bytes leaving quietly. Together they read as the full account of
+// untracked matter: what sync removed, what it was told about but found
+// changed, and what nothing vouched for at all.
 //
 // --dry-run relabels rather than reusing the past tense: synced= would be a
 // lie about a run that wrote nothing, so the counters read would-fast-forward=
@@ -935,16 +1023,16 @@ func emitSyncReport(w io.Writer, out syncOutcome, skipped []syncDiff, unattribut
 	}
 	skippedN := len(skipped) + len(out.ResidueSkips)
 	if opts.DryRun {
-		fmt.Fprintf(w, "ℹ sync dry-run=true would-fast-forward=%d conflicts=%d skipped=%d would-delete=%d unattributed=%d\n",
-			len(out.Synced), len(out.Conflicts), skippedN, len(out.Deleted), len(unattributed))
+		fmt.Fprintf(w, "ℹ sync dry-run=true would-fast-forward=%d conflicts=%d skipped=%d would-delete=%d residue-modified=%d unattributed=%d\n",
+			len(out.Synced), len(out.Conflicts), skippedN, len(out.Deleted), len(out.Modified), len(unattributed))
 	} else {
-		fmt.Fprintf(w, "%s sync synced=%d conflicts=%d skipped=%d deleted=%d unattributed=%d\n",
-			glyph, len(out.Synced), len(out.Conflicts), skippedN, len(out.Deleted), len(unattributed))
+		fmt.Fprintf(w, "%s sync synced=%d conflicts=%d skipped=%d deleted=%d residue-modified=%d unattributed=%d\n",
+			glyph, len(out.Synced), len(out.Conflicts), skippedN, len(out.Deleted), len(out.Modified), len(unattributed))
 	}
-	fmt.Fprintf(w, "ℹ attribution=rejected-candidate-write-set window=%s max-events=%d\n",
+	fmt.Fprintf(w, "ℹ attribution=rejected-candidate-write-set+blob window=%s max-events=%d\n",
 		syncRetentionWindow(), store.EventsRetentionMaxRows)
 
-	rows := make([]syncReportRow, 0, len(out.Synced)+len(out.Deleted)+len(out.Conflicts)+skippedN+len(unattributed))
+	rows := make([]syncReportRow, 0, len(out.Synced)+len(out.Deleted)+len(out.Conflicts)+skippedN+len(out.Modified)+len(unattributed))
 	ffAction, delAction := "fast-forward", "delete"
 	if opts.DryRun {
 		ffAction, delAction = "would-fast-forward", "would-delete"
@@ -965,6 +1053,14 @@ func emitSyncReport(w io.Writer, out syncOutcome, skipped []syncDiff, unattribut
 		rows = append(rows, syncReportRow{path: d.Path, line: fmt.Sprintf("⚠ target=%s reason=unsupported-mode", syncPathField(d.Path))})
 	}
 	if opts.Verbose {
+		// Both --verbose classes are files sync deliberately did not touch. The
+		// counts carry them on line 1 either way; the rows are for the operator
+		// hunting one specific file and asking why it is still there.
+		for _, m := range out.Modified {
+			rows = append(rows, syncReportRow{path: m.Path, line: fmt.Sprintf(
+				"⚠ target=%s reason=%s candidate=%s recorded=%s found=%s",
+				syncPathField(m.Path), syncReasonResidueModified, m.CandidateID, shortOID(m.Blob), shortOID(m.Found))})
+		}
 		for _, p := range unattributed {
 			rows = append(rows, syncReportRow{path: p, line: fmt.Sprintf("ℹ target=%s reason=unattributed action=none", syncPathField(p))})
 		}
@@ -981,8 +1077,8 @@ func emitSyncReport(w io.Writer, out syncOutcome, skipped []syncDiff, unattribut
 // design.md's inline-fix rule: how to see a conflict's holder, and how to see
 // the untracked files sync deliberately did not touch.
 func emitSyncFixBlock(w io.Writer, out syncOutcome, unattributed []string, opts syncOpts) {
-	showUnattributed := len(unattributed) > 0 && !opts.Verbose
-	if len(out.Conflicts) == 0 && !showUnattributed {
+	showLeftAlone := (len(unattributed) > 0 || len(out.Modified) > 0) && !opts.Verbose
+	if len(out.Conflicts) == 0 && !showLeftAlone {
 		return
 	}
 	fmt.Fprintln(w, "```bash")
@@ -990,10 +1086,23 @@ func emitSyncFixBlock(w io.Writer, out syncOutcome, unattributed []string, opts 
 		fmt.Fprintln(w, "loto status --collisions   # see holders")
 		fmt.Fprintln(w, "loto sync                  # re-run once the lease/claim resolves")
 	}
-	if showUnattributed {
+	if showLeftAlone {
 		fmt.Fprintln(w, "loto sync --verbose        # name the untracked files sync left alone")
 	}
 	fmt.Fprintln(w, "```")
+}
+
+// shortOID truncates a git object id for display. φ shortUUID's own
+// prefix convention; kept separate because these are blob SHAs, not agent
+// identities, and one day the two may want different widths.
+func shortOID(oid string) string {
+	if len(oid) > 8 {
+		return oid[:8]
+	}
+	if oid == "" {
+		return "none"
+	}
+	return oid
 }
 
 // syncRetentionWindow renders the events-retention age as whole days when it

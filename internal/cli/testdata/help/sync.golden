@@ -11,11 +11,14 @@ live territory claim, or an unresolved candidate claim is never written; it
 is reported as a conflict row instead.
 
 An untracked file is deleted ONLY when a rejected candidate's recorded
-write-set names it as a path that candidate created. Every other untracked
-file — build output, an editor dropping, a .env — is counted as unattributed
-and left alone; --verbose names them. Attribution comes from the events table,
-so it reaches back only as far as event retention: residue older than that
-window is unattributable and is never deleted.
+write-set names it as a path that candidate created AND the file still hashes
+to the blob that candidate wrote there. A file whose bytes have changed since
+is somebody's work now: it is counted as residue-modified and left alone.
+Every other untracked file — build output, an editor dropping, a .env — is
+counted as unattributed and left alone too; --verbose names both classes.
+Attribution comes from the events table, so it reaches back only as far as
+event retention: residue older than that window is unattributable and is never
+deleted.
 
 loto sync takes no positional arguments; run it from anywhere inside the repo.
   -dry-run
