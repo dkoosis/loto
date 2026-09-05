@@ -1,0 +1,30 @@
+usage: loto promote [--max-batch N] [--max-rounds N] [--dry-run] -- <cmd> [args...]
+
+Drain accepted candidates onto refs/loto/integration, in the pusher's own
+process — no daemon. Each round claims a batch under a short flock, verifies
+the prospective chain tip with NO lock held (admission keeps running through
+it), then commits the whole batch in one CAS'd ref transaction.
+
+This is the only verb that advances refs/loto/integration. loto submit fills
+the queue in front of it; loto pr bridges what it lands onward to GitHub.
+
+<cmd> is the gate-owned invariant command, run against the prospective chain
+tip in a throwaway worktree. It is a parameter and not config until loto has
+somewhere outside any candidate tree to keep one (internal/gate/promotion.go).
+
+--dry-run reports the accepted candidates a run would consider, advances no
+ref and runs no verify — so it needs no command.
+
+exit: 0 nothing was rejected · 1 a candidate verified red on its own and was
+retired · 3 verify could not reach a verdict, or git/store trouble.
+
+examples:
+  loto promote --dry-run
+  loto promote -- make check
+  loto promote --max-batch 1 -- go test ./...
+  -dry-run
+    	report what a run would consider; advance no ref and run no verify
+  -max-batch int
+    	candidates per batch; 0 keeps the gate default
+  -max-rounds int
+    	rounds per run; 0 keeps the gate default
