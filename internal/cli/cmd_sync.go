@@ -18,15 +18,17 @@ import (
 
 	"loto/internal/domain"
 	"loto/internal/gate"
+	"loto/internal/store"
 )
 
 func init() { register("sync", cmdSync) } //nolint:gochecknoinits // command registry pattern
 
 // syncUsageHead is the point-of-use teaching surface (loto-5rwc), φ submitUsageHead.
-const syncUsageHead = `usage: loto sync
+const syncUsageHead = `usage: loto sync [--dry-run] [--verbose]
 
 Fast-forward every unleased path that diverges from refs/loto/integration to
-integration content, and report the conflicts it refused to touch.
+integration content, delete the untracked residue a rejected candidate is on
+record as having created, and report everything it refused to touch.
 
 Divergence comes from rejected/abandoned candidates leaving tree residue,
 out-of-band writes, and interrupted sessions — never ordinary promotion
@@ -34,7 +36,14 @@ out-of-band writes, and interrupted sessions — never ordinary promotion
 live territory claim, or an unresolved candidate claim is never written; it
 is reported as a conflict row instead.
 
-loto sync takes no arguments; run it from anywhere inside the repo.
+An untracked file is deleted ONLY when a rejected candidate's recorded
+write-set names it as a path that candidate created. Every other untracked
+file — build output, an editor dropping, a .env — is counted as unattributed
+and left alone; --verbose names them. Attribution comes from the events table,
+so it reaches back only as far as event retention: residue older than that
+window is unattributable and is never deleted.
+
+loto sync takes no positional arguments; run it from anywhere inside the repo.
 `
 
 // syncState classifies one integration-tracked path's divergence shape.
@@ -71,7 +80,42 @@ const (
 	syncReasonLeased         = "leased"
 	syncReasonTerritoryClaim = "territory-claim"
 	syncReasonCandidateClaim = "candidate-claim"
+	// syncReasonResidueNotFile refuses a deletion whose target stopped being an
+	// ordinary file between the scan and the delete — a directory or a symlink
+	// now stands where the rejected candidate created a blob. Advisory (⚠), not
+	// a conflict: nothing is wrong with the rest of the run, and the operator,
+	// not sync, decides what that object is.
+	syncReasonResidueNotFile = "residue-not-regular-file"
 )
+
+// syncResidue is one untracked worktree file a rejected candidate is on record
+// as having CREATED — the only shape of file `loto sync` may delete
+// (loto-ovno.13). CandidateID is the rejection the deletion is attributed to
+// and appears on the row, so no byte leaves the tree unaccounted for
+// (DESIGN.md invariant 8, "no silent dispossession").
+type syncResidue struct {
+	Path        string
+	CandidateID string
+}
+
+// syncOpts carries the two flags that only change what sync is allowed to do.
+type syncOpts struct {
+	// DryRun makes the whole verb read-only — no fast-forward, no deletion.
+	// The report names what it would have done, prefixed `would-`.
+	DryRun bool
+	// Verbose lists the untracked paths sync could not attribute (counted
+	// either way; the count is what design.md's triage line owes the reader,
+	// the list is what an operator hunting one file needs).
+	Verbose bool
+}
+
+// syncOutcome is what one decide+apply pass did, or (dry-run) would have done.
+type syncOutcome struct {
+	Synced       []string
+	Deleted      []syncResidue
+	Conflicts    []syncConflict
+	ResidueSkips []syncConflict
+}
 
 // errHashObjectCountMismatch is batchHashObject's static sentinel — git
 // hash-object returning a different oid count than the paths fed to it is
@@ -99,6 +143,8 @@ var syncParentDirFn = syncParentDir //nolint:gochecknoglobals // fault-injection
 func cmdSync(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	dryRun := fs.Bool("dry-run", false, "report what sync would fast-forward and delete; touch nothing")
+	verbose := fs.Bool("verbose", false, "also list the untracked paths sync could not attribute")
 	fs.Usage = func() {
 		fmt.Fprint(stderr, syncUsageHead)
 		fs.PrintDefaults()
@@ -126,13 +172,18 @@ func cmdSync(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	defer rt.Close()
 
-	return runSync(rt, repoTop, stdout, stderr)
+	return runSync(rt, repoTop, syncOpts{DryRun: *dryRun, Verbose: *verbose}, stdout, stderr)
 }
 
 // runSync is the orchestration: resolve integration (read-only, never
-// bootstrap) → refuse if it's behind HEAD → enumerate divergence → decide →
-// apply → report.
-func runSync(rt *runtime, repoTop string, stdout, stderr io.Writer) int {
+// bootstrap) → refuse if it's behind HEAD → enumerate divergence → scan
+// untracked residue and attribute it → decide → apply → report.
+//
+// ‡ Both refusal paths below return BEFORE the residue scan, deliberately. An
+// absent integration ref means the gate has never run here, and a ref behind
+// HEAD means sync's whole picture of the repo is stale — neither is a state in
+// which this verb has earned the right to delete a file.
+func runSync(rt *runtime, repoTop string, opts syncOpts, stdout, stderr io.Writer) int {
 	integSHA, exists, err := syncIntegrationSHA(rt.Ctx, repoTop)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
@@ -160,45 +211,133 @@ func runSync(rt *runtime, repoTop string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	if len(diffs) == 0 {
+
+	residue, unattributed, err := syncScanResidue(rt, repoTop)
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return 3
+	}
+
+	if len(diffs) == 0 && len(residue) == 0 && len(unattributed) == 0 {
+		// The one shape that keeps v1's line: nothing diverges, nothing is
+		// attributable, and no untracked file went uncounted — so every counter
+		// the full report would print is zero and none is being hidden.
 		fmt.Fprintln(stdout, "✓ sync synced=0 conflicts=0 tree=matches-integration")
 		return 0
 	}
 
 	skipped, decidable := partitionSkipped(diffs)
 
-	synced, conflicts, code := syncStoreDecideApply(rt, repoTop, integSHA, decidable, stderr)
+	out, code := syncStoreDecideApply(rt, repoTop, integSHA, decidable, residue, opts, stderr)
 	if code != 0 {
-		// A mid-apply failure leaves the tree PARTIALLY fast-forwarded. Naming
-		// the files that already changed is the whole report the operator gets
-		// (loto-8sic); returning only the error would leave them to diff the
-		// tree by hand to find out what moved.
-		if len(synced) > 0 {
-			fmt.Fprintf(stdout, "⚠ sync synced=%d partial=true — the tree is partially fast-forwarded\n", len(synced))
-			for _, p := range synced {
-				fmt.Fprintf(stdout, "✓ target=%s action=fast-forward\n", syncPathField(p))
-			}
-		}
+		emitSyncPartial(stdout, out)
 		return code
 	}
 
-	emitSyncReport(stdout, synced, conflicts, skipped)
-	if len(conflicts) > 0 {
+	emitSyncReport(stdout, out, skipped, unattributed, opts)
+	if len(out.Conflicts) > 0 {
 		return 1
 	}
 	return 0
+}
+
+// emitSyncPartial names what a failed run had already changed. A mid-apply
+// failure leaves the tree PARTIALLY fast-forwarded (and possibly partially
+// swept); naming those files is the whole report the operator gets
+// (loto-8sic), and a deletion above all must never go unnamed.
+func emitSyncPartial(w io.Writer, out syncOutcome) {
+	if len(out.Synced) == 0 && len(out.Deleted) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "⚠ sync synced=%d deleted=%d partial=true — the tree is partially repaired\n",
+		len(out.Synced), len(out.Deleted))
+	for _, p := range out.Synced {
+		fmt.Fprintf(w, "✓ target=%s action=fast-forward\n", syncPathField(p))
+	}
+	for _, r := range out.Deleted {
+		fmt.Fprintf(w, "ℹ target=%s action=delete candidate=%s\n", syncPathField(r.Path), r.CandidateID)
+	}
+}
+
+// syncScanResidue lists every untracked, non-ignored worktree file and splits
+// it against the created-path record of the rejections the store still holds:
+// attributed residue on one side, everything else on the other.
+//
+// ‡ The split is the safety property of this whole bead. Attribution is a
+// positive fact a rejected candidate wrote down; absence of one is never
+// evidence a file is disposable, so the unattributed side is COUNTED and left
+// on disk — build output, a .env, an editor dropping and a residue file too
+// old for event retention all land there together, which is correct, because
+// sync cannot tell them apart and must not try.
+func syncScanResidue(rt *runtime, repoTop string) (residue []syncResidue, unattributed []string, err error) {
+	untracked, err := syncUntrackedPaths(rt.Ctx, repoTop)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(untracked) == 0 {
+		return nil, nil, nil
+	}
+	createdBy, err := rt.Store.RejectedCandidateCreations(rt.Ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, p := range untracked {
+		if id, ok := createdBy[p]; ok {
+			residue = append(residue, syncResidue{Path: p, CandidateID: id})
+			continue
+		}
+		unattributed = append(unattributed, p)
+	}
+	sort.Slice(residue, func(i, j int) bool { return residue[i].Path < residue[j].Path })
+	sort.Strings(unattributed)
+	return residue, unattributed, nil
+}
+
+// syncUntrackedPaths lists the worktree's untracked, non-ignored files as
+// repo-relative slash paths.
+//
+// ‡ --exclude-standard stays: an ignored path is one the repo has already said
+// is not its business, and a gate that can delete files is the wrong place to
+// start second-guessing .gitignore. It costs nothing real — a rejected
+// candidate's write-set names tracked-to-be source, not ignored output.
+//
+// -z because a Git path may contain a newline, and because git QUOTES such a
+// path in the default output — the quoted form would then miss the exact-match
+// against the recorded write-set and the file would go unattributed.
+func syncUntrackedPaths(ctx context.Context, repoTop string) ([]string, error) {
+	out, err := gitOutput(ctx, repoTop, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, fmt.Errorf("git ls-files --others: %w", err)
+	}
+	var paths []string
+	for rec := range strings.SplitSeq(strings.TrimRight(out, "\x00"), "\x00") {
+		if rec != "" {
+			paths = append(paths, rec)
+		}
+	}
+	return paths, nil
 }
 
 // syncStoreDecideApply reads live lock/claim/candidate-claim state, decides,
 // and applies while the store holds the project operation flock. Every path
 // that acquires one of those protections uses the same flock, so a peer cannot
 // acquire after the decision and before the filesystem mutation.
-// ‡ On a non-zero code the returned synced slice is still meaningful: apply is
-// not atomic, so it names the files already published before the failure.
-func syncStoreDecideApply(rt *runtime, repoTop, expectedIntegration string, decidable []syncDiff, stderr io.Writer) (synced []string, conflicts []syncConflict, code int) {
-	paths := make([]string, len(decidable))
-	for i, d := range decidable {
-		paths[i] = d.Path
+// ‡ On a non-zero code the returned outcome is still meaningful: apply is not
+// atomic, so it names the files already published or removed before the
+// failure.
+//
+// ‡ Residue paths join the SAME stable-state read as the divergent ones, and
+// are judged by the same syncConflictFor. A rejected candidate's created path
+// can be under a peer's lease by now — the peer picked up the abandoned file
+// and is working on it — and a deletion is the one repair with no undo, so it
+// answers to every holder v1 already refuses to write over.
+func syncStoreDecideApply(rt *runtime, repoTop, expectedIntegration string, decidable []syncDiff, residue []syncResidue, opts syncOpts, stderr io.Writer) (out syncOutcome, code int) {
+	paths := make([]string, 0, len(decidable)+len(residue))
+	for _, d := range decidable {
+		paths = append(paths, d.Path)
+	}
+	for _, r := range residue {
+		paths = append(paths, r.Path)
 	}
 
 	err := rt.Store.WithStableCoordinationState(rt.Ctx, paths, func(
@@ -216,23 +355,119 @@ func syncStoreDecideApply(rt *runtime, repoTop, expectedIntegration string, deci
 
 		ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe())}
 		apply, decidedConflicts := syncDecide(decidable, locks, claims, cands, ec)
-		conflicts = decidedConflicts
+		sweep, residueConflicts := syncDecideResidue(residue, locks, claims, cands, ec)
+		out.Conflicts = mergeSyncConflicts(decidedConflicts, residueConflicts)
 		if syncBeforeApplyFn != nil {
 			syncBeforeApplyFn()
 		}
-
-		// ‡ syncApply returns what it published BEFORE it failed. Discarding
-		// that on the error path leaves the caller unable to name which files
-		// moved in a partially fast-forwarded tree.
-		var applyErr error
-		synced, applyErr = syncApply(rt.Ctx, repoTop, apply)
-		return applyErr
+		return syncApplyDecision(rt.Ctx, repoTop, apply, sweep, opts, &out)
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return synced, nil, 3
+		out.Conflicts = nil
+		return out, 3
 	}
-	return synced, conflicts, 0
+	return out, 0
+}
+
+// mergeSyncConflicts joins the divergence and residue refusals into one
+// path-sorted list, so the report reads as a single verdict per path rather
+// than as two passes the reader has to interleave.
+func mergeSyncConflicts(a, b []syncConflict) []syncConflict {
+	merged := make([]syncConflict, 0, len(a)+len(b))
+	merged = append(merged, a...)
+	merged = append(merged, b...)
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Path < merged[j].Path })
+	return merged
+}
+
+// syncApplyDecision carries out (or, under --dry-run, only records) the
+// decision: fast-forward first, then the sweep. Order is deliberate — a
+// deletion is the irreversible half, so it runs last, after the reversible
+// half has proved the tree is writable.
+//
+// --dry-run performs neither half. The decision is what an operator is
+// checking before letting sync delete anything, so it is still computed
+// against the same live state a real run would use, under the same flock.
+//
+// ‡ Both appliers return what they completed BEFORE failing, and both results
+// are recorded on out even on the error path: a caller that cannot name the
+// files that moved in a partially repaired tree has no report to give.
+func syncApplyDecision(ctx context.Context, repoTop string, apply []syncDiff, sweep []syncResidue, opts syncOpts, out *syncOutcome) error {
+	if opts.DryRun {
+		for _, d := range apply {
+			out.Synced = append(out.Synced, d.Path)
+		}
+		out.Deleted = sweep
+		return nil
+	}
+	var applyErr error
+	out.Synced, applyErr = syncApply(ctx, repoTop, apply)
+	if applyErr != nil {
+		return applyErr
+	}
+	var deleteErr error
+	out.Deleted, out.ResidueSkips, deleteErr = syncSweepResidue(repoTop, sweep)
+	return deleteErr
+}
+
+// syncDecideResidue partitions attributed residue into what may be deleted and
+// what a live holder blocks, using the same predicate as syncDecide. Pure.
+func syncDecideResidue(residue []syncResidue, locks []domain.LockRecord, claims []domain.ClaimRecord, cands []domain.CandidateClaim, ec domain.EvalContext) (sweep []syncResidue, conflicts []syncConflict) {
+	locksByPath := map[string][]domain.LockRecord{}
+	for i := range locks {
+		l := &locks[i]
+		locksByPath[l.Target.Canonical] = append(locksByPath[l.Target.Canonical], *l)
+	}
+	candsByPath := map[string][]domain.CandidateClaim{}
+	for i := range cands {
+		c := &cands[i]
+		candsByPath[c.PathCanonical] = append(candsByPath[c.PathCanonical], *c)
+	}
+	for _, r := range residue {
+		if reason, holder, ok := syncConflictFor(r.Path, locksByPath[r.Path], claims, candsByPath[r.Path], ec); ok {
+			conflicts = append(conflicts, syncConflict{Path: r.Path, Reason: reason, Holder: holder})
+			continue
+		}
+		sweep = append(sweep, r)
+	}
+	sort.Slice(sweep, func(i, j int) bool { return sweep[i].Path < sweep[j].Path })
+	sort.Slice(conflicts, func(i, j int) bool { return conflicts[i].Path < conflicts[j].Path })
+	return sweep, conflicts
+}
+
+// syncSweepResidue deletes the attributed residue, in sorted order, stopping
+// at the first failure and returning what it had already removed.
+//
+// ‡ Every path is re-checked with Lstat immediately before os.Remove and must
+// still be an ordinary file. Between the scan and here it could have become a
+// directory or a symlink — os.Remove would happily unlink the symlink, and an
+// object that is no longer the blob the candidate created is not the thing
+// this run was authorized to delete. It is reported and skipped.
+//
+// os.Remove, never RemoveAll: a directory is never a write-set path, and the
+// recursive form is a mistake this function must not be able to make.
+func syncSweepResidue(repoTop string, sweep []syncResidue) (deleted []syncResidue, skips []syncConflict, err error) {
+	for _, r := range sweep {
+		full := filepath.Join(repoTop, filepath.FromSlash(r.Path))
+		fi, statErr := os.Lstat(full)
+		switch {
+		case os.IsNotExist(statErr):
+			// Gone since the scan (a peer cleaned up, or the candidate's author
+			// did). Nothing to delete and nothing to report as done.
+			continue
+		case statErr != nil:
+			return deleted, skips, fmt.Errorf("lstat %s: %w", syncPathField(r.Path), statErr)
+		case !fi.Mode().IsRegular():
+			skips = append(skips, syncConflict{Path: r.Path, Reason: syncReasonResidueNotFile, Holder: r.CandidateID})
+			continue
+		}
+		if rmErr := os.Remove(full); rmErr != nil {
+			return deleted, skips, fmt.Errorf("delete %s: %w", syncPathField(r.Path), rmErr)
+		}
+		deleted = append(deleted, r)
+	}
+	return deleted, skips, nil
 }
 
 // partitionSkipped splits diffs into unsupported-mode rows (reported, never
@@ -678,39 +913,97 @@ func syncParentDir(dir string) error {
 	return syncFull(d)
 }
 
-// emitSyncReport renders the normal (non-special-cased) sync report:
-// triage counts (skipped= always present per design.md determinism), then
-// every row — synced, conflict, skipped — merged and sorted by path
-// (byte-identical for the same input), then the fix block when there are
-// conflicts to act on.
-func emitSyncReport(w io.Writer, synced []string, conflicts []syncConflict, skipped []syncDiff) {
+// emitSyncReport renders the normal (non-special-cased) sync report: triage
+// counts (every counter always present per design.md determinism), the
+// attribution-window row, then every row — synced, deleted, conflict,
+// skipped — merged and sorted by path (byte-identical for the same input),
+// then the fix block when there are conflicts to act on.
+//
+// ‡ deleted= and unattributed= are on line 1 unconditionally. A deletion that
+// only shows up in the row list is a deletion a reader who greps the first
+// line can miss, and DESIGN.md invariant 8 forbids bytes leaving quietly. The
+// pair also reads as a ratio: how much untracked matter sync could account for
+// against how much it left alone.
+//
+// --dry-run relabels rather than reusing the past tense: synced= would be a
+// lie about a run that wrote nothing, so the counters read would-fast-forward=
+// / would-delete= and the rows read action=would-*.
+func emitSyncReport(w io.Writer, out syncOutcome, skipped []syncDiff, unattributed []string, opts syncOpts) {
 	glyph := "✓"
-	if len(conflicts) > 0 {
+	if len(out.Conflicts) > 0 {
 		glyph = "✗"
 	}
-	fmt.Fprintf(w, "%s sync synced=%d conflicts=%d skipped=%d\n", glyph, len(synced), len(conflicts), len(skipped))
-
-	rows := make([]syncReportRow, 0, len(synced)+len(conflicts)+len(skipped))
-	for _, p := range synced {
-		rows = append(rows, syncReportRow{path: p, line: fmt.Sprintf("✓ target=%s action=fast-forward", syncPathField(p))})
+	skippedN := len(skipped) + len(out.ResidueSkips)
+	if opts.DryRun {
+		fmt.Fprintf(w, "ℹ sync dry-run=true would-fast-forward=%d conflicts=%d skipped=%d would-delete=%d unattributed=%d\n",
+			len(out.Synced), len(out.Conflicts), skippedN, len(out.Deleted), len(unattributed))
+	} else {
+		fmt.Fprintf(w, "%s sync synced=%d conflicts=%d skipped=%d deleted=%d unattributed=%d\n",
+			glyph, len(out.Synced), len(out.Conflicts), skippedN, len(out.Deleted), len(unattributed))
 	}
-	for _, c := range conflicts {
+	fmt.Fprintf(w, "ℹ attribution=rejected-candidate-write-set window=%s max-events=%d\n",
+		syncRetentionWindow(), store.EventsRetentionMaxRows)
+
+	rows := make([]syncReportRow, 0, len(out.Synced)+len(out.Deleted)+len(out.Conflicts)+skippedN+len(unattributed))
+	ffAction, delAction := "fast-forward", "delete"
+	if opts.DryRun {
+		ffAction, delAction = "would-fast-forward", "would-delete"
+	}
+	for _, p := range out.Synced {
+		rows = append(rows, syncReportRow{path: p, line: fmt.Sprintf("✓ target=%s action=%s", syncPathField(p), ffAction)})
+	}
+	for _, r := range out.Deleted {
+		rows = append(rows, syncReportRow{path: r.Path, line: fmt.Sprintf("ℹ target=%s action=%s candidate=%s", syncPathField(r.Path), delAction, r.CandidateID)})
+	}
+	for _, c := range out.Conflicts {
 		rows = append(rows, syncReportRow{path: c.Path, line: formatSyncConflictRow(c)})
+	}
+	for _, c := range out.ResidueSkips {
+		rows = append(rows, syncReportRow{path: c.Path, line: fmt.Sprintf("⚠ target=%s reason=%s candidate=%s", syncPathField(c.Path), c.Reason, c.Holder)})
 	}
 	for _, d := range skipped {
 		rows = append(rows, syncReportRow{path: d.Path, line: fmt.Sprintf("⚠ target=%s reason=unsupported-mode", syncPathField(d.Path))})
+	}
+	if opts.Verbose {
+		for _, p := range unattributed {
+			rows = append(rows, syncReportRow{path: p, line: fmt.Sprintf("ℹ target=%s reason=unattributed action=none", syncPathField(p))})
+		}
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].path < rows[j].path })
 	for _, r := range rows {
 		fmt.Fprintln(w, r.line)
 	}
 
-	if len(conflicts) > 0 {
-		fmt.Fprintln(w, "```bash")
+	emitSyncFixBlock(w, out, unattributed, opts)
+}
+
+// emitSyncFixBlock prints the one actionable next step per finding class, per
+// design.md's inline-fix rule: how to see a conflict's holder, and how to see
+// the untracked files sync deliberately did not touch.
+func emitSyncFixBlock(w io.Writer, out syncOutcome, unattributed []string, opts syncOpts) {
+	showUnattributed := len(unattributed) > 0 && !opts.Verbose
+	if len(out.Conflicts) == 0 && !showUnattributed {
+		return
+	}
+	fmt.Fprintln(w, "```bash")
+	if len(out.Conflicts) > 0 {
 		fmt.Fprintln(w, "loto status --collisions   # see holders")
 		fmt.Fprintln(w, "loto sync                  # re-run once the lease/claim resolves")
-		fmt.Fprintln(w, "```")
 	}
+	if showUnattributed {
+		fmt.Fprintln(w, "loto sync --verbose        # name the untracked files sync left alone")
+	}
+	fmt.Fprintln(w, "```")
+}
+
+// syncRetentionWindow renders the events-retention age as whole days when it
+// divides evenly, so the report says 7d rather than 168h0m0s.
+func syncRetentionWindow() string {
+	const day = 24 * time.Hour
+	if store.EventsRetentionAge%day == 0 {
+		return strconv.FormatInt(int64(store.EventsRetentionAge/day), 10) + "d"
+	}
+	return store.EventsRetentionAge.String()
 }
 
 type syncReportRow struct {

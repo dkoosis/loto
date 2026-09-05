@@ -9,7 +9,7 @@ import (
 	"loto/internal/domain"
 )
 
-const eventCols = `id,target_canonical,event_kind,actor_uuid,subject_uuid,reason,created_at`
+const eventCols = `id,target_canonical,event_kind,actor_uuid,subject_uuid,reason,detail,created_at`
 
 // Events retention: cap at 1000 rows AND 7 days; rows violating either rule
 // are deleted. Rotation runs in-txn via rotateEventsTx — opportunistically on
@@ -17,6 +17,17 @@ const eventCols = `id,target_canonical,event_kind,actor_uuid,subject_uuid,reason
 const (
 	eventsRetentionMax = 1000
 	eventsRetentionAge = 7 * 24 * time.Hour
+)
+
+// EventsRetentionMaxRows and EventsRetentionAge are the retention bound above,
+// exported because a reader whose CORRECTNESS depends on it has to be able to
+// say so out loud. `loto sync` deletes residue only for a rejection it can
+// still read, so this pair is exactly how far back attribution reaches; the
+// report prints it rather than leaving an un-deleted older file unexplained
+// (loto-ovno.13).
+const (
+	EventsRetentionMaxRows = eventsRetentionMax
+	EventsRetentionAge     = eventsRetentionAge
 )
 
 // rotateEventsTx trims the events table per retention policy, in the caller's tx.
@@ -138,8 +149,8 @@ func appendEventsTx(ctx context.Context, tx *sql.Tx, evs []domain.Event) error {
 		if evs[i].SubjectUUID != "" {
 			subject = sql.NullString{Valid: true, String: evs[i].SubjectUUID}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO events(`+eventCols+`) VALUES (?,?,?,?,?,?,?)`,
-			evs[i].ID, evs[i].Target.Canonical, evs[i].Kind, evs[i].ActorUUID, subject, evs[i].Reason, evs[i].CreatedAt.UnixNano()); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO events(`+eventCols+`) VALUES (?,?,?,?,?,?,?,?)`,
+			evs[i].ID, evs[i].Target.Canonical, evs[i].Kind, evs[i].ActorUUID, subject, evs[i].Reason, evs[i].Detail, evs[i].CreatedAt.UnixNano()); err != nil {
 			return err
 		}
 	}
@@ -173,7 +184,7 @@ func scanEvents(rows *sql.Rows) ([]domain.Event, error) {
 			subject   sql.NullString
 			createdNs int64
 		)
-		if err := rows.Scan(&e.ID, &canonical, &e.Kind, &e.ActorUUID, &subject, &e.Reason, &createdNs); err != nil {
+		if err := rows.Scan(&e.ID, &canonical, &e.Kind, &e.ActorUUID, &subject, &e.Reason, &e.Detail, &createdNs); err != nil {
 			return nil, err
 		}
 		e.Target = domain.Target{Canonical: canonical}

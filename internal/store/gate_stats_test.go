@@ -14,13 +14,13 @@ func TestRecordAdmissionVerdict_CountsPerClass(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 
-	if err := s.RecordAdmissionVerdict(ctx, tcAlice, tcCandA, ""); err != nil {
+	if err := s.RecordAdmissionVerdict(ctx, tcAlice, tcCandA, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range []gate.RejectionReason{
 		gate.ReasonViolationIntersect, gate.ReasonViolationIntersect, gate.ReasonStalePreimage,
 	} {
-		if err := s.RecordAdmissionVerdict(ctx, tcAlice, tcCandA, r); err != nil {
+		if err := s.RecordAdmissionVerdict(ctx, tcAlice, tcCandA, r, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -37,6 +37,71 @@ func TestRecordAdmissionVerdict_CountsPerClass(t *testing.T) {
 	}
 	if got := st.ByClass[gate.ReasonStalePreimage]; got != 1 {
 		t.Errorf("stale-preimage = %d, want 1", got)
+	}
+}
+
+// The created write-set survives the round trip through events.detail, keyed
+// by path to the candidate that created it — the attribution `loto sync`
+// deletes residue by (loto-ovno.13).
+func TestRecordAdmissionVerdict_CreatedPathsRoundTrip(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	if err := s.RecordAdmissionVerdict(ctx, tcAlice, tcCandA, gate.ReasonStalePreimage,
+		[]string{"pkg/b.go", "pkg/a.go"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.RejectedCandidateCreations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"pkg/a.go", "pkg/b.go"} {
+		if got[p] != tcCandA {
+			t.Errorf("created path %s attributed to %q, want %q", p, got[p], tcCandA)
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("attribution map has %d entries, want 2: %v", len(got), got)
+	}
+}
+
+// An ACCEPTED candidate's created paths are never recorded, whatever the
+// caller passes. Those files are live work headed for promotion; an audit row
+// that made them attributable to a deleter would be a loaded gun.
+func TestRecordAdmissionVerdict_AcceptedCandidateRecordsNoCreatedPaths(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	if err := s.RecordAdmissionVerdict(ctx, tcAlice, tcCandA, "", []string{"pkg/live.go"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.RejectedCandidateCreations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("an accepted candidate's paths became deletable: %v", got)
+	}
+}
+
+// A rejection with nothing to declare — a capture failure, where no envelope
+// was ever built — records no payload, and its residue stays unattributed.
+func TestRejectedCandidateCreations_NoPayloadIsNoAttribution(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	if err := s.RecordAdmissionVerdict(ctx, tcAlice, tcCandA, gate.ReasonStaleAncestry, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.RejectedCandidateCreations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("a payload-free rejection produced attribution: %v", got)
 	}
 }
 
@@ -89,7 +154,7 @@ func TestReadGateStats_BypassIsItsOwnClassNotAnAcceptance(t *testing.T) {
 func TestReadGateStats_HonorsTheWindow(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	if err := s.RecordAdmissionVerdict(ctx, tcAlice, tcCandA, gate.ReasonStaleAncestry); err != nil {
+	if err := s.RecordAdmissionVerdict(ctx, tcAlice, tcCandA, gate.ReasonStaleAncestry, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Age the row past the window rather than sleeping through it.
@@ -114,7 +179,7 @@ func TestReadGateStats_HonorsTheWindow(t *testing.T) {
 func TestReadGateStats_UnknownClassStillCountsAsRejected(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
-	if err := s.RecordAdmissionVerdict(ctx, tcAlice, tcCandA, gate.RejectionReason("from-the-future")); err != nil {
+	if err := s.RecordAdmissionVerdict(ctx, tcAlice, tcCandA, gate.RejectionReason("from-the-future"), nil); err != nil {
 		t.Fatal(err)
 	}
 

@@ -99,6 +99,25 @@ type Envelope struct {
 	LeaseEpoch map[string]int64
 }
 
+// CreatedPaths is the subset of WriteSet this candidate CREATES — every
+// transition whose Expected preimage is nil, i.e. the path had no entry in
+// integration at capture time. Sorted, because Transitions is.
+//
+// ‡ This is the only write-set subset a rejection may hand a deleter
+// (loto-ovno.13). A MODIFIED path existed before the candidate touched it, so
+// its worktree bytes are integration's file with someone's edit on top and
+// deleting it destroys content the candidate never authored; a created path's
+// residue is a file integration has no entry for at all.
+func (e Envelope) CreatedPaths() []string {
+	var out []string
+	for _, t := range e.Transitions {
+		if t.Expected == nil {
+			out = append(out, t.Path)
+		}
+	}
+	return out
+}
+
 var (
 	// errEmptyField is wrapped by Capture's validation for any required,
 	// caller-supplied field left blank — a caller bug, not a runtime

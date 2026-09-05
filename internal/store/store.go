@@ -366,6 +366,7 @@ var migrationEnsures = []struct {
 	{"add violations.baseline", ensureViolationsBaseline},
 	{"add violations.worktree", ensureViolationsWorktree},
 	{"scope violations open index to worktree", ensureViolationsOpenIndexScoped},
+	{"add events.detail", ensureEventsDetail},
 }
 
 // schemaCurrent reports whether a re-migrate would be a pure no-op — the gate
@@ -737,6 +738,22 @@ func ensureViolationsOpenIndexScoped(ctx context.Context, db sqlExecQuerier, app
 		return false, nil // applied: no longer outstanding
 	}
 	return true, nil
+}
+
+// ensureEventsDetail adds the optional per-kind JSON payload column
+// (loto-ovno.13) to an events table created before it existed. Additive with a
+// ” default, so every pre-existing row reads as "no payload" — which is the
+// truth: a rejection recorded before this column existed never captured a
+// write-set, and `loto sync` must treat it as unattributed rather than guess.
+//
+// ‡ Ordered AFTER ensureEventsCheckCurrent in migrationEnsures, and that order
+// is load-bearing: the CHECK widening REBUILDS events from a column list that
+// does not name detail, so running it second would silently drop this column
+// again. Any future events rebuild must add detail to both its DDL and its
+// INSERT ... SELECT.
+func ensureEventsDetail(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	return ensureColumn(ctx, db, apply, "events", "detail",
+		`ALTER TABLE events ADD COLUMN detail TEXT NOT NULL DEFAULT ''`)
 }
 
 // indexExists reports whether sqlite_master carries an index by that name.

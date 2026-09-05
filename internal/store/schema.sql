@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS events (
   actor_uuid       TEXT NOT NULL,
   subject_uuid     TEXT,
   reason           TEXT NOT NULL DEFAULT '',
+  detail           TEXT NOT NULL DEFAULT '',
   created_at       INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_target     ON events(target_canonical, created_at);

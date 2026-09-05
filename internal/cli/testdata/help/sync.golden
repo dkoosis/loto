@@ -1,7 +1,8 @@
-usage: loto sync
+usage: loto sync [--dry-run] [--verbose]
 
 Fast-forward every unleased path that diverges from refs/loto/integration to
-integration content, and report the conflicts it refused to touch.
+integration content, delete the untracked residue a rejected candidate is on
+record as having created, and report everything it refused to touch.
 
 Divergence comes from rejected/abandoned candidates leaving tree residue,
 out-of-band writes, and interrupted sessions — never ordinary promotion
@@ -9,4 +10,15 @@ out-of-band writes, and interrupted sessions — never ordinary promotion
 live territory claim, or an unresolved candidate claim is never written; it
 is reported as a conflict row instead.
 
-loto sync takes no arguments; run it from anywhere inside the repo.
+An untracked file is deleted ONLY when a rejected candidate's recorded
+write-set names it as a path that candidate created. Every other untracked
+file — build output, an editor dropping, a .env — is counted as unattributed
+and left alone; --verbose names them. Attribution comes from the events table,
+so it reaches back only as far as event retention: residue older than that
+window is unattributable and is never deleted.
+
+loto sync takes no positional arguments; run it from anywhere inside the repo.
+  -dry-run
+    	report what sync would fast-forward and delete; touch nothing
+  -verbose
+    	also list the untracked paths sync could not attribute

@@ -88,8 +88,8 @@ func TestReleaseLocks_NoEventForNonOwner(t *testing.T) {
 }
 
 func containsEventKind(events []domain.Event, kind string) bool {
-	for _, e := range events {
-		if e.Kind == kind {
+	for i := range events {
+		if events[i].Kind == kind {
 			return true
 		}
 	}

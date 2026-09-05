@@ -2,6 +2,9 @@ package store
 
 import (
 	"context"
+	"encoding/json"
+	"slices"
+	"sort"
 	"time"
 
 	"loto/internal/domain"
@@ -21,26 +24,115 @@ const (
 	EventCandidateRejected = "candidate_rejected"
 )
 
+// verdictDetail is the JSON payload a candidate_rejected event carries in
+// events.detail. Created is the subset of the candidate's declared write-set
+// whose paths did not exist in integration — the ONLY paths whose untracked
+// worktree residue can be attributed to this rejection, and therefore the only
+// ones `loto sync` may delete (loto-ovno.13). A modified path's residue is a
+// fast-forward, never a deletion; a created path's is a file integration has
+// no entry for at all.
+type verdictDetail struct {
+	Created []string `json:"created"`
+}
+
 // RecordAdmissionVerdict appends the one audit row a judged candidate owes.
 // Target is the candidate id rather than a path: a verdict is a fact about a
 // candidate, and its write-set may be many paths or (on a malformed
 // candidate) none the store can trust.
 //
+// createdPaths is the rejected candidate's created write-set (gate.Envelope's
+// CreatedPaths). It is recorded ONLY on a rejection: an accepted candidate's
+// created files are live work, and a record that made them attributable to a
+// deleter would turn this audit row into a loaded gun. The kind switch below
+// is the enforcement — a caller passing paths with an empty reason gets an
+// accepted event with no payload, not an accepted event sync can act on.
+//
 // Best-effort, like every other audit append: a lost breadcrumb must not undo
 // a verdict that has already been acted on. The caller surfaces the error;
-// it does not retry.
-func (s *Store) RecordAdmissionVerdict(ctx context.Context, actorUUID, candidateID string, reason gate.RejectionReason) error {
+// it does not retry. A lost breadcrumb costs attribution, which fails closed:
+// the residue is reported unattributed and left on disk.
+func (s *Store) RecordAdmissionVerdict(ctx context.Context, actorUUID, candidateID string, reason gate.RejectionReason, createdPaths []string) error {
 	kind := EventCandidateAccepted
+	detail := ""
 	if reason != "" {
 		kind = EventCandidateRejected
+		var err error
+		if detail, err = encodeVerdictDetail(createdPaths); err != nil {
+			return err
+		}
 	}
 	return s.appendAuditDetached([]domain.Event{{
 		Kind:      kind,
 		Target:    domain.Target{Canonical: candidateID},
 		ActorUUID: actorUUID,
 		Reason:    string(reason),
+		Detail:    detail,
 		CreatedAt: time.Now(),
 	}})
+}
+
+// encodeVerdictDetail renders the created-path payload, sorted and
+// deduplicated so the same rejection always serializes to the same bytes. No
+// paths means an EMPTY payload, not `{"created":null}` — the
+// unattributed case must be indistinguishable from a pre-column row, since
+// both mean the same thing to sync: delete nothing.
+func encodeVerdictDetail(createdPaths []string) (string, error) {
+	if len(createdPaths) == 0 {
+		return "", nil
+	}
+	uniq := append([]string(nil), createdPaths...)
+	sort.Strings(uniq)
+	uniq = slices.Compact(uniq)
+	b, err := json.Marshal(verdictDetail{Created: uniq})
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// RejectedCandidateCreations maps each repo-relative path a REJECTED candidate
+// recorded as created to that candidate's id, over the rejections the events
+// table still holds (EventsRetentionAge / EventsRetentionMaxRows — that bound
+// IS the attribution horizon, and the caller prints it).
+//
+// ‡ Only candidate_rejected rows are read. An accepted candidate never carries
+// a payload (RecordAdmissionVerdict above), so no query filter alone is load-
+// bearing here — but the filter is written anyway, because a reader that
+// deletes files must not depend on a writer's discipline it cannot see.
+//
+// A path claimed by more than one rejection resolves to the MOST RECENT one:
+// a resubmit that was rejected again is the honest attribution, and ordering
+// the scan by (created_at, id) makes the winner deterministic. A row whose
+// detail does not parse is skipped, not guessed at — an unreadable payload
+// leaves its paths unattributed, which leaves them on disk.
+func (s *Store) RejectedCandidateCreations(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT target_canonical, detail FROM events
+		  WHERE event_kind = ? AND detail <> ''
+		  ORDER BY created_at, id`, EventCandidateRejected)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string]string{}
+	for rows.Next() {
+		var candidateID, detail string
+		if err := rows.Scan(&candidateID, &detail); err != nil {
+			return nil, err
+		}
+		var d verdictDetail
+		if err := json.Unmarshal([]byte(detail), &d); err != nil {
+			continue
+		}
+		for _, p := range d.Created {
+			if p == "" {
+				continue
+			}
+			out[p] = candidateID
+		}
+	}
+	return out, rows.Err()
 }
 
 // GateStats is what `loto gate stats` reports over one window.
