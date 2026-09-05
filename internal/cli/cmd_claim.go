@@ -29,9 +29,16 @@ descendant by path segment). Re-claiming your own prefix refreshes the TTL.
 Advisory between claimants only: a claim does not block loto lock/check under
 the prefix — still lock files before editing.
 
+"." is the repo root, the widest prefix: it overlaps every other claim, so it
+blocks every peer claimant until it expires or you unclaim it. Reach for it
+deliberately — a takeover of the whole checkout — not as a shorthand for "the
+directory I am standing in": a prefix is always repo-root-relative, never
+cwd-relative. loto lock still refuses ".", because a lock names a write-set.
+
 examples:
   loto claim internal/store -t "store refactor"
   loto claim pkg/newthing -t "scaffolding a new package" --ttl 2h
+  loto claim . -t "takeover: rebasing every lane" --ttl 30m
 `
 
 func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int {
