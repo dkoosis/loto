@@ -412,8 +412,9 @@ func resolveLaneWriteSet(args []string, repoTop string) ([]domain.Target, []rend
 	seen := make(map[string]bool, len(args))
 	var invalid []render.InvalidTarget
 	base := callerBase()
+	cc := newCaseCache()
 	for _, raw := range args {
-		t, err := resolveCLITarget(base, repoTop, raw)
+		t, err := resolveCLITarget(cc, base, repoTop, raw)
 		if err != nil {
 			invalid = append(invalid, render.InvalidTarget{Path: raw, Reason: classifyCanonicalizeErr(err)})
 			continue

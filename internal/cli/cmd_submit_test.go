@@ -145,7 +145,7 @@ func TestSubmit_RendersAdmissionRejection(t *testing.T) {
 		// Canonical targets are repo-relative (domain.Canonicalize), not
 		// absolute — resolveCLITarget is the same resolution runSubmit itself
 		// used to build `targets`, so this matches exactly.
-		aTarget, err := resolveCLITarget(callerBase(), rt.RepoTop, tcTargetA)
+		aTarget, err := resolveCLITarget(nil, callerBase(), rt.RepoTop, tcTargetA)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -212,7 +212,7 @@ func TestSubmit_RejectionLeavesNoLaneRef(t *testing.T) {
 	// a real rejection, arrived at through the real flow.
 	t.Cleanup(func() { submitAfterLeaseCheck = nil })
 	submitAfterLeaseCheck = func(rt *runtime) {
-		aTarget, err := resolveCLITarget(callerBase(), rt.RepoTop, tcTargetA)
+		aTarget, err := resolveCLITarget(nil, callerBase(), rt.RepoTop, tcTargetA)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -350,7 +350,7 @@ func TestSubmit_LeaseLostBetweenAdmissionAndClaim(t *testing.T) {
 	// to exercise this window, which is the whole point of the second seam.
 	t.Cleanup(func() { submitBeforeAccept = nil })
 	submitBeforeAccept = func(rt *runtime) {
-		aTarget, err := resolveCLITarget(callerBase(), rt.RepoTop, tcTargetA)
+		aTarget, err := resolveCLITarget(nil, callerBase(), rt.RepoTop, tcTargetA)
 		if err != nil {
 			t.Fatal(err)
 		}

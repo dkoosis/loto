@@ -109,12 +109,12 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // the walk in resolveDiskCase never sees an empty last segment. Claims fold for
 // the same reason locks do (loto-f8m8): PrefixOverlaps is a byte comparison, so
 // a claim on internal/Store did not cover a lock on internal/store/x.go.
-func resolveCLIPrefix(repoTop, raw string) (domain.Target, error) {
+func resolveCLIPrefix(cc *caseCache, repoTop, raw string) (domain.Target, error) {
 	t, err := domain.CanonicalizePrefix(normalizeRepoPath(raw, repoTop))
 	if err != nil {
 		return domain.Target{}, err
 	}
-	t.Canonical = resolveDiskCase(repoTop, t.Canonical)
+	t.Canonical = resolveDiskCase(cc, repoTop, t.Canonical)
 	return t, nil
 }
 
@@ -128,7 +128,7 @@ func claimVerbPrefix(ctx context.Context, flags *flag.FlagSet, usage string, std
 		return domain.Target{}, "", 2
 	}
 	repoTop, _ := repoTopForCwd(ctx)
-	prefix, err := resolveCLIPrefix(repoTop, flags.Arg(0))
+	prefix, err := resolveCLIPrefix(nil, repoTop, flags.Arg(0))
 	if err != nil {
 		render.EmitInvalid(stderr, []render.InvalidTarget{{Path: flags.Arg(0), Reason: classifyCanonicalizeErr(err)}})
 		return domain.Target{}, "", 2

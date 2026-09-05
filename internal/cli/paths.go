@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/dkoosis/atomicfile"
@@ -225,12 +226,13 @@ func callerBase() string {
 // The caller declares; loto must not sniff. Making the base a parameter is what
 // keeps `check --staged` (git-produced, already repo-root-relative) from being
 // re-based onto the cwd.
-func resolveCLITarget(base, repoTop, raw string) (domain.Target, error) {
+// cc may be nil; a batch of targets shares one so each directory is read once.
+func resolveCLITarget(cc *caseCache, base, repoTop, raw string) (domain.Target, error) {
 	t, err := canonicalizeCLIToken(base, repoTop, raw)
 	if err != nil {
 		return domain.Target{}, err
 	}
-	t.Canonical = resolveDiskCase(repoTop, t.Canonical)
+	t.Canonical = resolveDiskCase(cc, repoTop, t.Canonical)
 	return t, nil
 }
 
@@ -443,11 +445,11 @@ func foldContains(parent, child string) (string, bool) {
 // Segments below the deepest one that exists keep the caller's casing: a
 // `beacon` names a file that does not exist yet, and disk has no truth to
 // offer about it. Directory case, the realistic divergence, still converges.
-func resolveDiskCase(repoTop, rel string) string {
+func resolveDiskCase(cc *caseCache, repoTop, rel string) string {
 	if repoTop == "" || rel == "" || rel == "." || filepath.IsAbs(rel) {
 		return rel
 	}
-	if !caseInsensitiveFS(repoTop) {
+	if !cc.foldsAt(repoTop) {
 		return rel
 	}
 	segs := strings.Split(rel, "/")
@@ -456,7 +458,7 @@ func resolveDiskCase(repoTop, rel string) string {
 		if seg == "" || seg == "." || seg == ".." {
 			return rel // not a shape this walk can reason about
 		}
-		onDisk, ok := lookupEntryFold(dir, seg)
+		onDisk, ok := lookupEntryFold(cc, dir, seg)
 		if !ok {
 			break // nothing below this point exists; keep the typed tail
 		}
@@ -466,22 +468,75 @@ func resolveDiskCase(repoTop, rel string) string {
 	return strings.Join(segs, "/")
 }
 
+// caseCache memoizes the two filesystem questions resolveDiskCase asks, for the
+// life of one command's target batch. A nil *caseCache is legal and answers
+// every question from disk — the single-target verbs pass nil.
+//
+// ‡ Without it the walk is quadratic (loto-f8m8, codex review on #306): every
+// target re-read every directory on its path, so `check --staged` over N files
+// in one N-entry directory did N ReadDirs of N entries. Measured on APFS, 300
+// targets in a 300-entry directory: 71ms uncached.
+//
+// Scoped to a batch rather than the process because the cache must not outlive
+// the moment it describes — `loto lane` creates files between batches, and the
+// package's own tests mkdir mid-test.
+type caseCache struct {
+	folds map[string]bool     // dir → its filesystem folds case
+	dirs  map[string][]string // dir → entry names, nil when unreadable
+}
+
+func newCaseCache() *caseCache {
+	return &caseCache{folds: map[string]bool{}, dirs: map[string][]string{}}
+}
+
+// foldsAt is caseInsensitiveFS memoized per directory.
+func (c *caseCache) foldsAt(dir string) bool {
+	if c == nil {
+		return caseInsensitiveFS(dir)
+	}
+	if v, ok := c.folds[dir]; ok {
+		return v
+	}
+	v := caseInsensitiveFS(dir)
+	c.folds[dir] = v
+	return v
+}
+
+// entryNames returns dir's entry names, reading dir at most once per cache. ok
+// is false when dir cannot be read.
+func (c *caseCache) entryNames(dir string) ([]string, bool) {
+	if c != nil {
+		if v, cached := c.dirs[dir]; cached {
+			return v, v != nil
+		}
+	}
+	var names []string
+	if ents, err := os.ReadDir(dir); err == nil {
+		names = make([]string, len(ents))
+		for i := range ents {
+			names[i] = ents[i].Name()
+		}
+	}
+	if c != nil {
+		c.dirs[dir] = names
+	}
+	return names, names != nil
+}
+
 // lookupEntryFold returns the entry of dir whose name equals name ignoring
 // case. An exact match wins over a folded one — a case-sensitive filesystem
 // can hold both, and this must not rename a path that was already right.
-func lookupEntryFold(dir, name string) (string, bool) {
-	ents, err := os.ReadDir(dir)
-	if err != nil {
+func lookupEntryFold(cc *caseCache, dir, name string) (string, bool) {
+	names, ok := cc.entryNames(dir)
+	if !ok {
 		return "", false
 	}
-	for i := range ents {
-		if ents[i].Name() == name {
-			return name, true
-		}
+	if slices.Contains(names, name) {
+		return name, true
 	}
-	for i := range ents {
-		if strings.EqualFold(ents[i].Name(), name) {
-			return ents[i].Name(), true
+	for _, n := range names {
+		if strings.EqualFold(n, name) {
+			return n, true
 		}
 	}
 	return "", false
@@ -536,7 +591,42 @@ func probeFoldedPath(path string) (answer, ok bool) {
 		// which is a real answer, not a failure to probe.
 		return false, true
 	}
-	return os.SameFile(fi, ffi), true
+	if !os.SameFile(fi, ffi) {
+		return false, true
+	}
+	// Two spellings, one inode — but that is also what an alias looks like: a
+	// case-variant symlink or hard link beside the real entry on a
+	// case-SENSITIVE filesystem (`/work/Repo -> repo`). A folding filesystem
+	// cannot hold both spellings as separate entries, so seeing both listed is
+	// proof the filesystem does not fold (loto-f8m8, codex review on #306).
+	// Without this the probe answers "folds", and resolveDiskCase then rewrites
+	// A.go to an existing a.go — `loto lock A.go` would lock a different file.
+	if bothSpellingsListed(path, flipped) {
+		return false, true
+	}
+	return true, true
+}
+
+// bothSpellingsListed reports whether a's and b's basenames both appear as
+// entries of their shared parent directory. False when the parent cannot be
+// read — an unreadable parent is no evidence either way, so the caller keeps
+// the SameFile answer.
+func bothSpellingsListed(a, b string) bool {
+	ents, err := os.ReadDir(filepath.Dir(a))
+	if err != nil {
+		return false
+	}
+	nameA, nameB := filepath.Base(a), filepath.Base(b)
+	var sawA, sawB bool
+	for i := range ents {
+		switch ents[i].Name() {
+		case nameA:
+			sawA = true
+		case nameB:
+			sawB = true
+		}
+	}
+	return sawA && sawB
 }
 
 // flipBasenameCase returns dir with the case of the first ASCII letter in its

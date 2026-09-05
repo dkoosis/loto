@@ -181,8 +181,10 @@ func breakTargets(rt *runtime, args []string, intent, repoTop string, expect hol
 
 func resolveUnlockArgs(args []string, repoTop string, stderr io.Writer) ([]domain.Target, int) {
 	out := make([]domain.Target, 0, len(args))
+	cc := newCaseCache()
+	base := callerBase()
 	for _, a := range args {
-		t, err := resolveCLITarget(callerBase(), repoTop, a)
+		t, err := resolveCLITarget(cc, base, repoTop, a)
 		if err != nil {
 			fmt.Fprintf(stderr, "✗ target %q: %v\n", a, err)
 			return nil, 2
