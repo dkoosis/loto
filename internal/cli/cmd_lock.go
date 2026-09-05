@@ -40,7 +40,7 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, lockUsageHead)
 		fs.PrintDefaults()
 	}
-	ttl := fs.Duration("ttl", 30*time.Minute, "lock TTL")
+	ttl := fs.Duration("ttl", domain.DegradedModeTTL, "lock TTL")
 	intent := fs.String("t", "", "intent (required)")
 	fs.StringVar(intent, "intent", "", "intent (required)")
 	shared := fs.Bool("shared", false, "acquire a shared (multi-reader) lock; default is exclusive")

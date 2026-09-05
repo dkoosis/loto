@@ -194,13 +194,22 @@ func (c EvalContext) CandidateClaimIsDead(cc CandidateClaim) bool {
 	}) == LivenessDead
 }
 
+// DegradedModeTTL is the one duration behind "TTL-only liveness when no
+// pid/session witness exists" everywhere loto applies that policy — not
+// specific to candidate claims, so it is named for the policy, not the
+// caller. cli imports domain (never the reverse: domain → ∅ per
+// .go-arch-lint.yml), so this is the single source; `loto lock`'s and
+// `loto refresh`'s `-ttl` default both reference it directly (PR #298 review:
+// the three literal 30-minute values agreed by coincidence, not by a shared
+// symbol — this closes that gap).
+const DegradedModeTTL = 30 * time.Minute
+
 // CandidateClaimReclaimGrace bounds how young a zero-evidence candidate claim
 // (PID<=0, probe UNKNOWN — see CandidateClaimIsAbandoned) must be before
-// doctor's sweep will reclaim it. Set to the same 30-minute default the lock
-// layer already uses for its own TTL-only degraded mode (cmd_lock.go's and
-// cmd_refresh.go's `-ttl` default) — domain cannot import cli (arch layering:
-// domain → ∅), so the VALUE is restated here rather than imported; this is
-// the same policy number, not a new one.
+// doctor's sweep will reclaim it. An alias for DegradedModeTTL, kept as its
+// own name because it is what `loto doctor`'s report and --dry-run lines
+// print (`candidate_claim_grace=`) — that field name stays stable regardless
+// of what the underlying policy constant is called.
 //
 // Without this floor, a claim minted seconds ago by a degraded-mode submitter
 // (no durable LOTO_PID — documented as the expected, silent case for a bare
@@ -211,7 +220,7 @@ func (c EvalContext) CandidateClaimIsDead(cc CandidateClaim) bool {
 // provably killed" contract (PR #298 review). A provably DEAD claim (the
 // switch's other reclaiming branch) is exempt from this floor and reclaims at
 // any age — there the process is confirmed gone, not merely unread.
-const CandidateClaimReclaimGrace = 30 * time.Minute
+const CandidateClaimReclaimGrace = DegradedModeTTL
 
 // CandidateClaimIsAbandoned is doctor's stale-candidate-claim reclaim
 // authority (loto-u2p7) — deliberately BROADER than CandidateClaimIsDead
