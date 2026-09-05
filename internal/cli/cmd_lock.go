@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"loto/internal/domain"
@@ -20,6 +21,13 @@ import (
 func init() { //nolint:gochecknoinits // command registry pattern
 	register("lock", cmdLock)
 }
+
+// reasonNotRegularFile is the design.md token for "this path is not a regular
+// file". Three surfaces emit or read it — the Lstat check, the ErrTargetIsDir
+// mapping, and emitDirLockHint's filter — and a typo in any one of them makes
+// the hint silently stop firing, which reads exactly like "no directory was
+// passed" (.claude/rules/standard-checks.md).
+const reasonNotRegularFile = "not-regular-file"
 
 // lockUsageHead is the point-of-use teaching surface for lock (loto-5rwc):
 // usage line plus worked examples. The flag list is appended by PrintDefaults.
@@ -66,6 +74,7 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	targets, invalid := validateLockTargets(fs.Args(), repoTop, false)
 	if len(invalid) > 0 {
 		render.EmitInvalid(stderr, invalid)
+		emitDirLockHint(stderr, invalid, fs.Args(), repoTop, *intent)
 		return 2
 	}
 	rt, err := openRuntimeGC(ctx)
@@ -81,6 +90,84 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		mode = domain.ModeShared
 	}
 	return acquireBatch(rt, targets, *intent, *ttl, mode, rt.liveProbe(), stdout, stderr)
+}
+
+// emitDirLockHint — sd-hh0h. `loto lock <dir>` is refused with
+// reason=not-regular-file, which says WHY and never WHAT TO RUN INSTEAD. Two
+// lanes read that refusal on 2026-09-05 and edited unlocked: the gate was
+// simply off, and nothing in the output said so. The same two round trips were
+// recorded a month earlier (kg 356affa894c2), so the refusal's silence is the
+// defect, not the refusal.
+//
+// ‡ The refusal STANDS — option B on the bead. loto has two nouns by design
+// (loto-qoq, loto-7af9): `claim <prefix>` reserves TERRITORY, a directory,
+// advisory between claimants; `lock <file>...` takes the WRITE-SET, regular
+// files, blocking. Making lock expand a directory (option A) would grow a
+// lock's territory with the tree, which is "lock the write-set, not the blast
+// radius" inverted. So the fix is that the refusal names both replacements.
+//
+// The directory test itself lives in refusedDirTargets below.
+func emitDirLockHint(w io.Writer, invalid []render.InvalidTarget, args []string, repoTop, intent string) {
+	dirs := refusedDirTargets(invalid, args, repoTop)
+	if len(dirs) == 0 {
+		return
+	}
+	why := intent
+	if why == "" {
+		why = "<bead>: intent"
+	}
+	fmt.Fprintln(w, "ℹ a directory is not a lock target — claim the territory, lock the files:")
+	for _, d := range dirs {
+		fmt.Fprintf(w, "ℹ   loto claim %s -t %q\n", d, why)
+		fmt.Fprintf(w, "ℹ   loto lock $(fd -t f . %s) -t %q\n", d, why)
+	}
+	fmt.Fprintln(w, "ℹ claim reserves the PREFIX (advisory between claimants); lock takes the WRITE-SET (regular files, blocking).")
+}
+
+// refusedDirTargets picks the refused paths that are DIRECTORIES, in input
+// order, deduplicated.
+//
+// ‡ A directory, not merely a non-regular file. A fifo, socket or device also
+// answers not-regular-file, and neither replacement line is the answer for one
+// — printing them would teach a wrong move at exactly the moment the caller is
+// looking for the right one. Two arms, because the two spellings reach the
+// refusal by different routes: a bare directory fails statFileTargetReason's
+// IsRegular check and stats as a dir here; a trailing-slash one is refused by
+// domain.ErrTargetIsDir BEFORE any stat, and only a directory is ever written
+// that way.
+func refusedDirTargets(invalid []render.InvalidTarget, args []string, repoTop string) []string {
+	slashed := make(map[string]bool, len(args))
+	for _, a := range args {
+		if strings.HasSuffix(a, "/") && len(a) > 1 {
+			slashed[a] = true
+		}
+	}
+	seen := make(map[string]bool, len(invalid))
+	dirs := make([]string, 0, len(invalid))
+	for _, it := range invalid {
+		if it.Reason != reasonNotRegularFile {
+			continue
+		}
+		d := strings.TrimRight(it.Path, "/")
+		if d == "" || seen[d] || (!slashed[it.Path] && !statIsDir(repoTop, d)) {
+			continue
+		}
+		seen[d] = true
+		dirs = append(dirs, d)
+	}
+	return dirs
+}
+
+// statIsDir resolves a repo-relative path against repoTop the same way
+// statFileTargetReason does — statting it bare would mean
+// "repoTop/<cwd-suffix>/<path>" whenever loto runs from a subdirectory.
+func statIsDir(repoTop, rel string) bool {
+	probe := rel
+	if repoTop != "" {
+		probe = filepath.Join(repoTop, rel)
+	}
+	st, err := os.Stat(probe)
+	return err == nil && st.IsDir()
 }
 
 // validateLockTargets canonicalizes and Lstat-validates each path before any
@@ -156,7 +243,7 @@ func statFileTargetReason(repoTop, canonical string, allowMissing bool) string {
 		return "symlink"
 	}
 	if !lst.Mode().IsRegular() {
-		return "not-regular-file"
+		return reasonNotRegularFile
 	}
 	return ""
 }
@@ -171,7 +258,7 @@ func classifyCanonicalizeErr(err error) string {
 		// base. Deliberately reuses that token rather than minting a second one.
 		return "relative-path-caller-cwd-unknown"
 	case errors.Is(err, domain.ErrTargetIsDir):
-		return "not-regular-file"
+		return reasonNotRegularFile
 	case errors.Is(err, domain.ErrEmptyTarget):
 		return "empty-target"
 	case errors.Is(err, domain.ErrTargetHasNUL):
