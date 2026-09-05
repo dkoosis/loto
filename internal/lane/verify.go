@@ -35,20 +35,21 @@ var errVerifyAborted = errors.New("lane: verify aborted before a verdict")
 type VerifyResult struct {
 	// Passed is true iff the command exited zero.
 	Passed bool
-	// Output is the command's combined stdout+stderr with absolute
-	// ephemeral-worktree and git-dir paths scrubbed to repo-relative form.
+	// Output is the command's combined stdout+stderr with the absolute
+	// verify-worktree and git-dir paths scrubbed to repo-relative form.
 	Output string
 }
 
 // Verify runs a broad-repo command (go test -trimpath / vet / lint / build)
-// against commit in a throwaway, detached worktree cut off the lane ref, then
-// removes that worktree BY PATH. The command runs EXEC-ONLY: the caller never
+// against commit in a detached worktree holding exactly that commit — never
+// the shared, dirty checkout. The command runs EXEC-ONLY: the caller never
 // receives a writable handle to the checkout, so it can neither poison the
-// prompt cache with the throwaway path nor silently lose edits into a tree about
-// to be deleted. Both the worktree's checkout dir and its .git/.../worktrees/<id>
-// admin path are stripped from Output — `go test -trimpath` removes them at the
-// source for Go tooling; this scrub is the backstop for non-Go tools (vet
-// plugins, linters, shell) that print absolute paths.
+// prompt cache with the worktree path nor silently lose edits into a tree that
+// the next verify resets. Both the worktree's checkout dir and its
+// .git/.../worktrees/<id> admin path are stripped from Output — `go test
+// -trimpath` removes them at the source for Go tooling; this scrub is the
+// backstop for non-Go tools (vet plugins, linters, shell) that print absolute
+// paths.
 //
 // commit is any commit-ish; in the lane pipeline it is the tip Commit returned.
 // repoTop is the source working tree the worktree forks from (Commit threads the
@@ -56,9 +57,17 @@ type VerifyResult struct {
 // not as an error — a returned error means the verify could not be RUN (worktree
 // setup/teardown failed, the command could not start, or ctx expired).
 //
-// Concurrency: each call removes only its own worktree by exact path and NEVER
-// runs `git worktree prune`, so parallel lane verifies in one shared repo cannot
-// reap each other's in-flight worktrees.
+// ‡ The worktree is REUSED, one per repo, under the git common dir — cutting a
+// fresh one cost 2.9–7.1s on this repo's 327 files and was the whole p50 of a
+// promotion's phase-2 verify (loto-3is6). It is reset to commit before the
+// command runs, so what the command sees is byte-identical to a fresh cut;
+// verifytree.go carries the reset and the fallbacks.
+//
+// Concurrency: the reused tree is held under its own non-blocking flock, so a
+// second verify in the same repo cuts a throwaway rather than waiting or
+// sharing. Every teardown removes ONLY its own worktree by exact path and
+// NEVER runs `git worktree prune`, so parallel lane verifies in one shared
+// repo cannot reap each other's in-flight worktrees.
 func Verify(ctx context.Context, repoTop, commit string, cmd []string) (VerifyResult, error) {
 	switch {
 	case repoTop == "":
@@ -71,23 +80,16 @@ func Verify(ctx context.Context, repoTop, commit string, cmd []string) (VerifyRe
 
 	g := gitRunner{repoTop: repoTop}
 
-	// Parent dir for the throwaway checkout: `git worktree add` wants the leaf to
-	// not yet exist, so point it at <tmp>/wt under a dir we own and later delete.
-	parent, err := os.MkdirTemp("", "loto-verify-")
+	// The checkout: the repo's reused verify worktree when it can be had, a
+	// throwaway cut when it cannot. Either way the tree is detached at commit
+	// and clean, and release either drops the reuse lock or removes the
+	// throwaway BY PATH. verifytree.go holds which case is chosen and why.
+	tree, err := acquireVerifyTree(ctx, g, repoTop, commit)
 	if err != nil {
-		return VerifyResult{}, fmt.Errorf("lane: verify tempdir: %w", err)
+		return VerifyResult{}, err
 	}
-	defer os.RemoveAll(parent)
-	wt := filepath.Join(parent, "wt")
-
-	if _, err := g.run(ctx, gitCall{args: []string{"worktree", "add", "--detach", wt, commit}}); err != nil {
-		return VerifyResult{}, fmt.Errorf("lane: worktree add: %w", err)
-	}
-	// Tear down BY PATH (never prune — prune would reap peers' concurrent
-	// worktrees). Background ctx so cleanup still runs if the caller's ctx expired.
-	defer func() {
-		_, _ = g.run(context.Background(), gitCall{args: []string{"worktree", "remove", wt, "--force"}})
-	}()
+	defer tree.release()
+	wt := tree.path
 
 	// Learn the worktree's git admin dir so its absolute form can be scrubbed too;
 	// a non-fatal best effort (a tool that never prints it costs us nothing).

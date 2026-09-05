@@ -72,24 +72,25 @@ func TestVerifyScrubsWorktreeAndGitDirPaths(t *testing.T) {
 	}
 }
 
-// TestVerifyRemovesWorktreeByPath is acceptance criterion (c): the ephemeral
-// worktree is gone afterward — both its checkout dir and its git admin entry, so
-// the porcelain worktree set is byte-identical before and after.
-func TestVerifyRemovesWorktreeByPath(t *testing.T) {
+// TestVerifyLeavesNoThrowawayWorktree is acceptance criterion (c): no
+// worktree Verify cut under a temp dir survives the call — checkout dir and
+// git admin entry both gone.
+//
+// ‡ The one worktree that DOES survive is the repo's reused verify tree under
+// the git common dir; that is loto-moqi's point, and verifytree_test.go is its
+// spec. What must never survive is a THROWAWAY: those live under
+// os.MkdirTemp's "loto-verify-<random>" parent, which the reused tree's own
+// path ("loto-verify/wt", no hyphen) cannot be confused with.
+func TestVerifyLeavesNoThrowawayWorktree(t *testing.T) {
 	repoTop, base := newBaseRepo(t)
-	list := func() string { return gitT(t, repoTop, "worktree", "list", "--porcelain") }
 
-	before := list()
 	if _, err := Verify(context.Background(), repoTop, base, []string{"sh", "-c", "exit 0"}); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
-	after := list()
+	after := gitT(t, repoTop, "worktree", "list", "--porcelain")
 
-	if after != before {
-		t.Errorf("worktree set changed; ephemeral worktree not removed.\nbefore:\n%s\nafter:\n%s", before, after)
-	}
-	if strings.Contains(after, "loto-verify") {
-		t.Errorf("an ephemeral verify worktree survived:\n%s", after)
+	if strings.Contains(after, "loto-verify-") {
+		t.Errorf("a throwaway verify worktree survived:\n%s", after)
 	}
 }
 

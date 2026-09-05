@@ -147,9 +147,14 @@ const (
 	// same box, load average 28–37 from nine concurrent agent sessions).
 	// Batches of two cost 3.7–5.8s for ONE verify, the same per-verify range
 	// as a batch of one — the measured form of the paragraph above. So the
-	// budget miss is in the verify harness, and the fix is a cheaper cut
-	// (a reused worktree), NOT a bigger batch: raising MaxBatch would leave
-	// one verify exactly as slow and make the red-batch fallback's n+1 worse.
+	// budget miss was in the verify harness, and the fix was a cheaper cut,
+	// NOT a bigger batch: raising MaxBatch would have left one verify exactly
+	// as slow and made the red-batch fallback's n+1 worse.
+	//
+	// ‡ That cut is now paid once per repo, not once per verify: lane.Verify
+	// reuses one detached worktree under the git common dir (loto-moqi). The
+	// reasoning above is unchanged by it — batching still reduces the number
+	// of verifies and never the latency of one.
 	defaultMaxRounds = 4
 )
 
