@@ -21,6 +21,15 @@ func TestPrefixOverlaps(t *testing.T) {
 		{tcStorePrefix, "internal/render", false, "disjoint"},
 		{"pkg/a", "pkg/a/deep", true, "deep-ancestor"},
 		{"a", "a/b/c", true, "multi-segment-ancestor"},
+		// sd-isv2: the repo root covers everything, and the loop below asserts
+		// each pair in both directions, so these also pin the symmetry.
+		// ‡ Every one of these is false under the three original arms — a
+		// canonical path never starts "./", and HasPrefix(".", b+"/") never
+		// holds — so they go red against a root claim that has no overlap arm.
+		{".", ".", true, "root-eq"},
+		{".", tcStorePrefix, true, "root-covers-nested"},
+		{".", "a", true, "root-covers-top-level"},
+		{".", "pkg/a/b/c", true, "root-covers-deep"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -71,6 +80,11 @@ func TestClaimCoversTarget(t *testing.T) {
 		{"non-overlapping-sibling", ClaimRecord{PathPrefix: tcStorePrefix, OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, "internal/storefront/file.go", false},
 		{"exact-prefix-match", ClaimRecord{PathPrefix: tcStorePrefix, OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix, true},
 		{"strict-ancestor-deep", ClaimRecord{PathPrefix: "pkg", OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, "pkg/a/b/c/deep.go", true},
+		// sd-isv2: a takeover's root claim is what a peer's ref-mutating git
+		// has to consult. These are the rows the gate reads.
+		{"foreign-root-claim-covers-anything", ClaimRecord{PathPrefix: ".", OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix + "/file.go", true},
+		{"own-root-claim-does-not-block-me", ClaimRecord{PathPrefix: ".", OwnerUUID: myUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix + "/file.go", false},
+		{"expired-root-claim", ClaimRecord{PathPrefix: ".", OwnerUUID: foeUUID, ExpiresAt: now.Add(-time.Hour)}, tcStorePrefix + "/file.go", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

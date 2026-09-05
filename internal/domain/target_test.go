@@ -68,6 +68,10 @@ func TestCanonicalizePrefix(t *testing.T) {
 		{"internal/store//", tcStorePrefix},
 		{"./internal/store", tcStorePrefix},
 		{"a//b", "a/b"},
+		// sd-isv2: the repo root is the widest claim prefix. Both spellings
+		// canonicalize to "." rather than being refused.
+		{".", "."},
+		{"./", "."},
 	}
 	for _, c := range cases {
 		got, err := CanonicalizePrefix(c.in)
@@ -91,13 +95,52 @@ func TestCanonicalizePrefixRejections(t *testing.T) {
 		{`a\b`, ErrTargetBackslash},
 		{"../escape", ErrRepoEscape},
 		{"/abs/path", ErrRepoEscape},
-		{".", ErrTargetIsRepoRoot},
-		{"./", ErrTargetIsRepoRoot},
+		// sd-isv2: "." and "./" moved to TestCanonicalizePrefix — the root is a
+		// legal claim prefix now. `lock` still refuses it; that is pinned by
+		// TestCanonicalizeRejectsRepoRootForLockVerb below, so the divergence
+		// between the two verbs is asserted rather than assumed.
+		//
+		// ‡ The spelling whose ONLY fault is being the root is what the rescue
+		// arm accepts. A token that Cleans to "." but fails an earlier rule
+		// must still be refused by that rule, or the arm has widened the
+		// shellMeta check it sits behind.
+		{"$X/..", ErrTargetUnspellable},
+		{"a/../*", ErrTargetIsGlob},
 	}
 	for _, c := range cases {
 		_, err := CanonicalizePrefix(c.in)
 		if !errors.Is(err, c.wantErr) {
 			t.Errorf("CanonicalizePrefix(%q) err=%v; want %v", c.in, err, c.wantErr)
+		}
+	}
+}
+
+// sd-isv2: `claim` accepts the repo root and `lock` refuses it. That is the one
+// place the two verbs' spelling rules diverge on purpose, so it is asserted
+// from BOTH sides in one test — a later change that relaxes Canonicalize to
+// match CanonicalizePrefix would leave every other test in this file green.
+// ‡ The two root spellings refuse for DIFFERENT reasons on the lock side, and
+// both are named rather than collapsed into "returns some error". "./" carries
+// a trailing slash, and that check runs before the repo-root one, so it is
+// ErrTargetIsDir; only bare "." reaches ErrTargetIsRepoRoot. An assertion that
+// accepted any error here would still pass if a later change made `lock .`
+// fail for an unrelated reason — and would have hidden that CanonicalizePrefix
+// is trimming the slash before the two verbs diverge, which is the mechanism
+// this test exists to pin.
+func TestCanonicalizeRejectsRepoRootForLockVerb(t *testing.T) {
+	cases := []struct {
+		in      string
+		wantErr error
+	}{
+		{".", ErrTargetIsRepoRoot},
+		{"./", ErrTargetIsDir},
+	}
+	for _, c := range cases {
+		if _, err := Canonicalize(c.in); !errors.Is(err, c.wantErr) {
+			t.Errorf("Canonicalize(%q) err=%v; want %v — a lock names a write-set, and the whole repo is not one", c.in, err, c.wantErr)
+		}
+		if got, err := CanonicalizePrefix(c.in); err != nil || got.Canonical != "." {
+			t.Errorf("CanonicalizePrefix(%q) = %+v, err=%v; want canonical=\".\", nil — claim territory may be the root", c.in, got, err)
 		}
 	}
 }

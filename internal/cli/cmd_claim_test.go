@@ -28,7 +28,10 @@ func TestClaimCmdUsageErrors(t *testing.T) {
 		{"missing-intent", []string{tcCmdClaim, tcPrefixStore}},
 		{"two-prefixes", []string{tcCmdClaim, tcPrefixStore, tcPrefixParent, "-t", tcIntentTest}},
 		{"glob", []string{tcCmdClaim, "internal/*", "-t", tcIntentTest}},
-		{"repo-root", []string{tcCmdClaim, ".", "-t", tcIntentTest}},
+		// sd-isv2: "repo-root" was a usage error here. `claim .` is legal now —
+		// the root is the widest territory and a takeover of a shared checkout
+		// reserves exactly it. The accept path, and the fact that `lock .` is
+		// still refused, are TestClaimCmdRepoRootIsTheWidestPrefix below.
 		{"unclaim-no-args", []string{tcCmdUnclaim}},
 		{"zero-ttl", []string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest, "--ttl", "0"}},
 		{"negative-ttl", []string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest, "--ttl", "-1h"}},
@@ -136,5 +139,41 @@ func TestClaimCmdBlockedNamesHolder(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), tcClaimNotOwner) || !strings.Contains(out.String(), "owner=") {
 		t.Errorf("not-owner row must name owner: %q", out.String())
+	}
+}
+
+// sd-isv2: a takeover of a shared checkout reserves the whole repo, so `claim .`
+// is legal and blocks every other claimant. Three things are asserted together
+// because any one of them alone can pass while the feature is useless:
+// acceptance without coverage is a claim that reserves nothing (the exact
+// failure PrefixOverlaps' root arm exists to prevent), and coverage without
+// `lock .` still refusing would mean the two verbs' rules had been collapsed.
+func TestClaimCmdRepoRootIsTheWidestPrefix(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t) // agent A — the takeover
+	var out, errBuf bytes.Buffer
+	if code := Run([]string{tcCmdClaim, ".", "-t", tcIntentTest}, &out, &errBuf); code != 0 {
+		t.Fatalf("claim . exit=%d; want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✓ claimed count=1") || !strings.Contains(out.String(), "prefix=.") {
+		t.Errorf("claim . output: %q", out.String())
+	}
+
+	pinAgent(t) // agent B — a peer that must now be refused anywhere in the tree
+	out.Reset()
+	errBuf.Reset()
+	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest}, &out, &errBuf); code != 1 {
+		t.Fatalf("peer claim under a root claim exit=%d; want 1; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✗ blocked count=1") || !strings.Contains(out.String(), "blocker=") {
+		t.Errorf("a root claim must block a nested claim and name the holder: %q", out.String())
+	}
+
+	// The divergence, from the CLI side: `lock` is a write-set verb and the
+	// whole repo is not a write-set.
+	out.Reset()
+	errBuf.Reset()
+	if code := Run([]string{tcCmdLock, ".", "-t", tcIntentTest}, &out, &errBuf); code != 2 {
+		t.Errorf("lock . exit=%d; want 2 (invalid target); out=%q err=%q", code, out.String(), errBuf.String())
 	}
 }
