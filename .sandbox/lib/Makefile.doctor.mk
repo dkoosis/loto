@@ -1,4 +1,3 @@
-# go-sandbox v0.2.0 synced 2026-04-05
 # go-sandbox Makefile.doctor.mk — includable doctor target
 # Include from consuming project: include .sandbox/lib/Makefile.doctor.mk
 

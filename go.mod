@@ -11,7 +11,7 @@ require (
 )
 
 require (
-	github.com/dkoosis/conform v0.2.0 // indirect
+	github.com/dkoosis/conform v0.2.1-0.20260903165921-1ae916b6be54 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/renameio/v2 v2.0.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect

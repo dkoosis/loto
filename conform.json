@@ -1,6 +1,0 @@
-{
-  "profile": "tool",
-  "exceptions": [
-    {"rule": "no-git-ops", "reason": "loto never performs git operations by design; declared exception, never fix (sd-th5.15 — .githooks are delegating wrappers that call `bd hooks run` directly, phase-0.2 shape; conform's textual bd-hooks/review-gate check doesn't follow delegation yet)"}
-  ]
-}
