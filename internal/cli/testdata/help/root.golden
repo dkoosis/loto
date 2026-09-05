@@ -23,4 +23,5 @@ lane choreography (engine verbs; used by the /team fleet harness):
   beacon   Mint a short-TTL shared lease on paths this agent is about to write (PreToolUse gate)
   submit   Package held-lock edits into a git-gate candidate: commit, capture, admit
   gate     stats — admission verdicts per rejection class over a window
+  promote  Drain accepted candidates onto refs/loto/integration; verify runs unlocked
   pr       Bridge promoted integration commits to GitHub: one branch and one PR per bead

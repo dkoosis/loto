@@ -92,6 +92,42 @@ type CandidateOutcome struct {
 type PromoteResult struct {
 	Integration string
 	Outcomes    []CandidateOutcome
+	// Verifies is one entry per phase-2 verify, in the order they ran.
+	Verifies []VerifyRun
+}
+
+// VerifyRun is one phase-2 verify: which batch it judged, how many candidates
+// rode in it, and how long lane.Verify itself took.
+//
+// ‡ Per-run, never summed. The loto-ovno.1 budget (p50 ≤ 1.5s, p95 ≤ 3s) is
+// stated over ONE verify, and batching changes how many of these there are,
+// never how long one takes — so a caller grading the budget reads Duration
+// per entry and never a total across the call.
+type VerifyRun struct {
+	BatchID    string
+	Candidates int
+	Duration   time.Duration
+	Passed     bool
+	// Infra marks a verify that could not reach a verdict. Its Duration is
+	// wall time spent, not a measurement of the invariant command, and grading
+	// the budget must skip it.
+	Infra bool
+}
+
+// timedVerify runs the phase-2 verify and records how long it took. The one
+// place lane.Verify is called from promotion, so no path can land a verify
+// that the result does not account for.
+func timedVerify(ctx context.Context, p PromoteParams, b *batch, rec *[]VerifyRun) (lane.VerifyResult, error) {
+	start := time.Now()
+	vr, err := lane.Verify(ctx, p.RepoTop, b.chainTip, p.VerifyCmd)
+	*rec = append(*rec, VerifyRun{
+		BatchID:    b.id,
+		Candidates: len(b.members),
+		Duration:   time.Since(start),
+		Passed:     err == nil && vr.Passed,
+		Infra:      err != nil,
+	})
+	return vr, err
 }
 
 const (
@@ -101,6 +137,19 @@ const (
 	// reduces the NUMBER of verifies, never the latency of one — the
 	// loto-ovno.1 budget is per-verify and amortization is not compliance
 	// with it.
+	//
+	// ‡ Both values STAND on a measurement, 2026-09-05 (loto-3is6). 22
+	// single-candidate promotions driven through `loto promote` on a scratch
+	// clone of this repo, invariant command `true`: p50 2.32s, p95 3.96s per
+	// phase-2 verify — already over the budget with a command that does
+	// nothing. The whole cost is lane.Verify's `git worktree add --detach` +
+	// `worktree remove` on a 327-file tree (add alone measured 3.0–7.1s on the
+	// same box, load average 28–37 from nine concurrent agent sessions).
+	// Batches of two cost 3.7–5.8s for ONE verify, the same per-verify range
+	// as a batch of one — the measured form of the paragraph above. So the
+	// budget miss is in the verify harness, and the fix is a cheaper cut
+	// (a reused worktree), NOT a bigger batch: raising MaxBatch would leave
+	// one verify exactly as slow and make the red-batch fallback's n+1 worse.
 	defaultMaxRounds = 4
 )
 
@@ -168,7 +217,7 @@ func Promote(ctx context.Context, p PromoteParams) (PromoteResult, error) {
 			break // nothing eligible; the queue is drained for now
 		}
 
-		done, stop, err := promoteVerifyAndCommit(ctx, p, batch)
+		done, stop, err := promoteVerifyAndCommit(ctx, p, batch, &res.Verifies)
 		res.Outcomes = append(res.Outcomes, done...)
 		if err != nil {
 			return finish(ctx, res, p), err
@@ -195,8 +244,8 @@ func finish(ctx context.Context, res PromoteResult, p PromoteParams) PromoteResu
 // the red-batch fallback. stop reports that the round loop should end
 // (infrastructure trouble, which is environmental and not worth a tight
 // retry).
-func promoteVerifyAndCommit(ctx context.Context, p PromoteParams, b *batch) (outcomes []CandidateOutcome, stop bool, err error) {
-	vr, verr := lane.Verify(ctx, p.RepoTop, b.chainTip, p.VerifyCmd)
+func promoteVerifyAndCommit(ctx context.Context, p PromoteParams, b *batch, rec *[]VerifyRun) (outcomes []CandidateOutcome, stop bool, err error) {
+	vr, verr := timedVerify(ctx, p, b, rec)
 	if verr != nil {
 		// Could not reach a verdict. Release the claim, leave every candidate
 		// exactly as it was, and stop: infra failures do not improve on retry.
@@ -209,7 +258,7 @@ func promoteVerifyAndCommit(ctx context.Context, p PromoteParams, b *batch) (out
 		if derr := releaseBatch(ctx, p.RepoTop, b); derr != nil {
 			return nil, true, derr
 		}
-		return redBatchSweep(ctx, p, b)
+		return redBatchSweep(ctx, p, b, rec)
 	}
 
 	if promoteBeforePhase3Fn != nil {
@@ -239,11 +288,11 @@ func promoteVerifyAndCommit(ctx context.Context, p PromoteParams, b *batch) (out
 // of attributing a red to exactly one candidate instead of punishing the batch
 // — and a candidate that is red on its own must be rejected, or it wedges
 // every future promotion behind it.
-func redBatchSweep(ctx context.Context, p PromoteParams, red *batch) (outcomes []CandidateOutcome, stop bool, err error) {
+func redBatchSweep(ctx context.Context, p PromoteParams, red *batch, rec *[]VerifyRun) (outcomes []CandidateOutcome, stop bool, err error) {
 	solo := p
 	solo.MaxBatch = 1
 	for i := range red.members {
-		outs, stop, err := promoteSolo(ctx, p, solo, red.members[i].candidateID)
+		outs, stop, err := promoteSolo(ctx, p, solo, red.members[i].candidateID, rec)
 		outcomes = append(outcomes, outs...)
 		if err != nil || stop {
 			return outcomes, true, err
@@ -255,7 +304,7 @@ func redBatchSweep(ctx context.Context, p PromoteParams, red *batch) (outcomes [
 // promoteSolo runs the full three-phase flow for one candidate on a fresh
 // snapshot. stop reports that the sweep should abandon the remaining
 // candidates — infrastructure trouble is environmental, not per-candidate.
-func promoteSolo(ctx context.Context, p, solo PromoteParams, id string) (outcomes []CandidateOutcome, stop bool, err error) {
+func promoteSolo(ctx context.Context, p, solo PromoteParams, id string, rec *[]VerifyRun) (outcomes []CandidateOutcome, stop bool, err error) {
 	one, outs, perr := promotePhase1For(ctx, solo, id)
 	outcomes = append(outcomes, outs...)
 	if perr != nil {
@@ -264,7 +313,7 @@ func promoteSolo(ctx context.Context, p, solo PromoteParams, id string) (outcome
 	if one == nil {
 		return outcomes, false, nil // went stale or was taken while we verified
 	}
-	vr, verr := lane.Verify(ctx, p.RepoTop, one.chainTip, p.VerifyCmd)
+	vr, verr := timedVerify(ctx, p, one, rec)
 	if verr != nil {
 		if derr := releaseBatch(ctx, p.RepoTop, one); derr != nil {
 			return outcomes, true, derr
