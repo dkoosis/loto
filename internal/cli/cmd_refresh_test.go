@@ -2,13 +2,43 @@ package cli
 
 import (
 	"bytes"
+	"database/sql"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
+
+// forceLockExpiry rewrites ownerUUID's lease to an already-past expires_at,
+// directly in the sqlite file withTempProject pointed LOTO_BASE at — the same
+// direct-UPDATE trick internal/store's own tests use to exercise TTL-expiry
+// logic without a real time.Sleep (e.g. locks_beacon_test.go). Sound here
+// because expiry only ever compares the stored expires_at against a fresh
+// time.Now(); a row that already says "lapsed" is indistinguishable from one
+// that lapsed by waiting out its TTL. Call it between two Run() calls — the
+// CLI opens and closes its own store connection per invocation, so nothing
+// else holds the file open while this direct connection does its update.
+func forceLockExpiry(t *testing.T, ownerUUID string) {
+	t.Helper()
+	base := os.Getenv("LOTO_BASE")
+	if base == "" {
+		t.Fatal("forceLockExpiry: LOTO_BASE not set — call after withTempProject")
+	}
+	db, err := sql.Open("sqlite", filepath.Join(base, "loto.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("forceLockExpiry: open store db directly: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE locks SET expires_at = ? WHERE owner_uuid = ?`,
+		time.Now().Add(-time.Minute).UnixNano(), ownerUUID); err != nil {
+		t.Fatalf("forceLockExpiry: update: %v", err)
+	}
+}
 
 // TestAcceptance_ExpiredLeaseFreesTerritoryWithoutDoctor is ccp-z1vj.6's
 // expiry half: alice locks with a short TTL and never comes back (crashed
@@ -21,19 +51,10 @@ func TestAcceptance_ExpiredLeaseFreesTerritoryWithoutDoctor(t *testing.T) {
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
 	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
-	// The margin is sized for a loaded serial CI runner: the pre-expiry block
-	// check below must land inside the lease, and each Run opens+migrates the
-	// store. The sleep runs to the deadline, so a wider margin costs wall time
-	// only when the Runs finish fast.
 	const ttl = 10 * time.Second
 	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, "crash me", tcFlagTTL, ttl.String()}, io.Discard, io.Discard); code != 0 {
 		t.Fatal("alice lock failed")
 	}
-	// Deadline taken AFTER the acquire: the row's expires_at is now+ttl as of a
-	// moment inside that Run, so a deadline read here is at or past the real
-	// one. Taken before, slow setup would put the true expiry beyond the sleep
-	// and bob would still be blocked when the test expects him through.
-	deadline := time.Now().Add(ttl)
 
 	// Peer is blocked while the lease is live.
 	t.Setenv("LOTO_AGENT_ID", bob.UUID)
@@ -42,7 +63,9 @@ func TestAcceptance_ExpiredLeaseFreesTerritoryWithoutDoctor(t *testing.T) {
 		t.Fatalf("bob must be blocked pre-expiry, got %d: %s", code, out.String())
 	}
 
-	time.Sleep(time.Until(deadline) + 200*time.Millisecond) // outlive alice's lease
+	// Age alice's lease out in place instead of sleeping past a real 10s TTL —
+	// see forceLockExpiry.
+	forceLockExpiry(t, alice.UUID)
 
 	out.Reset()
 	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, tcIntentWrite}, &out, io.Discard); code != 0 {

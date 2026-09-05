@@ -3,6 +3,8 @@ package cli
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -35,9 +37,57 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "TestMain: set fallback HOME:", err)
 		os.Exit(1)
 	}
+	template, err := os.MkdirTemp("", "loto-cli-git-template-*")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain: mkdir git template:", err)
+		os.Exit(1)
+	}
+	if err := buildGitRepoTemplate(template); err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain: build git template:", err)
+		os.Exit(1)
+	}
+	gitRepoTemplateDir = template
+
 	code := m.Run()
 	_ = os.RemoveAll(fallback) // best-effort; a leftover empty tmp dir is not the residue this bead is about
+	_ = os.RemoveAll(template)
 	os.Exit(code)
+}
+
+// gitRepoTemplateDir holds a `.git` directory built ONCE per test binary run
+// (below) with the exact init+config sequence initBareGitRepo used to run
+// per-test: `git init -q`, `git config user.email`, `git config user.name`.
+// initBareGitRepo (cmd_lock_test.go) now copies this template's `.git` tree
+// into each test's fresh repo dir instead of re-running those three git
+// subprocesses per test. loto-a0fs measured the per-test cost as git-exec
+// overhead, not compute (~300ms/exec under load) — 200+ call sites each
+// spawning 3 processes was the bulk of internal/cli's wall time. A filesystem
+// copy produces an identical `.git` tree with zero subprocess spawns.
+var gitRepoTemplateDir string
+
+// buildGitRepoTemplate runs the one real `git init` + config sequence that
+// every withTempProject/initBareGitRepo caller used to run for itself. dir
+// must be empty; on return dir/.git is a ready-to-copy template.
+func buildGitRepoTemplate(dir string) error {
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "t@example.com"},
+		{"config", "user.name", "T"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git %v: %w\n%s", args, err, out)
+		}
+	}
+	return nil
+}
+
+// copyGitTemplate copies gitRepoTemplateDir's `.git` tree into dir/.git. Used
+// by initBareGitRepo (cmd_lock_test.go) in place of the git subprocess
+// sequence buildGitRepoTemplate ran once above.
+func copyGitTemplate(dir string) error {
+	return os.CopyFS(filepath.Join(dir, ".git"), os.DirFS(filepath.Join(gitRepoTemplateDir, ".git")))
 }
 
 // TestHomeGuardCanary_HomeIsNeverTheRealOne is the regression test for
