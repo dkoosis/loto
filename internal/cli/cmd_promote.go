@@ -82,12 +82,15 @@ func cmdPromote(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintln(stderr, "✗ --max-batch and --max-rounds must be >= 0 (0 keeps the gate default)")
 		return 2
 	}
+	// No manual "--" strip: with no positional arg ahead of the command,
+	// flag.Parse's own terminator handling already consumes loto's separator
+	// (flag.go: parseOne treats a bare "--" as the end-of-flags marker and
+	// drops it from Args() itself). Stripping again here was eating the
+	// wrapped command's own leading "--" when its first arg happened to be
+	// one (loto-aq8x) — cmd_verify.go does need its strip: a commit-ish
+	// precedes its command, so flag.Parse stops at that non-flag token before
+	// ever reaching a "--" and never consumes one.
 	verify := fs.Args()
-	// Drop an optional "--" separator between the flags and the command, φ
-	// cmd_verify.go.
-	if len(verify) > 0 && verify[0] == "--" {
-		verify = verify[1:]
-	}
 	if !o.dryRun && len(verify) == 0 {
 		fmt.Fprintln(stderr, "✗ verify command required: loto promote -- <cmd> [args...]")
 		return 2
