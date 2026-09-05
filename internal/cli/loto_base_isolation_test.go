@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -49,11 +48,7 @@ func TestLotoBaseIsolatesRealHomeState(t *testing.T) {
 
 	repo := t.TempDir()
 	initBareGitRepo(t, repo)
-	cmd := exec.Command("git", "remote", "add", "origin", "git@github.com:test/sd-kx5.git")
-	cmd.Dir = repo
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v\n%s", err, out)
-	}
+	addOriginRemote(t, repo, "git@github.com:test/sd-kx5.git")
 	t.Chdir(repo)
 	target := "a.txt"
 	if err := os.WriteFile(filepath.Join(repo, target), nil, 0o644); err != nil {
