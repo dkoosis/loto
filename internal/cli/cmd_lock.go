@@ -188,8 +188,9 @@ func validateLockTargets(args []string, repoTop string, allowMissing bool) ([]do
 	var invalid []render.InvalidTarget
 	// Every token here is caller-typed, so one syscall serves the whole batch.
 	base := callerBase()
+	cc := newCaseCache()
 	for _, raw := range args {
-		t, err := resolveCLITarget(base, repoTop, raw)
+		t, err := resolveCLITarget(cc, base, repoTop, raw)
 		if err != nil {
 			invalid = append(invalid, render.InvalidTarget{Path: raw, Reason: classifyCanonicalizeErr(err)})
 			continue

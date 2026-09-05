@@ -134,7 +134,7 @@ func TestResolveCLITarget_RelativeTokenUsesCallerBase(t *testing.T) {
 	top := evalTop(t, t.TempDir())
 	base := filepath.Join(top, "internal", "store")
 
-	got, err := resolveCLITarget(base, top, "locks.go")
+	got, err := resolveCLITarget(nil, base, top, "locks.go")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestResolveCLITarget_RepoRootBaseUnchanged(t *testing.T) {
 		{tcStoreStoreGo, tcStoreStoreGo},
 		{"./" + tcTargetA, tcTargetA},
 	} {
-		got, err := resolveCLITarget(top, top, tc.raw)
+		got, err := resolveCLITarget(nil, top, top, tc.raw)
 		if err != nil {
 			t.Errorf("%q: %v", tc.raw, err)
 			continue
@@ -176,7 +176,7 @@ func TestResolveCLITarget_StagedBaseIsRepoTop(t *testing.T) {
 	}
 	t.Chdir(sub)
 
-	got, err := resolveCLITarget(top, top, tcStoreStoreGo)
+	got, err := resolveCLITarget(nil, top, top, tcStoreStoreGo)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestResolveCLITarget_SpellingVerdictsSurviveTheJoin(t *testing.T) {
 		{"a*.go", domain.ErrTargetIsGlob},
 		{"sub/", domain.ErrTargetIsDir},
 	} {
-		_, err := resolveCLITarget(base, top, tc.raw)
+		_, err := resolveCLITarget(nil, base, top, tc.raw)
 		if !errors.Is(err, tc.want) {
 			t.Errorf("%q: err = %v, want %v", tc.raw, err, tc.want)
 		}
@@ -228,7 +228,7 @@ func TestResolveCLITarget_PositionalVerdictsRebasedOnCallerCwd(t *testing.T) {
 		{name: "sibling package resolves", base: store, raw: "../cli/paths.go", want: "internal/cli/paths.go"},
 		{name: "deep escape still escapes", base: store, raw: "../../../../etc/passwd", wantErr: domain.ErrRepoEscape},
 	} {
-		got, err := resolveCLITarget(tc.base, top, tc.raw)
+		got, err := resolveCLITarget(nil, tc.base, top, tc.raw)
 		if tc.wantErr != nil {
 			if !errors.Is(err, tc.wantErr) {
 				t.Errorf("%s: err = %v, want %v", tc.name, err, tc.wantErr)
@@ -249,7 +249,7 @@ func TestResolveCLITarget_PositionalVerdictsRebasedOnCallerCwd(t *testing.T) {
 // no repo-relative frame, so the resolver must behave exactly as it did before.
 func TestResolveCLITarget_NoRepoTopUnchanged(t *testing.T) {
 	for _, raw := range []string{tcTargetA, "sub/" + tcTargetA, "", "a*.go"} {
-		got, gotErr := resolveCLITarget(t.TempDir(), "", raw)
+		got, gotErr := resolveCLITarget(nil, t.TempDir(), "", raw)
 		want, wantErr := domain.Canonicalize(raw)
 		if got != want || (gotErr == nil) != (wantErr == nil) {
 			t.Errorf("%q: got (%+v, %v), want (%+v, %v)", raw, got, gotErr, want, wantErr)
@@ -264,14 +264,14 @@ func TestResolveCLITarget_NoRepoTopUnchanged(t *testing.T) {
 func TestResolveCLITarget_EmptyBaseRefusesRelative(t *testing.T) {
 	top := evalTop(t, t.TempDir())
 
-	_, err := resolveCLITarget("", top, tcTargetA)
+	_, err := resolveCLITarget(nil, "", top, tcTargetA)
 	if !errors.Is(err, errCallerCWDUnknown) {
 		t.Fatalf("err = %v, want errCallerCWDUnknown", err)
 	}
 	if got := classifyCanonicalizeErr(err); got != "relative-path-caller-cwd-unknown" {
 		t.Errorf("reason = %q, want relative-path-caller-cwd-unknown", got)
 	}
-	got, err := resolveCLITarget("", top, filepath.Join(top, tcTargetA))
+	got, err := resolveCLITarget(nil, "", top, filepath.Join(top, tcTargetA))
 	if err != nil {
 		t.Fatalf("absolute token with no base: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestResolveCLITarget_RelativeLeafSymlinkStillRefused(t *testing.T) {
 	if err := os.Symlink(filepath.Join(top, tcTargetA), filepath.Join(top, tcTargetSym)); err != nil {
 		t.Fatal(err)
 	}
-	got, err := resolveCLITarget(top, top, tcTargetSym)
+	got, err := resolveCLITarget(nil, top, top, tcTargetSym)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -319,11 +319,11 @@ func TestResolveCLITarget_SymlinkedAncestorConverges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	viaLink, err := resolveCLITarget(top, top, "link/"+tcTargetA)
+	viaLink, err := resolveCLITarget(nil, top, top, "link/"+tcTargetA)
 	if err != nil {
 		t.Fatalf("via link: %v", err)
 	}
-	viaReal, err := resolveCLITarget(top, top, "real/"+tcTargetA)
+	viaReal, err := resolveCLITarget(nil, top, top, "real/"+tcTargetA)
 	if err != nil {
 		t.Fatalf("via real: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestResolveCLITarget_DeepMissingLeafUnderSymlinkedAncestor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := resolveCLITarget(top, top, "link/pkg/brand-new.go")
+	got, err := resolveCLITarget(nil, top, top, "link/pkg/brand-new.go")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestResolveCLITarget_SymlinkedAncestorOutOfRepoEscapes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := resolveCLITarget(top, top, "escape/"+tcTargetA); !errors.Is(err, domain.ErrRepoEscape) {
+	if _, err := resolveCLITarget(nil, top, top, "escape/"+tcTargetA); !errors.Is(err, domain.ErrRepoEscape) {
 		t.Errorf("err = %v, want ErrRepoEscape", err)
 	}
 }

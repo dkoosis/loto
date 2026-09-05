@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/dkoosis/atomicfile"
@@ -225,7 +226,19 @@ func callerBase() string {
 // The caller declares; loto must not sniff. Making the base a parameter is what
 // keeps `check --staged` (git-produced, already repo-root-relative) from being
 // re-based onto the cwd.
-func resolveCLITarget(base, repoTop, raw string) (domain.Target, error) {
+// cc may be nil; a batch of targets shares one so each directory is read once.
+func resolveCLITarget(cc *caseCache, base, repoTop, raw string) (domain.Target, error) {
+	t, err := canonicalizeCLIToken(base, repoTop, raw)
+	if err != nil {
+		return domain.Target{}, err
+	}
+	t.Canonical = resolveDiskCase(cc, repoTop, t.Canonical)
+	return t, nil
+}
+
+// canonicalizeCLIToken is resolveCLITarget's path translation, before the
+// case fold. Split out so the fold applies to every return path.
+func canonicalizeCLIToken(base, repoTop, raw string) (domain.Target, error) {
 	if repoTop == "" || filepath.IsAbs(raw) {
 		// No repo frame, or a token that carries its own base: today's path.
 		return domain.Canonicalize(normalizeRepoPath(raw, repoTop))
@@ -413,24 +426,207 @@ func foldContains(parent, child string) (string, bool) {
 	return child[len(parent)+1:], true
 }
 
+// resolveDiskCase rewrites a repo-relative POSIX path to the spelling the
+// filesystem actually records, so two agents typing internal/store/x.go and
+// internal/Store/x.go mint ONE lock key (loto-f8m8).
+//
+// ‡ The bug this closes: every conflict decision — lock overlap, claim prefix
+// overlap, `check --gate` admission — is a byte comparison over
+// Target.Canonical (domain.SameCanonical, domain.PrefixOverlaps). On APFS or
+// NTFS the two spellings above are one inode and were two keys, so no overlap
+// was detected and both agents were granted the same file. Folding at the
+// domain comparisons was rejected: the canonical string is also the SQL key
+// for every lock, claim and violation row, so the fix has to converge the key
+// itself, once, at the CLI boundary.
+//
+// Guarded on caseInsensitiveFS, so on a case-sensitive filesystem — where a.go
+// and A.go are genuinely two files — nothing changes.
+//
+// Segments below the deepest one that exists keep the caller's casing: a
+// `beacon` names a file that does not exist yet, and disk has no truth to
+// offer about it. Directory case, the realistic divergence, still converges.
+func resolveDiskCase(cc *caseCache, repoTop, rel string) string {
+	if repoTop == "" || rel == "" || rel == "." || filepath.IsAbs(rel) {
+		return rel
+	}
+	if !cc.foldsAt(repoTop) {
+		return rel
+	}
+	segs := strings.Split(rel, "/")
+	dir := repoTop
+	for i, seg := range segs {
+		if seg == "" || seg == "." || seg == ".." {
+			return rel // not a shape this walk can reason about
+		}
+		onDisk, ok := lookupEntryFold(cc, dir, seg)
+		if !ok {
+			break // nothing below this point exists; keep the typed tail
+		}
+		segs[i] = onDisk
+		dir = filepath.Join(dir, onDisk)
+	}
+	return strings.Join(segs, "/")
+}
+
+// caseCache memoizes the two filesystem questions resolveDiskCase asks, for the
+// life of one command's target batch. A nil *caseCache is legal and answers
+// every question from disk — the single-target verbs pass nil.
+//
+// ‡ Without it the walk is quadratic (loto-f8m8, codex review on #306): every
+// target re-read every directory on its path, so `check --staged` over N files
+// in one N-entry directory did N ReadDirs of N entries. Measured on APFS, 300
+// targets in a 300-entry directory: 71ms uncached.
+//
+// Scoped to a batch rather than the process because the cache must not outlive
+// the moment it describes — `loto lane` creates files between batches, and the
+// package's own tests mkdir mid-test.
+type caseCache struct {
+	folds map[string]bool     // dir → its filesystem folds case
+	dirs  map[string][]string // dir → entry names, nil when unreadable
+}
+
+func newCaseCache() *caseCache {
+	return &caseCache{folds: map[string]bool{}, dirs: map[string][]string{}}
+}
+
+// foldsAt is caseInsensitiveFS memoized per directory.
+func (c *caseCache) foldsAt(dir string) bool {
+	if c == nil {
+		return caseInsensitiveFS(dir)
+	}
+	if v, ok := c.folds[dir]; ok {
+		return v
+	}
+	v := caseInsensitiveFS(dir)
+	c.folds[dir] = v
+	return v
+}
+
+// entryNames returns dir's entry names, reading dir at most once per cache. ok
+// is false when dir cannot be read.
+func (c *caseCache) entryNames(dir string) ([]string, bool) {
+	if c != nil {
+		if v, cached := c.dirs[dir]; cached {
+			return v, v != nil
+		}
+	}
+	var names []string
+	if ents, err := os.ReadDir(dir); err == nil {
+		names = make([]string, len(ents))
+		for i := range ents {
+			names[i] = ents[i].Name()
+		}
+	}
+	if c != nil {
+		c.dirs[dir] = names
+	}
+	return names, names != nil
+}
+
+// lookupEntryFold returns the entry of dir whose name equals name ignoring
+// case. An exact match wins over a folded one — a case-sensitive filesystem
+// can hold both, and this must not rename a path that was already right.
+func lookupEntryFold(cc *caseCache, dir, name string) (string, bool) {
+	names, ok := cc.entryNames(dir)
+	if !ok {
+		return "", false
+	}
+	if slices.Contains(names, name) {
+		return name, true
+	}
+	for _, n := range names {
+		if strings.EqualFold(n, name) {
+			return n, true
+		}
+	}
+	return "", false
+}
+
 // caseInsensitiveFS reports whether dir resides on a case-insensitive filesystem
-// by checking that a case-flipped variant of dir resolves to the same inode. dir
-// must exist. Returns false (the conservative, case-sensitive assumption) on any
-// error or when dir's basename has no ASCII letter to flip.
+// by checking that a case-flipped variant of some existing path resolves to the
+// same inode. dir must exist. Returns false — the conservative, case-sensitive
+// assumption — on any error, or when neither dir nor any entry inside it has an
+// ASCII letter to flip.
+//
+// ‡ dir's own basename is tried first, then an entry inside it (loto-f8m8).
+// Flipping only the basename silently answered "case-sensitive" for any
+// directory named without an ASCII letter — `/Users/dk/2026/proj`'s parent, a
+// numeric release dir, and every `t.TempDir()` in this package's own tests,
+// whose basenames are digits. That is the quiet-disable failure: the fold in
+// resolveDiskCase turns itself off and the case-variant bug returns with no
+// signal. Probing an entry inside dir stays on dir's own volume, so it cannot
+// answer for a different filesystem the way walking up to a parent could.
 func caseInsensitiveFS(dir string) bool {
-	fi, err := os.Stat(dir)
+	if ans, ok := probeFoldedPath(dir); ok {
+		return ans
+	}
+	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return false
 	}
-	flipped := flipBasenameCase(dir)
-	if flipped == dir {
-		return false
+	for i := range ents {
+		if ans, ok := probeFoldedPath(filepath.Join(dir, ents[i].Name())); ok {
+			return ans
+		}
+	}
+	return false
+}
+
+// probeFoldedPath stats path and its case-flipped twin, reporting whether they
+// are the same file. ok is false when path has no ASCII letter to flip or does
+// not exist — meaning this path answered nothing and the caller should try
+// another.
+func probeFoldedPath(path string) (answer, ok bool) {
+	flipped := flipBasenameCase(path)
+	if flipped == path {
+		return false, false
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false, false
 	}
 	ffi, err := os.Stat(flipped)
 	if err != nil {
+		// The flipped spelling does not resolve: a case-sensitive filesystem,
+		// which is a real answer, not a failure to probe.
+		return false, true
+	}
+	if !os.SameFile(fi, ffi) {
+		return false, true
+	}
+	// Two spellings, one inode — but that is also what an alias looks like: a
+	// case-variant symlink or hard link beside the real entry on a
+	// case-SENSITIVE filesystem (`/work/Repo -> repo`). A folding filesystem
+	// cannot hold both spellings as separate entries, so seeing both listed is
+	// proof the filesystem does not fold (loto-f8m8, codex review on #306).
+	// Without this the probe answers "folds", and resolveDiskCase then rewrites
+	// A.go to an existing a.go — `loto lock A.go` would lock a different file.
+	if bothSpellingsListed(path, flipped) {
+		return false, true
+	}
+	return true, true
+}
+
+// bothSpellingsListed reports whether a's and b's basenames both appear as
+// entries of their shared parent directory. False when the parent cannot be
+// read — an unreadable parent is no evidence either way, so the caller keeps
+// the SameFile answer.
+func bothSpellingsListed(a, b string) bool {
+	ents, err := os.ReadDir(filepath.Dir(a))
+	if err != nil {
 		return false
 	}
-	return os.SameFile(fi, ffi)
+	nameA, nameB := filepath.Base(a), filepath.Base(b)
+	var sawA, sawB bool
+	for i := range ents {
+		switch ents[i].Name() {
+		case nameA:
+			sawA = true
+		case nameB:
+			sawB = true
+		}
+	}
+	return sawA && sawB
 }
 
 // flipBasenameCase returns dir with the case of the first ASCII letter in its

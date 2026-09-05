@@ -215,8 +215,9 @@ func loadCheckTargets(ctx context.Context, repoTop string, staged bool, posArgs 
 func resolveCheckTargets(base, repoTop string, paths []string) ([]domain.Target, []checkInvalid) {
 	var targets []domain.Target
 	var invalid []checkInvalid
+	cc := newCaseCache()
 	for _, raw := range paths {
-		t, err := resolveCLITarget(base, repoTop, raw)
+		t, err := resolveCLITarget(cc, base, repoTop, raw)
 		if err != nil {
 			invalid = append(invalid, checkInvalid{Path: raw, Reason: classifyCanonicalizeErr(err)})
 			continue

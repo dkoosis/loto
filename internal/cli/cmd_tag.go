@@ -115,12 +115,12 @@ func cmdTag(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // caller reaching for `internal/store/**` has the right idea in the wrong
 // spelling.
 func resolveTagGround(repoTop, raw string, stderr io.Writer) (canonical string, prefixOnly bool, rc int) {
-	target, err := resolveCLITarget(callerBase(), repoTop, raw)
+	target, err := resolveCLITarget(nil, callerBase(), repoTop, raw)
 	if err == nil {
 		return target.Canonical, false, 0
 	}
 	if errors.Is(err, domain.ErrTargetIsDir) {
-		prefix, perr := resolveCLIPrefix(repoTop, raw)
+		prefix, perr := resolveCLIPrefix(nil, repoTop, raw)
 		if perr != nil {
 			fmt.Fprintf(stderr, "✗ %v\n", perr)
 			return "", false, 2
