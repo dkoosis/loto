@@ -148,6 +148,12 @@ var errSyncIntegrationChanged = errors.New("sync: integration changed during rep
 // Nil in production; tests use it to make the lease-acquire TOCTOU deterministic.
 var syncBeforeApplyFn func() //nolint:gochecknoglobals // production-nil concurrency test seam
 
+// syncBeforeDeleteFn fires after residue classification and the fast-forward,
+// immediately before the first deletion. Nil in production; tests use it to
+// open the classify→delete window deterministically and prove a peer's write
+// landing inside it is not deleted.
+var syncBeforeDeleteFn func() //nolint:gochecknoglobals // production-nil concurrency test seam
+
 // syncWriteFn indirects the temporary-file write so tests can force a short
 // write before publication.
 var syncWriteFn = func(f *os.File, data []byte) (int, error) { //nolint:gochecknoglobals // fault-injection seam
@@ -433,69 +439,98 @@ func syncApplyDecision(ctx context.Context, repoTop string, apply []syncDiff, sw
 	if applyErr != nil {
 		return applyErr
 	}
-	var deleteErr error
-	var lateSkips []syncConflict
-	out.Deleted, lateSkips, deleteErr = syncDeleteResidue(repoTop, deletable)
+	if syncBeforeDeleteFn != nil {
+		syncBeforeDeleteFn()
+	}
+	deleted, lateSkips, lateModified, deleteErr := syncDeleteResidue(ctx, repoTop, deletable)
+	out.Deleted = deleted
 	out.ResidueSkips = append(out.ResidueSkips, lateSkips...)
+	out.Modified = append(out.Modified, lateModified...)
 	sort.Slice(out.ResidueSkips, func(i, j int) bool { return out.ResidueSkips[i].Path < out.ResidueSkips[j].Path })
+	sort.Slice(out.Modified, func(i, j int) bool { return out.Modified[i].Path < out.Modified[j].Path })
 	return deleteErr
 }
 
-// syncClassifyResidue decides which attributed residue is still the rejected
-// candidate's own bytes, and is therefore deletable.
+// syncResidueState is what one probe of a residue path found.
+type syncResidueState int
+
+const (
+	// residueStateHashed: an ordinary file, and the probe's oid is its current
+	// content. Whether that content is still the candidate's is the CALLER's
+	// comparison — the probe reports what is there, it does not judge it.
+	residueStateHashed syncResidueState = iota
+	// residueStateVanished: nothing at the path any more. Someone got there
+	// first; there is nothing to delete and nothing to report as done.
+	residueStateVanished
+	// residueStateNotRegular: a directory or a symlink now stands there.
+	residueStateNotRegular
+)
+
+// probeResidue answers, for one path, the only question that authorizes a
+// deletion: is this still an ordinary file holding exactly the bytes the
+// rejected candidate wrote?
 //
-// Two gates, in this order:
+// ‡ Lstat FIRST, then hash, and both per file. Ordering: `git hash-object`
+// follows a symlink, so hashing first reads a live link's target and fails
+// outright on a dangling one. Granularity: a batched
+// `git hash-object --stdin-paths` exits 128 and takes the WHOLE sync down when
+// any one of its paths has vanished since the scan — a peer cleaning up its
+// own residue mid-run should cost that one path, not the fast-forward of every
+// other file in the tree. One process per residue file is affordable because
+// the residue set is bounded by what a rejection declared, unlike the
+// divergence scan's whole-tree manifest, which keeps the batch.
 //
-//  1. Lstat — the path must be an ordinary file. A directory or a symlink now
-//     standing where the candidate created a blob is not the thing this run
-//     was authorized to delete. Order matters: `git hash-object` FOLLOWS a
-//     symlink, so a dangling one would fail the whole run if hashing came
-//     first, and a live one would hash its target's bytes.
-//  2. Content — the file must still hash to the blob the rejection recorded.
-//
-// ‡ Gate 2 is the review's correction, and the asymmetry behind it is worth
-// stating: a fast-forward RESTORES a known-good state, so being wrong about it
-// costs an undo; a deletion restores nothing, so being wrong about it costs
-// the bytes. Same path, different content means a peer re-created that file
-// with their own work — the path matched, the file did not.
-func syncClassifyResidue(ctx context.Context, repoTop string, sweep []syncResidue) (deletable []syncResidue, skips []syncConflict, modified []syncResidueMismatch, err error) {
-	var hashable []syncResidue
-	for _, r := range sweep {
-		fi, statErr := os.Lstat(filepath.Join(repoTop, filepath.FromSlash(r.Path)))
-		switch {
-		case os.IsNotExist(statErr):
-			// Gone since the scan (a peer cleaned up, or the candidate's author
-			// did). Nothing to delete and nothing to report as done.
-			continue
-		case statErr != nil:
-			return nil, nil, nil, fmt.Errorf("lstat %s: %w", syncPathField(r.Path), statErr)
-		case !fi.Mode().IsRegular():
-			skips = append(skips, syncConflict{Path: r.Path, Reason: syncReasonResidueNotFile, Holder: r.CandidateID})
-			continue
-		}
-		hashable = append(hashable, r)
-	}
-	if len(hashable) == 0 {
-		return nil, skips, nil, nil
+// A hash failure is re-probed rather than trusted: if the file is gone by
+// then, the failure WAS the race and the path is simply vanished.
+func probeResidue(ctx context.Context, repoTop, path string) (oid string, state syncResidueState, err error) {
+	full := filepath.Join(repoTop, filepath.FromSlash(path))
+	fi, statErr := os.Lstat(full)
+	switch {
+	case os.IsNotExist(statErr):
+		return "", residueStateVanished, nil
+	case statErr != nil:
+		return "", residueStateVanished, fmt.Errorf("lstat %s: %w", syncPathField(path), statErr)
+	case !fi.Mode().IsRegular():
+		return "", residueStateNotRegular, nil
 	}
 
-	paths := make([]string, len(hashable))
-	for i, r := range hashable {
-		paths[i] = r.Path
-	}
-	// Same hasher the divergence scan uses, so "the bytes match" means exactly
-	// what it means everywhere else in this file, newline-bearing paths and all.
-	oids, err := batchHashObject(ctx, repoTop, paths)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	for _, r := range hashable {
-		found := oids[r.Path]
-		if found == r.Blob {
-			deletable = append(deletable, r)
-			continue
+	c, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+	oid, hashErr := hashExceptionalPath(c, repoTop, path)
+	if hashErr != nil {
+		if _, again := os.Lstat(full); os.IsNotExist(again) {
+			return "", residueStateVanished, nil
 		}
-		modified = append(modified, syncResidueMismatch{syncResidue: r, Found: found})
+		return "", residueStateVanished, hashErr
+	}
+	return oid, residueStateHashed, nil
+}
+
+// syncClassifyResidue decides which attributed residue is still the rejected
+// candidate's own bytes, and is therefore deletable. See probeResidue for the
+// two gates and why they run in that order, per file.
+//
+// ‡ The content gate is the review's correction, and the asymmetry behind it
+// is worth stating: a fast-forward RESTORES a known-good state, so being wrong
+// about it costs an undo; a deletion restores nothing, so being wrong about it
+// costs the bytes. Same path, different content means a peer re-created that
+// file with their own work — the path matched, the file did not.
+func syncClassifyResidue(ctx context.Context, repoTop string, sweep []syncResidue) (deletable []syncResidue, skips []syncConflict, modified []syncResidueMismatch, err error) {
+	for _, r := range sweep {
+		oid, state, probeErr := probeResidue(ctx, repoTop, r.Path)
+		if probeErr != nil {
+			return nil, nil, nil, probeErr
+		}
+		switch {
+		case state == residueStateVanished:
+			continue
+		case state == residueStateNotRegular:
+			skips = append(skips, syncConflict{Path: r.Path, Reason: syncReasonResidueNotFile, Holder: r.CandidateID})
+		case oid == r.Blob:
+			deletable = append(deletable, r)
+		default:
+			modified = append(modified, syncResidueMismatch{syncResidue: r, Found: oid})
+		}
 	}
 	sort.Slice(modified, func(i, j int) bool { return modified[i].Path < modified[j].Path })
 	return deletable, skips, modified, nil
@@ -529,32 +564,37 @@ func syncDecideResidue(residue []syncResidue, locks []domain.LockRecord, claims 
 // syncDeleteResidue removes the classified-deletable residue, in sorted order,
 // stopping at the first failure and returning what it had already removed.
 //
-// ‡ Lstat runs AGAIN here, immediately before each os.Remove, even though
-// syncClassifyResidue already checked. Classification hashes the whole batch
-// first, so there is a real window in which a path can turn into a symlink or
-// a directory, and os.Remove would happily unlink the symlink.
+// ‡ The FULL probe runs again here, immediately before each os.Remove — not
+// just the Lstat. Classification walks every residue path and the
+// fast-forward runs between, so there is a real window in which a peer can
+// overwrite an attributed file with its own work; re-checking only the file
+// TYPE would still delete those bytes. A path that changed in that window is
+// reported exactly as it would have been had classification caught it.
 //
 // os.Remove, never RemoveAll: a directory is never a write-set path, and the
 // recursive form is a mistake this function must not be able to make.
-func syncDeleteResidue(repoTop string, deletable []syncResidue) (deleted []syncResidue, skips []syncConflict, err error) {
+func syncDeleteResidue(ctx context.Context, repoTop string, deletable []syncResidue) (deleted []syncResidue, skips []syncConflict, modified []syncResidueMismatch, err error) {
 	for _, r := range deletable {
-		full := filepath.Join(repoTop, filepath.FromSlash(r.Path))
-		fi, statErr := os.Lstat(full)
+		oid, state, probeErr := probeResidue(ctx, repoTop, r.Path)
+		if probeErr != nil {
+			return deleted, skips, modified, probeErr
+		}
 		switch {
-		case os.IsNotExist(statErr):
+		case state == residueStateVanished:
 			continue
-		case statErr != nil:
-			return deleted, skips, fmt.Errorf("lstat %s: %w", syncPathField(r.Path), statErr)
-		case !fi.Mode().IsRegular():
+		case state == residueStateNotRegular:
 			skips = append(skips, syncConflict{Path: r.Path, Reason: syncReasonResidueNotFile, Holder: r.CandidateID})
 			continue
+		case oid != r.Blob:
+			modified = append(modified, syncResidueMismatch{syncResidue: r, Found: oid})
+			continue
 		}
-		if rmErr := os.Remove(full); rmErr != nil {
-			return deleted, skips, fmt.Errorf("delete %s: %w", syncPathField(r.Path), rmErr)
+		if rmErr := os.Remove(filepath.Join(repoTop, filepath.FromSlash(r.Path))); rmErr != nil {
+			return deleted, skips, modified, fmt.Errorf("delete %s: %w", syncPathField(r.Path), rmErr)
 		}
 		deleted = append(deleted, r)
 	}
-	return deleted, skips, nil
+	return deleted, skips, modified, nil
 }
 
 // partitionSkipped splits diffs into unsupported-mode rows (reported, never

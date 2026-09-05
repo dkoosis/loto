@@ -514,7 +514,7 @@ func TestSync_RefusesResidueThatIsNoLongerARegularFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deleted, skips, err := syncDeleteResidue(repo, []syncResidue{
+	deleted, skips, modified, err := syncDeleteResidue(t.Context(), repo, []syncResidue{
 		{Path: tcResidueNewGo, CandidateID: tcResidueCandidate, Blob: blob},
 		{Path: tcResidueOtherGo, CandidateID: tcResidueCandidate, Blob: blob},
 	})
@@ -523,6 +523,9 @@ func TestSync_RefusesResidueThatIsNoLongerARegularFile(t *testing.T) {
 	}
 	if len(deleted) != 0 {
 		t.Errorf("deleted %v, want nothing", deleted)
+	}
+	if len(modified) != 0 {
+		t.Errorf("a non-file was reported as modified rather than not-regular: %v", modified)
 	}
 	if len(skips) != 2 {
 		t.Fatalf("skips = %v, want one per path", skips)
@@ -537,6 +540,73 @@ func TestSync_RefusesResidueThatIsNoLongerARegularFile(t *testing.T) {
 	}
 	if _, err := os.Lstat(linkPath); err != nil {
 		t.Errorf("the symlink was removed: %v", err)
+	}
+}
+
+// TestSync_LeavesResidueOverwrittenBetweenClassifyAndDelete closes the window
+// the classification pass opens: sync decided this file was deletable, then a
+// peer wrote its own work into it before the delete loop reached it. The
+// re-probe must catch that — re-checking only the file TYPE would still have
+// unlinked the peer's bytes.
+func TestSync_LeavesResidueOverwrittenBetweenClassifyAndDelete(t *testing.T) {
+	repo := syncBaseRepo(t)
+	residue := plantResidue(t, repo, tcResidueNewGo, tcResidueBody)
+
+	const peerWork = "package p\n\nfunc LandedMidSync() {}\n"
+	syncBeforeDeleteFn = func() {
+		if err := os.WriteFile(residue, []byte(peerWork), 0o644); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { syncBeforeDeleteFn = nil })
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✓ sync synced=0 conflicts=0 skipped=0 deleted=0 residue-modified=1 unattributed=0") {
+		t.Errorf("missing triage line: %q", out.String())
+	}
+	if got := readFileT(t, residue); got != peerWork {
+		t.Errorf("sync deleted work that landed after classification: %q", got)
+	}
+}
+
+// TestSync_ResidueVanishingMidRunDoesNotAbortTheSync: a peer cleaned up its own
+// residue between the untracked scan and the content probe. That path is simply
+// gone — it must cost nothing but itself, and the rest of the repair must
+// finish. (Before per-file probing, a batched `git hash-object --stdin-paths`
+// exited 128 on the missing path and took the whole sync down with it.)
+func TestSync_ResidueVanishingMidRunDoesNotAbortTheSync(t *testing.T) {
+	repo := syncBaseRepo(t)
+	residue := plantResidue(t, repo, tcResidueNewGo, tcResidueBody)
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("drift\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fires after the coordination read, before classification — the scan has
+	// already listed the file and attributed it.
+	syncBeforeApplyFn = func() {
+		if err := os.Remove(residue); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { syncBeforeApplyFn = nil })
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✓ sync synced=1 conflicts=0 skipped=0 deleted=0 residue-modified=0 unattributed=0") {
+		t.Errorf("a vanished residue path must cost nothing but itself: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "✓ target="+tcTargetA+" action=fast-forward") {
+		t.Errorf("the rest of the repair must still run: %q", out.String())
+	}
+	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != "" {
+		t.Errorf("divergent path not restored: %q", got)
 	}
 }
 
