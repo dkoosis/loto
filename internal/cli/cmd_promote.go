@@ -258,8 +258,19 @@ func emitPromoteReport(w io.Writer, res gate.PromoteResult) int {
 		fmt.Fprintln(w, line)
 	}
 	for _, v := range res.Verifies {
-		fmt.Fprintf(w, "ℹ verify batch=%s candidates=%d ms=%d result=%s\n",
+		// tree= rides the existing verify row rather than adding one of its
+		// own: ms= is meaningless without it, since a slow verify reads the
+		// same whether the invariant command is heavy or the reuse tree quietly
+		// stopped working.
+		line := fmt.Sprintf("ℹ verify batch=%s candidates=%d ms=%d result=%s",
 			v.BatchID, v.Candidates, v.Duration.Milliseconds(), promoteVerifyResult(v))
+		if v.Tree != "" {
+			line += " tree=" + string(v.Tree)
+		}
+		if v.TreeReason != "" {
+			line += " reason=" + v.TreeReason
+		}
+		fmt.Fprintln(w, line)
 	}
 	emitPromoteFixBlock(w, res)
 

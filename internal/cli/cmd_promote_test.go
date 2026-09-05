@@ -161,6 +161,12 @@ func TestPromote_HappyPath(t *testing.T) {
 	if !strings.Contains(got, "ℹ verify batch=b-") || !strings.Contains(got, "result=pass") {
 		t.Errorf("missing verify timing row: %q", got)
 	}
+	// tree= rides the same row. Without it ms= cannot be read: a slow verify
+	// looks identical whether the invariant command is heavy or the reused
+	// worktree quietly stopped working.
+	if !strings.Contains(got, " tree=") {
+		t.Errorf("verify row does not say which tree ran: %q", got)
+	}
 
 	after := submitGitT(t, repo, "rev-parse", "refs/loto/integration")
 	if after == before {

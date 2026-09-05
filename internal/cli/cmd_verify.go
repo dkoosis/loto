@@ -14,9 +14,11 @@ func init() { register("verify", cmdVerify) } //nolint:gochecknoinits // command
 
 const verifyUsageHead = `usage: loto verify <commit-ish> -- <cmd> [args...]
 
-Run a broad-repo command against <commit-ish> in a throwaway detached worktree
-cut off the lane ref, then remove that worktree. A non-zero command exit is a
-test failure (exit 1); a setup/teardown/ctx failure is infra (exit 3).
+Run a broad-repo command against <commit-ish> in a detached worktree holding
+exactly that commit, never the shared checkout. The worktree is reused across
+runs (one per repo, under .git/loto-verify) and reset to <commit-ish> first, so
+what the command sees matches a fresh cut. A non-zero command exit is a test
+failure (exit 1); a setup/teardown/ctx failure is infra (exit 3).
 
 examples:
   loto verify loto/impl-1 -- go test -race ./...
@@ -74,16 +76,39 @@ func cmdVerify(ctx context.Context, args []string, stdout, stderr io.Writer) int
 // 0 passed, 1 failed.
 func emitVerifyResult(w io.Writer, commit string, res lane.VerifyResult) int {
 	body := strings.TrimRight(res.Output, "\n")
+	code := 1
+	glyph, verdict := "✗", "failed"
 	if res.Passed {
-		fmt.Fprintf(w, "✓ verify passed commit=%s\n", commit)
-		if body != "" {
-			fmt.Fprintln(w, body)
-		}
-		return 0
+		code, glyph, verdict = 0, "✓", "passed"
 	}
-	fmt.Fprintf(w, "✗ verify failed commit=%s\n", commit)
+	fmt.Fprintf(w, "%s verify %s commit=%s\n", glyph, verdict, commit)
+	if row := verifyTreeRow(res.Tree, res.TreeReason); row != "" {
+		fmt.Fprintln(w, row)
+	}
 	if body != "" {
 		fmt.Fprintln(w, body)
 	}
-	return 1
+	return code
+}
+
+// verifyTreeRow reports which checkout ran the verify. Always emitted, because
+// the failure it exists to catch is a SILENT one: a repo that has quietly
+// fallen back to cutting a worktree per verify pays seconds per promotion and
+// looks, in every other output, exactly like a repo on the fast path.
+// ℹ for reuse (neutral data), ⚠ for anything slower, which is advisory and
+// never fatal. Empty mode means a hand-built VerifyResult, not a fault, so it
+// stays silent.
+func verifyTreeRow(mode lane.VerifyTreeMode, reason string) string {
+	if mode == "" {
+		return ""
+	}
+	glyph := "⚠"
+	if mode == lane.TreeReuse {
+		glyph = "ℹ"
+	}
+	row := fmt.Sprintf("%s verify tree=%s", glyph, mode)
+	if reason != "" {
+		row += " reason=" + reason
+	}
+	return row
 }

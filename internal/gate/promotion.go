@@ -112,6 +112,12 @@ type VerifyRun struct {
 	// wall time spent, not a measurement of the invariant command, and grading
 	// the budget must skip it.
 	Infra bool
+	// Tree names which checkout ran this verify (reuse / recut / fresh), and
+	// TreeReason says why it was not reuse. Carried through to the CLI row: a
+	// Duration back at pre-loto-moqi levels means nothing on its own, and this
+	// is what says whether the reuse tree stopped working.
+	Tree       lane.VerifyTreeMode
+	TreeReason string
 }
 
 // timedVerify runs the phase-2 verify and records how long it took. The one
@@ -126,6 +132,8 @@ func timedVerify(ctx context.Context, p PromoteParams, b *batch, rec *[]VerifyRu
 		Duration:   time.Since(start),
 		Passed:     err == nil && vr.Passed,
 		Infra:      err != nil,
+		Tree:       vr.Tree,
+		TreeReason: vr.TreeReason,
 	})
 	return vr, err
 }
@@ -147,9 +155,14 @@ const (
 	// same box, load average 28–37 from nine concurrent agent sessions).
 	// Batches of two cost 3.7–5.8s for ONE verify, the same per-verify range
 	// as a batch of one — the measured form of the paragraph above. So the
-	// budget miss is in the verify harness, and the fix is a cheaper cut
-	// (a reused worktree), NOT a bigger batch: raising MaxBatch would leave
-	// one verify exactly as slow and make the red-batch fallback's n+1 worse.
+	// budget miss was in the verify harness, and the fix was a cheaper cut,
+	// NOT a bigger batch: raising MaxBatch would have left one verify exactly
+	// as slow and made the red-batch fallback's n+1 worse.
+	//
+	// ‡ That cut is now paid once per repo, not once per verify: lane.Verify
+	// reuses one detached worktree under the git common dir (loto-moqi). The
+	// reasoning above is unchanged by it — batching still reduces the number
+	// of verifies and never the latency of one.
 	defaultMaxRounds = 4
 )
 
