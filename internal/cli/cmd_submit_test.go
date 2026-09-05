@@ -290,9 +290,9 @@ func assertGateBypassLogged(t *testing.T) {
 		t.Fatal(err)
 	}
 	var found []domain.Event
-	for _, e := range events {
-		if e.Kind == store.EventGateBypass {
-			found = append(found, e)
+	for i := range events {
+		if events[i].Kind == store.EventGateBypass {
+			found = append(found, events[i])
 		}
 	}
 	if len(found) != 1 {

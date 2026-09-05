@@ -141,7 +141,11 @@ func runSubmit(rt *runtime, repoTop, bead, msg string, targets []domain.Target, 
 			fmt.Fprintf(stderr, "✗ capture: %v\n", err)
 			return 3
 		}
-		recordVerdict(rt, candidateID, captureRejectionReason(err), stderr)
+		// nil created-set, deliberately: capture is what BUILDS the transition
+		// data, so a capture rejection has no envelope and no trustworthy
+		// creation list. The residue of a candidate that never got an envelope
+		// stays on disk and is reported unattributed.
+		recordVerdict(rt, candidateID, captureRejectionReason(err), nil, stderr)
 		emitSubmitCaptureRejected(stdout, candidateID, err)
 		return 1
 	}
@@ -168,7 +172,7 @@ func runSubmit(rt *runtime, repoTop, bead, msg string, targets []domain.Target, 
 		return code
 	}
 	if !decision.Accepted {
-		recordVerdict(rt, candidateID, decision.Reason, stderr)
+		recordVerdict(rt, candidateID, decision.Reason, env.CreatedPaths(), stderr)
 		emitSubmitRejected(stdout, candidateID, decision)
 		return 1
 	}
@@ -183,8 +187,14 @@ func runSubmit(rt *runtime, repoTop, bead, msg string, targets []domain.Target, 
 // with a ⚠ on failure: the verdict has already been rendered and acted on,
 // and losing its breadcrumb must not change the exit code the caller sees.
 // An empty reason means accepted.
-func recordVerdict(rt *runtime, candidateID string, reason gate.RejectionReason, stderr io.Writer) {
-	if err := rt.Store.RecordAdmissionVerdict(rt.Ctx, rt.Agent.UUID, candidateID, reason); err != nil {
+//
+// created is the rejected candidate's created write-set, each path bound to
+// the blob it proposed — the attribution `loto sync` deletes residue by
+// (loto-ovno.13). Pass nil wherever no envelope was ever built: attribution
+// then fails closed, and sync reports the residue as unattributed rather than
+// deleting a file nothing vouches for.
+func recordVerdict(rt *runtime, candidateID string, reason gate.RejectionReason, created []gate.CreatedPath, stderr io.Writer) {
+	if err := rt.Store.RecordAdmissionVerdict(rt.Ctx, rt.Agent.UUID, candidateID, reason, created); err != nil {
 		fmt.Fprintf(stderr, "⚠ verdict not recorded id=%s: %v\n", candidateID, err)
 	}
 }
@@ -388,7 +398,7 @@ func submitAccept(rt *runtime, repoTop string, env gate.Envelope, owner domain.A
 		var stale *store.LeaseRevalidationError
 		if errors.As(err, &stale) {
 			if judged {
-				recordVerdict(rt, candidateID, gate.ReasonStaleLeaseEpoch, stderr)
+				recordVerdict(rt, candidateID, gate.ReasonStaleLeaseEpoch, env.CreatedPaths(), stderr)
 			}
 			emitSubmitLeaseLost(stdout, candidateID, stale)
 			return 1
@@ -397,7 +407,7 @@ func submitAccept(rt *runtime, repoTop string, env gate.Envelope, owner domain.A
 		return 3
 	}
 	if judged {
-		recordVerdict(rt, candidateID, "", stderr)
+		recordVerdict(rt, candidateID, "", nil, stderr)
 	}
 	fmt.Fprintf(stdout, "✓ candidate id=%s envelope=%s proposal=%s files=%d\n", candidateID, envSHA, proposal, len(writeSet))
 	return 0

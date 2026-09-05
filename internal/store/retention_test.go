@@ -285,7 +285,7 @@ func TestRotateEvents_FiresOnReleaseBreakDowngrade(t *testing.T) {
 	t.Run("admission_verdict", func(t *testing.T) {
 		s := mustOpen(t)
 		seedExcess(t, s, eventsRetentionMax+50)
-		if err := s.RecordAdmissionVerdict(ctx, tcAlice, "cand-1", ""); err != nil {
+		if err := s.RecordAdmissionVerdict(ctx, tcAlice, "cand-1", "", nil); err != nil {
 			t.Fatalf("verdict: %v", err)
 		}
 		assertTrimmed(t, s)

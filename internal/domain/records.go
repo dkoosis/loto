@@ -278,5 +278,11 @@ type Event struct {
 	ActorUUID   string
 	SubjectUUID string
 	Reason      string
-	CreatedAt   time.Time
+	// Detail is optional per-kind structured payload, JSON or empty. Empty on
+	// every kind that has nothing to say — only candidate_rejected uses it
+	// today, carrying the created paths sync attributes residue to
+	// (loto-ovno.13). Opaque here: domain does not parse it, so a kind can
+	// grow a payload without this package learning its shape.
+	Detail    string
+	CreatedAt time.Time
 }
