@@ -104,8 +104,18 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // repo, relative, trailing slash) into a canonical claim prefix — the prefix
 // counterpart of resolveCLITarget, sharing normalizeRepoPath so one policy
 // governs path translation.
+//
+// The disk-case fold runs after CanonicalizePrefix trims the trailing slash, so
+// the walk in resolveDiskCase never sees an empty last segment. Claims fold for
+// the same reason locks do (loto-f8m8): PrefixOverlaps is a byte comparison, so
+// a claim on internal/Store did not cover a lock on internal/store/x.go.
 func resolveCLIPrefix(repoTop, raw string) (domain.Target, error) {
-	return domain.CanonicalizePrefix(normalizeRepoPath(raw, repoTop))
+	t, err := domain.CanonicalizePrefix(normalizeRepoPath(raw, repoTop))
+	if err != nil {
+		return domain.Target{}, err
+	}
+	t.Canonical = resolveDiskCase(repoTop, t.Canonical)
+	return t, nil
 }
 
 // claimVerbPrefix is the shared arg preamble of the claim/unclaim verb pair:
