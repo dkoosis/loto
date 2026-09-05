@@ -1,10 +1,15 @@
-# go-sandbox v0.2.0 synced 2026-04-05
 #!/usr/bin/env bash
 # go-sandbox lib-setup.sh — setup actions
 # Makes the environment correct. Downloads, installs, builds.
 # Sourced, not executed. Requires: REPO_DIR, PREBUILT_DIR, INSTALL_DIR, SANDBOX_DIR.
 # Requires: lib-doctor.sh sourced first (for have, warn, fatal).
 # Requires: project.conf sourced (for HAS_LOCAL_REPLACES).
+
+# The Go environment is shared with activation: setup must warm the same caches
+# task time reads, so it sources the one env file rather than inheriting
+# whatever the container image happens to export.
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/lib-env.sh"
 
 # Download Go modules, optionally stripping local replace directives.
 # Uses `go mod edit -dropreplace` instead of sed to avoid deleting legitimate

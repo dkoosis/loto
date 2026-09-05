@@ -1,4 +1,3 @@
-# go-sandbox v0.2.0 synced 2026-04-05
 #!/usr/bin/env bash
 # go-sandbox lib-activate.sh — local dev environment activation
 # Sourced by generated activate.sh. Requires: _SANDBOX_DIR set by caller.
@@ -17,41 +16,32 @@ _CODEX_PLATFORM="${_CODEX_OS}-${_CODEX_ARCH}"
 
 _REPO_DIR="$(cd "$_SANDBOX_DIR/.." && pwd)"
 
-export GOTOOLCHAIN=local
-export GOPROXY="https://proxy.golang.org,direct"
-export GOSUMDB="sum.golang.org"
+# The Go environment lives in lib-env.sh, which setup sources too — one file,
+# two consumers, so the caches setup warms are the caches this reads.
+# shellcheck source=/dev/null
+source "$_SANDBOX_DIR/lib/lib-env.sh"
 
-# Repo-local caches
-export GOCACHE="$_REPO_DIR/.sandbox/cache/go-build"
-export GOMODCACHE="$_REPO_DIR/.sandbox/cache/mod"
-export GOLANGCI_LINT_CACHE="$_REPO_DIR/.sandbox/cache/golangci-lint"
-mkdir -p "$GOCACHE" "$GOMODCACHE" "$GOLANGCI_LINT_CACHE" 2>/dev/null || true
+# Repo-local customization seam. The shared lib stays byte-identical fleet-wide;
+# anything repo-specific lives here and survives a re-pull from GO_SANDBOX_REF.
+if [ -f "$_SANDBOX_DIR/local-activate.sh" ]; then
+  . "$_SANDBOX_DIR/local-activate.sh"
+fi
 
-# Performance
-export GOMAXPROCS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+# Performance (GOMAXPROCS is set in lib-env.sh)
 ulimit -n 4096 2>/dev/null || true
 
-# Ubuntu fd-find workaround
+# Ubuntu fd-find workaround — shim lives in a gitignored cache dir, not root bin/
+_SHIM_DIR="$_REPO_DIR/.sandbox/cache/shims"
 if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
-  mkdir -p "$_REPO_DIR/bin" 2>/dev/null || true
-  ln -sf "$(command -v fdfind)" "$_REPO_DIR/bin/fd" 2>/dev/null || true
+  mkdir -p "$_SHIM_DIR" 2>/dev/null || true
+  ln -sf "$(command -v fdfind)" "$_SHIM_DIR/fd" 2>/dev/null || true
 fi
 
-# Link prebuilt binaries for current platform
+# PATH: prebuilt platform binaries + shims first, straight from .sandbox/
+# (no root bin/ mirror — keeps `ls` at repo root legible). Non-existent
+# entries are harmlessly ignored by the shell's PATH lookup.
 _PREBUILT_DIR="$_SANDBOX_DIR/bin/$_CODEX_PLATFORM"
-if [ -d "$_PREBUILT_DIR" ] && [ -n "$(ls -A "$_PREBUILT_DIR" 2>/dev/null)" ]; then
-  mkdir -p "$_REPO_DIR/bin" 2>/dev/null || true
-  for tool in "$_PREBUILT_DIR"/*; do
-    [ -f "$tool" ] || continue
-    toolname=$(basename "$tool")
-    if [ ! -e "$_REPO_DIR/bin/$toolname" ]; then
-      ln -sf "$tool" "$_REPO_DIR/bin/$toolname" 2>/dev/null || true
-    fi
-  done
-fi
-
-# PATH: repo bins first
-export PATH="$_REPO_DIR/bin:$PATH"
+export PATH="$_SHIM_DIR:$_PREBUILT_DIR:$PATH"
 
 # Helper: available commands
 sandbox-help() {
@@ -77,7 +67,13 @@ sandbox-help() {
 }
 
 # Report tool status — derived from project.conf, not hardcoded
-_REQUIRED_TOOLS=($BASE_IMAGE_TOOLS $PREBUILT_TOOLS)
+# zsh doesn't word-split unquoted scalars; use ${=VAR} for SH_WORD_SPLIT.
+if [ -n "${ZSH_VERSION:-}" ]; then
+  _REQUIRED_TOOLS=(${=BASE_IMAGE_TOOLS} ${=PREBUILT_TOOLS})
+else
+  # shellcheck disable=SC2206
+  _REQUIRED_TOOLS=($BASE_IMAGE_TOOLS $PREBUILT_TOOLS)
+fi
 _TOOLS_OK=0
 _TOOLS_MISS=0
 _TOOLS_TOTAL=${#_REQUIRED_TOOLS[@]}
@@ -114,4 +110,4 @@ unset _REPORT_FILE _HEALTH _FATAL_COUNT _WARN_COUNT
 
 echo "  Run 'sandbox-help' for available commands"
 
-unset _CODEX_OS _CODEX_ARCH _CODEX_PLATFORM _PREBUILT_DIR _TOOLS_OK _TOOLS_MISS _TOOLS_TOTAL _REQUIRED_TOOLS _REPO_DIR _t
+unset _CODEX_OS _CODEX_ARCH _CODEX_PLATFORM _PREBUILT_DIR _SHIM_DIR _TOOLS_OK _TOOLS_MISS _TOOLS_TOTAL _REQUIRED_TOOLS _REPO_DIR _t

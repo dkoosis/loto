@@ -1,4 +1,3 @@
-# go-sandbox v0.2.0 synced 2026-04-05
 # go-sandbox Makefile.cross.mk — includable cross-compile targets
 # Include from consuming project: include .sandbox/lib/Makefile.cross.mk
 # Requires: .sandbox/project.conf exists
@@ -6,8 +5,8 @@
 # Reads PROJECT_BINS and PREBUILT_TOOLS from project.conf.
 # Version pins below are defaults — override in your Makefile before the include.
 
-GOLANGCI_LINT_VER ?= v2.11.4
-GO_ARCH_LINT_VER  ?= v1.14.0
+GOLANGCI_LINT_VER ?= v2.12.2
+GO_ARCH_LINT_VER  ?= v1.15.0
 GOVULNCHECK_VER   ?= v1.1.4
 GOFUMPT_VER       ?= v0.9.2
 GOIMPORTS_VER     ?= v0.39.0

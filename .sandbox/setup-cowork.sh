@@ -74,9 +74,11 @@ fi
 export GOROOT="$GO_INSTALL_DIR"
 export PATH="$GO_INSTALL_DIR/bin:$PATH"
 
-# Use repo-local caches (same as lib-activate.sh)
-export GOCACHE="$SANDBOX_DIR/cache/go-build"
-export GOMODCACHE="$SANDBOX_DIR/cache/mod"
+# Cowork has no ambient Go cache to inherit (unlike Codex's warm container
+# image), so this script keeps its own — under COWORK_CACHE, not
+# .sandbox/cache, which lib-env.sh no longer uses (loto-7qyc).
+export GOCACHE="$COWORK_CACHE/go-build"
+export GOMODCACHE="$COWORK_CACHE/mod"
 mkdir -p "$GOCACHE" "$GOMODCACHE"
 
 # ------------------------------------------------------------------ step 2: Go tools

@@ -1,4 +1,3 @@
-# go-sandbox v0.2.0 synced 2026-04-05
 #!/usr/bin/env bash
 # go-sandbox lib-doctor.sh — diagnostics only
 # Answers "is the environment correct?" Does not install or download.
