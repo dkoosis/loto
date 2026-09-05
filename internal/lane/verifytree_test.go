@@ -230,12 +230,11 @@ func TestVerifyFreshCutWhenReuseTreeRemoved(t *testing.T) {
 // post-reset clean check cannot catch it either — a re-cut is the only exit,
 // and the worktree's private index is where the flag dies.
 //
-// ‡ The review named `--assume-unchanged`. Measured on git 2.55.0, that flag
-// does NOT survive `checkout --force` — git overwrites the file and moves on.
-// `--skip-worktree` is the sibling that actually sticks, and it is the harder
-// case (status stays silent), so the test pins that one. The fix is the same
-// either way: it turns on whether the COMMIT resolves, never on which local
-// flag made the checkout fail.
+// ‡ Both `--assume-unchanged` and `--skip-worktree` defeat `checkout --force`
+// on git 2.55.0 ("Entry not uptodate. Cannot merge.", measured twice, 2026-09-05).
+// The test pins `--skip-worktree` because it is the harder case (status stays
+// silent). The fix is the same either way: it turns on whether the COMMIT
+// resolves, never on which local flag made the checkout fail.
 func TestVerifyRecutsAPoisonedReuseTree(t *testing.T) {
 	repoTop, base := newBaseRepo(t)
 	writeFile(t, repoTop, "add.go", addEdited)
