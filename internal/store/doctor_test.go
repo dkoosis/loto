@@ -809,6 +809,162 @@ func TestDoctorAudit_ListsExpiredClaims(t *testing.T) {
 	}
 }
 
+// --- stale candidate claim reclaim (loto-u2p7) ------------------------------
+
+// TestDoctorRepair_ReclaimsAbandonedCandidateClaim covers AC1: a
+// candidate_claims row with pid=0 and a session absent from the roster —
+// modeled here by liveProbe, which (like production's pidVerdict fallback)
+// answers UNKNOWN for any PID<=0 record — is named by --dry-run's audit and
+// swept by --repair, and a `loto lock` on its path succeeds afterward. Aged
+// 10h, well past domain.CandidateClaimReclaimGrace (30m, PR #298 review) —
+// TestDoctorAudit_FreshCandidateClaimSurvivesGrace pins the fresh case this
+// fixture deliberately does not exercise.
+func TestDoctorRepair_ReclaimsAbandonedCandidateClaim(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	l := mkFileLock(t, tcAGo, tcBob, time.Hour)
+
+	cc := domain.CandidateClaim{
+		PathCanonical: l.Target.Canonical, CandidateID: tcCand1,
+		OwnerUUID: tcAlice, SessionUUID: "session-absent-from-roster",
+		CreatedAt: time.Now().Add(-10 * time.Hour), Host: tcHost, PID: 0,
+	}
+	if err := s.insertCandidateClaimsUnguarded(ctx, []domain.CandidateClaim{cc}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The claim blocks lock acquisition before repair (blockOnCandidateClaims).
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err == nil {
+		t.Fatal("lock over an unresolved candidate claim must be refused before repair")
+	} else {
+		var ccce *CandidateClaimConflictError
+		if !errors.As(err, &ccce) {
+			t.Fatalf("want *CandidateClaimConflictError, got %T: %v", err, err)
+		}
+	}
+
+	report, err := s.DoctorAudit(ctx, tcHost, true, liveProbe, SidecarCheck{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.StaleCandidateClaims) != 1 {
+		t.Fatalf("want would_gc_candidate_claims=1, got %d: %+v", len(report.StaleCandidateClaims), report.StaleCandidateClaims)
+	}
+
+	if err := s.DoctorRepair(ctx, "doctor-agent", liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := s.ListCandidateClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("repair must remove the abandoned candidate claim, got %+v", remaining)
+	}
+
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
+		t.Fatalf("lock must succeed once the candidate claim is reclaimed: %v", err)
+	}
+}
+
+// TestDoctorAudit_FreshCandidateClaimSurvivesGrace is the PR #298 review fix's
+// integration pin: a zero-evidence candidate claim (pid=0, probe UNKNOWN) that
+// is freshly minted — the documented shape for a degraded-mode submitter with
+// no durable LOTO_PID — must NOT be named by --dry-run or swept by --repair.
+// Without domain.CandidateClaimReclaimGrace this fixture reclaims exactly like
+// TestDoctorRepair_ReclaimsAbandonedCandidateClaim's 10h-old one; the only
+// difference between the two is age.
+func TestDoctorAudit_FreshCandidateClaimSurvivesGrace(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	l := mkFileLock(t, tcAGo, tcBob, time.Hour)
+
+	cc := domain.CandidateClaim{
+		PathCanonical: l.Target.Canonical, CandidateID: tcCand1,
+		OwnerUUID: tcAlice, SessionUUID: "session-absent-from-roster",
+		CreatedAt: time.Now(), Host: tcHost, PID: 0,
+	}
+	if err := s.insertCandidateClaimsUnguarded(ctx, []domain.CandidateClaim{cc}); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := s.DoctorAudit(ctx, tcHost, true, liveProbe, SidecarCheck{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.StaleCandidateClaims) != 0 {
+		t.Fatalf("a fresh zero-evidence candidate claim must not be reported stale (grace floor), got %+v", report.StaleCandidateClaims)
+	}
+
+	if err := s.DoctorRepair(ctx, "doctor-agent", liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := s.ListCandidateClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 1 {
+		t.Fatalf("repair must not remove a fresh candidate claim still inside the grace floor, got %d remaining: %+v", len(remaining), remaining)
+	}
+}
+
+// TestDoctorRepair_LiveSessionCandidateClaimSurvives is AC3's negative case: a
+// candidate claim minted with no durable pid but owned by a session the
+// probe positively confirms LIVE must not be reported stale or reclaimed —
+// broadening past CandidateClaimIsDead must not also broaden past a real
+// liveness witness.
+func TestDoctorRepair_LiveSessionCandidateClaimSurvives(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	l := mkFileLock(t, tcAGo, tcBob, time.Hour)
+
+	const liveSession = domain.SessionUUID("live-session")
+	sessionAlive := func(l domain.LockRecord) domain.Liveness {
+		if l.SessionUUID == liveSession {
+			return domain.LivenessAlive
+		}
+		return domain.LivenessUnknown
+	}
+
+	cc := domain.CandidateClaim{
+		PathCanonical: l.Target.Canonical, CandidateID: tcCand1,
+		OwnerUUID: tcAlice, SessionUUID: liveSession,
+		CreatedAt: time.Now(), Host: tcHost, PID: 0,
+	}
+	if err := s.insertCandidateClaimsUnguarded(ctx, []domain.CandidateClaim{cc}); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := s.DoctorAudit(ctx, tcHost, true, sessionAlive, SidecarCheck{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.StaleCandidateClaims) != 0 {
+		t.Fatalf("a live-session candidate claim must not be reported stale, got %+v", report.StaleCandidateClaims)
+	}
+
+	if err := s.DoctorRepair(ctx, "doctor-agent", sessionAlive); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := s.ListCandidateClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 1 {
+		t.Fatalf("repair must not remove a live-session candidate claim, got %d remaining: %+v", len(remaining), remaining)
+	}
+
+	// Still-standing proof, not just a row count: the claim must still block.
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, sessionAlive); err == nil {
+		t.Fatal("a live candidate claim must still block lock acquisition")
+	} else {
+		var ccce *CandidateClaimConflictError
+		if !errors.As(err, &ccce) {
+			t.Fatalf("want *CandidateClaimConflictError, got %T: %v", err, err)
+		}
+	}
+}
+
 // TestDoctorRepair_ChmodEraMigration is loto-zssw's migration leg. Until 2026-08
 // acquire stripped write bits and release restored them, so a session that died
 // mid-hold left files at 0444 with nothing to explain them. `doctor --repair`

@@ -274,6 +274,96 @@ func TestCandidateClaimIsDead_NoTTLBackstop(t *testing.T) {
 	}
 }
 
+// --- domain.CandidateClaimIsAbandoned (loto-u2p7) ---------------------------
+
+// TestCandidateClaimIsAbandoned pins the doctor-only reclaim policy: broader
+// than CandidateClaimIsDead (Dead alone), but only for the zero-evidence
+// combination — PID<=0 AND a probe that comes back UNKNOWN, i.e. no durable
+// pid and no session witness at all (AC1's "pid=0, session absent from the
+// roster") — and even then, only once the claim clears
+// CandidateClaimReclaimGrace (PR #298 review: an UNKNOWN verdict covers both
+// "genuinely no witness" and "a fresh degraded-mode/cross-host claim that
+// just hasn't been read yet", and only age tells them apart). A live session
+// (AC3), a real pid the probe merely can't confirm from here (e.g.
+// cross-host), or a DEAD verdict fresh enough to still be "just happened"
+// must each behave as documented below.
+func TestCandidateClaimIsAbandoned(t *testing.T) {
+	now := time.Now()
+	grace := domain.CandidateClaimReclaimGrace
+	old := now.Add(-grace - time.Minute) // clears the grace floor
+	// alwaysAlive models a session record the oracle positively confirms up —
+	// SessionLive — independent of pid, the way runtime.liveProbe()'s session
+	// leg takes precedence over the pid fallback in production.
+	alwaysAlive := func(domain.LockRecord) domain.Liveness { return domain.LivenessAlive }
+
+	cases := []struct {
+		name string
+		cc   domain.CandidateClaim
+		ec   domain.EvalContext
+		want bool
+	}{
+		{
+			"nil probe never reports abandoned",
+			domain.CandidateClaim{OwnerUUID: tcAlice, Host: tcHost, PID: 0, CreatedAt: now},
+			domain.EvalContext{Now: now},
+			false,
+		},
+		{
+			"provably dead, fresh — Dead reclaims at any age, no grace floor",
+			domain.CandidateClaim{OwnerUUID: tcAlice, Host: tcHost, PID: 1, CreatedAt: now},
+			domain.EvalContext{Now: now, Live: deadProbe},
+			true,
+		},
+		{
+			"same-host, pid=0, no witness, FRESH — grace protects it",
+			// liveProbe (hostPidProbe) answers UNKNOWN for any PID<=0 record —
+			// the same no-durable-pid sentinel production's pidVerdict falls
+			// back to when ProbeSession finds no record ("session absent from
+			// the roster"). Freshly minted, so it must survive.
+			domain.CandidateClaim{OwnerUUID: tcAlice, Host: tcHost, SessionUUID: "session-absent", PID: 0, CreatedAt: now},
+			domain.EvalContext{Now: now, Live: liveProbe},
+			false,
+		},
+		{
+			"same-host, pid=0, no witness, OLDER than grace (AC1) — abandoned",
+			domain.CandidateClaim{OwnerUUID: tcAlice, Host: tcHost, SessionUUID: "session-absent", PID: 0, CreatedAt: old},
+			domain.EvalContext{Now: now, Live: liveProbe},
+			true,
+		},
+		{
+			"pid=0 but a LIVE session (AC3) — not abandoned regardless of age",
+			domain.CandidateClaim{OwnerUUID: tcAlice, Host: tcHost, SessionUUID: "live-session", PID: 0, CreatedAt: old},
+			domain.EvalContext{Now: now, Live: alwaysAlive},
+			false,
+		},
+		{
+			"cross-host, pid=0, FRESH — grace protects it",
+			domain.CandidateClaim{OwnerUUID: tcAlice, Host: tcOtherHost, PID: 0, CreatedAt: now},
+			domain.EvalContext{Now: now, Live: liveProbe},
+			false,
+		},
+		{
+			"cross-host, pid=0, OLDER than grace — abandoned",
+			domain.CandidateClaim{OwnerUUID: tcAlice, Host: tcOtherHost, PID: 0, CreatedAt: old},
+			domain.EvalContext{Now: now, Live: liveProbe},
+			true,
+		},
+		{
+			"pid>0 but cross-host (a real witness this vantage can't read) — not abandoned even old",
+			domain.CandidateClaim{OwnerUUID: tcAlice, Host: tcOtherHost, PID: 1, CreatedAt: old},
+			domain.EvalContext{Now: now, Live: liveProbe},
+			false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.ec.CandidateClaimIsAbandoned(c.cc); got != c.want {
+				t.Errorf("CandidateClaimIsAbandoned() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // --- candidate claim store CRUD ---------------------------------------------
 
 func mkCandidateClaim(path, candidateID, owner string) domain.CandidateClaim {

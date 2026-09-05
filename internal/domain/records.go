@@ -194,6 +194,81 @@ func (c EvalContext) CandidateClaimIsDead(cc CandidateClaim) bool {
 	}) == LivenessDead
 }
 
+// DegradedModeTTL is the one duration behind "TTL-only liveness when no
+// pid/session witness exists" everywhere loto applies that policy — not
+// specific to candidate claims, so it is named for the policy, not the
+// caller. cli imports domain (never the reverse: domain → ∅ per
+// .go-arch-lint.yml), so this is the single source; `loto lock`'s and
+// `loto refresh`'s `-ttl` default both reference it directly (PR #298 review:
+// the three literal 30-minute values agreed by coincidence, not by a shared
+// symbol — this closes that gap).
+const DegradedModeTTL = 30 * time.Minute
+
+// CandidateClaimReclaimGrace bounds how young a zero-evidence candidate claim
+// (PID<=0, probe UNKNOWN — see CandidateClaimIsAbandoned) must be before
+// doctor's sweep will reclaim it. An alias for DegradedModeTTL, kept as its
+// own name because it is what `loto doctor`'s report and --dry-run lines
+// print (`candidate_claim_grace=`) — that field name stays stable regardless
+// of what the underlying policy constant is called.
+//
+// Without this floor, a claim minted seconds ago by a degraded-mode submitter
+// (no durable LOTO_PID — documented as the expected, silent case for a bare
+// shell/cron) or from another host (the probe reads UNKNOWN on host mismatch
+// before it ever inspects PID or session) would be reclaimed by a peer's very
+// next `loto doctor --repair` while genuinely still under review — violating
+// CandidateClaim's own "no natural deadline... reclaimable [only when]
+// provably killed" contract (PR #298 review). A provably DEAD claim (the
+// switch's other reclaiming branch) is exempt from this floor and reclaims at
+// any age — there the process is confirmed gone, not merely unread.
+const CandidateClaimReclaimGrace = DegradedModeTTL
+
+// CandidateClaimIsAbandoned is doctor's stale-candidate-claim reclaim
+// authority (loto-u2p7) — deliberately BROADER than CandidateClaimIsDead
+// above, and scoped to doctor's sweep alone: every other caller (admission's
+// authorizedPaths, promotion's re-validation) keeps the conservative
+// Dead-only predicate.
+//
+// A provably-DEAD claim is abandoned at any age, same as CandidateClaimIsDead.
+// In addition, a claim minted with NO durable pid (PID<=0, the same
+// "no-durable-liveness-handle" sentinel IsBeacon/pidVerdict document
+// elsewhere) whose probe comes back UNKNOWN — no session record, no socket,
+// nothing to read — is ALSO abandoned, but only once it is at least
+// CandidateClaimReclaimGrace old: it carries zero evidence either way, and
+// unlike a LockRecord or a ClaimRecord it has no TTL backstop to eventually
+// self-heal on (CandidateClaim's own doc), so leaving the zero-evidence case
+// entirely un-reclaimed is the bug loto-u2p7 reports — doctor reporting
+// healthy while a dead session's claim blocks `loto lock` on its paths
+// forever. The grace floor is what keeps a claim that is merely YOUNG (not
+// dead) from reading the same as one that is abandoned.
+//
+// A claim with a durable pid (PID>0) that merely reads UNKNOWN — a foreign
+// host, say — is NOT reclaimed here at any age: it still has a witness (the
+// pid) this vantage point just can't read, and the risk asymmetry that keeps
+// CandidateClaimIsDead conservative applies to it in full. Only the
+// zero-evidence, no-TTL-backstop combination gets the broader (grace-gated)
+// treatment.
+func (c EvalContext) CandidateClaimIsAbandoned(cc CandidateClaim) bool {
+	if c.Live == nil {
+		return false
+	}
+	switch c.Live(LockRecord{
+		OwnerUUID:   cc.OwnerUUID,
+		SessionUUID: cc.SessionUUID,
+		Host:        cc.Host,
+		PID:         cc.PID,
+		ProcStart:   cc.ProcStart,
+	}) {
+	case LivenessDead:
+		return true
+	case LivenessUnknown:
+		return cc.PID <= 0 && !c.Now.Before(cc.CreatedAt.Add(CandidateClaimReclaimGrace))
+	case LivenessAlive:
+		return false
+	default:
+		return false
+	}
+}
+
 // Event is an append-only audit row. SubjectUUID is the affected agent (for
 // lock_broken / lock_reclaimed_stale); empty otherwise.
 type Event struct {

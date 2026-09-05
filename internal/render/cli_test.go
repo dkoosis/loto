@@ -17,6 +17,7 @@ const (
 	pkgA       = "pkg/a"
 	bGo        = "b.go"
 	cGo        = "c.go"
+	zGo        = "z.go"
 	ownerGreen = "Green"
 	ownerRed   = "Red"
 )
@@ -24,7 +25,7 @@ const (
 func TestEmitLockSuccess_SortedDeterministic(t *testing.T) {
 	var buf bytes.Buffer
 	EmitLockSuccess(&buf, []domain.LockRecord{
-		{Target: domain.Target{Canonical: "z.go"}},
+		{Target: domain.Target{Canonical: zGo}},
 		{Target: domain.Target{Canonical: aGo}},
 	})
 	got := buf.String()
@@ -133,7 +134,7 @@ func TestRelToCwd_AbsolutePathBecomesRelative(t *testing.T) {
 
 func TestEmitInvalid_DoesNotMutateInput(t *testing.T) {
 	in := []InvalidTarget{
-		{Path: "z.go", Reason: "not-found"},
+		{Path: zGo, Reason: "not-found"},
 		{Path: aGo, Reason: "symlink"},
 	}
 	original := []InvalidTarget{in[0], in[1]}
@@ -403,6 +404,44 @@ func TestEmitClaimConflictNamesHolder(t *testing.T) {
 	}
 	if !strings.Contains(got, "⚠ prefix=") {
 		t.Errorf("per-blocker rows use ⚠: %q", got)
+	}
+}
+
+// TestEmitCandidateClaimConflict_NamesBlocker pins loto-u2p7 AC2: the
+// candidate id, owning session, and created-at age must appear on the
+// refusal line — a bare "candidate claim conflict: N blocker(s)" (the
+// error's own Error() string) gives the operator nothing to act on.
+func TestEmitCandidateClaimConflict_NamesBlocker(t *testing.T) {
+	created := time.Date(2026, 5, 10, 8, 0, 0, 0, time.UTC)
+	now := created.Add(90 * time.Minute)
+	var buf bytes.Buffer
+	EmitCandidateClaimConflict(&buf, &store.CandidateClaimConflictError{
+		Blockers: []domain.CandidateClaim{
+			{PathCanonical: zGo, CandidateID: "cand-z", SessionUUID: "sess-z", CreatedAt: created},
+			{PathCanonical: aGo, CandidateID: "cand-a", SessionUUID: "sess-a", CreatedAt: created},
+		},
+	}, now)
+	got := buf.String()
+	if !strings.HasPrefix(got, "✗ blocked count=2\n") {
+		t.Errorf("triage first: %q", got)
+	}
+	if strings.Index(got, "target=a.go") > strings.Index(got, "target=z.go") {
+		t.Errorf("not sorted by target: %q", got)
+	}
+	if !strings.Contains(got, "candidate=cand-a") {
+		t.Errorf("row must name the candidate id: %q", got)
+	}
+	if !strings.Contains(got, "session=sess-a") {
+		t.Errorf("row must name the owning session: %q", got)
+	}
+	if !strings.Contains(got, "age=1h30m0s") {
+		t.Errorf("row must name the created-at age: %q", got)
+	}
+	if !strings.Contains(got, "⚠ target=") {
+		t.Errorf("per-blocker rows use ⚠: %q", got)
+	}
+	if strings.Contains(got, "blocker(s)") {
+		t.Errorf("bare CandidateClaimConflictError.Error() text must not appear: %q", got)
 	}
 }
 

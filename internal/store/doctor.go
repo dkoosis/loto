@@ -38,6 +38,13 @@ type DoctorReport struct {
 	// fact about territory. Reported, not resurrected — no retry, no
 	// re-delivery, no author notification (that would need an address).
 	ExpiredTerritoryTags []TerritoryTag
+	// StaleCandidateClaims are the candidate_claims rows --repair would sweep
+	// (gcCandidateClaimsTx, loto-u2p7): abandoned by
+	// domain.EvalContext.CandidateClaimIsAbandoned — provably dead, or
+	// carrying no durable pid and no other liveness witness at all. In
+	// (path, candidate_id) order (ListCandidateClaims' own order, preserved
+	// by filtering rather than re-sorting).
+	StaleCandidateClaims []domain.CandidateClaim
 	SidecarFindings      []SidecarFinding
 	IntegrityOK          bool
 	IntegrityDetail      string
@@ -83,6 +90,9 @@ func (s *Store) DoctorAudit(ctx context.Context, thisHost string, hostKnown bool
 	if err := s.collectExpiredClaims(ctx, r, ec.Now); err != nil {
 		return nil, err
 	}
+	if err := s.collectStaleCandidateClaims(ctx, r, ec); err != nil {
+		return nil, err
+	}
 	expiredNotes, err := s.ExpiredTerritoryTags(ctx, ec.Now.UnixNano())
 	if err != nil {
 		return nil, err
@@ -113,6 +123,24 @@ func (s *Store) collectExpiredClaims(ctx context.Context, r *DoctorReport, now t
 		}
 		return r.ExpiredClaims[i].OwnerUUID < r.ExpiredClaims[j].OwnerUUID
 	})
+	return nil
+}
+
+// collectStaleCandidateClaims fills r.StaleCandidateClaims with every
+// candidate_claims row domain.EvalContext.CandidateClaimIsAbandoned judges
+// abandoned — the audit half of gcCandidateClaimsTx's sweep (loto-u2p7).
+// ListCandidateClaims already returns (path_canonical, candidate_id) order;
+// filtering preserves it rather than re-deriving a sort.
+func (s *Store) collectStaleCandidateClaims(ctx context.Context, r *DoctorReport, ec domain.EvalContext) error {
+	claims, err := s.ListCandidateClaims(ctx)
+	if err != nil {
+		return err
+	}
+	for i := range claims {
+		if ec.CandidateClaimIsAbandoned(claims[i]) {
+			r.StaleCandidateClaims = append(r.StaleCandidateClaims, claims[i])
+		}
+	}
 	return nil
 }
 
@@ -221,6 +249,9 @@ func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live d
 		return err
 	}
 	if err := gcClaimsTx(ctx, tx, now); err != nil {
+		return err
+	}
+	if _, err := gcCandidateClaimsTx(ctx, tx, live, now); err != nil {
 		return err
 	}
 	if err := gcTerritoryTagsTx(ctx, tx, now); err != nil {
@@ -415,6 +446,60 @@ func gcTagsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 func gcClaimsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	_, err := tx.ExecContext(ctx, `DELETE FROM claims WHERE expires_at <= ?`, now.UnixNano())
 	return err
+}
+
+// gcCandidateClaimsTx deletes every row belonging to a candidate whose claim
+// domain.EvalContext.CandidateClaimIsAbandoned judges abandoned (loto-u2p7),
+// returning the number of rows removed (report.StaleCandidateClaims' count,
+// when the caller wants dry-run parity). Runs inside DoctorRepair's tx beside
+// gcClaimsTx.
+//
+// ‡ Deletes by CandidateID, not by individual (path, candidate_id) row — the
+// same granularity ReleaseCandidateClaims already uses everywhere a
+// candidate's claims are dropped for good (promoted/rejected/withdrawn). A
+// candidate's rows all share the one minting process's PID/session/host
+// (AcceptCandidate builds every row from one `submitter`), so the abandonment
+// verdict is identical across a candidate's whole write-set — evaluating the
+// first row found for each id is sufficient; nothing is gained by
+// re-evaluating each path.
+//
+// ‡ The DECIDED scope (loto-u2p7 comment, 2026-09-05): this deletes the
+// candidate_claims row(s) only. refs/loto/candidates/* and
+// refs/loto/proposals/* are left untouched — the store, not refs, is the
+// attribution home (loto-ovno.13), so the refs are inert once nothing blocks
+// on them.
+func gcCandidateClaimsTx(ctx context.Context, tx *sql.Tx, live domain.HolderLiveProbe, now time.Time) (int, error) {
+	claims, err := listCandidateClaimsTx(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	ec := domain.EvalContext{Now: now, Live: live}
+	seen := map[string]bool{}
+	var ids []string
+	for i := range claims {
+		id := claims[i].CandidateID
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		if ec.CandidateClaimIsAbandoned(claims[i]) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids) // deterministic delete order, matching this file's other sweeps
+	removed := 0
+	for _, id := range ids {
+		res, err := tx.ExecContext(ctx, `DELETE FROM candidate_claims WHERE candidate_id = ?`, id)
+		if err != nil {
+			return removed, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return removed, err
+		}
+		removed += int(n)
+	}
+	return removed, nil
 }
 
 // errOrphanNoRepoTop reports a candidate/lock-row path-form mismatch the store

@@ -230,6 +230,21 @@ func (s *Store) ListCandidateClaims(ctx context.Context) ([]domain.CandidateClai
 	return scanCandidateClaims(rows)
 }
 
+// listCandidateClaimsTx is ListCandidateClaims' tx-scoped twin, for
+// DoctorRepair's stale-candidate-claim sweep (gcCandidateClaimsTx, loto-u2p7):
+// reading inside the repair tx means the abandonment verdict and the delete
+// see the same snapshot, the same posture candidateClaimsForPathsTx already
+// takes for the acquisition-time overlap block.
+func listCandidateClaimsTx(ctx context.Context, tx *sql.Tx) ([]domain.CandidateClaim, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT `+candidateClaimCols+` FROM candidate_claims ORDER BY path_canonical, candidate_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCandidateClaims(rows)
+}
+
 // CandidateClaimsForPaths returns claims covering any of the given canonical
 // paths — the query AcquireLocks' overlap block runs before granting a new
 // lease (part 3 of loto-ovno.2: "lease acquisition fails on overlap with any

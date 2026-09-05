@@ -40,7 +40,7 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, lockUsageHead)
 		fs.PrintDefaults()
 	}
-	ttl := fs.Duration("ttl", 30*time.Minute, "lock TTL")
+	ttl := fs.Duration("ttl", domain.DegradedModeTTL, "lock TTL")
 	intent := fs.String("t", "", "intent (required)")
 	fs.StringVar(intent, "intent", "", "intent (required)")
 	shared := fs.Bool("shared", false, "acquire a shared (multi-reader) lock; default is exclusive")
@@ -202,6 +202,16 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 		var mce *store.MultiConflictError
 		if errors.As(err, &mce) {
 			render.EmitConflictWithTags(stdout, mce, fetchTagsForBlockers(rt, mce.Blockers))
+			return 1
+		}
+		// A candidate claim conflict is a distinct blocker shape (loto-u2p7): no
+		// live lock to point at, but a pending candidate this write-set would
+		// step on. Named separately so the refusal line carries the candidate
+		// id, its session, and its age rather than falling to the bare
+		// CandidateClaimConflictError.Error() string below.
+		var ccce *store.CandidateClaimConflictError
+		if errors.As(err, &ccce) {
+			render.EmitCandidateClaimConflict(stdout, ccce, now)
 			return 1
 		}
 		fmt.Fprintf(stderr, "✗ %v\n", err)

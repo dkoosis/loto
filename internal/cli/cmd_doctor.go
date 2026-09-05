@@ -38,14 +38,14 @@ func renderDoctorReport(stdout io.Writer, report *store.DoctorReport) {
 	})
 	// A note that lapsed with nobody having read it is a finding, so a box whose
 	// only trouble is one of those must not print ✓ healthy (loto-z3y1 D2).
-	if len(staleLocks) == 0 && len(report.ExpiredClaims) == 0 && len(sidecarFindings) == 0 &&
-		len(report.ExpiredTerritoryTags) == 0 && report.IntegrityOK {
+	if len(staleLocks) == 0 && len(report.ExpiredClaims) == 0 && len(report.StaleCandidateClaims) == 0 &&
+		len(sidecarFindings) == 0 && len(report.ExpiredTerritoryTags) == 0 && report.IntegrityOK {
 		fmt.Fprintln(stdout, "✓ healthy")
 		return
 	}
-	fmt.Fprintf(stdout, "✗ stale_locks=%d expired_claims=%d expired_territory_tags=%d sidecar_findings=%d integrity=%s\n",
-		len(staleLocks), len(report.ExpiredClaims), len(report.ExpiredTerritoryTags),
-		len(sidecarFindings), report.IntegrityDetail)
+	fmt.Fprintf(stdout, "✗ stale_locks=%d expired_claims=%d stale_candidate_claims=%d expired_territory_tags=%d sidecar_findings=%d integrity=%s candidate_claim_grace=%s\n",
+		len(staleLocks), len(report.ExpiredClaims), len(report.StaleCandidateClaims), len(report.ExpiredTerritoryTags),
+		len(sidecarFindings), report.IntegrityDetail, domain.CandidateClaimReclaimGrace)
 	for i := range staleLocks {
 		l := &staleLocks[i]
 		fmt.Fprintf(stdout, "✗ stale target=%s owner=%s expires_at=%s host=%s pid=%d\n",
@@ -57,6 +57,13 @@ func renderDoctorReport(stdout io.Writer, report *store.DoctorReport) {
 		c := &report.ExpiredClaims[i]
 		fmt.Fprintf(stdout, "✗ expired_claim prefix=%s owner=%s expires_at=%s\n",
 			c.PathPrefix, c.OwnerUUID, c.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	// StaleCandidateClaims arrive in ListCandidateClaims' (path, candidate_id)
+	// order — canonical paths are repo-relative, so relPath applies.
+	for i := range report.StaleCandidateClaims {
+		c := &report.StaleCandidateClaims[i]
+		fmt.Fprintf(stdout, "✗ stale_candidate_claim candidate=%s target=%s session=%s created_at=%s pid=%d\n",
+			c.CandidateID, relPath(c.PathCanonical), c.SessionUUID, c.CreatedAt.UTC().Format(time.RFC3339), c.PID)
 	}
 	// ⚠ rather than ✗: the note is not broken state, it is undelivered word,
 	// and --repair will sweep it. The text rides along so the row is actionable
@@ -146,10 +153,14 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}, stdout)
 
 	if *dryRun {
-		// would_gc_claims mirrors the repair tx's gcClaimsTx sweep (D3) so the
+		// would_gc_claims mirrors the repair tx's gcClaimsTx sweep (D3);
+		// would_gc_candidate_claims mirrors gcCandidateClaimsTx (loto-u2p7) — the
 		// dry-run names everything --repair would delete, not just lock rows.
-		fmt.Fprintf(stdout, "✓ dry-run would_reclaim=%d would_gc_claims=%d would_release_residue=%d\n",
-			len(report.StaleLocks), len(report.ExpiredClaims), len(residue))
+		// candidate_claim_grace names the age floor a zero-evidence claim must
+		// clear before it counts (domain.CandidateClaimReclaimGrace, PR #298
+		// review) — so an operator sees why a fresh one didn't.
+		fmt.Fprintf(stdout, "✓ dry-run would_reclaim=%d would_gc_claims=%d would_gc_candidate_claims=%d would_release_residue=%d candidate_claim_grace=%s\n",
+			len(report.StaleLocks), len(report.ExpiredClaims), len(report.StaleCandidateClaims), len(residue), domain.CandidateClaimReclaimGrace)
 		if scanIncomplete {
 			return 3
 		}
