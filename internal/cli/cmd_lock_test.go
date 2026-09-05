@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -295,6 +296,94 @@ func TestLock_RejectDirectoryTarget(t *testing.T) {
 	combined := out.String() + errBuf.String()
 	if !strings.Contains(combined, "not-regular-file") {
 		t.Errorf("expected reason=not-regular-file: %q", combined)
+	}
+}
+
+// sd-hh0h: the refusal must say WHAT TO RUN, not only why it refused. Two
+// lanes read `reason=not-regular-file` on 2026-09-05 and edited unlocked —
+// the gate was simply off. Option B on the bead: the refusal stands (claim
+// takes a directory, lock takes files — loto-qoq) and gains both replacements.
+//
+// ‡ Three spellings, because each reaches the reason through a DIFFERENT arm:
+// a bare directory is rejected by statFileTargetReason's IsRegular check, a
+// trailing-slash one by domain.ErrTargetIsDir before any stat, and a regular
+// file must still lock. A suite that only covered the first would go green
+// against a hint keyed on the stat alone, which the slash spelling never reaches.
+func TestLock_DirectoryRefusalNamesBothReplacements(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{"bare directory", tcPrefixStore, tcPrefixStore},
+		{"trailing slash", tcPrefixStore + "/", tcPrefixStore},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withTempProject(t)
+			pinAgent(t)
+			var out, errBuf bytes.Buffer
+			code := Run([]string{tcCmdLock, tc.target, "-t", tcIntentTest}, &out, &errBuf)
+			if code != 2 {
+				t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
+			}
+			// The hint belongs on stderr, beside the refusal it explains.
+			got := errBuf.String()
+			if !strings.Contains(got, "not-regular-file") {
+				t.Errorf("refusal reason missing: %q", got)
+			}
+			claim := "loto claim " + tc.want + " -t"
+			if !strings.Contains(got, claim) {
+				t.Errorf("stderr does not name the territory replacement %q: %q", claim, got)
+			}
+			expand := "loto lock $(fd -t f . " + tc.want + ") -t"
+			if !strings.Contains(got, expand) {
+				t.Errorf("stderr does not name the write-set expansion %q: %q", expand, got)
+			}
+			if !strings.Contains(got, tcIntentTest) {
+				t.Errorf("the hint drops the intent the caller already typed: %q", got)
+			}
+		})
+	}
+}
+
+// The other half of the pair: a REGULAR FILE still locks, and no hint appears.
+// Without this the assertions above could pass against a lock that refuses
+// everything and prints the hint unconditionally.
+func TestLock_RegularFileStillLocksAndGetsNoDirHint(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("a regular file must still lock; exit %d out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	combined := out.String() + errBuf.String()
+	if strings.Contains(combined, "fd -t f") {
+		t.Errorf("the directory hint fired on a regular file: %q", combined)
+	}
+}
+
+// A non-regular target that is NOT a directory gets the bare reason it always
+// got: neither replacement line is the answer for a fifo, and printing them
+// would teach a wrong move at exactly the moment the caller is looking for one.
+func TestLock_NonRegularNonDirectoryGetsNoDirHint(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	fifo := "afifo"
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Skipf("mkfifo unavailable here: %v", err)
+	}
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, fifo, "-t", tcIntentTest}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	combined := out.String() + errBuf.String()
+	if !strings.Contains(combined, "not-regular-file") {
+		t.Errorf("expected reason=not-regular-file: %q", combined)
+	}
+	if strings.Contains(combined, "fd -t f") {
+		t.Errorf("the directory hint fired on a fifo: %q", combined)
 	}
 }
 
