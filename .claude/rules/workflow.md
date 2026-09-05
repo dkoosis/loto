@@ -4,6 +4,8 @@
 
 ‡ Go symbol questions → `snipe` (def/refs/callers/pack/impact/tests) before rg/Grep. rg = non-symbol text only.
 
+‡ **After every `go tool conform sandbox sync`, run `make check` before shipping.** A dropped local patch (e.g. the pipefail-parity fix, loto-qzoo) has no other signal.
+
 ‡ **store Open / race-path fixes → ALWAYS via PR, never direct-to-main.** linux `-race` runs only on CI, not local macOS. Even a no-op refactor touching `internal/store/*` or `internal/identity/*` goes through a PR (#170 honored this). The rule keyed on `registry.go` until loto-jnid deleted it; the whole package is the trigger now, so the rule cannot be disarmed by a rename.
 
 ‡ **Before publishing a branch you did not author, check it.** A local branch

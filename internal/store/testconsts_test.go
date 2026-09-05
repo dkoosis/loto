@@ -14,4 +14,7 @@ const (
 	// tcPkgStore is the representative claim prefix — a real package path, so
 	// the overlap cases read as territory rather than as opaque fixtures.
 	tcPkgStore = "internal/store"
+	// tcOtherHost is a host that never equals tcHost — the cross-host fixture
+	// for liveness probes that gate on host equality (loto-u2p7).
+	tcOtherHost = "other-host"
 )

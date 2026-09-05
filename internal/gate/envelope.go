@@ -99,6 +99,44 @@ type Envelope struct {
 	LeaseEpoch map[string]int64
 }
 
+// CreatedPath is one path this candidate creates, bound to the exact bytes it
+// proposed for it. Blob is the proposal commit's blob SHA — Transition.Result
+// — and is empty only when the candidate declared a path it neither found nor
+// wrote, which attributes nothing.
+//
+// ‡ The pair, never the path alone (loto-ovno.13 review). A path names a slot;
+// a deleter needs to know it is removing the bytes the rejected candidate put
+// there, not whatever a peer has since written into the same slot.
+type CreatedPath struct {
+	Path string
+	Blob string
+}
+
+// CreatedPaths is the subset of WriteSet this candidate CREATES — every
+// transition whose Expected preimage is nil, i.e. the path had no entry in
+// integration at capture time — each with the blob the proposal gives it.
+// Sorted, because Transitions is.
+//
+// ‡ This is the only write-set subset a rejection may hand a deleter. A
+// MODIFIED path existed before the candidate touched it, so its worktree bytes
+// are integration's file with someone's edit on top and deleting it destroys
+// content the candidate never authored; a created path's residue is a file
+// integration has no entry for at all.
+func (e Envelope) CreatedPaths() []CreatedPath {
+	var out []CreatedPath
+	for _, t := range e.Transitions {
+		if t.Expected != nil {
+			continue
+		}
+		cp := CreatedPath{Path: t.Path}
+		if t.Result != nil {
+			cp.Blob = t.Result.SHA
+		}
+		out = append(out, cp)
+	}
+	return out
+}
+
 var (
 	// errEmptyField is wrapped by Capture's validation for any required,
 	// caller-supplied field left blank — a caller bug, not a runtime

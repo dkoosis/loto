@@ -1,8 +1,10 @@
 usage: loto verify <commit-ish> -- <cmd> [args...]
 
-Run a broad-repo command against <commit-ish> in a throwaway detached worktree
-cut off the lane ref, then remove that worktree. A non-zero command exit is a
-test failure (exit 1); a setup/teardown/ctx failure is infra (exit 3).
+Run a broad-repo command against <commit-ish> in a detached worktree holding
+exactly that commit, never the shared checkout. The worktree is reused across
+runs (one per repo, under .git/loto-verify) and reset to <commit-ish> first, so
+what the command sees matches a fresh cut. A non-zero command exit is a test
+failure (exit 1); a setup/teardown/ctx failure is infra (exit 3).
 
 examples:
   loto verify loto/impl-1 -- go test -race ./...

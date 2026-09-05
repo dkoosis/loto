@@ -37,7 +37,7 @@ func cmdRefresh(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprint(stderr, refreshUsageHead)
 		fs.PrintDefaults()
 	}
-	ttl := fs.Duration("ttl", 30*time.Minute, "new lock TTL, measured from now")
+	ttl := fs.Duration("ttl", domain.DegradedModeTTL, "new lock TTL, measured from now")
 	all := fs.Bool("all", false, "refresh every lock owned by my uuid")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2

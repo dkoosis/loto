@@ -14,10 +14,18 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/gate"
 )
 
 const (
 	tcCmdSync = "sync"
+	// Residue fixture (loto-ovno.13): a created path a rejection attributes,
+	// the candidate id it is charged to, and a stray nothing vouches for.
+	tcResidueNewGo     = "new.go"
+	tcResidueCandidate = "c-resid0001"
+	tcResidueOtherGo   = "other.go"
+	tcResidueEnv       = ".env"
+	tcResidueBody      = "package p\n"
 )
 
 var errInjectedSyncIO = errors.New("injected sync I/O failure")
@@ -182,7 +190,7 @@ func TestSync_LeaseAcquireCannotRaceFinalApply(t *testing.T) {
 	done := make(chan int, 1)
 	expectedIntegration := syncGitT(t, repo, "rev-parse", "refs/loto/integration")
 	go func() {
-		_, _, code := syncStoreDecideApply(rt, repo, expectedIntegration, []syncDiff{diff}, io.Discard)
+		_, code := syncStoreDecideApply(rt, repo, expectedIntegration, []syncDiff{diff}, nil, syncOpts{}, io.Discard)
 		done <- code
 	}()
 	<-readDone
@@ -334,17 +342,23 @@ func TestSync_MixedReport(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
-	if len(lines) < 3 {
-		t.Fatalf("want at least 3 lines, got %d: %q", len(lines), out.String())
+	if len(lines) < 4 {
+		t.Fatalf("want at least 4 lines, got %d: %q", len(lines), out.String())
 	}
-	if lines[0] != "✗ sync synced=1 conflicts=1 skipped=0" {
+	if lines[0] != "✗ sync synced=1 conflicts=1 skipped=0 deleted=0 residue-modified=0 unattributed=0" {
 		t.Errorf("bad triage line: %q", lines[0])
 	}
-	if !strings.HasPrefix(lines[1], "✓ target="+tcTargetA+" action=fast-forward") {
-		t.Errorf("want a.go row before b.go (path-sorted), got: %q", lines[1])
+	// Line 2 is the attribution-window row: it always follows the triage
+	// counts, so a reader who sees deleted=0 also sees how far back sync could
+	// have looked before concluding it.
+	if !strings.HasPrefix(lines[1], "ℹ attribution=rejected-candidate-write-set+blob window=") {
+		t.Errorf("want the attribution-window row second, got: %q", lines[1])
 	}
-	if !strings.HasPrefix(lines[2], "✗ target="+tcTargetB+" reason=leased holder=") {
-		t.Errorf("want b.go conflict row second, got: %q", lines[2])
+	if !strings.HasPrefix(lines[2], "✓ target="+tcTargetA+" action=fast-forward") {
+		t.Errorf("want a.go row before b.go (path-sorted), got: %q", lines[2])
+	}
+	if !strings.HasPrefix(lines[3], "✗ target="+tcTargetB+" reason=leased holder=") {
+		t.Errorf("want b.go conflict row third, got: %q", lines[3])
 	}
 	if !strings.Contains(out.String(), "loto status --collisions") {
 		t.Errorf("missing fix block: %q", out.String())
@@ -378,7 +392,337 @@ func TestSync_Idempotent(t *testing.T) {
 	}
 }
 
-// TestSync_RejectsStrayArgs: sync takes no arguments in v1.
+// --- v2: untracked residue, deleted only by recorded attribution (loto-ovno.13) ---
+
+// blobOf is the SHA git would store the given bytes under — the value a real
+// envelope's Transition.Result carries for a created path.
+func blobOf(t *testing.T, repo, content string) string {
+	t.Helper()
+	cmd := exec.Command("git", "hash-object", "--stdin")
+	cmd.Dir = repo
+	cmd.Stdin = strings.NewReader(content)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git hash-object: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// recordRejection persists a candidate_rejected verdict naming the paths that
+// candidate created, each bound to the blob it wrote there — the only
+// attribution `loto sync` will delete by. Uses its own short-lived runtime and
+// closes it before the caller runs sync, so the sweep sees the row through a
+// fresh open, not a shared handle.
+func recordRejection(t *testing.T, candidateID string, created ...gate.CreatedPath) {
+	t.Helper()
+	rt, err := openRuntime(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	if err := rt.Store.RecordAdmissionVerdict(rt.Ctx, rt.Agent.UUID, candidateID,
+		gate.ReasonStalePreimage, created); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// plantResidue writes an untracked file and records the rejection that
+// attributes it, blob and all — the fixture every deletion case starts from.
+func plantResidue(t *testing.T, repo, path, content string) string {
+	t.Helper()
+	full := filepath.Join(repo, path)
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recordRejection(t, tcResidueCandidate, gate.CreatedPath{Path: path, Blob: blobOf(t, repo, content)})
+	return full
+}
+
+// TestSync_DeletesResidueAttributedToARejectedCandidate is the whole bead: an
+// untracked file a rejected candidate is on record as having created is
+// removed, and the row names both the path and the candidate the deletion is
+// charged to (DESIGN.md invariant 8 — no silent dispossession).
+func TestSync_DeletesResidueAttributedToARejectedCandidate(t *testing.T) {
+	repo := syncBaseRepo(t)
+	residue := plantResidue(t, repo, tcResidueNewGo, tcResidueBody)
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✓ sync synced=0 conflicts=0 skipped=0 deleted=1 residue-modified=0 unattributed=0") {
+		t.Errorf("missing triage line: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "ℹ target="+tcResidueNewGo+" action=delete candidate="+tcResidueCandidate) {
+		t.Errorf("deletion row must name path and candidate: %q", out.String())
+	}
+	if _, err := os.Stat(residue); !os.IsNotExist(err) {
+		t.Errorf("attributed residue survived: %v", err)
+	}
+	if !strings.Contains(out.String(), "ℹ attribution=rejected-candidate-write-set+blob window=") {
+		t.Errorf("report must state the attribution window: %q", out.String())
+	}
+}
+
+// TestSync_LeavesResidueRecreatedWithDifferentBytes is the review's correction:
+// a peer re-created the same path with their own work. The path still matches
+// the rejection's record, the CONTENT does not — and a deletion restores
+// nothing, so it must be exact.
+func TestSync_LeavesResidueRecreatedWithDifferentBytes(t *testing.T) {
+	repo := syncBaseRepo(t)
+	residue := plantResidue(t, repo, tcResidueNewGo, tcResidueBody)
+	const peerWork = "package p\n\nfunc Peer() {}\n"
+	if err := os.WriteFile(residue, []byte(peerWork), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync, "--verbose"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✓ sync synced=0 conflicts=0 skipped=0 deleted=0 residue-modified=1 unattributed=0") {
+		t.Errorf("missing triage line: %q", out.String())
+	}
+	recorded := shortOID(blobOf(t, repo, tcResidueBody))
+	found := shortOID(blobOf(t, repo, peerWork))
+	wantRow := "⚠ target=" + tcResidueNewGo + " reason=" + syncReasonResidueModified +
+		" candidate=" + tcResidueCandidate + " recorded=" + recorded + " found=" + found
+	if !strings.Contains(out.String(), wantRow) {
+		t.Errorf("--verbose row must name both SHAs, want %q in: %q", wantRow, out.String())
+	}
+	if got := readFileT(t, residue); got != peerWork {
+		t.Errorf("sync deleted a peer's work at an attributed path: %q", got)
+	}
+}
+
+// TestSync_RefusesResidueThatIsNoLongerARegularFile: between the scan and the
+// delete a residue path can turn into a directory or a symlink. Neither is the
+// blob this run was authorized to remove, so both are reported and skipped —
+// and os.Remove would have happily unlinked the symlink.
+func TestSync_RefusesResidueThatIsNoLongerARegularFile(t *testing.T) {
+	repo := syncBaseRepo(t)
+	blob := blobOf(t, repo, tcResidueBody)
+
+	dirPath := filepath.Join(repo, tcResidueNewGo)
+	if err := os.Mkdir(dirPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(repo, tcResidueOtherGo)
+	if err := os.Symlink(filepath.Join(repo, tcTargetA), linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, skips, modified, err := syncDeleteResidue(t.Context(), repo, []syncResidue{
+		{Path: tcResidueNewGo, CandidateID: tcResidueCandidate, Blob: blob},
+		{Path: tcResidueOtherGo, CandidateID: tcResidueCandidate, Blob: blob},
+	})
+	if err != nil {
+		t.Fatalf("delete returned an error rather than skipping: %v", err)
+	}
+	if len(deleted) != 0 {
+		t.Errorf("deleted %v, want nothing", deleted)
+	}
+	if len(modified) != 0 {
+		t.Errorf("a non-file was reported as modified rather than not-regular: %v", modified)
+	}
+	if len(skips) != 2 {
+		t.Fatalf("skips = %v, want one per path", skips)
+	}
+	for _, s := range skips {
+		if s.Reason != syncReasonResidueNotFile {
+			t.Errorf("%s skipped with reason %q, want %q", s.Path, s.Reason, syncReasonResidueNotFile)
+		}
+	}
+	if fi, err := os.Lstat(dirPath); err != nil || !fi.IsDir() {
+		t.Errorf("the directory was removed: %v", err)
+	}
+	if _, err := os.Lstat(linkPath); err != nil {
+		t.Errorf("the symlink was removed: %v", err)
+	}
+}
+
+// TestSync_LeavesResidueOverwrittenBetweenClassifyAndDelete closes the window
+// the classification pass opens: sync decided this file was deletable, then a
+// peer wrote its own work into it before the delete loop reached it. The
+// re-probe must catch that — re-checking only the file TYPE would still have
+// unlinked the peer's bytes.
+func TestSync_LeavesResidueOverwrittenBetweenClassifyAndDelete(t *testing.T) {
+	repo := syncBaseRepo(t)
+	residue := plantResidue(t, repo, tcResidueNewGo, tcResidueBody)
+
+	const peerWork = "package p\n\nfunc LandedMidSync() {}\n"
+	syncBeforeDeleteFn = func() {
+		if err := os.WriteFile(residue, []byte(peerWork), 0o644); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { syncBeforeDeleteFn = nil })
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✓ sync synced=0 conflicts=0 skipped=0 deleted=0 residue-modified=1 unattributed=0") {
+		t.Errorf("missing triage line: %q", out.String())
+	}
+	if got := readFileT(t, residue); got != peerWork {
+		t.Errorf("sync deleted work that landed after classification: %q", got)
+	}
+}
+
+// TestSync_ResidueVanishingMidRunDoesNotAbortTheSync: a peer cleaned up its own
+// residue between the untracked scan and the content probe. That path is simply
+// gone — it must cost nothing but itself, and the rest of the repair must
+// finish. (Before per-file probing, a batched `git hash-object --stdin-paths`
+// exited 128 on the missing path and took the whole sync down with it.)
+func TestSync_ResidueVanishingMidRunDoesNotAbortTheSync(t *testing.T) {
+	repo := syncBaseRepo(t)
+	residue := plantResidue(t, repo, tcResidueNewGo, tcResidueBody)
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("drift\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fires after the coordination read, before classification — the scan has
+	// already listed the file and attributed it.
+	syncBeforeApplyFn = func() {
+		if err := os.Remove(residue); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { syncBeforeApplyFn = nil })
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✓ sync synced=1 conflicts=0 skipped=0 deleted=0 residue-modified=0 unattributed=0") {
+		t.Errorf("a vanished residue path must cost nothing but itself: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "✓ target="+tcTargetA+" action=fast-forward") {
+		t.Errorf("the rest of the repair must still run: %q", out.String())
+	}
+	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != "" {
+		t.Errorf("divergent path not restored: %q", got)
+	}
+}
+
+// TestSync_LeavesUnattributedUntrackedFile: nothing vouches for a stray .env,
+// so it is counted and left alone. This is the fail-closed half — sync must
+// never reason from "untracked" to "disposable".
+func TestSync_LeavesUnattributedUntrackedFile(t *testing.T) {
+	repo := syncBaseRepo(t)
+	stray := filepath.Join(repo, tcResidueEnv)
+	if err := os.WriteFile(stray, []byte("SECRET=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync, "--verbose"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✓ sync synced=0 conflicts=0 skipped=0 deleted=0 residue-modified=0 unattributed=1") {
+		t.Errorf("missing triage line: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "ℹ target="+tcResidueEnv+" reason=unattributed action=none") {
+		t.Errorf("--verbose must name the unattributed path: %q", out.String())
+	}
+	if got := readFileT(t, stray); got != "SECRET=1\n" {
+		t.Errorf("unattributed file was touched: %q", got)
+	}
+}
+
+// TestSync_LeavesPathCommittedSinceTheRejection: someone committed the file a
+// rejected candidate created, so it is tracked content now — not residue. The
+// untracked listing is what enforces this, and the test pins it: attribution
+// alone must never be enough to delete.
+func TestSync_LeavesPathCommittedSinceTheRejection(t *testing.T) {
+	repo := syncBaseRepo(t)
+	kept := filepath.Join(repo, tcResidueNewGo)
+	if err := os.WriteFile(kept, []byte(tcResidueBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	syncGitT(t, repo, "add", tcResidueNewGo)
+	syncGitT(t, repo, "commit", "-q", "-m", "someone committed the residue")
+	// Integration moves with HEAD; otherwise sync refuses as behind-HEAD and
+	// the test would pass without ever reaching the residue pass.
+	syncGitT(t, repo, "update-ref", "refs/loto/integration", "HEAD")
+	recordRejection(t, tcResidueCandidate,
+		gate.CreatedPath{Path: tcResidueNewGo, Blob: blobOf(t, repo, tcResidueBody)})
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if strings.Contains(out.String(), "action=delete") {
+		t.Errorf("sync deleted a tracked path: %q", out.String())
+	}
+	if got := readFileT(t, kept); got != tcResidueBody {
+		t.Errorf("tracked file was touched: %q", got)
+	}
+}
+
+// TestSync_DryRunDeletesNothing: --dry-run reports the same decision and
+// leaves the tree exactly as it found it, in both halves — the fast-forward
+// and the deletion.
+func TestSync_DryRunDeletesNothing(t *testing.T) {
+	repo := syncBaseRepo(t)
+	residue := plantResidue(t, repo, tcResidueNewGo, tcResidueBody)
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("drift\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync, "--dry-run"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "ℹ sync dry-run=true would-fast-forward=1 conflicts=0 skipped=0 would-delete=1 residue-modified=0 unattributed=0") {
+		t.Errorf("missing dry-run triage line: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "ℹ target="+tcResidueNewGo+" action=would-delete candidate="+tcResidueCandidate) {
+		t.Errorf("missing would-delete row: %q", out.String())
+	}
+	if got := readFileT(t, residue); got != tcResidueBody {
+		t.Errorf("--dry-run deleted the residue: %q", got)
+	}
+	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != "drift\n" {
+		t.Errorf("--dry-run fast-forwarded a divergent path: %q", got)
+	}
+}
+
+// TestSync_RefusesToDeleteLeasedResidue: a peer has taken a lease on the file
+// the rejected candidate left behind — it is someone's live work now. The
+// deletion answers to every holder v1 already refuses to write over.
+func TestSync_RefusesToDeleteLeasedResidue(t *testing.T) {
+	repo := syncBaseRepo(t)
+	residue := plantResidue(t, repo, tcResidueNewGo, tcResidueBody)
+	if code := Run([]string{tcCmdLock, tcResidueNewGo, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("lock")
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✗ sync synced=0 conflicts=1 skipped=0 deleted=0 residue-modified=0 unattributed=0") {
+		t.Errorf("missing triage line: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "✗ target="+tcResidueNewGo+" reason="+syncReasonLeased) {
+		t.Errorf("missing leased conflict row: %q", out.String())
+	}
+	if got := readFileT(t, residue); got != tcResidueBody {
+		t.Errorf("sync deleted a leased file: %q", got)
+	}
+}
+
+// TestSync_RejectsStrayArgs: sync takes no positional arguments.
 func TestSync_RejectsStrayArgs(t *testing.T) {
 	syncBaseRepo(t)
 
@@ -508,12 +852,12 @@ func TestSync_RefusesStaleIntegrationSnapshot(t *testing.T) {
 	}
 	defer rt.Close()
 	var errBuf bytes.Buffer
-	synced, _, code := syncStoreDecideApply(rt, repo, expectedIntegration, []syncDiff{{
+	out, code := syncStoreDecideApply(rt, repo, expectedIntegration, []syncDiff{{
 		syncEntry: syncEntry{Path: tcTargetA, Mode: "100644", OID: oldOID},
 		State:     syncModified,
-	}}, &errBuf)
+	}}, nil, syncOpts{}, &errBuf)
 	if code != 3 || !strings.Contains(errBuf.String(), errSyncIntegrationChanged.Error()) {
-		t.Fatalf("stale sync = code %d synced=%v err=%q, want refusal", code, synced, errBuf.String())
+		t.Fatalf("stale sync = code %d synced=%v err=%q, want refusal", code, out.Synced, errBuf.String())
 	}
 	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != "worktree\n" {
 		t.Errorf("stale sync overwrote current worktree bytes: %q", got)

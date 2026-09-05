@@ -16,21 +16,38 @@ import (
 	"loto/internal/identity"
 )
 
-// initBareGitRepo runs `git init` and the minimal user.email/user.name config
-// in `dir`. Shared by withTempProject and any test that builds an auxiliary
-// repo (e.g., TestLoadCheckTargets_UsesRepoTopForGitDiff).
+// initBareGitRepo gives `dir` the same `.git` a fresh `git init -q` plus
+// user.email/user.name config would produce. Shared by withTempProject and
+// any test that builds an auxiliary repo (e.g.,
+// TestLoadCheckTargets_UsesRepoTopForGitDiff).
+//
+// Copies gitRepoTemplateDir's `.git` (testmain_home_guard_test.go) instead of
+// spawning `git init` + two `git config` calls per call site: loto-a0fs
+// measured this fixture's cost as git-subprocess overhead, not compute, and
+// this helper alone had 200+ call sites across the package. The copy
+// produces a byte-identical `.git` tree — same init, same config — with zero
+// subprocess spawns.
 func initBareGitRepo(t *testing.T, dir string) {
 	t.Helper()
-	for _, args := range [][]string{
-		{"init", "-q"},
-		{"config", "user.email", "t@example.com"},
-		{"config", "user.name", "T"},
-	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
+	if err := copyGitTemplate(dir); err != nil {
+		t.Fatalf("copy git template into %s: %v", dir, err)
+	}
+}
+
+// addOriginRemote appends a `[remote "origin"]` section to dir/.git/config
+// directly instead of spawning `git remote add`. Safe because the section's
+// shape is fixed and known (mirrors what `git remote add origin <url>`
+// itself writes) — see loto-a0fs's initBareGitRepo comment for why this test
+// fixture avoids git subprocesses where it safely can.
+func addOriginRemote(t *testing.T, dir, url string) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(dir, ".git", "config"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open .git/config to add origin remote: %v", err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintf(f, "[remote \"origin\"]\n\turl = %s\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n", url); err != nil {
+		t.Fatalf("append origin remote: %v", err)
 	}
 }
 
@@ -48,11 +65,7 @@ func withTempProject(t *testing.T) string {
 
 	repo := t.TempDir()
 	initBareGitRepo(t, repo)
-	cmd := exec.Command("git", "remote", "add", "origin", "git@github.com:test/proj.git")
-	cmd.Dir = repo
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v\n%s", err, out)
-	}
+	addOriginRemote(t, repo, "git@github.com:test/proj.git")
 	t.Chdir(repo)
 	// Standard target files used across CLI tests. AcquireLocks Lstat-validates
 	// KindFile targets, so these must exist on disk.
@@ -155,6 +168,36 @@ func TestLockConflictBetweenAgents(t *testing.T) {
 		t.Errorf("expected blocker report: %q", combined)
 	}
 	_ = alice
+}
+
+// TestLock_CandidateClaimRefusalNamesBlocker pins loto-u2p7 AC2: a refusal
+// caused by a candidate claim must name the candidate id, its owning
+// session, and its age — not the bare CandidateClaimConflictError.Error()
+// string ("candidate claim conflict: N blocker(s)"), which gives the
+// operator nothing to act on.
+func TestLock_CandidateClaimRefusalNamesBlocker(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	seedClaim(t, "cand-live", tcTargetA)
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &out, &errBuf)
+	if code != 1 {
+		t.Fatalf("expected exit 1 (blocked), got %d; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "candidate=cand-live") {
+		t.Errorf("refusal must name the candidate id: %q", got)
+	}
+	if !strings.Contains(got, "session=") {
+		t.Errorf("refusal must name the owning session: %q", got)
+	}
+	if !strings.Contains(got, "age=") {
+		t.Errorf("refusal must name the claim's created-at age: %q", got)
+	}
+	if strings.Contains(got, "candidate claim conflict:") {
+		t.Errorf("bare CandidateClaimConflictError.Error() text must not leak through: %q", got)
+	}
 }
 
 func TestLock_MultiTarget_HappyPath(t *testing.T) {

@@ -105,6 +105,38 @@ func TestPromote_DryRunListsCandidate(t *testing.T) {
 	}
 }
 
+// TestPromote_PassesThroughLiteralLeadingDashDash pins loto-aq8x: a wrapped
+// command whose OWN first token is a literal "--" survives intact through
+// `loto promote -- -- --check` as ["--", "--check"], rather than the manual
+// strip eating that leading "--" (thinking it was loto's own separator,
+// already consumed by flag.Parse) and leaving gate.Promote to try running a
+// nonexistent "--check" executable.
+//
+// The wrapped "command" is a real executable literally named "--": finding
+// and running it at all proves cmd[0] survived as "--"; its own exit code
+// proves cmd[1] arrived as exactly "--check" and nothing else.
+func TestPromote_PassesThroughLiteralLeadingDashDash(t *testing.T) {
+	repo := promoteRepo(t)
+	promoteSubmitOne(t, repo, "edited\n")
+
+	bin := t.TempDir()
+	script := filepath.Join(bin, "--")
+	body := "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = \"--check\" ] && exit 0\nexit 1\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdPromote, "--", "--", "--check"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("want exit 0 (promoted), got %d: out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "action=promoted") {
+		t.Errorf("candidate not promoted — wrapped command did not receive [\"--\", \"--check\"]: %q", out.String())
+	}
+}
+
 // TestPromote_HappyPath is the end-to-end slice this bead unblocks: a
 // candidate submitted through the CLI is landed on refs/loto/integration by
 // the CLI, its refs retired, and the phase-2 verify reported with its own
@@ -128,6 +160,12 @@ func TestPromote_HappyPath(t *testing.T) {
 	}
 	if !strings.Contains(got, "ℹ verify batch=b-") || !strings.Contains(got, "result=pass") {
 		t.Errorf("missing verify timing row: %q", got)
+	}
+	// tree= rides the same row. Without it ms= cannot be read: a slow verify
+	// looks identical whether the invariant command is heavy or the reused
+	// worktree quietly stopped working.
+	if !strings.Contains(got, " tree=") {
+		t.Errorf("verify row does not say which tree ran: %q", got)
 	}
 
 	after := submitGitT(t, repo, "rev-parse", "refs/loto/integration")

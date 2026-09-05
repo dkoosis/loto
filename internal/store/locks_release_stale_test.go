@@ -30,8 +30,8 @@ func countEvents(t *testing.T, s *Store, target domain.Target, kind string) int 
 		t.Fatal(err)
 	}
 	n := 0
-	for _, e := range events {
-		if e.Kind == kind {
+	for i := range events {
+		if events[i].Kind == kind {
 			n++
 		}
 	}
