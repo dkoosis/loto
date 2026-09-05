@@ -204,6 +204,16 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 			render.EmitConflictWithTags(stdout, mce, fetchTagsForBlockers(rt, mce.Blockers))
 			return 1
 		}
+		// A candidate claim conflict is a distinct blocker shape (loto-u2p7): no
+		// live lock to point at, but a pending candidate this write-set would
+		// step on. Named separately so the refusal line carries the candidate
+		// id, its session, and its age rather than falling to the bare
+		// CandidateClaimConflictError.Error() string below.
+		var ccce *store.CandidateClaimConflictError
+		if errors.As(err, &ccce) {
+			render.EmitCandidateClaimConflict(stdout, ccce, now)
+			return 1
+		}
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}

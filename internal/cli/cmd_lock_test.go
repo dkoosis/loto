@@ -157,6 +157,36 @@ func TestLockConflictBetweenAgents(t *testing.T) {
 	_ = alice
 }
 
+// TestLock_CandidateClaimRefusalNamesBlocker pins loto-u2p7 AC2: a refusal
+// caused by a candidate claim must name the candidate id, its owning
+// session, and its age — not the bare CandidateClaimConflictError.Error()
+// string ("candidate claim conflict: N blocker(s)"), which gives the
+// operator nothing to act on.
+func TestLock_CandidateClaimRefusalNamesBlocker(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	seedClaim(t, "cand-live", tcTargetA)
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &out, &errBuf)
+	if code != 1 {
+		t.Fatalf("expected exit 1 (blocked), got %d; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "candidate=cand-live") {
+		t.Errorf("refusal must name the candidate id: %q", got)
+	}
+	if !strings.Contains(got, "session=") {
+		t.Errorf("refusal must name the owning session: %q", got)
+	}
+	if !strings.Contains(got, "age=") {
+		t.Errorf("refusal must name the claim's created-at age: %q", got)
+	}
+	if strings.Contains(got, "candidate claim conflict:") {
+		t.Errorf("bare CandidateClaimConflictError.Error() text must not leak through: %q", got)
+	}
+}
+
 func TestLock_MultiTarget_HappyPath(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)

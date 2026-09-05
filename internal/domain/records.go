@@ -194,6 +194,50 @@ func (c EvalContext) CandidateClaimIsDead(cc CandidateClaim) bool {
 	}) == LivenessDead
 }
 
+// CandidateClaimIsAbandoned is doctor's stale-candidate-claim reclaim
+// authority (loto-u2p7) — deliberately BROADER than CandidateClaimIsDead
+// above, and scoped to doctor's sweep alone: every other caller (admission's
+// authorizedPaths, promotion's re-validation) keeps the conservative
+// Dead-only predicate.
+//
+// A provably-DEAD claim is abandoned, same as CandidateClaimIsDead. In
+// addition, a claim minted with NO durable pid (PID<=0, the same
+// "no-durable-liveness-handle" sentinel IsBeacon/pidVerdict document
+// elsewhere) whose probe comes back UNKNOWN — no session record, no socket,
+// nothing to read — is ALSO abandoned: it carries zero evidence either way,
+// and unlike a LockRecord or a ClaimRecord it has no TTL backstop to
+// eventually self-heal on (CandidateClaim's own doc). Leaving that
+// combination un-reclaimed is precisely the bug loto-u2p7 reports — doctor
+// reporting healthy while a dead session's claim blocks `loto lock` on its
+// paths forever.
+//
+// A claim with a durable pid (PID>0) that merely reads UNKNOWN — a foreign
+// host, say — is NOT reclaimed here: it still has a witness (the pid) this
+// vantage point just can't read, and the risk asymmetry that keeps
+// CandidateClaimIsDead conservative applies to it in full. Only the
+// zero-evidence, no-TTL-backstop combination gets the broader treatment.
+func (c EvalContext) CandidateClaimIsAbandoned(cc CandidateClaim) bool {
+	if c.Live == nil {
+		return false
+	}
+	switch c.Live(LockRecord{
+		OwnerUUID:   cc.OwnerUUID,
+		SessionUUID: cc.SessionUUID,
+		Host:        cc.Host,
+		PID:         cc.PID,
+		ProcStart:   cc.ProcStart,
+	}) {
+	case LivenessDead:
+		return true
+	case LivenessUnknown:
+		return cc.PID <= 0
+	case LivenessAlive:
+		return false
+	default:
+		return false
+	}
+}
+
 // Event is an append-only audit row. SubjectUUID is the affected agent (for
 // lock_broken / lock_reclaimed_stale); empty otherwise.
 type Event struct {

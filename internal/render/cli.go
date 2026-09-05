@@ -109,6 +109,31 @@ func EmitConflictWithTags(w io.Writer, ce *store.MultiConflictError, tagsByTarge
 	}
 }
 
+// EmitCandidateClaimConflict renders the blocked-by-candidate-claim block
+// (loto-u2p7): count-first, ⚠ per blocker naming the candidate id, its
+// owning session, and its age — CandidateClaimConflictError's own Error()
+// string ("candidate claim conflict: N blocker(s)") gives the operator
+// nothing to act on, which was the bug this replaces at the `loto lock` call
+// site. now is the caller's acquisition-attempt clock, so age is stable
+// within one command run even across several blocker rows.
+func EmitCandidateClaimConflict(w io.Writer, ce *store.CandidateClaimConflictError, now time.Time) {
+	cwd := getCwd()
+	blockers := append([]domain.CandidateClaim(nil), ce.Blockers...)
+	sort.Slice(blockers, func(i, j int) bool {
+		if blockers[i].PathCanonical != blockers[j].PathCanonical {
+			return blockers[i].PathCanonical < blockers[j].PathCanonical
+		}
+		return blockers[i].CandidateID < blockers[j].CandidateID
+	})
+	fmt.Fprintf(w, "✗ blocked count=%d\n", len(blockers))
+	for i := range blockers {
+		b := &blockers[i]
+		fmt.Fprintf(w, "⚠ target=%s candidate=%s session=%s age=%s\n",
+			relToCwd(b.PathCanonical, cwd), b.CandidateID, holderTag(string(b.SessionUUID)),
+			now.Sub(b.CreatedAt).Round(time.Second))
+	}
+}
+
 // EmitClaimSuccess renders the acquired-claim block (loto-7af9). Single-claim
 // by design — the claim verb takes exactly one prefix — so the count header is
 // constant; it stays count-first for surface consistency with lock/unlock.
