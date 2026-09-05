@@ -1,7 +1,6 @@
 {
   "profile": "tool",
   "exceptions": [
-    {"rule": "no-git-ops", "reason": "loto never performs git operations by design; declared exception, never fix (sd-th5.15 — .githooks are delegating wrappers that call `bd hooks run` directly, phase-0.2 shape; conform's textual bd-hooks/review-gate check doesn't follow delegation yet)"},
-    {"rule": "sandbox-lib", "reason": "loto's own pipefail-parity gate (scripts/makefile_check.sh, #295/loto-uekt) requires every piped recipe line under .sandbox/lib/*.mk to say `set -o pipefail`; conform's canonical Makefile.cross.mk (as of the pseudo-version pinned in go.mod) doesn't carry that fix yet, so the 4 lines are hand-patched locally and read as drift. Tracked in loto-qzoo to upstream into conform; remove this exception once a synced version carries the fix."}
+    {"rule": "no-git-ops", "reason": "loto never performs git operations by design; declared exception, never fix (sd-th5.15 — .githooks are delegating wrappers that call `bd hooks run` directly, phase-0.2 shape; conform's textual bd-hooks/review-gate check doesn't follow delegation yet)"}
   ]
 }
