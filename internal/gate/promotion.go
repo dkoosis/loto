@@ -112,6 +112,12 @@ type VerifyRun struct {
 	// wall time spent, not a measurement of the invariant command, and grading
 	// the budget must skip it.
 	Infra bool
+	// Tree names which checkout ran this verify (reuse / recut / fresh), and
+	// TreeReason says why it was not reuse. Carried through to the CLI row: a
+	// Duration back at pre-loto-moqi levels means nothing on its own, and this
+	// is what says whether the reuse tree stopped working.
+	Tree       lane.VerifyTreeMode
+	TreeReason string
 }
 
 // timedVerify runs the phase-2 verify and records how long it took. The one
@@ -126,6 +132,8 @@ func timedVerify(ctx context.Context, p PromoteParams, b *batch, rec *[]VerifyRu
 		Duration:   time.Since(start),
 		Passed:     err == nil && vr.Passed,
 		Infra:      err != nil,
+		Tree:       vr.Tree,
+		TreeReason: vr.TreeReason,
 	})
 	return vr, err
 }

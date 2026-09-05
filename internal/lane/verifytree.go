@@ -49,20 +49,41 @@ const (
 )
 
 // Reset outcomes the caller discriminates on. errVerifyTreeCommit is the one
-// that must NOT trigger a re-cut: the tree answered git and cleaned fine, so
-// the fault is the caller's commit-ish and destroying a healthy tree over it
-// would trade a bad argument for a slow next verify.
+// that must NOT trigger a re-cut, and it is now reserved for a commit-ish git
+// cannot resolve AT ALL — see reuseVerifyTree for why the weaker reading of it
+// was a bug.
 var (
 	errVerifyTreeUnusable = errors.New("lane: verify tree is not a live worktree")
-	errVerifyTreeCommit   = errors.New("lane: verify tree cannot check out the commit")
+	errVerifyTreeCheckout = errors.New("lane: verify tree refused a valid commit")
+	errVerifyTreeCommit   = errors.New("lane: commit-ish does not resolve")
 	errVerifyTreeDirty    = errors.New("lane: verify tree still dirty after reset")
 	errNoGitCommonDir     = errors.New("lane: git-common-dir is empty")
 )
 
-// verifyTree is one acquired checkout: where the verify command runs, and how
-// to give it back. release is always non-nil and safe to call once.
+// VerifyTreeMode names which checkout ran a verify. Reported on every
+// VerifyResult so a caller can see the reuse tree working — or, more to the
+// point, silently NOT working: a repo stuck on "fresh" is paying the cut this
+// package exists to remove, and without this field that is invisible.
+type VerifyTreeMode string
+
+const (
+	// TreeReuse: the standing per-repo worktree, reset in place. The fast path.
+	TreeReuse VerifyTreeMode = "reuse"
+	// TreeRecut: the standing worktree would not reset, so it was rebuilt.
+	// Self-healing but slow — one cut, then reuse resumes.
+	TreeRecut VerifyTreeMode = "recut"
+	// TreeFresh: a throwaway under a temp dir. The reuse tree was unavailable
+	// (no common dir, a peer holds the lock, or even the rebuild failed).
+	TreeFresh VerifyTreeMode = "fresh"
+)
+
+// verifyTree is one acquired checkout: where the verify command runs, which
+// mode delivered it, why that mode was not reuse, and how to give it back.
+// release is always non-nil and safe to call once.
 type verifyTree struct {
 	path    string
+	mode    VerifyTreeMode
+	reason  string
 	release func()
 }
 
@@ -76,17 +97,27 @@ type verifyTree struct {
 // `loto promote` processes in one repo can verify at the same time, as can any
 // mix of `loto verify` / `loto lane --build`); the loser cuts its own tree
 // rather than waiting, because waiting would cost more than the cut it avoids.
+//
+// ‡ Every fallback carries its reason out to the caller. A silent fallback is
+// indistinguishable from the feature working, so a repo permanently stuck on a
+// throwaway cut would look exactly like a repo on the fast path while paying
+// seconds per promotion — that is the failure mode this reporting exists for.
 func acquireVerifyTree(ctx context.Context, g gitRunner, repoTop, commit string) (verifyTree, error) {
-	if common, err := gitCommonDir(ctx, g, repoTop); err == nil {
-		if lock, err := tryVerifyFlock(filepath.Join(common, verifyTreeLock)); err == nil {
-			path := filepath.Join(common, verifyTreeDir, verifyTreeLeaf)
-			if err := resetVerifyTree(ctx, g, path, commit); err == nil {
-				return verifyTree{path: path, release: lock.release}, nil
-			}
-			lock.release()
-		}
+	common, err := gitCommonDir(ctx, g, repoTop)
+	if err != nil {
+		return freshVerifyTree(ctx, g, commit, oneLine(err.Error()))
 	}
-	return freshVerifyTree(ctx, g, commit)
+	lock, err := tryVerifyFlock(filepath.Join(common, verifyTreeLock))
+	if err != nil {
+		return freshVerifyTree(ctx, g, commit, "reuse tree held by a peer verify")
+	}
+	path := filepath.Join(common, verifyTreeDir, verifyTreeLeaf)
+	mode, reason, err := resetVerifyTree(ctx, g, path, commit)
+	if err != nil {
+		lock.release()
+		return freshVerifyTree(ctx, g, commit, oneLine(err.Error()))
+	}
+	return verifyTree{path: path, mode: mode, reason: reason, release: lock.release}, nil
 }
 
 // resetVerifyTree points the reused worktree at commit, leaving a checkout
@@ -102,18 +133,37 @@ func acquireVerifyTree(ctx context.Context, g gitRunner, repoTop, commit string)
 // contains a .git behind — a nested repo a test created and abandoned — and a
 // fresh cut has no such thing. The tree is loto's disposable scratch, so the
 // closer-to-fresh reading of "force" is the right one.
-func resetVerifyTree(ctx context.Context, g gitRunner, path, commit string) error {
-	// Anything but a bad commit-ish is the TREE's problem, and a tree that
-	// will not come back clean is replaced rather than handed to the command:
-	// reuse must never weaken the verify.
-	if err := reuseVerifyTree(ctx, g, path, commit); err == nil || errors.Is(err, errVerifyTreeCommit) {
-		return err
+// It returns the mode that delivered the tree and, when that is not TreeReuse,
+// the one-line reason the reuse attempt was abandoned.
+func resetVerifyTree(ctx context.Context, g gitRunner, path, commit string) (VerifyTreeMode, string, error) {
+	err := reuseVerifyTree(ctx, g, path, commit)
+	switch {
+	case err == nil:
+		return TreeReuse, "", nil
+	case errors.Is(err, errVerifyTreeCommit):
+		// Nothing to rebuild toward: git cannot resolve what the caller asked
+		// for. Re-cutting would destroy a healthy tree over a bad argument.
+		return "", "", err
 	}
-	return recutVerifyTree(ctx, g, path, commit)
+	reason := oneLine(err.Error())
+	if err := recutVerifyTree(ctx, g, path, commit); err != nil {
+		return "", "", err
+	}
+	return TreeRecut, reason, nil
 }
 
 // reuseVerifyTree resets the standing tree in place and reports what stopped
 // it when it cannot.
+//
+// ‡ A failing checkout is the TREE's fault until the commit is proved missing.
+// The first cut of this code read any checkout failure as a bad commit-ish and
+// therefore never re-cut — and a tree can be poisoned into refusing EVERY
+// commit forever: `git update-index --assume-unchanged <file>` plus an edit
+// makes checkout bail on a dirty entry it has been told not to look at, and
+// `clean` will not touch a tracked file. That left the reuse tree permanently
+// dead with no signal, every promotion silently back to a full cut. So ask git
+// whether the commit resolves before blaming it; if it does, the tree is at
+// fault and gets rebuilt.
 func reuseVerifyTree(ctx context.Context, g gitRunner, path, commit string) error {
 	if !verifyTreeUsable(ctx, g, path) {
 		return errVerifyTreeUnusable
@@ -122,15 +172,46 @@ func reuseVerifyTree(ctx context.Context, g gitRunner, path, commit string) erro
 		return fmt.Errorf("lane: verify tree clean: %w", err)
 	}
 	if _, err := g.run(ctx, gitCall{args: []string{"-C", path, "checkout", gitForce, gitDetach, commit}}); err != nil {
+		if commitResolves(ctx, g, commit) {
+			return fmt.Errorf("%w: %w", errVerifyTreeCheckout, err)
+		}
 		return fmt.Errorf("%w: %w", errVerifyTreeCommit, err)
 	}
 	return verifyTreeIsClean(ctx, g, path)
 }
 
+// commitResolves reports whether git can name commit as a commit object in
+// this repo. Asked from repoTop, which shares the object store with every
+// linked worktree, so a poisoned worktree cannot skew the answer.
+func commitResolves(ctx context.Context, g gitRunner, commit string) bool {
+	_, err := g.run(ctx, gitCall{args: []string{"cat-file", "-e", commit + "^{commit}"}})
+	return err == nil
+}
+
+// oneLine flattens a git error into something a single ℹ row can carry: git
+// writes multi-line stderr, and a reason field that wraps breaks the one
+// row-per-fact shape the CLI output contract asks for.
+func oneLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	const limit = 160
+	if len(s) > limit {
+		return s[:limit-1] + "…"
+	}
+	return s
+}
+
 // verifyTreeIsClean is the runtime guard on the byte-identical rule: after a
-// reset, `git status --porcelain` must be as silent as it is in a fresh cut.
-// Cheap next to the cut it replaces, and it turns "the reset quietly missed
-// something" from a weakened verify into a re-cut.
+// reset, the tree must look exactly like a fresh cut. Cheap next to the cut it
+// replaces, and it turns "the reset quietly missed something" from a weakened
+// verify into a re-cut.
+//
+// ‡ Two questions, because one does not cover the other. `status --porcelain`
+// finds ordinary drift. It is BLIND, by design, to an entry flagged
+// skip-worktree or assume-unchanged — those flags tell git to stop looking at
+// a path, so an edit under one shows nothing in status, survives
+// `checkout --force`, and would be handed to the verify command as if it were
+// the commit's content. `git ls-files -v` tags every index entry and only 'H'
+// means git is still watching, so it is the question status cannot answer.
 func verifyTreeIsClean(ctx context.Context, g gitRunner, path string) error {
 	out, err := g.run(ctx, gitCall{args: []string{"-C", path, "status", "--porcelain"}})
 	if err != nil {
@@ -138,6 +219,15 @@ func verifyTreeIsClean(ctx context.Context, g gitRunner, path string) error {
 	}
 	if s := strings.TrimSpace(out); s != "" {
 		return fmt.Errorf("%w: %s", errVerifyTreeDirty, s)
+	}
+	tags, err := g.run(ctx, gitCall{args: []string{"-C", path, "ls-files", "-v"}})
+	if err != nil {
+		return fmt.Errorf("lane: verify tree index tags: %w", err)
+	}
+	for line := range strings.SplitSeq(tags, "\n") {
+		if line != "" && line[0] != 'H' {
+			return fmt.Errorf("%w: index entry not tracked normally: %s", errVerifyTreeDirty, line)
+		}
 	}
 	return nil
 }
@@ -208,7 +298,7 @@ func canonPath(p string) string {
 // freshVerifyTree cuts a throwaway detached worktree under a temp dir we own,
 // and tears it down BY PATH on release. This was Verify's only mode before the
 // reuse tree; it is now the fallback, unchanged in behavior.
-func freshVerifyTree(ctx context.Context, g gitRunner, commit string) (verifyTree, error) {
+func freshVerifyTree(ctx context.Context, g gitRunner, commit, reason string) (verifyTree, error) {
 	parent, err := os.MkdirTemp("", "loto-verify-")
 	if err != nil {
 		return verifyTree{}, fmt.Errorf("lane: verify tempdir: %w", err)
@@ -218,7 +308,7 @@ func freshVerifyTree(ctx context.Context, g gitRunner, commit string) (verifyTre
 		_ = os.RemoveAll(parent)
 		return verifyTree{}, err
 	}
-	return verifyTree{path: wt, release: func() {
+	return verifyTree{path: wt, mode: TreeFresh, reason: reason, release: func() {
 		// Background ctx so cleanup still runs when the caller's ctx expired.
 		_, _ = g.run(context.Background(), gitCall{args: removeWorktreeArgs(wt)})
 		_ = os.RemoveAll(parent)

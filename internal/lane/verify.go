@@ -38,6 +38,13 @@ type VerifyResult struct {
 	// Output is the command's combined stdout+stderr with the absolute
 	// verify-worktree and git-dir paths scrubbed to repo-relative form.
 	Output string
+	// Tree names which checkout ran the command: reuse (the fast path), recut
+	// (the standing tree was rebuilt first), or fresh (a throwaway).
+	Tree VerifyTreeMode
+	// TreeReason is one line saying why Tree is not reuse; empty when it is.
+	// Set even on the RECUT path, which is self-healing and would otherwise
+	// leave no trace of what poisoned the tree.
+	TreeReason string
 }
 
 // Verify runs a broad-repo command (go test -trimpath / vet / lint / build)
@@ -99,7 +106,12 @@ func Verify(ctx context.Context, repoTop, commit string, cmd []string) (VerifyRe
 	if err != nil {
 		return VerifyResult{}, err
 	}
-	return VerifyResult{Passed: passed, Output: scrubPaths(out, wt, strings.TrimSpace(gitDir))}, nil
+	return VerifyResult{
+		Passed:     passed,
+		Output:     scrubPaths(out, wt, strings.TrimSpace(gitDir)),
+		Tree:       tree.mode,
+		TreeReason: tree.reason,
+	}, nil
 }
 
 // runVerifyCmd runs cmd with cwd=dir, capturing combined stdout+stderr. A
