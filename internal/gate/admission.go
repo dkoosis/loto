@@ -222,14 +222,14 @@ func checkCommitShape(ctx context.Context, repoTop, commit string) (Decision, er
 // never actually changes.
 func checkDiffMatchesWriteSet(ctx context.Context, repoTop string, env Envelope) (Decision, error) {
 	g := gitRunner{repoTop: repoTop}
-	out, err := g.run(ctx, "diff-tree", "--no-commit-id", "--name-only", "-r", env.ProposalSHA)
+	// -z: core.quotePath (on by default) otherwise quote-escapes any
+	// non-ASCII path in the newline-delimited form (e.g. "docs/caf\303\251.md"
+	// for docs/café.md), which would never match the write-set's raw UTF-8.
+	out, err := g.run(ctx, "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", env.ProposalSHA)
 	if err != nil {
 		return Decision{}, fmt.Errorf("gate: diff-tree %s: %w", env.ProposalSHA, err)
 	}
-	actual := strings.Split(strings.TrimSpace(out), "\n")
-	if len(actual) == 1 && actual[0] == "" {
-		actual = []string{}
-	}
+	actual := parseNameOnlyZ(out)
 	sort.Strings(actual)
 	declared := append([]string(nil), env.WriteSet...)
 	sort.Strings(declared)
