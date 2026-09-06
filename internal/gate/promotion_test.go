@@ -523,6 +523,36 @@ func TestBuildChain_AppliesCreateModifyDelete(t *testing.T) {
 	}
 }
 
+// TestBuildChain_IgnoresCallerGitIdentityEnv pins the loto-nnqd fix: the chain
+// commit's identity must stay loto-gate even when the invoking shell exports
+// its own GIT_AUTHOR_NAME/EMAIL and GIT_COMMITTER_NAME/EMAIL. cmd.Env used to
+// be built promoteIdentityEnv() first, os.Environ() second — os/exec (and the
+// OS beneath it) resolve a duplicated env key to its LAST occurrence, so the
+// shell's values silently won.
+func TestBuildChain_IgnoresCallerGitIdentityEnv(t *testing.T) {
+	repoTop, integration := newIntegrationRepo(t)
+	bootstrapIntegration(t, repoTop, integration)
+	id, env := plantCandidate(t, repoTop, integration, tfFileA, "package gate\n\nvar A = 2\n", tpAgentA, tpBeadA)
+
+	t.Setenv("GIT_AUTHOR_NAME", "someone-else")
+	t.Setenv("GIT_AUTHOR_EMAIL", "someone-else@shell")
+	t.Setenv("GIT_COMMITTER_NAME", "someone-else")
+	t.Setenv("GIT_COMMITTER_EMAIL", "someone-else@shell")
+
+	b := &batch{id: newBatchID(), snapshot: integration, members: []member{{candidateID: id, env: env}}}
+	tip, err := buildChain(context.Background(), promoteParams(repoTop, &claimRecorder{}), b)
+	if err != nil {
+		t.Fatalf("buildChain: %v", err)
+	}
+
+	if got := gitT(t, repoTop, "log", "-1", "--format=%an <%ae>", tip); got != "loto-gate <loto@localhost>" {
+		t.Errorf("author = %q, want the loto-gate identity even with the shell's env exported", got)
+	}
+	if got := gitT(t, repoTop, "log", "-1", "--format=%cn <%ce>", tip); got != "loto-gate <loto@localhost>" {
+		t.Errorf("committer = %q, want the loto-gate identity even with the shell's env exported", got)
+	}
+}
+
 // TestPromote_SkipsStalePreimageCandidate pins D3: a candidate that no longer
 // applies is SKIPPED, never rejected. Its refs and claims must survive.
 func TestPromote_SkipsStalePreimageCandidate(t *testing.T) {

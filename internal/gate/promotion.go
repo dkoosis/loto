@@ -832,7 +832,13 @@ func commitTree(ctx context.Context, p PromoteParams, tree, parent string, m mem
 	cmd := exec.CommandContext(ctx, "git", "commit-tree", tree, "-p", parent)
 	cmd.Dir = p.RepoTop
 	cmd.Stdin = &msg
-	cmd.Env = append(promoteIdentityEnv(), os.Environ()...)
+	// append, not the reverse: os.Environ() first so the loto-gate identity,
+	// appended last, wins on a duplicate key (Go's exec — and the OS beneath
+	// it — resolve a duplicated env key to its LAST occurrence). Putting the
+	// identity first, as this used to, let any GIT_AUTHOR_NAME/COMMITTER_NAME
+	// the caller's shell exported override the very identity this function
+	// exists to enforce. Matches gitWithIndex below and internal/lane/verify.go.
+	cmd.Env = append(os.Environ(), promoteIdentityEnv()...)
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
