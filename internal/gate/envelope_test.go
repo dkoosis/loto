@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"loto/internal/domain"
 	"loto/internal/lane"
@@ -528,5 +529,74 @@ func TestDecodeEnvelope_AcceptsWhatCaptureMints(t *testing.T) {
 	}
 	if got.CandidateID != env.CandidateID || len(got.Transitions) != len(env.Transitions) {
 		t.Errorf("round trip lost data: %+v", got)
+	}
+}
+
+// --- git subprocess timeout (loto-4bde) -------------------------------------
+
+// TestGitRunnerRunTimesOutOnHungGit pins the loto-4bde fix: gitRunner.run must
+// not block for the full lifetime of a caller-supplied context when the git
+// subprocess itself wedges (a stale index.lock, a hung fsmonitor). A fake
+// "git" that never returns stands in for the hang; a short parent deadline
+// (rather than waiting out the real gatePlumbingTimeout) keeps the test fast
+// — context.WithTimeout inside run() picks whichever deadline is sooner.
+//
+// ‡ sleep 3, not 30: gitRunner.run does not override cmd.Cancel, so killing
+// the fake git script (a /bin/sh process) sends SIGKILL only to that direct
+// child — the `sleep` it invokes as its own child is not in the same kill
+// path and is orphaned to run out its duration. A short sleep bounds that
+// leak to a few seconds instead of leaving a 30s grandchild behind in CI.
+func TestGitRunnerRunTimesOutOnHungGit(t *testing.T) {
+	dir := t.TempDir()
+	fakeGit := filepath.Join(dir, "git")
+	if err := os.WriteFile(fakeGit, []byte("#!/bin/sh\nsleep 3\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	g := gitRunner{repoTop: t.TempDir()}
+	start := time.Now()
+	_, err := g.run(ctx, "status")
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ErrGitTimeout) {
+		t.Errorf("hung git err = %v, want ErrGitTimeout", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("run() took %v to return from a hung git subprocess, want well under gatePlumbingTimeout", elapsed)
+	}
+}
+
+// TestGateGitEnv_PinsLCAllC pins the loto-in5f follow-up: every git
+// subprocess this package launches must run under LC_ALL=C, last, so a
+// LANG/LC_ALL the calling shell exports cannot translate git's stderr out
+// from under refCASRejectionMarker's substring match. Asserted on the env
+// slice directly (a white-box check of the mechanism) rather than on an
+// actually-translated git message, which depends on locale catalogs the test
+// box may not have installed.
+func TestGateGitEnv_PinsLCAllC(t *testing.T) {
+	t.Setenv("LANG", "fr_FR.UTF-8")
+	t.Setenv("LC_ALL", "fr_FR.UTF-8")
+
+	env := gateGitEnv()
+
+	lastLCAll := ""
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "LC_ALL=") {
+			lastLCAll = kv
+		}
+	}
+	if lastLCAll != "LC_ALL=C" {
+		t.Errorf("last LC_ALL entry = %q, want LC_ALL=C to win the duplicate-key resolution regardless of the caller's own LC_ALL", lastLCAll)
+	}
+
+	// extra still wins over LC_ALL=C on ITS OWN key (e.g. GIT_INDEX_FILE),
+	// since it is appended after.
+	env = gateGitEnv("GIT_INDEX_FILE=/tmp/x")
+	if env[len(env)-1] != "GIT_INDEX_FILE=/tmp/x" {
+		t.Errorf("gateGitEnv with extra = %v, want the extra entry last", env)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // RefUpdate is one line of a git-update-ref transaction (git-update-ref(1),
@@ -40,6 +41,22 @@ var ErrEmptyTransaction = errors.New("gate: empty ref transaction")
 // sentinel.
 var errUnknownRefVerb = errors.New("gate: unknown ref update verb")
 
+// ErrRefCASLost marks the one UpdateRefsTx failure shape that actually means
+// "lost the compare-and-swap": git-update-ref(1) rejected an update/delete
+// line because the ref's current value no longer matches the OldSHA supplied.
+// Every other UpdateRefsTx failure (exec error, ENOSPC, a cancelled context,
+// ErrGitTimeout) is infrastructure trouble, not contention, and must not be
+// mistaken for one by a caller doing errors.Is(err, ErrRefCASLost).
+var ErrRefCASLost = errors.New("gate: ref update rejected — old value no longer matches (lost the compare-and-swap)")
+
+// refCASRejectionMarker is the exact substring git-update-ref --stdin prints
+// on stderr for a lost CAS: "cannot lock ref '<ref>': is at <old> but
+// expected <want>" (confirmed empirically against the git on PATH,
+// 2026-09-06). No other update-ref --stdin failure shape uses this wording —
+// a missing object says "nonexistent object", a bad verb never reaches git at
+// all — so a substring match is unambiguous.
+const refCASRejectionMarker = "but expected"
+
 // UpdateRefsTx runs one atomic multi-ref transaction via
 // `git update-ref --stdin`: every listed update applies, or none does
 // (git-gate.md "one atomic `update-ref --stdin` transaction... after a crash,
@@ -51,37 +68,83 @@ func UpdateRefsTx(ctx context.Context, repoTop string, updates []RefUpdate) erro
 	if len(updates) == 0 {
 		return ErrEmptyTransaction
 	}
-	var stdin bytes.Buffer
-	stdin.WriteString("start\n")
-	for _, u := range updates {
-		switch u.Verb {
-		case VerbCreate:
-			fmt.Fprintf(&stdin, "create %s %s\n", u.Ref, u.NewSHA)
-		case VerbUpdate:
-			if u.OldSHA != "" {
-				fmt.Fprintf(&stdin, "update %s %s %s\n", u.Ref, u.NewSHA, u.OldSHA)
-			} else {
-				fmt.Fprintf(&stdin, "update %s %s\n", u.Ref, u.NewSHA)
-			}
-		case VerbDelete:
-			if u.OldSHA != "" {
-				fmt.Fprintf(&stdin, "delete %s %s\n", u.Ref, u.OldSHA)
-			} else {
-				fmt.Fprintf(&stdin, "delete %s\n", u.Ref)
-			}
-		default:
-			return fmt.Errorf("%w: %q for %s", errUnknownRefVerb, u.Verb, u.Ref)
-		}
+	stdin, err := buildRefUpdateStdin(updates)
+	if err != nil {
+		return err
 	}
-	stdin.WriteString("commit\n")
 
+	// gateTreeTimeout, not gatePlumbingTimeout: acquiring every ref lock in
+	// one transaction under contention can take longer than a single
+	// plumbing read.
+	ctx, cancel := context.WithTimeout(ctx, gateTreeTimeout)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "update-ref", "--stdin")
 	cmd.Dir = repoTop
-	cmd.Stdin = &stdin
+	cmd.Stdin = stdin
+	cmd.Env = gateGitEnv()
+	cmd.WaitDelay = gateWaitDelay
+	// On timeout, SIGTERM first so git gets a chance to remove the
+	// <ref>.lock files it is holding, instead of the default CommandContext
+	// behavior (an immediate SIGKILL that leaves them in place).
+	//
+	// ‡ This narrows, but does not close, the stale-lock window: git must
+	// still receive and act on SIGTERM before its own shutdown path finishes
+	// removing every lock it holds. WaitDelay's eventual SIGKILL — or a
+	// signal git does not catch in time — can still leave a lock file behind
+	// for doctor to find and clear.
+	cmd.Cancel = func() error {
+		return cmd.Process.Signal(syscall.SIGTERM)
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("gate: update-ref --stdin: %w: %s", err, strings.TrimSpace(stderr.String()))
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("%w: git update-ref --stdin", ErrGitTimeout)
+		}
+		msg := strings.TrimSpace(stderr.String())
+		if strings.Contains(msg, refCASRejectionMarker) {
+			return fmt.Errorf("%w: %s", ErrRefCASLost, msg)
+		}
+		return fmt.Errorf("gate: update-ref --stdin: %w: %s", err, msg)
+	}
+	return nil
+}
+
+// buildRefUpdateStdin renders updates into the git-update-ref --stdin
+// transaction script: a "start" line, one create/update/delete line per
+// update, and a "commit" line. Split out of UpdateRefsTx so the per-verb
+// branching doesn't count against that function's own cognitive complexity.
+func buildRefUpdateStdin(updates []RefUpdate) (*bytes.Buffer, error) {
+	var stdin bytes.Buffer
+	stdin.WriteString("start\n")
+	for _, u := range updates {
+		if err := writeRefUpdateLine(&stdin, u); err != nil {
+			return nil, err
+		}
+	}
+	stdin.WriteString("commit\n")
+	return &stdin, nil
+}
+
+// writeRefUpdateLine appends one RefUpdate's update-ref --stdin command line.
+func writeRefUpdateLine(w *bytes.Buffer, u RefUpdate) error {
+	switch u.Verb {
+	case VerbCreate:
+		fmt.Fprintf(w, "create %s %s\n", u.Ref, u.NewSHA)
+	case VerbUpdate:
+		if u.OldSHA != "" {
+			fmt.Fprintf(w, "update %s %s %s\n", u.Ref, u.NewSHA, u.OldSHA)
+		} else {
+			fmt.Fprintf(w, "update %s %s\n", u.Ref, u.NewSHA)
+		}
+	case VerbDelete:
+		if u.OldSHA != "" {
+			fmt.Fprintf(w, "delete %s %s\n", u.Ref, u.OldSHA)
+		} else {
+			fmt.Fprintf(w, "delete %s\n", u.Ref)
+		}
+	default:
+		return fmt.Errorf("%w: %q for %s", errUnknownRefVerb, u.Verb, u.Ref)
 	}
 	return nil
 }
