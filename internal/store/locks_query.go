@@ -22,7 +22,7 @@ func (s *Store) ListLocks(ctx context.Context) ([]domain.LockRecord, error) {
 func (s *Store) LockForOwnerAt(ctx context.Context, t domain.Target, owner domain.AgentUUID) (*domain.LockRecord, error) {
 	k := s.keys()
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+lockCols+` FROM locks WHERE `+k.col("target_canonical")+` = ? AND owner_uuid = ?`,
+		`SELECT `+lockCols+` FROM locks WHERE `+k.col("target_canonical")+` = ? AND owner_uuid = ?`, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
 		k.key(t.Canonical), string(owner))
 	if err != nil {
 		return nil, err
@@ -84,7 +84,7 @@ func (s *Store) LocksForOwnerAt(ctx context.Context, targets []domain.Target, ow
 // that legitimately want a single representative holder.
 func (s *Store) LockAt(ctx context.Context, t domain.Target) (*domain.LockRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+lockCols+` FROM locks WHERE `+s.keys().col("target_canonical")+` = ? ORDER BY created_at ASC, owner_uuid ASC LIMIT 1`,
+		`SELECT `+lockCols+` FROM locks WHERE `+s.keys().col("target_canonical")+` = ? ORDER BY created_at ASC, owner_uuid ASC LIMIT 1`, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
 		s.keys().key(t.Canonical))
 	if err != nil {
 		return nil, err
@@ -110,7 +110,7 @@ func (s *Store) LockAt(ctx context.Context, t domain.Target) (*domain.LockRecord
 // arbitrary one (loto-2nc5).
 func (s *Store) LocksAt(ctx context.Context, t domain.Target) ([]domain.LockRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+lockCols+` FROM locks WHERE `+s.keys().col("target_canonical")+` = ? ORDER BY created_at ASC, owner_uuid ASC`,
+		`SELECT `+lockCols+` FROM locks WHERE `+s.keys().col("target_canonical")+` = ? ORDER BY created_at ASC, owner_uuid ASC`, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
 		s.keys().key(t.Canonical))
 	if err != nil {
 		return nil, err
