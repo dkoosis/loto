@@ -888,9 +888,19 @@ func promotePhase3(ctx context.Context, p PromoteParams, b *batch) error {
 	updates = append(updates, RefUpdate{Verb: VerbDelete, Ref: promotingRef(b.id), OldSHA: b.chainTip})
 
 	if err := UpdateRefsTx(ctx, p.RepoTop, updates); err != nil {
-		// Any line failing fails all of them, so there is nothing to undo —
-		// only the claim to drop, which the caller does.
-		return fmt.Errorf("%w: %w", errPromoteRace, err)
+		if errors.Is(err, ErrRefCASLost) {
+			// A genuine lost CAS. Any line failing fails all of them, so there
+			// is nothing to undo — only the claim to drop, which the caller
+			// does on this branch.
+			return fmt.Errorf("%w: %w", errPromoteRace, err)
+		}
+		// Anything else — an exec failure, ENOSPC, a cancelled context, a
+		// gatePlumbingTimeout kill — is infrastructure trouble, not
+		// contention. Returning it un-wrapped keeps promoteVerifyAndCommit's
+		// and promoteSolo's errors.Is(err, errPromoteRace) branch reserved
+		// for real races; everything else falls to their default case, which
+		// stops the round instead of retrying a failure retrying cannot fix.
+		return fmt.Errorf("gate: promotePhase3: update refs: %w", err)
 	}
 	return nil
 }

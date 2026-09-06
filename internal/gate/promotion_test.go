@@ -302,6 +302,40 @@ func TestPromote_SnapshotMovedRequeues(t *testing.T) {
 	})
 }
 
+// TestPromotePhase3NonCASFailureIsNotErrPromoteRace pins the loto-in5f fix:
+// promotePhase3 must route a non-CAS UpdateRefsTx failure (an exec-level
+// error, here a batch chain tip that names a git object which does not
+// exist) to an infra-error path, never through errPromoteRace — that
+// sentinel is reserved for a genuine lost compare-and-swap
+// (TestPromote_SnapshotMovedRequeues covers that side). Before the fix, every
+// UpdateRefsTx failure was blanket-wrapped in errPromoteRace regardless of
+// cause.
+func TestPromotePhase3NonCASFailureIsNotErrPromoteRace(t *testing.T) {
+	repoTop, integration := newIntegrationRepo(t)
+	bootstrapIntegration(t, repoTop, integration)
+
+	p := promoteParams(repoTop, &claimRecorder{})
+	b := &batch{
+		id:       "b-nonexistent-object",
+		snapshot: integration,
+		// A well-formed but nonexistent object SHA: git rejects this with
+		// "trying to write ref ... with nonexistent object", never the
+		// CAS-rejection wording ("... is at ... but expected ...").
+		chainTip: strings.Repeat("2", 40),
+	}
+
+	err := promotePhase3(context.Background(), p, b)
+	if err == nil {
+		t.Fatal("promotePhase3: want an error updating integration to a nonexistent object, got nil")
+	}
+	if errors.Is(err, errPromoteRace) {
+		t.Errorf("a non-CAS infra failure must not classify as errPromoteRace: %v", err)
+	}
+	if !strings.Contains(err.Error(), "nonexistent object") {
+		t.Errorf("err = %v, want the underlying git failure surfaced, not swallowed", err)
+	}
+}
+
 // --- acceptance 4: reclaim ----------------------------------------------
 
 // TestPromote_ReclaimsStalePromotingClaim: a pusher that died mid-verify leaves

@@ -40,6 +40,22 @@ var ErrEmptyTransaction = errors.New("gate: empty ref transaction")
 // sentinel.
 var errUnknownRefVerb = errors.New("gate: unknown ref update verb")
 
+// ErrRefCASLost marks the one UpdateRefsTx failure shape that actually means
+// "lost the compare-and-swap": git-update-ref(1) rejected an update/delete
+// line because the ref's current value no longer matches the OldSHA supplied.
+// Every other UpdateRefsTx failure (exec error, ENOSPC, a cancelled context,
+// ErrGitTimeout) is infrastructure trouble, not contention, and must not be
+// mistaken for one by a caller doing errors.Is(err, ErrRefCASLost).
+var ErrRefCASLost = errors.New("gate: ref update rejected — old value no longer matches (lost the compare-and-swap)")
+
+// refCASRejectionMarker is the exact substring git-update-ref --stdin prints
+// on stderr for a lost CAS: "cannot lock ref '<ref>': is at <old> but
+// expected <want>" (confirmed empirically against the git on PATH,
+// 2026-09-06). No other update-ref --stdin failure shape uses this wording —
+// a missing object says "nonexistent object", a bad verb never reaches git at
+// all — so a substring match is unambiguous.
+const refCASRejectionMarker = "but expected"
+
 // UpdateRefsTx runs one atomic multi-ref transaction via
 // `git update-ref --stdin`: every listed update applies, or none does
 // (git-gate.md "one atomic `update-ref --stdin` transaction... after a crash,
@@ -86,7 +102,11 @@ func UpdateRefsTx(ctx context.Context, repoTop string, updates []RefUpdate) erro
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("%w: git update-ref --stdin", ErrGitTimeout)
 		}
-		return fmt.Errorf("gate: update-ref --stdin: %w: %s", err, strings.TrimSpace(stderr.String()))
+		msg := strings.TrimSpace(stderr.String())
+		if strings.Contains(msg, refCASRejectionMarker) {
+			return fmt.Errorf("%w: %s", ErrRefCASLost, msg)
+		}
+		return fmt.Errorf("gate: update-ref --stdin: %w: %s", err, msg)
 	}
 	return nil
 }
