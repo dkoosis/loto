@@ -143,6 +143,19 @@ func normalizeURL(rawURL string) string {
 	for _, pfx := range []string{"https://", "http://", "git://", "ssh://"} {
 		s = strings.TrimPrefix(s, pfx)
 	}
+	// Strip RFC-3986 userinfo (user[:pass]@) before the SSH-shorthand colon
+	// branch below ever sees the string. Without this, a credentialed HTTPS
+	// remote (https://x-access-token:TOKEN@github.com/o/r.git, the shape
+	// GitHub Actions and CI bots use) has a colon before any slash — exactly
+	// like SSH-shorthand — so that branch took it as the whole "host" to
+	// discard and stripped only up to its own first colon, leaving the token
+	// riding through into the slug (loto-s34y). Guarded to before the first
+	// "/" so a path segment that happens to contain "@" is left alone.
+	if at := strings.Index(s, "@"); at != -1 {
+		if slash := strings.Index(s, "/"); slash == -1 || at < slash {
+			s = s[at+1:]
+		}
+	}
 	// Strip host component: SSH-shorthand "user@host:owner/repo" via colon, or
 	// "host/owner/repo" via first slash. Do exactly one strip.
 	if i := strings.Index(s, ":"); i != -1 && !strings.Contains(s[:i], "/") {

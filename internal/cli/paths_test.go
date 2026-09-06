@@ -100,17 +100,26 @@ func TestNormalizeRepoPath_CaseInsensitiveContainment(t *testing.T) {
 }
 
 func TestNormalizeURLVariants(t *testing.T) {
+	const credentialedRemote = "https://x-access-token:ghs_leakedTOKEN123@github.com/o/r.git"
 	cases := map[string]string{
 		"git@github.com:dkoosis/loto.git":     tcSlugDKLoto,
 		"https://github.com/dkoosis/loto":     tcSlugDKLoto,
 		"https://github.com/dkoosis/loto.git": tcSlugDKLoto,
 		"":                                    unnamedSlug,
+		// loto-s34y: a credentialed HTTPS remote (the shape GitHub Actions and
+		// CI bots use) has a colon before any slash — exactly like
+		// SSH-shorthand — so the userinfo must be stripped before that branch
+		// ever sees the string, or the token rides through into the slug.
+		credentialedRemote: "o-r",
 	}
 	for in, want := range cases {
 		got := normalizeURL(in)
 		if got != want {
 			t.Errorf("normalizeURL(%q) = %q; want %q", in, got, want)
 		}
+	}
+	if got := normalizeURL(credentialedRemote); strings.Contains(got, "TOKEN") {
+		t.Errorf("normalizeURL(%q) = %q; leaked the credential", credentialedRemote, got)
 	}
 	_ = strings.Builder{}
 }
