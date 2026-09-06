@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"loto/internal/domain"
@@ -148,6 +149,84 @@ func inClauseStrings(ss []string) (string, []any) {
 		args = append(args, s)
 	}
 	return string(ph), args
+}
+
+// keyMatch renders both halves of a target-key comparison — the SQL expression
+// applied to the column and the bind value that pairs with it — so a lookup
+// can be byte-exact or case-folded without either half drifting from the other
+// (loto-8soe).
+//
+// ‡ Why SQL needs this and not just the in-memory predicates: the CLI mints
+// every key folded on a case-folding filesystem, so live binaries agree. A row
+// an OLDER loto wrote carries the on-disk spelling (`Foo.go`), and
+// domain.EvalContext.SameTarget keeps that row BLOCKING against the folded key
+// — but a byte-exact `target_canonical = ?` stops FINDING it, so it could
+// never be released by name: `loto unlock foo.go` printed state=no-lock and
+// exit 0 while the row went on refusing every peer until its TTL (review of
+// #310).
+//
+// ‡ Only a lookup that finds a row BY THE NAME A CALLER TYPED uses this. A
+// query whose key came out of a row it had already read — reclaimStaleTx, the
+// tag delete keyed on its own host lock — stays byte-exact: both sides are the
+// same stored string, and folding there would widen a self-join onto a
+// different row.
+//
+// ‡ SQLite's LOWER is ASCII-only while strings.ToLower is Unicode-aware, so a
+// legacy row whose path carries a non-ASCII capital may not be found by the
+// folded name. That miss is fail-safe in the direction that matters — the row
+// keeps blocking, it is the release that stalls — and no repo path in play
+// here is non-ASCII.
+type keyMatch struct{ fold bool }
+
+// keys reports how this store compares target keys. Zero value (no
+// WithCaseFoldedKeys) is byte-exact, which is both the pre-existing behavior
+// and the permanently correct answer on a case-sensitive filesystem.
+func (s *Store) keys() keyMatch { return keyMatch{fold: s.caseFold} }
+
+// keysFor reads the same answer back off an EvalContext, for a helper that
+// already carries one and has no Store handle. The store fills both from one
+// field, so the two cannot disagree.
+func keysFor(ec domain.EvalContext) keyMatch { return keyMatch{fold: ec.CaseFold} }
+
+// col wraps a key column so it compares under the same rule key normalizes to.
+func (k keyMatch) col(name string) string {
+	if k.fold {
+		return "LOWER(" + name + ")"
+	}
+	return name
+}
+
+// key normalizes one canonical — as a bind value, and as the map key a caller
+// will index by the target it typed.
+func (k keyMatch) key(canonical string) string {
+	if k.fold {
+		return strings.ToLower(canonical)
+	}
+	return canonical
+}
+
+// inTargets and inStrings are inClause/inClauseStrings with every arg
+// normalized to match col's expression.
+func (k keyMatch) inTargets(targets []domain.Target) (string, []any) {
+	ph, args := inClause(targets)
+	return ph, k.normalizeArgs(args)
+}
+
+func (k keyMatch) inStrings(ss []string) (string, []any) {
+	ph, args := inClauseStrings(ss)
+	return ph, k.normalizeArgs(args)
+}
+
+func (k keyMatch) normalizeArgs(args []any) []any {
+	if !k.fold {
+		return args
+	}
+	for i := range args {
+		if s, ok := args[i].(string); ok {
+			args[i] = strings.ToLower(s)
+		}
+	}
+	return args
 }
 
 func modeRestoreFailedEvent(path, byAgent string, now time.Time, cause error) domain.Event {

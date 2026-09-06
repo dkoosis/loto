@@ -65,7 +65,7 @@ func (s *Store) DoctorAudit(ctx context.Context, thisHost string, hostKnown bool
 	if err != nil {
 		return nil, err
 	}
-	ec := domain.EvalContext{Now: time.Now(), Live: live}
+	ec := domain.EvalContext{Now: time.Now(), Live: live, CaseFold: s.caseFold}
 	for i := range locks {
 		if ec.IsStale(locks[i]) {
 			r.StaleLocks = append(r.StaleLocks, locks[i])
@@ -231,7 +231,7 @@ func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live d
 		return err
 	}
 	now := time.Now()
-	ec := domain.EvalContext{Now: now, Live: live}
+	ec := domain.EvalContext{Now: now, Live: live, CaseFold: s.caseFold}
 	if err := reclaimStaleLocks(ctx, tx, all, ec, byAgent, now); err != nil {
 		return err
 	}
@@ -251,7 +251,7 @@ func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live d
 	if err := gcClaimsTx(ctx, tx, now); err != nil {
 		return err
 	}
-	if _, err := gcCandidateClaimsTx(ctx, tx, live, now); err != nil {
+	if _, err := gcCandidateClaimsTx(ctx, tx, ec); err != nil {
 		return err
 	}
 	if err := gcTerritoryTagsTx(ctx, tx, now); err != nil {
@@ -468,12 +468,15 @@ func gcClaimsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 // refs/loto/proposals/* are left untouched — the store, not refs, is the
 // attribution home (loto-ovno.13), so the refs are inert once nothing blocks
 // on them.
-func gcCandidateClaimsTx(ctx context.Context, tx *sql.Tx, live domain.HolderLiveProbe, now time.Time) (int, error) {
+//
+// ‡ ec carries the ambient triple rather than (live, now) positionally — the
+// arg-order hazard domain.EvalContext exists to remove, and the only way this
+// helper inherits the store's filesystem case class (loto-8soe).
+func gcCandidateClaimsTx(ctx context.Context, tx *sql.Tx, ec domain.EvalContext) (int, error) {
 	claims, err := listCandidateClaimsTx(ctx, tx)
 	if err != nil {
 		return 0, err
 	}
-	ec := domain.EvalContext{Now: now, Live: live}
 	seen := map[string]bool{}
 	var ids []string
 	for i := range claims {
@@ -600,7 +603,7 @@ func (s *Store) ScanOrphanModes(ctx context.Context, live domain.HolderLiveProbe
 	if err := s.validateOrphanRoot(paths); err != nil {
 		return nil, err
 	}
-	owned, err := s.lockedPathSet(ctx, domain.EvalContext{Now: time.Now(), Live: live})
+	owned, err := s.lockedPathSet(ctx, domain.EvalContext{Now: time.Now(), Live: live, CaseFold: s.caseFold})
 	if err != nil {
 		return nil, err
 	}
@@ -654,7 +657,7 @@ func (s *Store) RestoreOrphanMode(ctx context.Context, live domain.HolderLivePro
 	// locked paths so we can skip any that became locked since the caller's scan
 	// (TOCTOU fix for loto-h85e). The flock ensures the lock table is stable for
 	// the duration of this query + chmod loop, and the query MUST stay inside it.
-	nowOwned, err := s.lockedPathSet(ctx, domain.EvalContext{Now: time.Now(), Live: live})
+	nowOwned, err := s.lockedPathSet(ctx, domain.EvalContext{Now: time.Now(), Live: live, CaseFold: s.caseFold})
 	if err != nil {
 		return nil, nil, fmt.Errorf("RestoreOrphanMode: re-query locks: %w", err)
 	}

@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// Case-variant path regression tests (loto-f8m8).
+// Case-variant path regression tests (loto-f8m8, loto-8soe).
 //
 // The bug: every conflict decision — lock overlap, claim prefix overlap,
 // `check --gate` admission — is a byte comparison over Target.Canonical. On a
@@ -23,8 +23,8 @@ import (
 // own FS can exercise its branch. The linux CI leg proves the two spellings
 // stay independent where they are genuinely two files; the darwin leg (weekly
 // backstop, or a `ci:macos` label) proves they converge where they are one.
-// lookupEntryFold is tested unconditionally so the fold logic itself has
-// coverage on every runner.
+// Both branches are asserted in every test rather than skipped, so neither
+// runner is silently proving nothing.
 
 // tcStoreVariantGo is tcStoreStoreGo with the directory segment spelled in the
 // other case — the two tokens whose canonical keys must converge on a
@@ -42,9 +42,9 @@ func caseVariantFSNote(t *testing.T, repo string) bool {
 
 // TestProbeFoldedPathRejectsSymlinkAlias: a case-variant symlink beside the
 // real entry makes two spellings stat to one inode without the filesystem
-// folding anything. Reading that as "case-insensitive" would let resolveDiskCase
-// rewrite A.go to an existing a.go, so `loto lock A.go` would lock a different
-// file than the caller named (codex review on #306).
+// folding anything. Reading that as "case-insensitive" would let foldTargetKey
+// mint one key for A.go and a.go, so a lock on one would refuse a peer
+// standing on the other (codex review on #306).
 //
 // Only a case-sensitive filesystem can hold the two entries, so the case-folding
 // runner skips — which is correct: there the alias cannot be created at all.
@@ -71,96 +71,52 @@ func TestProbeFoldedPathRejectsSymlinkAlias(t *testing.T) {
 	}
 }
 
-// TestLookupEntryFoldPrefersExactOverFolded runs on every filesystem: it feeds
-// lookupEntryFold a directory holding both spellings where the FS allows it,
-// and asserts the exact match wins so a path that was already right is never
-// rewritten.
-//
-// Run twice — uncached and cached — so the batch cache cannot answer differently
-// from disk. That parity is the whole safety argument for caching at all.
-func TestLookupEntryFoldPrefersExactOverFolded(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		cc   *caseCache
-	}{{"uncached", nil}, {"cached", newCaseCache()}} {
-		t.Run(tc.name, func(t *testing.T) { lookupEntryFoldChecks(t, tc.cc) })
-	}
-}
-
-func lookupEntryFoldChecks(t *testing.T, cc *caseCache) {
-	t.Helper()
-	dir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(dir, "Store"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// A second, lowercase entry only exists on a case-sensitive FS; where it
-	// collides the Mkdir fails and the exact-match leg below is vacuous, which
-	// is the correct behavior for that FS.
-	lowerExists := os.Mkdir(filepath.Join(dir, "store"), 0o755) == nil
-
-	got, ok := lookupEntryFold(cc, dir, "Store")
-	if !ok || got != "Store" {
-		t.Errorf("lookupEntryFold(%q, \"Store\") = %q,%v; want \"Store\",true", dir, got, ok)
-	}
-	if lowerExists {
-		got, ok = lookupEntryFold(cc, dir, "store")
-		if !ok || got != "store" {
-			t.Errorf("exact match must win over fold: got %q,%v; want \"store\",true", got, ok)
-		}
-	} else {
-		// Case-insensitive FS: only "Store" is on disk, so the folded lookup
-		// must report the on-disk spelling for the lowercase request.
-		got, ok = lookupEntryFold(cc, dir, "store")
-		if !ok || got != "Store" {
-			t.Errorf("folded lookup = %q,%v; want \"Store\",true", got, ok)
-		}
-	}
-
-	if _, ok := lookupEntryFold(cc, dir, "absent"); ok {
-		t.Error("lookupEntryFold reported a hit for an entry that does not exist")
-	}
-	if _, ok := lookupEntryFold(cc, filepath.Join(dir, "no-such-dir"), "x"); ok {
-		t.Error("lookupEntryFold reported a hit under an unreadable directory")
-	}
-}
-
-// TestResolveDiskCaseFoldsDirectorySpelling: the canonical key a variant
-// spelling produces must be the on-disk spelling where the FS folds, and must
-// be left alone where it does not.
-func TestResolveDiskCaseFoldsDirectorySpelling(t *testing.T) {
+// TestFoldTargetKeyFoldsSpelling: the key a variant spelling produces must be
+// the folded one where the FS folds, and the caller's spelling where it does
+// not.
+func TestFoldTargetKeyFoldsSpelling(t *testing.T) {
 	repo := withTempProject(t) // creates internal/store/store.go
 
-	got := resolveDiskCase(nil, repo, tcStoreVariantGo)
+	got := foldTargetKey(nil, repo, tcStoreVariantGo)
 	if caseVariantFSNote(t, repo) {
 		if got != tcStoreStoreGo {
-			t.Errorf("resolveDiskCase(%q) = %q; want %q — the variant must fold to the on-disk spelling", tcStoreVariantGo, got, tcStoreStoreGo)
+			t.Errorf("foldTargetKey(%q) = %q; want %q — every spelling of one file is one key", tcStoreVariantGo, got, tcStoreStoreGo)
 		}
 		return
 	}
 	if got != tcStoreVariantGo {
-		t.Errorf("resolveDiskCase(%q) = %q; want it unchanged on a case-sensitive filesystem", tcStoreVariantGo, got)
+		t.Errorf("foldTargetKey(%q) = %q; want it unchanged on a case-sensitive filesystem", tcStoreVariantGo, got)
 	}
 }
 
-// TestResolveDiskCaseKeepsUnknownTail: a beacon names a file that does not
-// exist yet, so disk has no truth to offer about its segment. Directory case
-// still converges; the typed tail survives verbatim.
-func TestResolveDiskCaseKeepsUnknownTail(t *testing.T) {
+// TestFoldTargetKeyFoldsAPathThatDoesNotExist is the first of loto-8soe's two
+// doors, at unit scale: `loto beacon` names a file nobody has written yet, and
+// the old disk walk stopped at the first absent segment and kept the caller's
+// casing — so two spellings of one future file were two keys. The key must not
+// depend on whether anything is on disk.
+func TestFoldTargetKeyFoldsAPathThatDoesNotExist(t *testing.T) {
 	repo := withTempProject(t)
-	got := resolveDiskCase(nil, repo, "internal/Store/NotYetWritten.go")
-	want := "internal/Store/NotYetWritten.go"
-	if caseVariantFSNote(t, repo) {
-		want = "internal/store/NotYetWritten.go"
+	folds := caseVariantFSNote(t, repo)
+	// One tail segment absent, then every segment absent — the second is what a
+	// claim on a directory nobody has scaffolded yet resolves to.
+	cases := []struct{ typed, folded string }{
+		{"internal/Store/NotYetWritten.go", "internal/store/notyetwritten.go"},
+		{"Nowhere/AtAll.go", "nowhere/atall.go"},
 	}
-	if got != want {
-		t.Errorf("resolveDiskCase = %q; want %q", got, want)
+	for _, c := range cases {
+		want := c.typed
+		if folds {
+			want = c.folded
+		}
+		if got := foldTargetKey(nil, repo, c.typed); got != want {
+			t.Errorf("foldTargetKey(%q) = %q; want %q — the key must not depend on what is on disk", c.typed, got, want)
+		}
 	}
 }
 
-// TestResolveDiskCaseLeavesUnwalkableShapes covers the early returns: an empty
-// repo frame, ".", an absolute path, and a relative token carrying "..". None
-// is a shape the segment walk can reason about.
-func TestResolveDiskCaseLeavesUnwalkableShapes(t *testing.T) {
+// TestFoldTargetKeyLeavesUnfoldableShapes covers the early returns: an empty
+// repo frame, "", ".", and an absolute path. None is a repo-relative key.
+func TestFoldTargetKeyLeavesUnfoldableShapes(t *testing.T) {
 	repo := withTempProject(t)
 	abs := filepath.Join(repo, "internal", "Store", "store.go")
 	cases := []struct{ repoTop, in string }{
@@ -168,11 +124,24 @@ func TestResolveDiskCaseLeavesUnwalkableShapes(t *testing.T) {
 		{repo, ""},
 		{repo, "."},
 		{repo, abs},
-		{repo, "internal/../" + tcStoreVariantGo},
 	}
 	for _, c := range cases {
-		if got := resolveDiskCase(nil, c.repoTop, c.in); got != c.in {
-			t.Errorf("resolveDiskCase(%q, %q) = %q; want it unchanged", c.repoTop, c.in, got)
+		if got := foldTargetKey(nil, c.repoTop, c.in); got != c.in {
+			t.Errorf("foldTargetKey(%q, %q) = %q; want it unchanged", c.repoTop, c.in, got)
+		}
+	}
+}
+
+// TestFoldTargetKeyCacheAgreesWithDisk: a batch shares one caseCache, so the
+// cached answer must equal the uncached one. That parity is the whole safety
+// argument for caching the probe at all.
+func TestFoldTargetKeyCacheAgreesWithDisk(t *testing.T) {
+	repo := withTempProject(t)
+	cc := newCaseCache()
+	for _, in := range []string{tcStoreVariantGo, tcStoreStoreGo, "internal/Store/NotYetWritten.go"} {
+		bare, cached := foldTargetKey(nil, repo, in), foldTargetKey(cc, repo, in)
+		if bare != cached {
+			t.Errorf("foldTargetKey(%q): uncached %q, cached %q", in, bare, cached)
 		}
 	}
 }
@@ -288,5 +257,95 @@ func TestClaimCaseVariantPrefixCoversLock(t *testing.T) {
 	}
 	if code != 0 {
 		t.Fatalf("internal/Store is a different prefix on a case-sensitive filesystem; exit %d: %q", code, out.String())
+	}
+}
+
+// The two doors loto-8soe closes. Both are the same defect — a key that was
+// read off the directory entry rather than computed from the caller's spelling
+// — and both admitted two agents to one file on a case-folding filesystem.
+// #306 closed the third door (two spellings of a file that EXISTS) and left
+// these two open; Codex filed them as P1s on that PR.
+
+// TestGateRefusesCaseVariantOfABeaconedPathThatDoesNotExist is door one.
+// `loto beacon` announces a write to a file that has not been created yet, so
+// the old walk had nothing on disk to resolve the tail against and kept the
+// caller's casing: internal/store/New.go and internal/store/new.go were two
+// keys and B was admitted onto A's ground.
+func TestGateRefusesCaseVariantOfABeaconedPathThatDoesNotExist(t *testing.T) {
+	repo := withTempProject(t)
+	alice, bob := twoAgents(t)
+	folds := caseVariantFSNote(t, repo)
+	const beaconed, variant = "internal/store/New.go", "internal/store/new.go"
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid())) // durable live holder → hard block
+	if code := Run([]string{"beacon", beaconed}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("alice beacon on %q failed", beaconed)
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcFlagGate, variant}, &out, &bytes.Buffer{})
+
+	if folds {
+		if code != 1 {
+			t.Fatalf("gate admitted %q against alice's beacon on %q — the key was read off a directory entry that does not exist (loto-8soe); exit %d: %q", variant, beaconed, code, out.String())
+		}
+		// A beacon is a lock row, so the gate names it kind=lock.
+		if !strings.Contains(out.String(), "kind=lock") {
+			t.Errorf("expected a lock-kind deny row: %q", out.String())
+		}
+		if !strings.Contains(out.String(), alice.UUID) {
+			t.Errorf("the refusal must name alice as the holder: %q", out.String())
+		}
+		return
+	}
+	if code != 0 {
+		t.Fatalf("on a case-sensitive filesystem %q and %q are two files; exit %d: %q", beaconed, variant, code, out.String())
+	}
+}
+
+// TestGateRefusesAfterCaseOnlyRename is door two. The lock's key used to be
+// whatever the directory entry was spelled at acquire time, and that spelling
+// is mutable: `git mv foo.go Foo.go` moved the key out from under a live lock,
+// so the next agent resolving Foo.go byte-matched nothing and was admitted.
+func TestGateRefusesAfterCaseOnlyRename(t *testing.T) {
+	repo := withTempProject(t)
+	alice, bob := twoAgents(t)
+	folds := caseVariantFSNote(t, repo)
+	const lower, upper = "renamed.go", "Renamed.go"
+	if err := os.WriteFile(filepath.Join(repo, lower), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	if code := Run([]string{tcCmdLock, lower, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("alice lock on %q failed", lower)
+	}
+
+	// The rename anyone can do while the lock is live. On a case-folding
+	// filesystem this is one entry changing spelling; on a case-sensitive one
+	// it moves the file to a genuinely different path, which is why the two
+	// branches below want opposite verdicts.
+	if err := os.Rename(filepath.Join(repo, lower), filepath.Join(repo, upper)); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcFlagGate, upper}, &out, &bytes.Buffer{})
+
+	if folds {
+		if code != 1 {
+			t.Fatalf("gate admitted %q after a case-only rename of alice's locked %q (loto-8soe); exit %d: %q", upper, lower, code, out.String())
+		}
+		if !strings.Contains(out.String(), alice.UUID) {
+			t.Errorf("the refusal must name alice as the holder: %q", out.String())
+		}
+		return
+	}
+	if code != 0 {
+		t.Fatalf("on a case-sensitive filesystem %q is a different path from the locked %q; exit %d: %q", upper, lower, code, out.String())
 	}
 }

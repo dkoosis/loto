@@ -113,9 +113,13 @@ func (s *Store) InsertTerritoryTag(ctx context.Context, n NewTerritoryTag) (stri
 
 	nowNs := now.UnixNano()
 	var atPrefix, repoWide int
+	// ‡ Keyed on the prefix a caller typed, so it folds when the store folds —
+	// otherwise the per-prefix cap reads `Docs` and `docs` as two prefixes and
+	// lets one piece of ground carry twice the notes (loto-8soe).
+	k := s.keys()
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM territory_tags WHERE path_prefix = ? AND acked_at IS NULL AND expires_at > ?`,
-		n.PathPrefix, nowNs).Scan(&atPrefix); err != nil {
+		`SELECT COUNT(*) FROM territory_tags WHERE `+k.col("path_prefix")+` = ? AND acked_at IS NULL AND expires_at > ?`,
+		k.key(n.PathPrefix), nowNs).Scan(&atPrefix); err != nil {
 		return "", err
 	}
 	if atPrefix >= territoryTagPrefixCap {

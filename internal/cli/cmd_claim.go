@@ -105,16 +105,16 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // counterpart of resolveCLITarget, sharing normalizeRepoPath so one policy
 // governs path translation.
 //
-// The disk-case fold runs after CanonicalizePrefix trims the trailing slash, so
-// the walk in resolveDiskCase never sees an empty last segment. Claims fold for
-// the same reason locks do (loto-f8m8): PrefixOverlaps is a byte comparison, so
-// a claim on internal/Store did not cover a lock on internal/store/x.go.
+// The case fold runs after CanonicalizePrefix trims the trailing slash, so the
+// key never carries an empty last segment. Claims fold for the same reason
+// locks do (loto-f8m8): PrefixOverlaps is a byte comparison, so a claim on
+// internal/Store did not cover a lock on internal/store/x.go.
 func resolveCLIPrefix(cc *caseCache, repoTop, raw string) (domain.Target, error) {
 	t, err := domain.CanonicalizePrefix(normalizeRepoPath(raw, repoTop))
 	if err != nil {
 		return domain.Target{}, err
 	}
-	t.Canonical = resolveDiskCase(cc, repoTop, t.Canonical)
+	t.Canonical = foldTargetKey(cc, repoTop, t.Canonical)
 	return t, nil
 }
 

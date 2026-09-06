@@ -130,7 +130,7 @@ func applyBreakChangesTx(ctx context.Context, tx *sql.Tx, b breakBatch) ([]Break
 		}
 	}
 	for owner, canonicals := range deleteByOwner {
-		if err := deleteOwnedTx(ctx, tx, canonicals, owner); err != nil {
+		if err := deleteOwnedTx(ctx, tx, keysFor(b.ec), canonicals, owner); err != nil {
 			return nil, err
 		}
 	}
@@ -264,9 +264,13 @@ func authorizeHolders(holders []domain.LockRecord, ec domain.EvalContext, force 
 // last-scanned row, so a multi-holder break removed one arbitrary holder and
 // reported success while the others silently survived (loto-w77f). ORDER BY
 // makes the per-holder event/delete stream deterministic.
-func loadLocksByTargetTx(ctx context.Context, tx *sql.Tx, targets []domain.Target) (map[string][]domain.LockRecord, error) {
-	placeholders, args := inClause(targets)
-	rows, err := tx.QueryContext(ctx, `SELECT `+lockCols+` FROM locks WHERE target_canonical IN (`+placeholders+`) ORDER BY created_at ASC, owner_uuid ASC`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+// k decides whether a target matches its row byte-exact or folded, and it also
+// keys the map: the caller indexes by the target it typed, so a legacy row's
+// stored spelling must be normalized on the way in or it is invisible to
+// release, refresh, downgrade and break alike (loto-8soe).
+func loadLocksByTargetTx(ctx context.Context, tx *sql.Tx, k keyMatch, targets []domain.Target) (map[string][]domain.LockRecord, error) {
+	placeholders, args := k.inTargets(targets)
+	rows, err := tx.QueryContext(ctx, `SELECT `+lockCols+` FROM locks WHERE `+k.col("target_canonical")+` IN (`+placeholders+`) ORDER BY created_at ASC, owner_uuid ASC`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 
 	if err != nil {
 		return nil, err
@@ -278,7 +282,8 @@ func loadLocksByTargetTx(ctx context.Context, tx *sql.Tx, targets []domain.Targe
 		if err != nil {
 			return nil, err
 		}
-		out[l.Target.Canonical] = append(out[l.Target.Canonical], l)
+		key := k.key(l.Target.Canonical)
+		out[key] = append(out[key], l)
 	}
 	return out, rows.Err()
 }

@@ -87,7 +87,7 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 	// Bundle the (now, live, kin) ambient triple once. Host policy rides inside
 	// the probe closure (HolderLiveProbe takes the record), so one EvalContext
 	// serves every lock in the batch — no per-lock rebinding.
-	blockers, err := collectAllBlockers(ctx, tx, all, sorted, domain.EvalContext{Now: now, Live: live, Kin: kin})
+	blockers, err := collectAllBlockers(ctx, tx, all, sorted, domain.EvalContext{Now: now, Live: live, Kin: kin, CaseFold: s.caseFold})
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 		return nil, &MultiConflictError{Blockers: blockers}
 	}
 
-	if err := s.insertAllLocks(ctx, tx, sorted, all, domain.EvalContext{Now: now, Live: live}); err != nil {
+	if err := s.insertAllLocks(ctx, tx, sorted, all, domain.EvalContext{Now: now, Live: live, CaseFold: s.caseFold}); err != nil {
 		return nil, err
 	}
 	if err := rotateEventsTx(ctx, tx, now); err != nil {
@@ -271,7 +271,7 @@ func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domai
 		ex := &all[i]
 		// Kin rows (the parent identity behind a subagent stamp) are skipped
 		// exactly like same-owner rows: never reclaimed here, never blocking.
-		if !domain.SameCanonical(ex.Target, l.Target) || ex.OwnerUUID == l.OwnerUUID || ec.IsKin(ex.OwnerUUID) {
+		if !ec.SameTarget(ex.Target, l.Target) || ex.OwnerUUID == l.OwnerUUID || ec.IsKin(ex.OwnerUUID) {
 			continue
 		}
 		if ec.IsStale(*ex) {
@@ -314,7 +314,7 @@ func beaconMaySupersede(l domain.LockRecord, all []domain.LockRecord, ec domain.
 	}
 	for i := range all {
 		ex := &all[i]
-		if ex.OwnerUUID != l.OwnerUUID || !domain.SameCanonical(ex.Target, l.Target) {
+		if ex.OwnerUUID != l.OwnerUUID || !ec.SameTarget(ex.Target, l.Target) {
 			continue
 		}
 		return ec.IsStale(*ex)

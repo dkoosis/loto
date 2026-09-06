@@ -20,9 +20,10 @@ func (s *Store) ListLocks(ctx context.Context) ([]domain.LockRecord, error) {
 // LockAt's bare WHERE target_canonical=? can match several rows (a shared
 // target with several holders) and returns an arbitrary one (loto-k5el.2).
 func (s *Store) LockForOwnerAt(ctx context.Context, t domain.Target, owner domain.AgentUUID) (*domain.LockRecord, error) {
+	k := s.keys()
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+lockCols+` FROM locks WHERE target_canonical = ? AND owner_uuid = ?`,
-		t.Canonical, string(owner))
+		`SELECT `+lockCols+` FROM locks WHERE `+k.col("target_canonical")+` = ? AND owner_uuid = ?`,
+		k.key(t.Canonical), string(owner))
 	if err != nil {
 		return nil, err
 	}
@@ -52,10 +53,11 @@ func (s *Store) LocksForOwnerAt(ctx context.Context, targets []domain.Target, ow
 	if len(targets) == 0 {
 		return out, nil
 	}
-	placeholders, args := inClause(targets)
+	k := s.keys()
+	placeholders, args := k.inTargets(targets)
 	args = append([]any{string(owner)}, args...)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+lockCols+` FROM locks WHERE owner_uuid = ? AND target_canonical IN (`+placeholders+`)`, //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+		`SELECT `+lockCols+` FROM locks WHERE owner_uuid = ? AND `+k.col("target_canonical")+` IN (`+placeholders+`)`, //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 		args...)
 	if err != nil {
 		return nil, err
@@ -66,7 +68,10 @@ func (s *Store) LocksForOwnerAt(ctx context.Context, targets []domain.Target, ow
 		if err != nil {
 			return nil, err
 		}
-		out[l.Target.Canonical] = l
+		// Keyed by the normalized canonical, not the stored one: the caller
+		// indexes this map by the target it typed, and a legacy row's stored
+		// spelling is exactly what would not match (loto-8soe).
+		out[k.key(l.Target.Canonical)] = l
 	}
 	return out, rows.Err()
 }
@@ -79,8 +84,8 @@ func (s *Store) LocksForOwnerAt(ctx context.Context, targets []domain.Target, ow
 // that legitimately want a single representative holder.
 func (s *Store) LockAt(ctx context.Context, t domain.Target) (*domain.LockRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+lockCols+` FROM locks WHERE target_canonical = ? ORDER BY created_at ASC, owner_uuid ASC LIMIT 1`,
-		t.Canonical)
+		`SELECT `+lockCols+` FROM locks WHERE `+s.keys().col("target_canonical")+` = ? ORDER BY created_at ASC, owner_uuid ASC LIMIT 1`,
+		s.keys().key(t.Canonical))
 	if err != nil {
 		return nil, err
 	}
@@ -105,8 +110,8 @@ func (s *Store) LockAt(ctx context.Context, t domain.Target) (*domain.LockRecord
 // arbitrary one (loto-2nc5).
 func (s *Store) LocksAt(ctx context.Context, t domain.Target) ([]domain.LockRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+lockCols+` FROM locks WHERE target_canonical = ? ORDER BY created_at ASC, owner_uuid ASC`,
-		t.Canonical)
+		`SELECT `+lockCols+` FROM locks WHERE `+s.keys().col("target_canonical")+` = ? ORDER BY created_at ASC, owner_uuid ASC`,
+		s.keys().key(t.Canonical))
 	if err != nil {
 		return nil, err
 	}

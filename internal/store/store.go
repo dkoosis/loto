@@ -50,6 +50,20 @@ type Store struct {
 	// A second clone that genuinely wants its own store sets LOTO_BASE, which
 	// StateDir honors ahead of the slug — see cli.StateDir.
 	repoTop string
+
+	// caseFold: the checkout named by repoTop is on a case-folding filesystem,
+	// so a stored key differing from a caller's key only by case names the SAME
+	// file (loto-8soe). It rides into every EvalContext this package builds and
+	// is consumed only by the widened comparisons (domain.EvalContext.SameTarget
+	// and friends).
+	//
+	// ‡ The filesystem question is asked by the CLI, not here: cli owns the
+	// probe (paths.go caseInsensitiveFS) that also decides how a key is minted,
+	// and one answer feeding both is what keeps the mint and the comparison
+	// from disagreeing. Absent the option the store compares byte-exact, which
+	// is this package's pre-existing behavior and the right answer on a
+	// case-sensitive filesystem.
+	caseFold bool
 }
 
 // OpenOption configures a Store after its connection is established. Options
@@ -63,6 +77,13 @@ type OpenOption func(*Store)
 // happens to be standing at the repo root.
 func WithRepoTop(top string) OpenOption {
 	return func(s *Store) { s.repoTop = top }
+}
+
+// WithCaseFoldedKeys tells the store that repo paths live on a case-folding
+// filesystem, so two keys differing only by case name one file (loto-8soe).
+// See Store.caseFold for why the caller, not this package, answers that.
+func WithCaseFoldedKeys(fold bool) OpenOption {
+	return func(s *Store) { s.caseFold = fold }
 }
 
 // connDSN: WAL + busy_timeout + immediate-mode write txns.

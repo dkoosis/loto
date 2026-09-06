@@ -110,10 +110,11 @@ func (s *Store) commitRefreshes(ctx context.Context, extend []domain.Target, own
 	}
 	defer cleanup()
 
-	placeholders, canonArgs := inClause(extend)
+	k := s.keys()
+	placeholders, canonArgs := k.inTargets(extend)
 	args := append([]any{newExpiry.UnixNano(), owner, now.UnixNano()}, canonArgs...)
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE locks SET expires_at = ? WHERE owner_uuid = ? AND expires_at > ? AND target_canonical IN (`+placeholders+`)`, //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+		`UPDATE locks SET expires_at = ? WHERE owner_uuid = ? AND expires_at > ? AND `+k.col("target_canonical")+` IN (`+placeholders+`)`, //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 		args...); err != nil {
 		return err
 	}

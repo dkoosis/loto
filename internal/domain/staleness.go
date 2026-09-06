@@ -35,6 +35,24 @@ type EvalContext struct {
 	// rows are never kin: distinct stamp, distinct uuid, and serializing those
 	// is the point of stamping (loto-xwod). Empty = only exact-owner is self.
 	Kin []AgentUUID
+	// CaseFold is true when this repo's checkout is on a case-folding
+	// filesystem, and it widens SameTarget/PrefixCovers/ClaimCovers below to
+	// compare keys ignoring case (loto-8soe). The CLI mints every new key
+	// already folded (cli.foldTargetKey), so this changes nothing for rows
+	// written by this binary — it is what lets a row minted by an OLDER loto,
+	// carrying the on-disk spelling, keep resolving against the folded key a
+	// caller now presents. Default false = today's byte comparison, which is
+	// also the correct and permanent answer on a case-sensitive filesystem.
+	//
+	// ‡ The rule for a NEW EvalContext: every context that reaches a path
+	// comparison must set this from the store (store.Store.caseFold), and a
+	// context built only to answer liveness questions — Classify, IsStale,
+	// CandidateClaimIsDead over rows nobody looks up by name, as in
+	// gate.reclaimDeadPromotions — may leave it zero. Zero is not "unknown", it
+	// is "compare byte-exact", so the omission can never widen a decision by
+	// accident; it can only fail to widen one, which leaves a legacy row
+	// blocking rather than admitting a peer.
+	CaseFold bool
 }
 
 // IsKin reports whether owner u counts as the caller's own for conflicts.
@@ -137,7 +155,7 @@ func (c EvalContext) Conflicts(incoming, existing LockRecord) bool {
 	if existing.OwnerUUID == incoming.OwnerUUID || c.IsKin(existing.OwnerUUID) {
 		return false
 	}
-	if !SameCanonical(incoming.Target, existing.Target) {
+	if !c.SameTarget(incoming.Target, existing.Target) {
 		return false
 	}
 	if c.IsStale(existing) {

@@ -39,3 +39,46 @@ func ClaimCoversTarget(c ClaimRecord, t string, myUUID string, now time.Time) bo
 		!c.Expired(now) &&
 		PrefixOverlaps(c.PathPrefix, t)
 }
+
+// SameTarget, PrefixCovers and ClaimCovers are the three predicates above
+// widened by EvalContext.CaseFold (loto-8soe). They live here, beside the
+// byte-exact primitives they delegate to, so a reader comparing two keys sees
+// both halves of the rule in one place.
+//
+// ‡ Every conflict decision goes through one of these three. A key minted by
+// this binary on a case-folding filesystem is already folded, so on a fresh
+// store the widened arm never fires; it exists for the row a PREVIOUS loto
+// wrote in the on-disk spelling (`Makefile`, `docs/README.md`) and that is
+// still live when the folded key (`makefile`) arrives. Without it that row
+// stops blocking the moment this binary lands, which is the double-grant the
+// fold set out to close, arriving through the upgrade instead.
+//
+// ‡ The widened arm is fail-SAFE in the one direction that matters: it can
+// only find MORE conflicts, never fewer. c.CaseFold is false on a
+// case-sensitive filesystem and in every zero-value EvalContext, where a.go
+// and A.go are two files and must stay independently lockable.
+
+// SameTarget reports whether a and b name the same file under this context's
+// filesystem case class.
+func (c EvalContext) SameTarget(a, b Target) bool {
+	if SameCanonical(a, b) {
+		return true
+	}
+	return c.CaseFold && strings.EqualFold(a.Canonical, b.Canonical)
+}
+
+// PrefixCovers is PrefixOverlaps under this context's filesystem case class.
+func (c EvalContext) PrefixCovers(a, b string) bool {
+	if PrefixOverlaps(a, b) {
+		return true
+	}
+	return c.CaseFold && PrefixOverlaps(strings.ToLower(a), strings.ToLower(b))
+}
+
+// ClaimCovers is ClaimCoversTarget under this context's filesystem case class,
+// reading the clock from the context rather than a positional now.
+func (c EvalContext) ClaimCovers(cl ClaimRecord, t string, myUUID string) bool {
+	return string(cl.OwnerUUID) != myUUID &&
+		!cl.Expired(c.Now) &&
+		c.PrefixCovers(cl.PathPrefix, t)
+}
