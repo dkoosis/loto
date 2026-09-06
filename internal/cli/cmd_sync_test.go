@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +28,9 @@ const (
 	tcResidueOtherGo   = "other.go"
 	tcResidueEnv       = ".env"
 	tcResidueBody      = "package p\n"
+	// tcDriftBody is the worktree content a test plants to make a tracked path
+	// diverge from integration.
+	tcDriftBody = "drift\n"
 )
 
 var errInjectedSyncIO = errors.New("injected sync I/O failure")
@@ -258,7 +263,7 @@ func TestSync_LeavesTargetOverwrittenInsideTheProbeWindow(t *testing.T) {
 // read and proves a peer cannot acquire the target until publication finishes.
 func TestSync_LeaseAcquireCannotRaceFinalApply(t *testing.T) {
 	repo := syncBaseRepo(t)
-	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("drift\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte(tcDriftBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -561,6 +566,29 @@ func TestSync_DeletesResidueAttributedToARejectedCandidate(t *testing.T) {
 	}
 }
 
+// TestSync_DeleteRowCarriesTheBlobOID pins loto-q2i6: the deleted file's blob
+// is the ONLY handle left on its bytes — the rejection's proposal ref is gone,
+// so nothing else references them — and the report must hand it over in full,
+// with the cat-file command that spends it.
+func TestSync_DeleteRowCarriesTheBlobOID(t *testing.T) {
+	repo := syncBaseRepo(t)
+	blob := blobOf(t, repo, tcResidueBody)
+	plantResidue(t, repo, tcResidueNewGo, tcResidueBody)
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	wantRow := "ℹ target=" + tcResidueNewGo + " action=delete candidate=" + tcResidueCandidate + " blob=" + blob
+	if !strings.Contains(out.String(), wantRow) {
+		t.Errorf("delete row must carry the full blob oid, want %q in: %q", wantRow, out.String())
+	}
+	if !strings.Contains(out.String(), "git cat-file blob <blob> > <target>") {
+		t.Errorf("fix block must name the recovery command: %q", out.String())
+	}
+}
+
 // TestSync_LeavesResidueRecreatedWithDifferentBytes is the review's correction:
 // a peer re-created the same path with their own work. The path still matches
 // the rejection's record, the CONTENT does not — and a deletion restores
@@ -677,7 +705,7 @@ func TestSync_LeavesResidueOverwrittenBetweenClassifyAndDelete(t *testing.T) {
 func TestSync_ResidueVanishingMidRunDoesNotAbortTheSync(t *testing.T) {
 	repo := syncBaseRepo(t)
 	residue := plantResidue(t, repo, tcResidueNewGo, tcResidueBody)
-	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("drift\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte(tcDriftBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -769,7 +797,7 @@ func TestSync_LeavesPathCommittedSinceTheRejection(t *testing.T) {
 func TestSync_DryRunDeletesNothing(t *testing.T) {
 	repo := syncBaseRepo(t)
 	residue := plantResidue(t, repo, tcResidueNewGo, tcResidueBody)
-	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("drift\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte(tcDriftBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -787,7 +815,7 @@ func TestSync_DryRunDeletesNothing(t *testing.T) {
 	if got := readFileT(t, residue); got != tcResidueBody {
 		t.Errorf("--dry-run deleted the residue: %q", got)
 	}
-	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != "drift\n" {
+	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != tcDriftBody {
 		t.Errorf("--dry-run fast-forwarded a divergent path: %q", got)
 	}
 }
@@ -819,6 +847,52 @@ func TestSync_RefusesToDeleteLeasedResidue(t *testing.T) {
 }
 
 // TestSync_RejectsStrayArgs: sync takes no positional arguments.
+// TestSync_HoldsTheOpFlockInBoundedBatches pins loto-roeh: the op-flock is the
+// rendezvous every peer's beacon needs, it gives up at 30s, and the hook that
+// consumes a beacon failure fails open — so a hold that grows with the number
+// of affected paths is a window in which peers write with no lease row. Measured
+// before the split: 8.1s over 50 divergent paths, 22.0s over 200, 33.3s over
+// 327. The property is that the run takes one flock section PER BATCH and
+// releases between them, which is what gives a waiting peer its opening; the
+// count is asserted rather than the clock, so the test says the same thing on a
+// slow CI box.
+func TestSync_HoldsTheOpFlockInBoundedBatches(t *testing.T) {
+	const n = syncApplyBatch*2 + 3
+	repo := syncBaseRepo(t)
+	for i := range n {
+		if err := os.WriteFile(filepath.Join(repo, fmt.Sprintf("b%03d.txt", i)), []byte("integrated\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	syncGitT(t, repo, "add", "-A")
+	syncGitT(t, repo, "commit", "-q", "-m", "batch fixture")
+	syncGitT(t, repo, "update-ref", "refs/loto/integration", "HEAD")
+	for i := range n {
+		if err := os.WriteFile(filepath.Join(repo, fmt.Sprintf("b%03d.txt", i)), []byte(tcDriftBody), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var sections atomic.Int64
+	syncBeforeApplyFn = func() { sections.Add(1) }
+	t.Cleanup(func() { syncBeforeApplyFn = nil })
+
+	var out, errBuf bytes.Buffer
+	if code := Run([]string{tcCmdSync}, &out, &errBuf); code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if want := int64((n + syncApplyBatch - 1) / syncApplyBatch); sections.Load() != want {
+		t.Errorf("flock sections = %d, want %d — the whole repair ran under one hold", sections.Load(), want)
+	}
+	// Correctness is the other half: batching must not lose a path.
+	if !strings.Contains(out.String(), fmt.Sprintf("✓ sync synced=%d conflicts=0 skipped=0", n)) {
+		t.Errorf("batched run did not repair every path: %q", out.String())
+	}
+	if status := syncGitT(t, repo, "status", "--porcelain"); status != "" {
+		t.Errorf("tree not clean after batched sync: %q", status)
+	}
+}
+
 func TestSync_RejectsStrayArgs(t *testing.T) {
 	syncBaseRepo(t)
 
@@ -927,6 +1001,67 @@ func TestSyncDecide_ConflictTable(t *testing.T) {
 	}
 }
 
+// TestSyncDecide_LapsedLeaseWithLiveHolder pins loto-0o0j: TTL lapse frees the
+// lock ROW, it never authorizes overwriting the bytes of an agent that is still
+// running. A lease that expired during a long tool call is the routine case in
+// this repo, and the holder's edits are uncommitted — unrecoverable once sync
+// publishes over them. A provably dead holder still fast-forwards.
+func TestSyncDecide_LapsedLeaseWithLiveHolder(t *testing.T) {
+	now := time.Now()
+	const path = "internal/a.go"
+	diffs := []syncDiff{{syncEntry: syncEntry{Path: path, Mode: "100644", OID: "deadbeef"}, State: syncModified}}
+	lapsed := []domain.LockRecord{
+		{Target: domain.Target{Canonical: path}, OwnerUUID: "owner-1", ExpiresAt: now.Add(-time.Hour)},
+	}
+	probeOf := func(v domain.Liveness) domain.HolderLiveProbe {
+		return func(domain.LockRecord) domain.Liveness { return v }
+	}
+
+	t.Run("holder alive -> conflict", func(t *testing.T) {
+		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessAlive)}
+		apply, conflicts := syncDecide(diffs, lapsed, nil, nil, ec)
+		if len(apply) != 0 || len(conflicts) != 1 {
+			t.Fatalf("want 1 conflict, got apply=%d conflicts=%+v", len(apply), conflicts)
+		}
+		if conflicts[0].Reason != syncReasonLeaseLapsedHolderLive {
+			t.Errorf("got reason=%s want %s", conflicts[0].Reason, syncReasonLeaseLapsedHolderLive)
+		}
+	})
+
+	t.Run("holder dead -> fast-forward", func(t *testing.T) {
+		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessDead)}
+		apply, conflicts := syncDecide(diffs, lapsed, nil, nil, ec)
+		if len(apply) != 1 || len(conflicts) != 0 {
+			t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
+		}
+	})
+
+	// UNKNOWN is the absence of a witness — another host, a PID-0 sentinel — not
+	// evidence the holder is gone, and an agent on another host loses its edits
+	// exactly as thoroughly. Only DEAD authorizes the overwrite.
+	t.Run("holder unknown -> conflict", func(t *testing.T) {
+		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessUnknown)}
+		apply, conflicts := syncDecide(diffs, lapsed, nil, nil, ec)
+		if len(apply) != 0 || len(conflicts) != 1 {
+			t.Fatalf("want 1 conflict, got apply=%d conflicts=%+v", len(apply), conflicts)
+		}
+		if conflicts[0].Reason != syncReasonLeaseLapsedHolderUnknown {
+			t.Errorf("got reason=%s want %s", conflicts[0].Reason, syncReasonLeaseLapsedHolderUnknown)
+		}
+	})
+
+	// No probe at all is a different state from an UNKNOWN verdict: no question
+	// was asked, so TTL stays the sole authority and every other caller of the
+	// staleness helpers keeps today's behaviour.
+	t.Run("no probe -> fast-forward, TTL is sole authority", func(t *testing.T) {
+		ec := domain.EvalContext{Now: now}
+		apply, conflicts := syncDecide(diffs, lapsed, nil, nil, ec)
+		if len(apply) != 1 || len(conflicts) != 0 {
+			t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
+		}
+	})
+}
+
 func TestSync_RefusesStaleIntegrationSnapshot(t *testing.T) {
 	repo := syncBaseRepo(t)
 	expectedIntegration := syncGitT(t, repo, "rev-parse", "refs/loto/integration")
@@ -1011,7 +1146,7 @@ func TestSync_NewlinePath(t *testing.T) {
 	syncGitT(t, repo, "add", "--", path)
 	syncGitT(t, repo, "commit", "-q", "-m", "add newline path")
 	syncGitT(t, repo, "update-ref", "refs/loto/integration", "HEAD")
-	if err := os.WriteFile(full, []byte("drift\n"), 0o644); err != nil {
+	if err := os.WriteFile(full, []byte(tcDriftBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1032,10 +1167,49 @@ func TestSync_NewlinePath(t *testing.T) {
 	}
 }
 
+// TestSync_QuoteLeadingPath pins loto-g870: a tracked file whose name starts
+// with a double quote must not take the rest of the run down with it. The
+// second, ordinary path is the assertion that matters — under the old LF/CR-only
+// predicate git unquotes the leading-quote line, the batched
+// `git hash-object --stdin-paths` exits 128 with "line is badly quoted", and
+// NEITHER file syncs.
+func TestSync_QuoteLeadingPath(t *testing.T) {
+	repo := syncBaseRepo(t)
+	const path = `"quoted.txt`
+	full := filepath.Join(repo, path)
+	if err := os.WriteFile(full, []byte("integrated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	syncGitT(t, repo, "add", "--", path)
+	syncGitT(t, repo, "commit", "-q", "-m", "add quote-leading path")
+	syncGitT(t, repo, "update-ref", "refs/loto/integration", "HEAD")
+	if err := os.WriteFile(full, []byte(tcDriftBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte(tcDriftBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if got := readFileT(t, full); got != "integrated\n" {
+		t.Errorf("quote-leading path content = %q, want integration content", got)
+	}
+	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != "" {
+		t.Errorf("%s content = %q — the quote-leading path took the batch down", tcTargetA, got)
+	}
+	if !strings.Contains(out.String(), "✓ sync synced=2 conflicts=0 skipped=0") {
+		t.Errorf("missing triage line: %q", out.String())
+	}
+}
+
 func TestSync_PostPublishFailureReportsCurrentPath(t *testing.T) {
 	repo := syncBaseRepo(t)
 	path := filepath.Join(repo, tcTargetA)
-	if err := os.WriteFile(path, []byte("drift\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(tcDriftBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	oid := syncGitT(t, repo, "rev-parse", "refs/loto/integration:"+tcTargetA)
@@ -1084,7 +1258,7 @@ func TestSync_MidApplyFailureReportsWhatItWrote(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("junk\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(zPath, []byte("drift\n"), 0o644); err != nil {
+	if err := os.WriteFile(zPath, []byte(tcDriftBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	writeErr := errInjectedSyncIO
@@ -1116,8 +1290,63 @@ func TestSync_MidApplyFailureReportsWhatItWrote(t *testing.T) {
 	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != "" {
 		t.Errorf("a.go should have been fast-forwarded before the failure, got %q", got)
 	}
-	if got := readFileT(t, zPath); got != "drift\n" {
+	if got := readFileT(t, zPath); got != tcDriftBody {
 		t.Errorf("z.go changed despite pre-publication failure: %q", got)
+	}
+}
+
+// TestSync_PartialReportKeepsConflictsDecidedBeforeTheFailure is the batching
+// half of the partial report (loto-roeh review). A conflict a completed batch
+// recorded is a finished verdict against live coordination state — a peer's
+// lease refused that path — and a LATER batch failing does not un-refuse it.
+// Dropping the list, as the single-pass form did, would tell the operator their
+// leased file was never considered.
+func TestSync_PartialReportKeepsConflictsDecidedBeforeTheFailure(t *testing.T) {
+	const n = syncApplyBatch + 4
+	repo := syncBaseRepo(t)
+	name := func(i int) string { return fmt.Sprintf("s%03d.txt", i) }
+	for i := range n {
+		if err := os.WriteFile(filepath.Join(repo, name(i)), []byte("integrated\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	syncGitT(t, repo, "add", "-A")
+	syncGitT(t, repo, "commit", "-q", "-m", "conflict-then-failure fixture")
+	syncGitT(t, repo, "update-ref", "refs/loto/integration", "HEAD")
+	for i := range n {
+		if err := os.WriteFile(filepath.Join(repo, name(i)), []byte(tcDriftBody), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// s000 sorts into the FIRST batch; its lease is decided there.
+	if code := Run([]string{tcCmdLock, name(0), "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("lock")
+	}
+	// Batch 1 writes the 15 unleased paths; fail the first write of batch 2.
+	originalWrite := syncWriteFn
+	calls := 0
+	syncWriteFn = func(f *os.File, data []byte) (int, error) {
+		calls++
+		if calls == syncApplyBatch {
+			return 0, errInjectedSyncIO
+		}
+		return f.Write(data)
+	}
+	t.Cleanup(func() { syncWriteFn = originalWrite })
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 3 {
+		t.Fatalf("exit %d, want 3; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✗ target="+name(0)+" reason=leased holder=") {
+		t.Errorf("a conflict decided before the failure must survive it: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "partial=true") {
+		t.Errorf("a partially applied tree must say so: %q", out.String())
+	}
+	if got := readFileT(t, filepath.Join(repo, name(0))); got != tcDriftBody {
+		t.Errorf("leased content must be untouched, got %q", got)
 	}
 }
 

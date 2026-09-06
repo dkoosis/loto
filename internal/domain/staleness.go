@@ -72,6 +72,31 @@ func (c EvalContext) IsStale(l LockRecord) bool {
 	return c.Live != nil && c.Live(l) == LivenessDead
 }
 
+// HolderLiveness reports the probe's RAW verdict on this lock's holder, and
+// whether there was a probe to ask. It answers the question IsStale deliberately
+// never asks: what is the holder doing RIGHT NOW, whatever its TTL says?
+//
+// IsStale short-circuits on expiry, which is correct for reclaiming a lock ROW —
+// lapsing frees the territory, and refresh is the remedy. It is not correct for
+// destroying the holder's uncommitted bytes on disk, so `loto sync` asks this
+// second question before it overwrites a lapsed path (loto-0o0j).
+//
+// ‡ The caller must not fold UNKNOWN into DEAD. Unknown is the answer for a
+// remote host, a PID-0 sentinel, a peer record that cannot be read — it means
+// "no witness", not "provably gone", and an agent on another host holding a
+// lapsed lease is exactly as capable of losing its edits as one on this host.
+// Only DEAD authorizes the overwrite.
+//
+// probed=false is the zero-value EvalContext with no probe at all: no question
+// was asked, so TTL stays the sole authority and every existing caller's
+// behaviour is unchanged.
+func (c EvalContext) HolderLiveness(l LockRecord) (v Liveness, probed bool) {
+	if c.Live == nil {
+		return LivenessUnknown, false
+	}
+	return c.Live(l), true
+}
+
 // ClaimIsStale applies the SAME staleness standard to a claim that IsStale
 // applies to a lock: TTL lapse OR the owner provably dead (loto-tzmv.9).
 // Claims carry no PID or start-time, so the subject handed to the probe is the
