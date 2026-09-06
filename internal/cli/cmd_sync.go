@@ -313,17 +313,27 @@ func runSync(rt *runtime, repoTop string, opts syncOpts, stdout, stderr io.Write
 // failure leaves the tree PARTIALLY fast-forwarded (and possibly partially
 // swept); naming those files is the whole report the operator gets
 // (loto-8sic), and a deletion above all must never go unnamed.
+//
+// ‡ The conflicts a completed batch decided are named here too. They are
+// finished verdicts against live coordination state, not guesses the failure
+// invalidated — a peer's lease that refused a path refused it, whether or not a
+// later batch then hit a moved integration ref. What the failure costs is the
+// paths no batch reached; partial=true is the report's statement that the
+// verdict list is short, and the next run judges the rest.
 func emitSyncPartial(w io.Writer, out syncOutcome) {
-	if len(out.Synced) == 0 && len(out.Deleted) == 0 {
+	if len(out.Synced) == 0 && len(out.Deleted) == 0 && len(out.Conflicts) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "⚠ sync synced=%d deleted=%d partial=true — the tree is partially repaired\n",
-		len(out.Synced), len(out.Deleted))
+	fmt.Fprintf(w, "⚠ sync synced=%d deleted=%d conflicts=%d partial=true — the tree is partially repaired, and paths after the failure are unjudged\n",
+		len(out.Synced), len(out.Deleted), len(out.Conflicts))
 	for _, p := range out.Synced {
 		fmt.Fprintf(w, "✓ target=%s action=fast-forward\n", syncPathField(p))
 	}
 	for _, r := range out.Deleted {
 		fmt.Fprintf(w, "ℹ target=%s action=delete candidate=%s blob=%s\n", syncPathField(r.Path), r.CandidateID, r.Blob)
+	}
+	for _, c := range out.Conflicts {
+		fmt.Fprintln(w, formatSyncConflictRow(c))
 	}
 	emitSyncRecoverBlock(w, out)
 }
@@ -408,20 +418,179 @@ func syncUntrackedPaths(ctx context.Context, repoTop string) ([]string, error) {
 	return paths, nil
 }
 
-// syncStoreDecideApply reads live lock/claim/candidate-claim state, decides,
-// and applies while the store holds the project operation flock. Every path
-// that acquires one of those protections uses the same flock, so a peer cannot
-// acquire after the decision and before the filesystem mutation.
-// ‡ On a non-zero code the returned outcome is still meaningful: apply is not
-// atomic, so it names the files already published or removed before the
-// failure.
+// syncApplyBatch bounds how many paths one flock section may act on.
 //
-// ‡ Residue paths join the SAME stable-state read as the divergent ones, and
-// are judged by the same syncConflictFor. A rejected candidate's created path
-// can be under a peer's lease by now — the peer picked up the abandoned file
-// and is working on it — and a deletion is the one repair with no undo, so it
-// answers to every holder v1 already refuses to write over.
+// ‡ The op-flock is the rendezvous every peer's `loto beacon`, AcquireLocks and
+// RefreshLocks needs. It gives up at LOTO_FLOCK_TIMEOUT (30s), and the
+// PreToolUse hook that consumes a beacon failure fails OPEN by design — so the
+// longest hold is the window in which peers write with no lease row for sync to
+// find. Measured on this repo before the split (loto-roeh), one whole-run hold
+// cost 8.1s over 50 divergent paths, 22.0s over 200 and 33.3s over 327: past
+// the peer's timeout at the repo's own tracked-file count. The cost is per path
+// — a cat-file fork to stage, a hash-object fork to re-probe, an fsync — so the
+// only bound that survives a growing repo is a bound on the batch. 16 paths is
+// ~1.6s at that measured rate, ~20x under the timeout.
+const syncApplyBatch = 16
+
+// syncStoreDecideApply decides and applies under the store's project operation
+// flock, in batches. Each batch takes the flock, reads live
+// lock/claim/candidate-claim state for ITS OWN paths, re-verifies integration,
+// decides and mutates — so a peer still cannot acquire between the decision and
+// the write that decision authorizes, while the flock is released between
+// batches instead of held across the whole repair (loto-roeh, syncApplyBatch).
+//
+// ‡ Re-reading coordination state per batch STRENGTHENS the refusal: a lease a
+// peer acquires while an earlier batch is applying blocks every later batch,
+// where one whole-run read could not have seen it.
+//
+// ‡ Every fast-forward batch runs before every deletion batch — the same
+// ordering the single-pass form carried. A deletion is the irreversible half,
+// so it runs last, after the reversible half has proved the tree is writable.
+//
+// ‡ Residue is judged by the same syncConflictFor as the divergent paths. A
+// rejected candidate's created path can be under a peer's lease by now — the
+// peer picked up the abandoned file and is working on it — and a deletion is the
+// one repair with no undo, so it answers to every holder v1 refuses to write
+// over.
+//
+// ‡ On a non-zero code the returned outcome is still meaningful: apply is not
+// atomic, so it names the files already published or removed before the failure.
 func syncStoreDecideApply(rt *runtime, repoTop, expectedIntegration string, decidable []syncDiff, residue []syncResidue, opts syncOpts, stderr io.Writer) (out syncOutcome, code int) {
+	if opts.DryRun {
+		return syncDryRun(rt, repoTop, expectedIntegration, decidable, residue, stderr)
+	}
+	if err := syncFastForwardBatches(rt, repoTop, expectedIntegration, decidable, &out); err != nil {
+		return syncBatchFailed(out, err, stderr)
+	}
+	if err := syncSweepBatches(rt, repoTop, expectedIntegration, residue, &out); err != nil {
+		return syncBatchFailed(out, err, stderr)
+	}
+	sortSyncOutcome(&out)
+	return out, 0
+}
+
+// syncBatchFailed renders a batch failure and KEEPS what the completed batches
+// decided.
+//
+// ‡ The single-pass form nulled the conflict list here, and under one flock
+// section that was right: nothing had been judged against state the failure did
+// not also throw into doubt. Batching makes it wrong. Every conflict on the list
+// is a finished verdict a completed section took against live coordination
+// state — a peer's lease refused that path, and a later batch hitting a moved
+// integration ref does not un-refuse it. Dropping them tells the operator their
+// leased file was never considered. What the failure really costs is the paths
+// no batch reached, and emitSyncPartial says so with partial=true.
+func syncBatchFailed(out syncOutcome, err error, stderr io.Writer) (syncOutcome, int) {
+	fmt.Fprintf(stderr, "✗ %v\n", err)
+	sortSyncOutcome(&out)
+	return out, 3
+}
+
+// syncFastForwardBatches publishes integration content over the divergent paths,
+// syncApplyBatch paths per flock section.
+func syncFastForwardBatches(rt *runtime, repoTop, expectedIntegration string, decidable []syncDiff, out *syncOutcome) error {
+	for batch := range slices.Chunk(decidable, syncApplyBatch) {
+		paths := make([]string, len(batch))
+		for i, d := range batch {
+			paths[i] = d.Path
+		}
+		err := rt.Store.WithStableCoordinationState(rt.Ctx, paths, func(
+			locks []domain.LockRecord, claims []domain.ClaimRecord, cands []domain.CandidateClaim,
+		) error {
+			ec, err := syncBatchContext(rt, repoTop, expectedIntegration)
+			if err != nil {
+				return err
+			}
+			apply, conflicts := syncDecide(batch, locks, claims, cands, ec)
+			out.Conflicts = append(out.Conflicts, conflicts...)
+			if syncBeforeApplyFn != nil {
+				syncBeforeApplyFn()
+			}
+			synced, skips, applyErr := syncApply(rt.Ctx, repoTop, apply)
+			out.Synced = append(out.Synced, synced...)
+			out.TargetSkips = append(out.TargetSkips, skips...)
+			return applyErr
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// syncSweepBatches deletes the attributed residue, syncApplyBatch paths per
+// flock section.
+//
+// ‡ No separate classification pass: syncDeleteResidue re-probes every path
+// immediately before its os.Remove and reports the same three outcomes, so
+// classifying first only bought a second hash-object fork per residue file
+// inside the flock — and a verdict the delete-time probe had to take again
+// anyway. --dry-run, which never reaches this, still classifies (syncDryRun).
+func syncSweepBatches(rt *runtime, repoTop, expectedIntegration string, residue []syncResidue, out *syncOutcome) error {
+	for batch := range slices.Chunk(residue, syncApplyBatch) {
+		paths := make([]string, len(batch))
+		for i, r := range batch {
+			paths[i] = r.Path
+		}
+		err := rt.Store.WithStableCoordinationState(rt.Ctx, paths, func(
+			locks []domain.LockRecord, claims []domain.ClaimRecord, cands []domain.CandidateClaim,
+		) error {
+			ec, err := syncBatchContext(rt, repoTop, expectedIntegration)
+			if err != nil {
+				return err
+			}
+			sweep, conflicts := syncDecideResidue(batch, locks, claims, cands, ec)
+			out.Conflicts = append(out.Conflicts, conflicts...)
+			if syncBeforeDeleteFn != nil {
+				syncBeforeDeleteFn()
+			}
+			deleted, skips, modified, delErr := syncDeleteResidue(rt.Ctx, repoTop, sweep)
+			out.Deleted = append(out.Deleted, deleted...)
+			out.ResidueSkips = append(out.ResidueSkips, skips...)
+			out.Modified = append(out.Modified, modified...)
+			return delErr
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// syncBatchContext re-verifies, inside a batch's own flock section, that
+// promotion has not moved refs/loto/integration under the repair plan, and
+// returns the evaluation context that batch decides with. Each batch re-reads
+// the ref because each holds the flock separately.
+func syncBatchContext(rt *runtime, repoTop, expectedIntegration string) (domain.EvalContext, error) {
+	currentIntegration, exists, err := syncIntegrationSHA(rt.Ctx, repoTop)
+	if err != nil {
+		return domain.EvalContext{}, err
+	}
+	if !exists || currentIntegration != expectedIntegration {
+		return domain.EvalContext{}, fmt.Errorf("%w: expected=%s actual=%s", errSyncIntegrationChanged, expectedIntegration, currentIntegration)
+	}
+	return domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold}, nil
+}
+
+// sortSyncOutcome restores the report's one-verdict-per-path ordering after the
+// batches have appended to each list in batch order.
+func sortSyncOutcome(out *syncOutcome) {
+	sort.Slice(out.Conflicts, func(i, j int) bool { return out.Conflicts[i].Path < out.Conflicts[j].Path })
+	sort.Slice(out.ResidueSkips, func(i, j int) bool { return out.ResidueSkips[i].Path < out.ResidueSkips[j].Path })
+	sort.Slice(out.Modified, func(i, j int) bool { return out.Modified[i].Path < out.Modified[j].Path })
+	sort.Slice(out.TargetSkips, func(i, j int) bool { return out.TargetSkips[i].Path < out.TargetSkips[j].Path })
+}
+
+// syncDryRun answers "what would this run do?" without touching the tree. The
+// flock covers only the coordination-state read and the decision — there is no
+// mutation for a peer's lease to race, so the per-path probing that classifies
+// residue runs OUTSIDE it rather than holding the rendezvous for the length of
+// the whole scan (loto-roeh).
+//
+// ‡ The content check still runs: --dry-run has to answer "would this delete my
+// file?", and it can only answer honestly if it applies every test the real run
+// does.
+func syncDryRun(rt *runtime, repoTop, expectedIntegration string, decidable []syncDiff, residue []syncResidue, stderr io.Writer) (out syncOutcome, code int) {
 	paths := make([]string, 0, len(decidable)+len(residue))
 	for _, d := range decidable {
 		paths = append(paths, d.Path)
@@ -430,32 +599,28 @@ func syncStoreDecideApply(rt *runtime, repoTop, expectedIntegration string, deci
 		paths = append(paths, r.Path)
 	}
 
+	var sweep []syncResidue
 	err := rt.Store.WithStableCoordinationState(rt.Ctx, paths, func(
-		locks []domain.LockRecord,
-		claims []domain.ClaimRecord,
-		cands []domain.CandidateClaim,
+		locks []domain.LockRecord, claims []domain.ClaimRecord, cands []domain.CandidateClaim,
 	) error {
-		currentIntegration, exists, err := syncIntegrationSHA(rt.Ctx, repoTop)
+		ec, err := syncBatchContext(rt, repoTop, expectedIntegration)
 		if err != nil {
 			return err
 		}
-		if !exists || currentIntegration != expectedIntegration {
-			return fmt.Errorf("%w: expected=%s actual=%s", errSyncIntegrationChanged, expectedIntegration, currentIntegration)
-		}
-
-		ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold}
 		apply, decidedConflicts := syncDecide(decidable, locks, claims, cands, ec)
-		sweep, residueConflicts := syncDecideResidue(residue, locks, claims, cands, ec)
+		var residueConflicts []syncConflict
+		sweep, residueConflicts = syncDecideResidue(residue, locks, claims, cands, ec)
 		out.Conflicts = mergeSyncConflicts(decidedConflicts, residueConflicts)
-		if syncBeforeApplyFn != nil {
-			syncBeforeApplyFn()
+		for _, d := range apply {
+			out.Synced = append(out.Synced, d.Path)
 		}
-		return syncApplyDecision(rt.Ctx, repoTop, apply, sweep, opts, &out)
+		return nil
 	})
+	if err == nil {
+		out.Deleted, out.ResidueSkips, out.Modified, err = syncClassifyResidue(rt.Ctx, repoTop, sweep)
+	}
 	if err != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		out.Conflicts = nil
-		return out, 3
+		return syncBatchFailed(out, err, stderr)
 	}
 	return out, 0
 }
@@ -469,52 +634,6 @@ func mergeSyncConflicts(a, b []syncConflict) []syncConflict {
 	merged = append(merged, b...)
 	sort.Slice(merged, func(i, j int) bool { return merged[i].Path < merged[j].Path })
 	return merged
-}
-
-// syncApplyDecision carries out (or, under --dry-run, only records) the
-// decision: fast-forward first, then the sweep. Order is deliberate — a
-// deletion is the irreversible half, so it runs last, after the reversible
-// half has proved the tree is writable.
-//
-// --dry-run performs neither half. The decision is what an operator is
-// checking before letting sync delete anything, so it is still computed
-// against the same live state a real run would use, under the same flock.
-//
-// ‡ Both appliers return what they completed BEFORE failing, and both results
-// are recorded on out even on the error path: a caller that cannot name the
-// files that moved in a partially repaired tree has no report to give.
-// ‡ The content check runs in BOTH modes, before either branch. --dry-run has
-// to answer "would this delete my file?", and it can only answer honestly if
-// it applies every test the real run does.
-func syncApplyDecision(ctx context.Context, repoTop string, apply []syncDiff, sweep []syncResidue, opts syncOpts, out *syncOutcome) error {
-	deletable, skips, modified, classifyErr := syncClassifyResidue(ctx, repoTop, sweep)
-	if classifyErr != nil {
-		return classifyErr
-	}
-	out.ResidueSkips, out.Modified = skips, modified
-
-	if opts.DryRun {
-		for _, d := range apply {
-			out.Synced = append(out.Synced, d.Path)
-		}
-		out.Deleted = deletable
-		return nil
-	}
-	var applyErr error
-	out.Synced, out.TargetSkips, applyErr = syncApply(ctx, repoTop, apply)
-	if applyErr != nil {
-		return applyErr
-	}
-	if syncBeforeDeleteFn != nil {
-		syncBeforeDeleteFn()
-	}
-	deleted, lateSkips, lateModified, deleteErr := syncDeleteResidue(ctx, repoTop, deletable)
-	out.Deleted = deleted
-	out.ResidueSkips = append(out.ResidueSkips, lateSkips...)
-	out.Modified = append(out.Modified, lateModified...)
-	sort.Slice(out.ResidueSkips, func(i, j int) bool { return out.ResidueSkips[i].Path < out.ResidueSkips[j].Path })
-	sort.Slice(out.Modified, func(i, j int) bool { return out.Modified[i].Path < out.Modified[j].Path })
-	return deleteErr
 }
 
 // syncProbeState is what one probe of a worktree path found.

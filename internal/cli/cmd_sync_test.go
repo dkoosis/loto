@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +28,9 @@ const (
 	tcResidueOtherGo   = "other.go"
 	tcResidueEnv       = ".env"
 	tcResidueBody      = "package p\n"
+	// tcDriftBody is the worktree content a test plants to make a tracked path
+	// diverge from integration.
+	tcDriftBody = "drift\n"
 )
 
 var errInjectedSyncIO = errors.New("injected sync I/O failure")
@@ -258,7 +263,7 @@ func TestSync_LeavesTargetOverwrittenInsideTheProbeWindow(t *testing.T) {
 // read and proves a peer cannot acquire the target until publication finishes.
 func TestSync_LeaseAcquireCannotRaceFinalApply(t *testing.T) {
 	repo := syncBaseRepo(t)
-	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("drift\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte(tcDriftBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -700,7 +705,7 @@ func TestSync_LeavesResidueOverwrittenBetweenClassifyAndDelete(t *testing.T) {
 func TestSync_ResidueVanishingMidRunDoesNotAbortTheSync(t *testing.T) {
 	repo := syncBaseRepo(t)
 	residue := plantResidue(t, repo, tcResidueNewGo, tcResidueBody)
-	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("drift\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte(tcDriftBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -792,7 +797,7 @@ func TestSync_LeavesPathCommittedSinceTheRejection(t *testing.T) {
 func TestSync_DryRunDeletesNothing(t *testing.T) {
 	repo := syncBaseRepo(t)
 	residue := plantResidue(t, repo, tcResidueNewGo, tcResidueBody)
-	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("drift\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte(tcDriftBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -810,7 +815,7 @@ func TestSync_DryRunDeletesNothing(t *testing.T) {
 	if got := readFileT(t, residue); got != tcResidueBody {
 		t.Errorf("--dry-run deleted the residue: %q", got)
 	}
-	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != "drift\n" {
+	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != tcDriftBody {
 		t.Errorf("--dry-run fast-forwarded a divergent path: %q", got)
 	}
 }
@@ -842,6 +847,52 @@ func TestSync_RefusesToDeleteLeasedResidue(t *testing.T) {
 }
 
 // TestSync_RejectsStrayArgs: sync takes no positional arguments.
+// TestSync_HoldsTheOpFlockInBoundedBatches pins loto-roeh: the op-flock is the
+// rendezvous every peer's beacon needs, it gives up at 30s, and the hook that
+// consumes a beacon failure fails open — so a hold that grows with the number
+// of affected paths is a window in which peers write with no lease row. Measured
+// before the split: 8.1s over 50 divergent paths, 22.0s over 200, 33.3s over
+// 327. The property is that the run takes one flock section PER BATCH and
+// releases between them, which is what gives a waiting peer its opening; the
+// count is asserted rather than the clock, so the test says the same thing on a
+// slow CI box.
+func TestSync_HoldsTheOpFlockInBoundedBatches(t *testing.T) {
+	const n = syncApplyBatch*2 + 3
+	repo := syncBaseRepo(t)
+	for i := range n {
+		if err := os.WriteFile(filepath.Join(repo, fmt.Sprintf("b%03d.txt", i)), []byte("integrated\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	syncGitT(t, repo, "add", "-A")
+	syncGitT(t, repo, "commit", "-q", "-m", "batch fixture")
+	syncGitT(t, repo, "update-ref", "refs/loto/integration", "HEAD")
+	for i := range n {
+		if err := os.WriteFile(filepath.Join(repo, fmt.Sprintf("b%03d.txt", i)), []byte(tcDriftBody), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var sections atomic.Int64
+	syncBeforeApplyFn = func() { sections.Add(1) }
+	t.Cleanup(func() { syncBeforeApplyFn = nil })
+
+	var out, errBuf bytes.Buffer
+	if code := Run([]string{tcCmdSync}, &out, &errBuf); code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if want := int64((n + syncApplyBatch - 1) / syncApplyBatch); sections.Load() != want {
+		t.Errorf("flock sections = %d, want %d — the whole repair ran under one hold", sections.Load(), want)
+	}
+	// Correctness is the other half: batching must not lose a path.
+	if !strings.Contains(out.String(), fmt.Sprintf("✓ sync synced=%d conflicts=0 skipped=0", n)) {
+		t.Errorf("batched run did not repair every path: %q", out.String())
+	}
+	if status := syncGitT(t, repo, "status", "--porcelain"); status != "" {
+		t.Errorf("tree not clean after batched sync: %q", status)
+	}
+}
+
 func TestSync_RejectsStrayArgs(t *testing.T) {
 	syncBaseRepo(t)
 
@@ -1095,7 +1146,7 @@ func TestSync_NewlinePath(t *testing.T) {
 	syncGitT(t, repo, "add", "--", path)
 	syncGitT(t, repo, "commit", "-q", "-m", "add newline path")
 	syncGitT(t, repo, "update-ref", "refs/loto/integration", "HEAD")
-	if err := os.WriteFile(full, []byte("drift\n"), 0o644); err != nil {
+	if err := os.WriteFile(full, []byte(tcDriftBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1132,10 +1183,10 @@ func TestSync_QuoteLeadingPath(t *testing.T) {
 	syncGitT(t, repo, "add", "--", path)
 	syncGitT(t, repo, "commit", "-q", "-m", "add quote-leading path")
 	syncGitT(t, repo, "update-ref", "refs/loto/integration", "HEAD")
-	if err := os.WriteFile(full, []byte("drift\n"), 0o644); err != nil {
+	if err := os.WriteFile(full, []byte(tcDriftBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("drift\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte(tcDriftBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1158,7 +1209,7 @@ func TestSync_QuoteLeadingPath(t *testing.T) {
 func TestSync_PostPublishFailureReportsCurrentPath(t *testing.T) {
 	repo := syncBaseRepo(t)
 	path := filepath.Join(repo, tcTargetA)
-	if err := os.WriteFile(path, []byte("drift\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(tcDriftBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	oid := syncGitT(t, repo, "rev-parse", "refs/loto/integration:"+tcTargetA)
@@ -1207,7 +1258,7 @@ func TestSync_MidApplyFailureReportsWhatItWrote(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("junk\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(zPath, []byte("drift\n"), 0o644); err != nil {
+	if err := os.WriteFile(zPath, []byte(tcDriftBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	writeErr := errInjectedSyncIO
@@ -1239,8 +1290,63 @@ func TestSync_MidApplyFailureReportsWhatItWrote(t *testing.T) {
 	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != "" {
 		t.Errorf("a.go should have been fast-forwarded before the failure, got %q", got)
 	}
-	if got := readFileT(t, zPath); got != "drift\n" {
+	if got := readFileT(t, zPath); got != tcDriftBody {
 		t.Errorf("z.go changed despite pre-publication failure: %q", got)
+	}
+}
+
+// TestSync_PartialReportKeepsConflictsDecidedBeforeTheFailure is the batching
+// half of the partial report (loto-roeh review). A conflict a completed batch
+// recorded is a finished verdict against live coordination state — a peer's
+// lease refused that path — and a LATER batch failing does not un-refuse it.
+// Dropping the list, as the single-pass form did, would tell the operator their
+// leased file was never considered.
+func TestSync_PartialReportKeepsConflictsDecidedBeforeTheFailure(t *testing.T) {
+	const n = syncApplyBatch + 4
+	repo := syncBaseRepo(t)
+	name := func(i int) string { return fmt.Sprintf("s%03d.txt", i) }
+	for i := range n {
+		if err := os.WriteFile(filepath.Join(repo, name(i)), []byte("integrated\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	syncGitT(t, repo, "add", "-A")
+	syncGitT(t, repo, "commit", "-q", "-m", "conflict-then-failure fixture")
+	syncGitT(t, repo, "update-ref", "refs/loto/integration", "HEAD")
+	for i := range n {
+		if err := os.WriteFile(filepath.Join(repo, name(i)), []byte(tcDriftBody), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// s000 sorts into the FIRST batch; its lease is decided there.
+	if code := Run([]string{tcCmdLock, name(0), "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("lock")
+	}
+	// Batch 1 writes the 15 unleased paths; fail the first write of batch 2.
+	originalWrite := syncWriteFn
+	calls := 0
+	syncWriteFn = func(f *os.File, data []byte) (int, error) {
+		calls++
+		if calls == syncApplyBatch {
+			return 0, errInjectedSyncIO
+		}
+		return f.Write(data)
+	}
+	t.Cleanup(func() { syncWriteFn = originalWrite })
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 3 {
+		t.Fatalf("exit %d, want 3; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✗ target="+name(0)+" reason=leased holder=") {
+		t.Errorf("a conflict decided before the failure must survive it: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "partial=true") {
+		t.Errorf("a partially applied tree must say so: %q", out.String())
+	}
+	if got := readFileT(t, filepath.Join(repo, name(0))); got != tcDriftBody {
+		t.Errorf("leased content must be untouched, got %q", got)
 	}
 }
 
