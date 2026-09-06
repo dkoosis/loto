@@ -1032,6 +1032,45 @@ func TestSync_NewlinePath(t *testing.T) {
 	}
 }
 
+// TestSync_QuoteLeadingPath pins loto-g870: a tracked file whose name starts
+// with a double quote must not take the rest of the run down with it. The
+// second, ordinary path is the assertion that matters — under the old LF/CR-only
+// predicate git unquotes the leading-quote line, the batched
+// `git hash-object --stdin-paths` exits 128 with "line is badly quoted", and
+// NEITHER file syncs.
+func TestSync_QuoteLeadingPath(t *testing.T) {
+	repo := syncBaseRepo(t)
+	const path = `"quoted.txt`
+	full := filepath.Join(repo, path)
+	if err := os.WriteFile(full, []byte("integrated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	syncGitT(t, repo, "add", "--", path)
+	syncGitT(t, repo, "commit", "-q", "-m", "add quote-leading path")
+	syncGitT(t, repo, "update-ref", "refs/loto/integration", "HEAD")
+	if err := os.WriteFile(full, []byte("drift\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, tcTargetA), []byte("drift\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if got := readFileT(t, full); got != "integrated\n" {
+		t.Errorf("quote-leading path content = %q, want integration content", got)
+	}
+	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != "" {
+		t.Errorf("%s content = %q — the quote-leading path took the batch down", tcTargetA, got)
+	}
+	if !strings.Contains(out.String(), "✓ sync synced=2 conflicts=0 skipped=0") {
+		t.Errorf("missing triage line: %q", out.String())
+	}
+}
+
 func TestSync_PostPublishFailureReportsCurrentPath(t *testing.T) {
 	repo := syncBaseRepo(t)
 	path := filepath.Join(repo, tcTargetA)

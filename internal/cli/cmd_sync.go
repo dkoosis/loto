@@ -831,12 +831,13 @@ func compareExisting(ctx context.Context, repoTop string, existing []syncEntry) 
 
 // batchHashObject hashes ordinary paths in one newline-delimited
 // `git hash-object --stdin-paths` call. Git offers no NUL-delimited form, so
-// paths containing LF or CR are passed individually as argv after `--`.
+// a path its line grammar cannot carry goes through argv after `--` instead
+// — see syncNeedsArgvPath.
 func batchHashObject(ctx context.Context, repoTop string, paths []string) (map[string]string, error) {
 	result := make(map[string]string, len(paths))
 	var ordinary, exceptional []string
 	for _, p := range paths {
-		if strings.ContainsAny(p, "\n\r") {
+		if syncNeedsArgvPath(p) {
 			exceptional = append(exceptional, p)
 		} else {
 			ordinary = append(ordinary, p)
@@ -856,6 +857,22 @@ func batchHashObject(ctx context.Context, repoTop string, paths []string) (map[s
 		result[p] = oid
 	}
 	return result, nil
+}
+
+// syncNeedsArgvPath reports whether a path must bypass
+// `git hash-object --stdin-paths`.
+//
+// ‡ LF and CR end a line, so such a path cannot be fed through the stream at
+// all. A path STARTING with a double quote is the worse case: git
+// C-style-unquotes any line that begins with one, so a file literally named
+// `"a.txt` aborts the WHOLE batch — `fatal: line is badly quoted`, exit 128,
+// every sync run in the repo down (loto-g870) — and a validly quoted spelling
+// like `"a.txt"` unquotes to a DIFFERENT path, whose oid is then paired
+// positionally with the name that was fed in. Backslash rides along because it
+// is the escape character that grammar consumes; routing it costs one extra
+// fork per such path and removes the need to reason about the interaction.
+func syncNeedsArgvPath(p string) bool {
+	return strings.ContainsAny(p, "\n\r\\") || strings.HasPrefix(p, `"`)
 }
 
 func hashOrdinaryPaths(ctx context.Context, repoTop string, paths []string, result map[string]string) error {
