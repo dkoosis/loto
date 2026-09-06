@@ -326,9 +326,14 @@ func beaconMaySupersede(l domain.LockRecord, all []domain.LockRecord, ec domain.
 // actually written. false means the beacon yield below suppressed the update:
 // no error, nothing changed, and the caller must not log an acquisition.
 // supersede comes from beaconMaySupersede and lifts the yield. epoch is the
-// value resolveEpoch already decided — preserved on the UPDATE branch
-// (deliberately absent from the SET list below) and only ever supplied fresh
-// on the INSERT branch (loto-ovno.2).
+// value resolveEpoch already decided, and BOTH branches write it (loto-ovno.2,
+// corrected by loto-rbij): resolveEpoch is the sole renewal-vs-fresh-grant
+// authority, handing back the row's existing epoch for a genuine renewal and a
+// freshly bumped path_epochs value for a reclaim. Omitting epoch from the SET
+// list did not "preserve" it — it pinned the row to its pre-lapse generation
+// while the counter moved on, so a same-owner re-acquire after its OWN TTL
+// lapsed left row and counter permanently divergent and an epoch check read a
+// stale envelope as current.
 func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, supersede bool, epoch int64) (bool, error) {
 	// Map 0 (UNKNOWN) → NULL at the store boundary so an absent start-time is a
 	// SQL null, matching legacy rows. A refresh re-stamps proc_start because the
@@ -373,7 +378,8 @@ ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
   proc_start=excluded.proc_start,
   branch=excluded.branch,
   mode=excluded.mode,
-  beacon=excluded.beacon
+  beacon=excluded.beacon,
+  epoch=excluded.epoch
 WHERE ? = 1
    OR excluded.beacon = 0
    OR locks.beacon = 1`,

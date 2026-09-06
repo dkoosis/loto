@@ -154,6 +154,44 @@ func TestAcquireLocks_SelfReacquireAfterOwnExpiryIncrementsEpoch(t *testing.T) {
 	}
 }
 
+// TestAcquireLocks_SelfReacquireAfterOwnExpiryPersistsNewEpoch pins the ROW,
+// not the returned record. The sibling test above reads second[0].Epoch — the
+// value resolveEpoch computed in memory — which stayed correct while the
+// upsert's DO UPDATE SET list omitted epoch: the conflict branch refreshed
+// every other column and left the row on its pre-lapse generation, so
+// path_epochs and locks.epoch diverged permanently and an epoch check passed a
+// stale envelope as current (loto-rbij).
+func TestAcquireLocks_SelfReacquireAfterOwnExpiryPersistsNewEpoch(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	l := mkFileLock(t, tcAGo, tcAlice, -time.Minute) // already expired
+
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	l2 := l
+	l2.ExpiresAt = time.Now().Add(time.Hour)
+	second, err := s.AcquireLocks(ctx, []domain.LockRecord{l2}, liveProbe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.LockAt(ctx, l.Target)
+	if err != nil || got == nil {
+		t.Fatalf("lookup: %v / %v", got, err)
+	}
+	if got.Epoch != second[0].Epoch {
+		t.Errorf("persisted epoch = %d, want %d (the generation the re-acquire granted)", got.Epoch, second[0].Epoch)
+	}
+	var counter int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT epoch FROM path_epochs WHERE path_canonical = ?`, l.Target.Canonical).Scan(&counter); err != nil {
+		t.Fatalf("read path_epochs: %v", err)
+	}
+	if got.Epoch != counter {
+		t.Errorf("locks row epoch = %d, path_epochs = %d — the row and the counter must not diverge", got.Epoch, counter)
+	}
+}
+
 // TestAcquireLocks_StaleOwnerReclaimIncrementsEpoch_ContinuingCount: a
 // DIFFERENT owner reclaiming a dead holder's stale lock must bump the epoch,
 // and path_epochs' durability means the new epoch continues counting from the
