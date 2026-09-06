@@ -90,6 +90,18 @@ const (
 	syncReasonLeased         = "leased"
 	syncReasonTerritoryClaim = "territory-claim"
 	syncReasonCandidateClaim = "candidate-claim"
+	// syncReasonLeaseLapsedHolderLive refuses a fast-forward whose lease has
+	// lapsed but whose holder still probes ALIVE. Its own reason string rather
+	// than `leased`, because the remedy differs: nothing is holding the row any
+	// more, so the operator either waits for the agent to finish or asks it to
+	// refresh — `loto status` will not show a live lease to point at.
+	syncReasonLeaseLapsedHolderLive = "lease-lapsed-holder-live"
+	// syncReasonLeaseLapsedHolderUnknown refuses the same write when the probe
+	// has no witness for the holder — another host, a PID-0 sentinel, a peer
+	// record that will not read. Distinct from the live reason because the
+	// operator's next move is different: this one is a question about another
+	// machine, not a wait.
+	syncReasonLeaseLapsedHolderUnknown = "lease-lapsed-holder-unknown"
 	// syncReasonResidueNotFile refuses a deletion whose target stopped being an
 	// ordinary file between the scan and the delete — a directory or a symlink
 	// now stands where the rejected candidate created a blob. Advisory (⚠), not
@@ -971,11 +983,36 @@ func syncDecide(diffs []syncDiff, locks []domain.LockRecord, claims []domain.Cla
 // carve-out — ClaimCoversTarget called with an empty uuid per plan-review
 // P1-1), or any candidate-claim row (liveness irrelevant — durable by
 // design, a dead one is doctor's reclaim job, not sync's).
+//
+// ‡ A lapsed lease is TWO questions here, not one (loto-0o0j). IsStale answers
+// the first — may the row be reclaimed? — on TTL alone, and that is right:
+// lapsing frees the territory for the next lock or claim. It does not answer
+// the second, which is the only one sync is actually asking: may these bytes be
+// destroyed? An agent whose lease lapsed during a long tool call is still
+// running and its edits are still uncommitted, so the answer is no.
+//
+// ‡ Only a DEAD verdict authorizes the overwrite. UNKNOWN — another host, a
+// PID-0 sentinel, a peer record that will not read — is the absence of a
+// witness, not evidence of absence, and an agent on another host loses its
+// edits exactly as thoroughly as one on this one. Both refusals get a row
+// naming which it was, because the operator's next move differs: wait out a
+// live agent, go look at the other host for an unknown one.
+// syncLapsedReason names which non-dead verdict refused a lapsed lease.
+func syncLapsedReason(v domain.Liveness) string {
+	if v == domain.LivenessAlive {
+		return syncReasonLeaseLapsedHolderLive
+	}
+	return syncReasonLeaseLapsedHolderUnknown
+}
+
 func syncConflictFor(path string, locks []domain.LockRecord, claims []domain.ClaimRecord, cands []domain.CandidateClaim, ec domain.EvalContext) (reason, holder string, conflict bool) {
 	for i := range locks {
 		l := &locks[i]
 		if !ec.IsStale(*l) {
 			return syncReasonLeased, string(l.OwnerUUID), true
+		}
+		if v, probed := ec.HolderLiveness(*l); probed && v != domain.LivenessDead {
+			return syncLapsedReason(v), string(l.OwnerUUID), true
 		}
 	}
 	for i := range claims {

@@ -950,6 +950,67 @@ func TestSyncDecide_ConflictTable(t *testing.T) {
 	}
 }
 
+// TestSyncDecide_LapsedLeaseWithLiveHolder pins loto-0o0j: TTL lapse frees the
+// lock ROW, it never authorizes overwriting the bytes of an agent that is still
+// running. A lease that expired during a long tool call is the routine case in
+// this repo, and the holder's edits are uncommitted — unrecoverable once sync
+// publishes over them. A provably dead holder still fast-forwards.
+func TestSyncDecide_LapsedLeaseWithLiveHolder(t *testing.T) {
+	now := time.Now()
+	const path = "internal/a.go"
+	diffs := []syncDiff{{syncEntry: syncEntry{Path: path, Mode: "100644", OID: "deadbeef"}, State: syncModified}}
+	lapsed := []domain.LockRecord{
+		{Target: domain.Target{Canonical: path}, OwnerUUID: "owner-1", ExpiresAt: now.Add(-time.Hour)},
+	}
+	probeOf := func(v domain.Liveness) domain.HolderLiveProbe {
+		return func(domain.LockRecord) domain.Liveness { return v }
+	}
+
+	t.Run("holder alive -> conflict", func(t *testing.T) {
+		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessAlive)}
+		apply, conflicts := syncDecide(diffs, lapsed, nil, nil, ec)
+		if len(apply) != 0 || len(conflicts) != 1 {
+			t.Fatalf("want 1 conflict, got apply=%d conflicts=%+v", len(apply), conflicts)
+		}
+		if conflicts[0].Reason != syncReasonLeaseLapsedHolderLive {
+			t.Errorf("got reason=%s want %s", conflicts[0].Reason, syncReasonLeaseLapsedHolderLive)
+		}
+	})
+
+	t.Run("holder dead -> fast-forward", func(t *testing.T) {
+		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessDead)}
+		apply, conflicts := syncDecide(diffs, lapsed, nil, nil, ec)
+		if len(apply) != 1 || len(conflicts) != 0 {
+			t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
+		}
+	})
+
+	// UNKNOWN is the absence of a witness — another host, a PID-0 sentinel — not
+	// evidence the holder is gone, and an agent on another host loses its edits
+	// exactly as thoroughly. Only DEAD authorizes the overwrite.
+	t.Run("holder unknown -> conflict", func(t *testing.T) {
+		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessUnknown)}
+		apply, conflicts := syncDecide(diffs, lapsed, nil, nil, ec)
+		if len(apply) != 0 || len(conflicts) != 1 {
+			t.Fatalf("want 1 conflict, got apply=%d conflicts=%+v", len(apply), conflicts)
+		}
+		if conflicts[0].Reason != syncReasonLeaseLapsedHolderUnknown {
+			t.Errorf("got reason=%s want %s", conflicts[0].Reason, syncReasonLeaseLapsedHolderUnknown)
+		}
+	})
+
+	// No probe at all is a different state from an UNKNOWN verdict: no question
+	// was asked, so TTL stays the sole authority and every other caller of the
+	// staleness helpers keeps today's behaviour.
+	t.Run("no probe -> fast-forward, TTL is sole authority", func(t *testing.T) {
+		ec := domain.EvalContext{Now: now}
+		apply, conflicts := syncDecide(diffs, lapsed, nil, nil, ec)
+		if len(apply) != 1 || len(conflicts) != 0 {
+			t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
+		}
+	})
+}
+
 func TestSync_RefusesStaleIntegrationSnapshot(t *testing.T) {
 	repo := syncBaseRepo(t)
 	expectedIntegration := syncGitT(t, repo, "rev-parse", "refs/loto/integration")
