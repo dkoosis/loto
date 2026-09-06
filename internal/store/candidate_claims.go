@@ -109,7 +109,8 @@ func (s *Store) InsertCandidateClaims(ctx context.Context, claims []domain.Candi
 	}
 	defer cleanup()
 
-	if err := revalidateClaimLeasesTx(ctx, tx, claims, guard, time.Now()); err != nil {
+	ec := domain.EvalContext{Now: time.Now(), Live: guard.Live, CaseFold: s.caseFold}
+	if err := revalidateClaimLeasesTx(ctx, tx, claims, guard, ec); err != nil {
 		return err
 	}
 
@@ -169,23 +170,29 @@ func insertCandidateClaimRowsTx(ctx context.Context, tx *sql.Tx, claims []domain
 // same op-flock and refuses to grant over a live exclusive lock, so a peer row
 // can only exist here if this owner's row is gone, stale, or was replaced —
 // each of which this check already rejects.
-func revalidateClaimLeasesTx(ctx context.Context, tx *sql.Tx, claims []domain.CandidateClaim, guard ClaimGuard, now time.Time) error {
+// ‡ ec is built by the caller, which holds the store: that is how the clock,
+// the liveness probe and the filesystem's case class arrive as one value
+// instead of a positional pair this helper would have to reassemble
+// (loto-8soe). The held map is keyed under the same rule, so a lease an older
+// loto wrote in the on-disk spelling still answers to the folded path a
+// candidate claim now names.
+func revalidateClaimLeasesTx(ctx context.Context, tx *sql.Tx, claims []domain.CandidateClaim, guard ClaimGuard, ec domain.EvalContext) error {
 	all, err := loadLocksTx(ctx, tx)
 	if err != nil {
 		return err
 	}
+	k := keysFor(ec)
 	held := make(map[string]domain.LockRecord, len(all))
 	for i := range all {
 		if all[i].OwnerUUID == guard.Owner {
-			held[all[i].Target.Canonical] = all[i]
+			held[k.key(all[i].Target.Canonical)] = all[i]
 		}
 	}
-	ec := domain.EvalContext{Now: now, Live: guard.Live}
 
 	var conflicts []ClaimLeaseConflict
 	for i := range claims {
 		path := claims[i].PathCanonical
-		l, ok := held[path]
+		l, ok := held[k.key(path)]
 		switch {
 		case !ok:
 			conflicts = append(conflicts, ClaimLeaseConflict{path, ClaimLeaseGone})

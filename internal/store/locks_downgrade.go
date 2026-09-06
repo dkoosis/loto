@@ -95,10 +95,11 @@ func (s *Store) DowngradeLocks(ctx context.Context, targets []domain.Target, own
 // serializes lock mutators across processes, so the read is authoritative.
 // Targets owner holds no lock on are absent from the returned map.
 func (s *Store) probeOwnerModes(ctx context.Context, owner string, targets []domain.Target) (map[string]string, error) {
-	ph, canonArgs := inClause(targets)
+	k := s.keys()
+	ph, canonArgs := k.inTargets(targets)
 	args := append([]any{owner}, canonArgs...)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT target_canonical, mode FROM locks WHERE owner_uuid = ? AND target_canonical IN (`+ph+`)`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+		`SELECT target_canonical, mode FROM locks WHERE owner_uuid = ? AND `+k.col("target_canonical")+` IN (`+ph+`)`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +110,9 @@ func (s *Store) probeOwnerModes(ctx context.Context, owner string, targets []dom
 		if err := rows.Scan(&canon, &mode); err != nil {
 			return nil, err
 		}
-		modeByCanon[canon] = mode
+		// Normalized, because the caller indexes by the target it typed
+		// (loto-8soe).
+		modeByCanon[k.key(canon)] = mode
 	}
 	return modeByCanon, rows.Err()
 }
@@ -126,10 +129,11 @@ func (s *Store) commitDowngrades(ctx context.Context, flip []domain.Target, owne
 	}
 	defer cleanup()
 
-	ph, canonArgs := inClause(flip)
+	k := s.keys()
+	ph, canonArgs := k.inTargets(flip)
 	args := append([]any{domain.ModeShared, owner}, canonArgs...)
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE locks SET mode = ? WHERE owner_uuid = ? AND target_canonical IN (`+ph+`)`, args...); err != nil { //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+		`UPDATE locks SET mode = ? WHERE owner_uuid = ? AND `+k.col("target_canonical")+` IN (`+ph+`)`, args...); err != nil { //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 		return err
 	}
 	if err := appendEventsTx(ctx, tx, events); err != nil {

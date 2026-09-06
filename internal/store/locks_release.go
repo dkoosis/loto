@@ -92,10 +92,10 @@ func (s *Store) applyOwnedReleasesTx(ctx context.Context, tx *sql.Tx, owned []st
 	// Ack tags BEFORE deleting the host locks: the host-lock match must still
 	// resolve to set acked_at; if we DELETE first the tags would orphan instead,
 	// losing the audit ack (edge #6 distinguishes release-ack from break-orphan).
-	if err := ackTagsForReleaseTx(ctx, tx, owned, byAgent); err != nil {
+	if err := ackTagsForReleaseTx(ctx, tx, s.keys(), owned, byAgent); err != nil {
 		return err
 	}
-	if err := deleteOwnedTx(ctx, tx, owned, byAgent); err != nil {
+	if err := deleteOwnedTx(ctx, tx, s.keys(), owned, byAgent); err != nil {
 		return err
 	}
 	// Emit lock_released events in the same tx (atomic with the row deletes).
@@ -195,25 +195,30 @@ func vetoingHolder(holders []domain.LockRecord, ec domain.EvalContext) string {
 // host-lock subquery still matches; running it after would silently orphan
 // tags instead of acking them (would still get GC'd by doctor, but the audit
 // would lose the explicit ack timestamp).
-func ackTagsForReleaseTx(ctx context.Context, tx *sql.Tx, canonicals []string, byAgent string) error {
-	placeholders, args := inClauseStrings(canonicals)
+func ackTagsForReleaseTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals []string, byAgent string) error {
+	placeholders, args := k.inStrings(canonicals)
 	args = append([]any{time.Now().UnixNano()}, args...)
 	args = append(args, byAgent)
+	// ‡ The inner SELECT matches the caller's names under k; the outer tuple IN
+	// compares the tag's stored target against the LOCK's stored target, both
+	// from rows, so it stays byte-exact (loto-8soe).
 	_, err := tx.ExecContext(ctx, `UPDATE tags SET acked_at = ?`+ //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 		` WHERE acked_at IS NULL`+
 		` AND (target_canonical, lock_owner_uuid, lock_created_at) IN (`+
 		`   SELECT target_canonical, owner_uuid, created_at FROM locks`+
-		`   WHERE target_canonical IN (`+placeholders+`) AND owner_uuid = ?`+
+		`   WHERE `+k.col("target_canonical")+` IN (`+placeholders+`) AND owner_uuid = ?`+
 		` )`, args...)
 	return err
 }
 
 // deleteOwnedTx removes `locks` rows for the given canonical paths owned by
-// byAgent in one statement.
-func deleteOwnedTx(ctx context.Context, tx *sql.Tx, canonicals []string, byAgent string) error {
-	placeholders, args := inClauseStrings(canonicals)
+// byAgent in one statement. k is what lets it reach a row an older loto wrote
+// in the on-disk spelling — without it `loto unlock foo.go` deleted nothing
+// and still reported success (loto-8soe).
+func deleteOwnedTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals []string, byAgent string) error {
+	placeholders, args := k.inStrings(canonicals)
 	args = append(args, byAgent)
-	_, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical IN (`+placeholders+`) AND owner_uuid = ?`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+	_, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE `+k.col("target_canonical")+` IN (`+placeholders+`) AND owner_uuid = ?`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 
 	return err
 }
@@ -271,10 +276,10 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 	}
 
 	// Ack tags before deleting host locks (same ordering as ReleaseLocks).
-	if err := ackTagsForReleaseTx(ctx, tx, paths, byAgent); err != nil {
+	if err := ackTagsForReleaseTx(ctx, tx, s.keys(), paths, byAgent); err != nil {
 		return nil, nil, err
 	}
-	if err := deleteOwnedTx(ctx, tx, paths, byAgent); err != nil {
+	if err := deleteOwnedTx(ctx, tx, s.keys(), paths, byAgent); err != nil {
 		return nil, nil, err
 	}
 	if err := emitLockReleaseEventsTx(ctx, tx, canonicals, byAgent, time.Now()); err != nil {

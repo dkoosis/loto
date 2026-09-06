@@ -43,6 +43,15 @@ type EvalContext struct {
 	// carrying the on-disk spelling, keep resolving against the folded key a
 	// caller now presents. Default false = today's byte comparison, which is
 	// also the correct and permanent answer on a case-sensitive filesystem.
+	//
+	// ‡ The rule for a NEW EvalContext: every context that reaches a path
+	// comparison must set this from the store (store.Store.caseFold), and a
+	// context built only to answer liveness questions — Classify, IsStale,
+	// CandidateClaimIsDead over rows nobody looks up by name, as in
+	// gate.reclaimDeadPromotions — may leave it zero. Zero is not "unknown", it
+	// is "compare byte-exact", so the omission can never widen a decision by
+	// accident; it can only fail to widen one, which leaves a legacy row
+	// blocking rather than admitting a peer.
 	CaseFold bool
 }
 

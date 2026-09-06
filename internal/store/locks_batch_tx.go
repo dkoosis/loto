@@ -40,7 +40,7 @@ func (s *Store) withLockBatchTx(ctx context.Context, targets []domain.Target, li
 	}
 	defer cleanup()
 
-	existing, err := loadLocksByTargetTx(ctx, tx, targets)
+	existing, err := loadLocksByTargetTx(ctx, tx, s.keys(), targets)
 	if err != nil {
 		return err
 	}
