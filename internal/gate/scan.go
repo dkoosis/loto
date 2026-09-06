@@ -193,6 +193,21 @@ func parseNameStatusZ(out string) (changed, deleted []string) {
 	return changed, deleted
 }
 
+// parseNameOnlyZ splits `git diff-tree --name-only -z` output — NUL-separated
+// paths, no status letters — into a slice, dropping the empty trailing field
+// the terminal NUL produces. Same rationale as parseNameStatusZ: -z sidesteps
+// core.quotePath's escaping, so a non-ASCII path round-trips as the same raw
+// bytes the write-set declared.
+func parseNameOnlyZ(out string) []string {
+	var paths []string
+	for p := range strings.SplitSeq(out, "\x00") {
+		if p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
 // hashWorktreePaths returns path -> worktree blob SHA for paths, in ONE
 // `git hash-object --stdin-paths` call rather than one process per path: a
 // dirty tree mid-wave routinely carries dozens of changed files and this runs

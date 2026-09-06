@@ -57,6 +57,35 @@ func TestAdmit_AcceptsCleanCandidate(t *testing.T) {
 	}
 }
 
+// TestAdmit_AcceptsUnusualWriteSetPaths guards against core.quotePath (on by
+// default): `git diff-tree --name-only` without -z prints a non-ASCII path
+// octal-escaped and a quote/backslash path C-quoted, neither of which equals
+// the write-set's raw UTF-8 — checkDiffMatchesWriteSet must compare the same
+// encoding on both sides regardless of the path's bytes (loto-yprz).
+func TestAdmit_AcceptsUnusualWriteSetPaths(t *testing.T) {
+	paths := []string{
+		"café.md",          // multi-byte (é)
+		"weird\"na\\me.md", // literal double quote + backslash
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			repoTop, integration := newIntegrationRepo(t)
+			writeFile(t, repoTop, path, "content\n")
+			proposal := mustLaneCommit(t, laneOpts(repoTop, integration, "lane1", path))
+			env := mustCapture(t, CaptureParams{
+				RepoTop: repoTop, IntegrationRef: integration, ProposalSHA: proposal,
+				Base: integration, WriteSet: []string{path}, CandidateID: "c1", BeadID: tfBead,
+				LeaseEpoch: map[string]int64{path: 1},
+			})
+
+			d := mustAdmit(t, env, admitParamsFor(repoTop, env, integration))
+			if !d.Accepted {
+				t.Fatalf("want accepted, got reject reason=%s detail=%s", d.Reason, d.Detail)
+			}
+		})
+	}
+}
+
 func TestAdmit_RejectsProposalSHAMismatch(t *testing.T) {
 	repoTop, integration := newIntegrationRepo(t)
 	writeFile(t, repoTop, tfFileA, "package gate\n\nvar A = 2\n")
