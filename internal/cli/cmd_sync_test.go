@@ -200,6 +200,58 @@ func TestSync_LeavesTargetOverwrittenBetweenClassifyAndApply(t *testing.T) {
 	}
 }
 
+// TestSync_LeavesTargetOverwrittenInsideTheProbeWindow drives the same race at
+// its narrowest. syncBeforeApplyFn above fires once, before the whole apply
+// pass; this seam fires per path, after that path's replacement is staged and
+// with nothing but the probe left between the peer's write and the rename. If
+// the probe ever stops being the last thing before publication, this is the
+// test that fails.
+func TestSync_LeavesTargetOverwrittenInsideTheProbeWindow(t *testing.T) {
+	repo := syncBaseRepo(t)
+	target := filepath.Join(repo, tcTargetA)
+	if err := os.WriteFile(target, []byte("junk\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const peerWork = "package p\n\nfunc LandedInsideTheWindow() {}\n"
+	syncBeforeTargetProbeFn = func(path string) {
+		if path != tcTargetA {
+			return
+		}
+		if err := os.WriteFile(target, []byte(peerWork), 0o644); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { syncBeforeTargetProbeFn = nil })
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if got := readFileT(t, target); got != peerWork {
+		t.Errorf("sync overwrote work that landed inside the probe window: %q", got)
+	}
+	if !strings.Contains(out.String(), "✓ sync synced=0 conflicts=0 skipped=1") {
+		t.Errorf("missing triage line: %q", out.String())
+	}
+	row := "⚠ target=" + tcTargetA + " reason=target-modified" +
+		" found=" + shortOID(syncGitT(t, repo, "hash-object", tcTargetA)) +
+		" want=" + shortOID(syncGitT(t, repo, "rev-parse", "refs/loto/integration:"+tcTargetA))
+	if !strings.Contains(out.String(), row) {
+		t.Errorf("missing row %q in: %q", row, out.String())
+	}
+	// The replacement was already staged when the skip was decided; its
+	// temporary must not survive the run.
+	matches, err := filepath.Glob(filepath.Join(repo, ".loto-sync-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("a skipped path left its staged temporary behind: %v", matches)
+	}
+}
+
 // --- Step 3: conflict red ---
 
 // TestSync_LeaseAcquireCannotRaceFinalApply pauses sync after its final state
@@ -928,15 +980,14 @@ func TestSync_WriteFailurePreservesExistingFile(t *testing.T) {
 	}
 	t.Cleanup(func() { syncWriteFn = originalWrite })
 
-	published, err := syncApplyOne(t.Context(), repo, syncDiff{
+	// A write failure now happens while staging, one rename short of
+	// publication: the target cannot have been reached at all.
+	_, err := syncStageReplacement(t.Context(), repo, syncDiff{
 		syncEntry: syncEntry{Path: tcTargetA, Mode: "100644", OID: oid},
 		State:     syncModified,
 	})
 	if !errors.Is(err, writeErr) {
-		t.Fatalf("syncApplyOne error = %v, want %v", err, writeErr)
-	}
-	if published {
-		t.Error("failed pre-publication write reported the target as published")
+		t.Fatalf("syncStageReplacement error = %v, want %v", err, writeErr)
 	}
 	if got := readFileT(t, path); got != old {
 		t.Errorf("failed replacement changed target: got %q want %q", got, old)
