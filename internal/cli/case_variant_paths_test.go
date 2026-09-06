@@ -71,6 +71,39 @@ func TestProbeFoldedPathRejectsSymlinkAlias(t *testing.T) {
 	}
 }
 
+// TestCaseInsensitiveFSEmptyRepo: a freshly `git init`'d, otherwise empty repo
+// top has zero entries and (on a temp checkout) a digit-only basename — the
+// exact shape that made the pre-fix probe fall back to its "case-sensitive"
+// default by the absence of a flippable name, rather than answer from the
+// filesystem (loto-l59r). `top` below reproduces that shape directly, since
+// caseInsensitiveFS never looks past dir's own contents.
+//
+// witness independently establishes this run's actual filesystem class from a
+// sibling directory that already has an entry to flip, so the assertion holds
+// on both a case-folding and a case-sensitive runner rather than assuming one.
+func TestCaseInsensitiveFSEmptyRepo(t *testing.T) {
+	parent := t.TempDir()
+
+	witness := filepath.Join(parent, "witness")
+	if err := os.Mkdir(witness, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(witness, "probe"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantFolds := caseInsensitiveFS(witness)
+	t.Logf("filesystem at %s is case-insensitive=%v", parent, wantFolds)
+
+	top := filepath.Join(parent, "1234")
+	if err := os.Mkdir(top, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := caseInsensitiveFS(top); got != wantFolds {
+		t.Errorf("caseInsensitiveFS(empty repo top) = %v; want %v (this filesystem's actual fold behavior) — answered by name-shape, not by disk (loto-l59r)", got, wantFolds)
+	}
+}
+
 // TestFoldTargetKeyFoldsSpelling: the key a variant spelling produces must be
 // the folded one where the FS folds, and the caller's spelling where it does
 // not.

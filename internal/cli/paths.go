@@ -143,6 +143,19 @@ func normalizeURL(rawURL string) string {
 	for _, pfx := range []string{"https://", "http://", "git://", "ssh://"} {
 		s = strings.TrimPrefix(s, pfx)
 	}
+	// Strip RFC-3986 userinfo (user[:pass]@) before the SSH-shorthand colon
+	// branch below ever sees the string. Without this, a credentialed HTTPS
+	// remote (https://x-access-token:TOKEN@github.com/o/r.git, the shape
+	// GitHub Actions and CI bots use) has a colon before any slash — exactly
+	// like SSH-shorthand — so that branch took it as the whole "host" to
+	// discard and stripped only up to its own first colon, leaving the token
+	// riding through into the slug (loto-s34y). Guarded to before the first
+	// "/" so a path segment that happens to contain "@" is left alone.
+	if at := strings.Index(s, "@"); at != -1 {
+		if slash := strings.Index(s, "/"); slash == -1 || at < slash {
+			s = s[at+1:]
+		}
+	}
 	// Strip host component: SSH-shorthand "user@host:owner/repo" via colon, or
 	// "host/owner/repo" via first slash. Do exactly one strip.
 	if i := strings.Index(s, ":"); i != -1 && !strings.Contains(s[:i], "/") {
@@ -495,8 +508,8 @@ func (c *caseCache) foldsAt(dir string) bool {
 // caseInsensitiveFS reports whether dir resides on a case-insensitive filesystem
 // by checking that a case-flipped variant of some existing path resolves to the
 // same inode. dir must exist. Returns false — the conservative, case-sensitive
-// assumption — on any error, or when neither dir nor any entry inside it has an
-// ASCII letter to flip.
+// assumption — only when dir cannot be written to for the temp-file probe
+// below (e.g. read-only).
 //
 // ‡ dir's own basename is tried first, then an entry inside it (loto-f8m8).
 // Flipping only the basename silently answered "case-sensitive" for any
@@ -510,16 +523,35 @@ func caseInsensitiveFS(dir string) bool {
 	if ans, ok := probeFoldedPath(dir); ok {
 		return ans
 	}
-	ents, err := os.ReadDir(dir)
+	if ents, err := os.ReadDir(dir); err == nil {
+		for i := range ents {
+			if ans, ok := probeFoldedPath(filepath.Join(dir, ents[i].Name())); ok {
+				return ans
+			}
+		}
+	}
+	// Neither dir's own basename nor any existing entry had an ASCII letter to
+	// flip and stat — a freshly `git init`'d, otherwise empty repo top is
+	// exactly this shape (loto-l59r). Falling back to "case-sensitive" here
+	// was a name heuristic wearing a filesystem probe's clothes: it answered
+	// from the absence of a flippable name, not from the filesystem. Mint a
+	// throwaway file so the answer still comes from a real stat.
+	return probeWithTempFile(dir)
+}
+
+// probeWithTempFile creates a short-lived file directly in dir purely to
+// case-flip and stat it, for when caseInsensitiveFS finds nothing existing to
+// flip. Returns false — the conservative default — if dir refuses the write.
+func probeWithTempFile(dir string) bool {
+	f, err := os.CreateTemp(dir, "loto-case-probe-*")
 	if err != nil {
 		return false
 	}
-	for i := range ents {
-		if ans, ok := probeFoldedPath(filepath.Join(dir, ents[i].Name())); ok {
-			return ans
-		}
-	}
-	return false
+	name := f.Name()
+	_ = f.Close()
+	defer os.Remove(name)
+	ans, _ := probeFoldedPath(name)
+	return ans
 }
 
 // probeFoldedPath stats path and its case-flipped twin, reporting whether they
