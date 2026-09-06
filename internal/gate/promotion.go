@@ -645,9 +645,21 @@ func reclaimDeadPromotions(ctx context.Context, p PromoteParams) (map[string]boo
 	for batchID, tip := range refs {
 		cl, err := readPromotionClaim(ctx, p.RepoTop, tip)
 		if err != nil {
-			// Undecodable claim: fail SAFE. Treat its candidates as spoken for
-			// and leave the ref alone — deleting a claim we cannot read is how
-			// a live peer's batch gets stolen.
+			if !errors.Is(err, errBadPromotingClaim) {
+				// Not a decode failure — a git-read error, a cancelled
+				// context. Fail-safe-continue is the wrong response to a
+				// reason that isn't "we can't parse this claim"; surface it.
+				return nil, fmt.Errorf("gate: read promoting claim %s: %w", batchID, err)
+			}
+			// Undecodable claim: fail SAFE. Mark every candidate we could
+			// still read (readPromotionClaim parses Batch-Candidates before
+			// it can fail on PID/ProcStart) as spoken for, and leave the ref
+			// alone — deleting a claim we cannot read is how a live peer's
+			// batch gets stolen; a residue sweep, not selectCandidates, is
+			// what should eventually clean up a claim nobody can read.
+			for _, id := range cl.candidates {
+				claimed[id] = true
+			}
 			continue
 		}
 		if !ec.CandidateClaimIsDead(domain.CandidateClaim{
@@ -691,6 +703,13 @@ const (
 	trailerProcStart  = "Promoter-ProcStart"
 )
 
+// readPromotionClaim parses the candidate list FIRST, unconditionally, before
+// the PID/ProcStart fields that can fail to parse — so a caller that gets an
+// errBadPromotingClaim back still receives every candidate id the message
+// named. reclaimDeadPromotions' fail-safe promise ("treat an unreadable
+// claim's candidates as spoken for") depends on that: the zero-value struct
+// this function used to return alongside an error carried no candidates at
+// all, so the fail-safe path had nothing to mark claimed (loto-fxja).
 func readPromotionClaim(ctx context.Context, repoTop, tip string) (promotionClaim, error) {
 	g := gitRunner{repoTop: repoTop}
 	msg, err := g.run(ctx, "log", "-1", "--format=%B", tip)
@@ -698,22 +717,25 @@ func readPromotionClaim(ctx context.Context, repoTop, tip string) (promotionClai
 		return promotionClaim{}, err
 	}
 	tr := parseTrailers(msg)
-	pid, err := strconv.Atoi(tr[trailerPID])
-	if err != nil {
-		return promotionClaim{}, fmt.Errorf("%w: %s: pid: %w", errBadPromotingClaim, tip, err)
-	}
-	start, err := strconv.ParseInt(tr[trailerProcStart], 10, 64)
-	if err != nil {
-		return promotionClaim{}, fmt.Errorf("%w: %s: proc-start: %w", errBadPromotingClaim, tip, err)
-	}
-	cl := promotionClaim{host: tr[trailerHost], pid: pid, procStart: start}
+
+	var cl promotionClaim
 	for id := range strings.SplitSeq(tr[trailerCandidates], ",") {
 		if id = strings.TrimSpace(id); id != "" {
 			cl.candidates = append(cl.candidates, id)
 		}
 	}
+
+	pid, err := strconv.Atoi(tr[trailerPID])
+	if err != nil {
+		return cl, fmt.Errorf("%w: %s: pid: %w", errBadPromotingClaim, tip, err)
+	}
+	start, err := strconv.ParseInt(tr[trailerProcStart], 10, 64)
+	if err != nil {
+		return cl, fmt.Errorf("%w: %s: proc-start: %w", errBadPromotingClaim, tip, err)
+	}
+	cl.host, cl.pid, cl.procStart = tr[trailerHost], pid, start
 	if len(cl.candidates) == 0 {
-		return promotionClaim{}, fmt.Errorf("%w: %s: names no candidates", errBadPromotingClaim, tip)
+		return cl, fmt.Errorf("%w: %s: names no candidates", errBadPromotingClaim, tip)
 	}
 	return cl, nil
 }

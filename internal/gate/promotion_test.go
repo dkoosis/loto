@@ -424,6 +424,50 @@ func TestPromote_ReclaimsStalePromotingClaim(t *testing.T) {
 	})
 }
 
+// TestPromote_UndecodablePromotingClaimBlocksReselection pins the loto-fxja
+// fix: a promoting ref whose PID trailer will not parse must still keep its
+// candidate spoken for. Before the fix, reclaimDeadPromotions hit the decode
+// error, ran a bare continue with nothing added to the claimed map, and
+// selectCandidates re-picked id into a fresh batch — promoting it a second
+// time while the original (unreadable but real) promoting ref for it still
+// stood.
+func TestPromote_UndecodablePromotingClaimBlocksReselection(t *testing.T) {
+	repoTop, integration := newIntegrationRepo(t)
+	bootstrapIntegration(t, repoTop, integration)
+	id, _ := plantCandidate(t, repoTop, integration, tfFileA, "package gate\n\nvar A = 2\n", tpAgentA, tpBeadA)
+
+	// A promoting ref whose PID trailer is not numeric — readPromotionClaim
+	// fails to parse it before it ever gets to Batch-Candidates in the old
+	// code, but must still name id in the (fail-safe, error-returning) result.
+	batchID := newBatchID()
+	msg := strings.Join([]string{
+		"loto: promote " + id, "",
+		"Candidate: " + id,
+		trailerBatch + ": " + batchID,
+		trailerCandidates + ": " + id,
+		trailerHost + ": h",
+		trailerPID + ": not-a-pid",
+		trailerProcStart + ": 12345",
+	}, "\n") + "\n"
+	tree := gitT(t, repoTop, "rev-parse", integration+"^{tree}")
+	commit := gitT(t, repoTop, "commit-tree", tree, "-p", integration, "-m", msg)
+	gitT(t, repoTop, "update-ref", promotingRef(batchID), commit)
+
+	rec := &claimRecorder{}
+	p := promoteParams(repoTop, rec)
+	p.Live = deadProbeT // irrelevant: an undecodable claim never reaches the liveness check
+	res, err := Promote(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	if len(res.Outcomes) != 0 {
+		t.Errorf("id must not be re-selected while its unreadable promoting claim stands: %+v", res.Outcomes)
+	}
+	if !refExists(t, repoTop, promotingRef(batchID)) {
+		t.Error("an undecodable claim must be left alone, not deleted")
+	}
+}
+
 // --- supporting units ---------------------------------------------------
 
 // TestBuildChain_AppliesCreateModifyDelete pins the transition triple: the
