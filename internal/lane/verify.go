@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -17,6 +18,15 @@ import (
 // module — so the bound is minutes, not seconds. It only guards a wedged
 // command; a shorter caller ctx deadline, if any, still wins.
 const verifyTimeout = 15 * time.Minute
+
+// verifyWaitDelay bounds how long c.Wait keeps draining the command's
+// stdout/stderr pipe after Cancel fires. Left at zero (the default), Wait
+// reads the pipe until EOF, which does not occur until every process holding
+// the write end closes it — including an orphaned grandchild that survives
+// the direct child's death (loto-wtxe). A few seconds is enough for the
+// process group's fds to close once SIGKILLed; it is not a second verify
+// budget.
+const verifyWaitDelay = 5 * time.Second
 
 // errVerifyInput is the stable target for a malformed Verify call (repo
 // convention: static error, not an ad-hoc string).
@@ -152,6 +162,19 @@ func runVerifyCmd(ctx context.Context, dir string, cmd []string) (string, bool, 
 	// nil-Env was already doing implicitly; this line preserves that, not a
 	// new behavior.
 	c.Env = append(os.Environ(), "GOWORK=off", "PWD="+dir)
+	// Run in its own process group: make/go test spawn grandchildren, and
+	// without this, killing only the direct child (exec's default Cancel)
+	// leaves them holding the stdout/stderr pipe open, so Wait blocks on
+	// draining it long after ctx expired (loto-wtxe). Setpgid with no Pgid
+	// makes the child the group leader, so its own pid doubles as the group id.
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Override the default Cancel (Process.Kill, direct child only) to SIGKILL
+	// the whole group, so an orphaned grandchild dies with its parent instead
+	// of surviving ctx expiry.
+	c.Cancel = func() error {
+		return syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+	}
+	c.WaitDelay = verifyWaitDelay
 	var buf bytes.Buffer
 	c.Stdout = &buf
 	c.Stderr = &buf
