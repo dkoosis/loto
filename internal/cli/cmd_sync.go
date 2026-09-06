@@ -68,9 +68,16 @@ type syncEntry struct {
 }
 
 // syncDiff is a syncEntry the worktree disagrees with, plus how.
+//
+// ‡ Observed is what the divergence scan hashed at that path — empty when
+// nothing was there (syncMissing) or when the path is unsupported. It is the
+// value the pre-write re-probe compares against, so the decision to write
+// carries the evidence it was made on rather than trusting it to still hold
+// (loto-gai7).
 type syncDiff struct {
 	syncEntry
-	State syncState
+	State    syncState
+	Observed string
 }
 
 // syncConflict is a divergent path syncDecide refused to write, and why.
@@ -94,6 +101,13 @@ const (
 	// the same path with different content — either way it is that person's
 	// work now, not the rejection's residue.
 	syncReasonResidueModified = "residue-modified"
+	// syncReasonTargetModified refuses a fast-forward whose target stopped
+	// being the file the divergence scan judged — different bytes, a
+	// directory or symlink in its place, or gone. Whatever is there now
+	// arrived after the decision to overwrite it was taken, so the decision
+	// no longer covers it. Advisory (⚠): the next run re-classifies the path
+	// against its current content.
+	syncReasonTargetModified = "target-modified"
 )
 
 // syncResidue is one untracked worktree file a rejected candidate is on record
@@ -126,6 +140,15 @@ type syncOpts struct {
 	Verbose bool
 }
 
+// syncTargetMismatch is a fast-forward the pre-write re-probe called off:
+// Found is what the path hashes to now (empty when it vanished or stopped
+// being an ordinary file), against syncDiff.Observed from the scan and
+// syncDiff.OID, which is the content sync did not write.
+type syncTargetMismatch struct {
+	syncDiff
+	Found string
+}
+
 // syncOutcome is what one decide+apply pass did, or (dry-run) would have done.
 type syncOutcome struct {
 	Synced       []string
@@ -133,6 +156,9 @@ type syncOutcome struct {
 	Conflicts    []syncConflict
 	ResidueSkips []syncConflict
 	Modified     []syncResidueMismatch
+	// TargetSkips are the apply paths that moved under the run — never
+	// written, always reported.
+	TargetSkips []syncTargetMismatch
 }
 
 // errHashObjectCountMismatch is batchHashObject's static sentinel — git
@@ -153,6 +179,12 @@ var syncBeforeApplyFn func() //nolint:gochecknoglobals // production-nil concurr
 // open the classify→delete window deterministically and prove a peer's write
 // landing inside it is not deleted.
 var syncBeforeDeleteFn func() //nolint:gochecknoglobals // production-nil concurrency test seam
+
+// syncBeforeTargetProbeFn fires once per fast-forward path, after its
+// replacement is staged and immediately before the probe that authorizes the
+// rename — the window loto-gai7 closes, at its narrowest. Nil in production;
+// tests use it to land a peer's bytes in that window for one named path.
+var syncBeforeTargetProbeFn func(path string) //nolint:gochecknoglobals // production-nil concurrency test seam
 
 // syncWriteFn indirects the temporary-file write so tests can force a short
 // write before publication.
@@ -435,7 +467,7 @@ func syncApplyDecision(ctx context.Context, repoTop string, apply []syncDiff, sw
 		return nil
 	}
 	var applyErr error
-	out.Synced, applyErr = syncApply(ctx, repoTop, apply)
+	out.Synced, out.TargetSkips, applyErr = syncApply(ctx, repoTop, apply)
 	if applyErr != nil {
 		return applyErr
 	}
@@ -451,24 +483,27 @@ func syncApplyDecision(ctx context.Context, repoTop string, apply []syncDiff, sw
 	return deleteErr
 }
 
-// syncResidueState is what one probe of a residue path found.
-type syncResidueState int
+// syncProbeState is what one probe of a worktree path found.
+type syncProbeState int
 
 const (
-	// residueStateHashed: an ordinary file, and the probe's oid is its current
-	// content. Whether that content is still the candidate's is the CALLER's
-	// comparison — the probe reports what is there, it does not judge it.
-	residueStateHashed syncResidueState = iota
-	// residueStateVanished: nothing at the path any more. Someone got there
-	// first; there is nothing to delete and nothing to report as done.
-	residueStateVanished
-	// residueStateNotRegular: a directory or a symlink now stands there.
-	residueStateNotRegular
+	// syncProbeHashed: an ordinary file, and the probe's oid is its current
+	// content. Whether that content is the one the caller expected is the
+	// CALLER's comparison — the probe reports what is there, it does not
+	// judge it.
+	syncProbeHashed syncProbeState = iota
+	// syncProbeVanished: nothing at the path any more. Someone got there
+	// first.
+	syncProbeVanished
+	// syncProbeNotRegular: a directory or a symlink now stands there.
+	syncProbeNotRegular
 )
 
-// probeResidue answers, for one path, the only question that authorizes a
-// deletion: is this still an ordinary file holding exactly the bytes the
-// rejected candidate wrote?
+// syncProbePath answers, for one path, the only question that authorizes
+// touching it: is this still an ordinary file, and what does it hold RIGHT
+// NOW? Both halves of sync ask immediately before they act — the deletion
+// half against the blob a rejected candidate wrote, the fast-forward half
+// against the oid the divergence scan hashed.
 //
 // ‡ Lstat FIRST, then hash, and both per file. Ordering: `git hash-object`
 // follows a symlink, so hashing first reads a live link's target and fails
@@ -476,22 +511,23 @@ const (
 // `git hash-object --stdin-paths` exits 128 and takes the WHOLE sync down when
 // any one of its paths has vanished since the scan — a peer cleaning up its
 // own residue mid-run should cost that one path, not the fast-forward of every
-// other file in the tree. One process per residue file is affordable because
-// the residue set is bounded by what a rejection declared, unlike the
-// divergence scan's whole-tree manifest, which keeps the batch.
+// other file in the tree. One process per probed file is affordable because
+// both callers probe a bounded set — what a rejection declared, or what the
+// scan already found divergent — unlike the divergence scan's whole-tree
+// manifest, which keeps the batch.
 //
 // A hash failure is re-probed rather than trusted: if the file is gone by
 // then, the failure WAS the race and the path is simply vanished.
-func probeResidue(ctx context.Context, repoTop, path string) (oid string, state syncResidueState, err error) {
+func syncProbePath(ctx context.Context, repoTop, path string) (oid string, state syncProbeState, err error) {
 	full := filepath.Join(repoTop, filepath.FromSlash(path))
 	fi, statErr := os.Lstat(full)
 	switch {
 	case os.IsNotExist(statErr):
-		return "", residueStateVanished, nil
+		return "", syncProbeVanished, nil
 	case statErr != nil:
-		return "", residueStateVanished, fmt.Errorf("lstat %s: %w", syncPathField(path), statErr)
+		return "", syncProbeVanished, fmt.Errorf("lstat %s: %w", syncPathField(path), statErr)
 	case !fi.Mode().IsRegular():
-		return "", residueStateNotRegular, nil
+		return "", syncProbeNotRegular, nil
 	}
 
 	c, cancel := context.WithTimeout(ctx, gitTimeout)
@@ -499,15 +535,15 @@ func probeResidue(ctx context.Context, repoTop, path string) (oid string, state 
 	oid, hashErr := hashExceptionalPath(c, repoTop, path)
 	if hashErr != nil {
 		if _, again := os.Lstat(full); os.IsNotExist(again) {
-			return "", residueStateVanished, nil
+			return "", syncProbeVanished, nil
 		}
-		return "", residueStateVanished, hashErr
+		return "", syncProbeVanished, hashErr
 	}
-	return oid, residueStateHashed, nil
+	return oid, syncProbeHashed, nil
 }
 
 // syncClassifyResidue decides which attributed residue is still the rejected
-// candidate's own bytes, and is therefore deletable. See probeResidue for the
+// candidate's own bytes, and is therefore deletable. See syncProbePath for the
 // two gates and why they run in that order, per file.
 //
 // ‡ The content gate is the review's correction, and the asymmetry behind it
@@ -517,14 +553,14 @@ func probeResidue(ctx context.Context, repoTop, path string) (oid string, state 
 // file with their own work — the path matched, the file did not.
 func syncClassifyResidue(ctx context.Context, repoTop string, sweep []syncResidue) (deletable []syncResidue, skips []syncConflict, modified []syncResidueMismatch, err error) {
 	for _, r := range sweep {
-		oid, state, probeErr := probeResidue(ctx, repoTop, r.Path)
+		oid, state, probeErr := syncProbePath(ctx, repoTop, r.Path)
 		if probeErr != nil {
 			return nil, nil, nil, probeErr
 		}
 		switch {
-		case state == residueStateVanished:
+		case state == syncProbeVanished:
 			continue
-		case state == residueStateNotRegular:
+		case state == syncProbeNotRegular:
 			skips = append(skips, syncConflict{Path: r.Path, Reason: syncReasonResidueNotFile, Holder: r.CandidateID})
 		case oid == r.Blob:
 			deletable = append(deletable, r)
@@ -575,14 +611,14 @@ func syncDecideResidue(residue []syncResidue, locks []domain.LockRecord, claims 
 // recursive form is a mistake this function must not be able to make.
 func syncDeleteResidue(ctx context.Context, repoTop string, deletable []syncResidue) (deleted []syncResidue, skips []syncConflict, modified []syncResidueMismatch, err error) {
 	for _, r := range deletable {
-		oid, state, probeErr := probeResidue(ctx, repoTop, r.Path)
+		oid, state, probeErr := syncProbePath(ctx, repoTop, r.Path)
 		if probeErr != nil {
 			return deleted, skips, modified, probeErr
 		}
 		switch {
-		case state == residueStateVanished:
+		case state == syncProbeVanished:
 			continue
-		case state == residueStateNotRegular:
+		case state == syncProbeNotRegular:
 			skips = append(skips, syncConflict{Path: r.Path, Reason: syncReasonResidueNotFile, Holder: r.CandidateID})
 			continue
 		case oid != r.Blob:
@@ -785,9 +821,9 @@ func compareExisting(ctx context.Context, repoTop string, existing []syncEntry) 
 		wantExec := e.Mode == "100755"
 		switch {
 		case oids[e.Path] != e.OID:
-			diffs = append(diffs, syncDiff{syncEntry: e, State: syncModified})
+			diffs = append(diffs, syncDiff{syncEntry: e, State: syncModified, Observed: oids[e.Path]})
 		case hasExecBit != wantExec:
-			diffs = append(diffs, syncDiff{syncEntry: e, State: syncModeOnly})
+			diffs = append(diffs, syncDiff{syncEntry: e, State: syncModeOnly, Observed: oids[e.Path]})
 		}
 	}
 	return diffs, nil
@@ -916,38 +952,87 @@ func syncConflictFor(path string, locks []domain.LockRecord, claims []domain.Cla
 }
 
 // syncApply fast-forwards every apply path to integration content, in sorted
-// order: cat-file blob → MkdirAll (restores a path whose directory went with
-// it) → atomic publish. Stops at the first failure. If publication succeeded
-// before a later durability error, the current path is included in synced.
-func syncApply(ctx context.Context, repoTop string, apply []syncDiff) (synced []string, err error) {
+// order: stage the replacement (cat-file blob → MkdirAll, which restores a path
+// whose directory went with it → write+fsync a temporary beside the target) →
+// probe → rename. Stops at the first failure. If publication succeeded before a
+// later durability error, the current path is included in synced.
+//
+// ‡ The probe runs again here, immediately before each write — φ
+// syncDeleteResidue, and for the same reason (loto-gai7). The divergence scan
+// hashes the whole manifest, the decision runs against coordination state, and
+// the residue classification runs between; a peer holding no lease can land its
+// own bytes in that window, and overwriting them would be a silent
+// dispossession the report calls action=fast-forward. A path that moved is
+// skipped and named, never written.
+//
+// ‡ Everything expensive is staged BEFORE the probe so that nothing but the
+// rename follows it — φ syncDeleteResidue's probe → os.Remove. Reading the
+// blob, creating parent directories and fsyncing a temporary file are each
+// slower than the write they precede, and every one of them left inside the
+// window would widen the very race the probe closes. Staging touches no
+// worktree path the report names; a skip discards the temporary and leaves the
+// peer's bytes where they are.
+func syncApply(ctx context.Context, repoTop string, apply []syncDiff) (synced []string, skipped []syncTargetMismatch, err error) {
 	sorted := append([]syncDiff(nil), apply...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
 	for _, d := range sorted {
-		published, applyErr := syncApplyOne(ctx, repoTop, d)
+		staged, stageErr := syncStageReplacement(ctx, repoTop, d)
+		if stageErr != nil {
+			return synced, skipped, fmt.Errorf("sync %s: %w", syncPathField(d.Path), stageErr)
+		}
+		if syncBeforeTargetProbeFn != nil {
+			syncBeforeTargetProbeFn(d.Path)
+		}
+		oid, state, probeErr := syncProbePath(ctx, repoTop, d.Path)
+		if probeErr != nil {
+			syncDiscardStaged(staged)
+			return synced, skipped, probeErr
+		}
+		if found, moved := syncTargetMoved(d, oid, state); moved {
+			syncDiscardStaged(staged)
+			skipped = append(skipped, syncTargetMismatch{syncDiff: d, Found: found})
+			continue
+		}
+		published, pubErr := syncPublishStaged(staged)
 		if published {
 			synced = append(synced, d.Path)
+		} else {
+			syncDiscardStaged(staged)
 		}
-		if applyErr != nil {
-			return synced, fmt.Errorf("sync %s: %w", syncPathField(d.Path), applyErr)
+		if pubErr != nil {
+			return synced, skipped, fmt.Errorf("sync %s: %w", syncPathField(d.Path), pubErr)
 		}
 	}
-	return synced, nil
+	return synced, skipped, nil
 }
 
-func syncApplyOne(ctx context.Context, repoTop string, d syncDiff) (bool, error) {
-	blob, err := gitOutputBytes(ctx, repoTop, "cat-file", "blob", d.OID)
-	if err != nil {
-		return false, fmt.Errorf("cat-file %s: %w", d.OID, err)
+// syncTargetMoved compares one fresh probe against what classification saw and
+// reports whether the write is still the one that was decided. Pure.
+//
+// A syncMissing path was decided on the absence of a file, so anything now
+// standing there — bytes or a directory — cancels it. Every other state was
+// decided on d.Observed, the oid the scan hashed, so the write survives only an
+// ordinary file still holding exactly that. Vanished counts as moved rather
+// than as a free restore: the file was removed after the decision, and the next
+// run reclassifies it as missing and restores it then, with that removal in
+// evidence.
+func syncTargetMoved(d syncDiff, oid string, state syncProbeState) (found string, moved bool) {
+	if d.State == syncMissing {
+		return oid, state != syncProbeVanished
 	}
-	full := filepath.Join(repoTop, filepath.FromSlash(d.Path))
-	if err := syncMkdirAll(filepath.Dir(full), 0o755); err != nil {
-		return false, err
+	if state != syncProbeHashed {
+		return "", true
 	}
-	mode := os.FileMode(0o644)
-	if d.Mode == "100755" {
-		mode = 0o755
-	}
-	return syncAtomicReplace(full, blob, mode)
+	return oid, oid != d.Observed
+}
+
+// syncStaged is one path's complete replacement, written and fsynced beside
+// the target and waiting for the single rename that publishes it. Nothing at
+// the target has been touched while it exists, so discarding it is always
+// safe.
+type syncStaged struct {
+	TmpPath string
+	Target  string
 }
 
 // syncMkdirAll is os.MkdirAll plus a durable fsync of every newly created
@@ -988,47 +1073,78 @@ func syncMkdirAll(dir string, perm os.FileMode) error {
 	return nil
 }
 
-// syncAtomicReplace prepares the complete replacement beside path, including
-// its final mode and a file fsync, before one rename publishes it. Failures
-// before rename leave the old target intact; a parent-directory fsync failure
-// after rename reports published=true so the partial-sync report names path.
-func syncAtomicReplace(path string, data []byte, mode os.FileMode) (bool, error) {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".loto-sync-*")
+// syncStageReplacement builds one path's replacement in full — integration's
+// blob, the parent directories it needs, the final mode, a file fsync — and
+// stops one rename short of publishing it. Every failure here leaves the
+// worktree file untouched, which is what lets the probe run last.
+func syncStageReplacement(ctx context.Context, repoTop string, d syncDiff) (syncStaged, error) {
+	blob, err := gitOutputBytes(ctx, repoTop, "cat-file", "blob", d.OID)
 	if err != nil {
-		return false, err
+		return syncStaged{}, fmt.Errorf("cat-file %s: %w", d.OID, err)
 	}
-	tmpPath := tmp.Name()
-	defer func() {
+	full := filepath.Join(repoTop, filepath.FromSlash(d.Path))
+	if err := syncMkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return syncStaged{}, err
+	}
+	mode := os.FileMode(0o644)
+	if d.Mode == "100755" {
+		mode = 0o755
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(full), ".loto-sync-*")
+	if err != nil {
+		return syncStaged{}, err
+	}
+	staged := syncStaged{TmpPath: tmp.Name(), Target: full}
+	if err := syncFillStaged(tmp, blob, mode); err != nil {
 		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-	}()
+		syncDiscardStaged(staged)
+		return syncStaged{}, err
+	}
+	return staged, nil
+}
 
-	// The write seam targets only the unpublished temporary file: even an
-	// injected short write can damage no existing worktree bytes.
+// syncFillStaged writes the temporary file and leaves it closed, durable and
+// wearing its final mode.
+//
+// ‡ The write seam targets only the unpublished temporary file: even an
+// injected short write can damage no existing worktree bytes.
+func syncFillStaged(tmp *os.File, data []byte, mode os.FileMode) error {
 	n, err := syncWriteFn(tmp, data)
 	if err != nil {
-		return false, err
+		return err
 	}
 	if n != len(data) {
-		return false, io.ErrShortWrite
+		return io.ErrShortWrite
 	}
 	if err := tmp.Chmod(mode); err != nil {
-		return false, err
+		return err
 	}
 	if err := syncFull(tmp); err != nil {
+		return err
+	}
+	return tmp.Close()
+}
+
+// syncPublishStaged is the rename that makes the staged content the target,
+// plus the parent-directory fsync that makes the rename durable. A fsync
+// failure after the rename reports published=true so the partial-sync report
+// names the path.
+func syncPublishStaged(s syncStaged) (bool, error) {
+	if err := os.Rename(s.TmpPath, s.Target); err != nil {
 		return false, err
 	}
-	if err := tmp.Close(); err != nil {
-		return false, err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return false, err
-	}
-	if err := syncParentDirFn(dir); err != nil {
+	if err := syncParentDirFn(filepath.Dir(s.Target)); err != nil {
 		return true, err
 	}
 	return true, nil
+}
+
+// syncDiscardStaged drops an unpublished replacement. The target is whatever
+// it was; only the temporary goes.
+func syncDiscardStaged(s syncStaged) {
+	if s.TmpPath != "" {
+		_ = os.Remove(s.TmpPath)
+	}
 }
 
 func syncParentDir(dir string) error {
@@ -1061,7 +1177,10 @@ func emitSyncReport(w io.Writer, out syncOutcome, skipped []syncDiff, unattribut
 	if len(out.Conflicts) > 0 {
 		glyph = "✗"
 	}
-	skippedN := len(skipped) + len(out.ResidueSkips)
+	// ‡ A target the pre-write re-probe called off counts as skipped=, beside
+	// the unsupported-mode and residue rows: three ways of not acting on a
+	// path, one counter, one ⚠ row each naming its own reason.
+	skippedN := len(skipped) + len(out.ResidueSkips) + len(out.TargetSkips)
 	if opts.DryRun {
 		fmt.Fprintf(w, "ℹ sync dry-run=true would-fast-forward=%d conflicts=%d skipped=%d would-delete=%d residue-modified=%d unattributed=%d\n",
 			len(out.Synced), len(out.Conflicts), skippedN, len(out.Deleted), len(out.Modified), len(unattributed))
@@ -1072,7 +1191,19 @@ func emitSyncReport(w io.Writer, out syncOutcome, skipped []syncDiff, unattribut
 	fmt.Fprintf(w, "ℹ attribution=rejected-candidate-write-set+blob window=%s max-events=%d\n",
 		syncRetentionWindow(), store.EventsRetentionMaxRows)
 
-	rows := make([]syncReportRow, 0, len(out.Synced)+len(out.Deleted)+len(out.Conflicts)+skippedN+len(out.Modified)+len(unattributed))
+	for _, r := range syncReportRows(out, skipped, unattributed, opts) {
+		fmt.Fprintln(w, r.line)
+	}
+
+	emitSyncFixBlock(w, out, unattributed, opts)
+}
+
+// syncReportRows builds every per-path row — synced, deleted, conflict,
+// skipped, and (under --verbose) the two left-alone classes — and sorts them
+// by path, so the same outcome always renders byte-identically.
+func syncReportRows(out syncOutcome, skipped []syncDiff, unattributed []string, opts syncOpts) []syncReportRow {
+	rows := make([]syncReportRow, 0, len(out.Synced)+len(out.Deleted)+len(out.Conflicts)+
+		len(out.ResidueSkips)+len(out.TargetSkips)+len(skipped)+len(out.Modified)+len(unattributed))
 	ffAction, delAction := "fast-forward", "delete"
 	if opts.DryRun {
 		ffAction, delAction = "would-fast-forward", "would-delete"
@@ -1092,6 +1223,11 @@ func emitSyncReport(w io.Writer, out syncOutcome, skipped []syncDiff, unattribut
 	for _, d := range skipped {
 		rows = append(rows, syncReportRow{path: d.Path, line: fmt.Sprintf("⚠ target=%s reason=unsupported-mode", syncPathField(d.Path))})
 	}
+	for _, m := range out.TargetSkips {
+		rows = append(rows, syncReportRow{path: m.Path, line: fmt.Sprintf(
+			"⚠ target=%s reason=%s found=%s want=%s",
+			syncPathField(m.Path), syncReasonTargetModified, shortOID(m.Found), shortOID(m.OID))})
+	}
 	if opts.Verbose {
 		// Both --verbose classes are files sync deliberately did not touch. The
 		// counts carry them on line 1 either way; the rows are for the operator
@@ -1106,11 +1242,7 @@ func emitSyncReport(w io.Writer, out syncOutcome, skipped []syncDiff, unattribut
 		}
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].path < rows[j].path })
-	for _, r := range rows {
-		fmt.Fprintln(w, r.line)
-	}
-
-	emitSyncFixBlock(w, out, unattributed, opts)
+	return rows
 }
 
 // emitSyncFixBlock prints the one actionable next step per finding class, per
@@ -1118,13 +1250,18 @@ func emitSyncReport(w io.Writer, out syncOutcome, skipped []syncDiff, unattribut
 // the untracked files sync deliberately did not touch.
 func emitSyncFixBlock(w io.Writer, out syncOutcome, unattributed []string, opts syncOpts) {
 	showLeftAlone := (len(unattributed) > 0 || len(out.Modified) > 0) && !opts.Verbose
-	if len(out.Conflicts) == 0 && !showLeftAlone {
+	if len(out.Conflicts) == 0 && len(out.TargetSkips) == 0 && !showLeftAlone {
 		return
 	}
 	fmt.Fprintln(w, "```bash")
 	if len(out.Conflicts) > 0 {
 		fmt.Fprintln(w, "loto status --collisions   # see holders")
 		fmt.Fprintln(w, "loto sync                  # re-run once the lease/claim resolves")
+	}
+	if len(out.TargetSkips) > 0 {
+		// The bytes on disk are safe — what a target-modified row's reader
+		// needs is the content sync declined to write over them.
+		fmt.Fprintln(w, "git cat-file blob <want>   # integration's bytes for a target-modified row")
 	}
 	if showLeftAlone {
 		fmt.Fprintln(w, "loto sync --verbose        # name the untracked files sync left alone")
