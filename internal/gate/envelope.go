@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path"
 	"sort"
@@ -25,19 +26,44 @@ import (
 	"loto/internal/domain"
 )
 
-// gatePlumbingTimeout bounds every git subprocess this package launches
-// directly (gitRunner.run, UpdateRefsTx, gitWithIndex) so a wedged git
-// process — a stale index.lock, a hung fsmonitor — cannot block for the full
-// lifetime of whatever context the caller happened to pass in. Mirrors
+// gatePlumbingTimeout bounds a fast, read-only git call — gitRunner.run's
+// ls-tree/rev-parse/for-each-ref/log-1 calls — where a wedge means something
+// is actually stuck, not merely working through a big tree. Mirrors
 // internal/cli's gitTimeout value; kept as this package's own constant since
 // the two latency budgets are free to diverge later.
 const gatePlumbingTimeout = 5 * time.Second
 
-// ErrGitTimeout marks a git subprocess killed by gatePlumbingTimeout (or an
-// even tighter caller-supplied deadline) rather than one that ran to
-// completion and failed on its own — the distinction a doctor/operator
-// surface needs to tell "git hung" from "git rejected the operation".
+// gateTreeTimeout bounds a git call that walks or writes tree/index state —
+// gitWithIndex's read-tree/write-tree/update-index, and UpdateRefsTx's
+// update-ref --stdin — where a cold packfile or a large tree can legitimately
+// take far longer than a plumbing read.
+const gateTreeTimeout = 60 * time.Second
+
+// gateWaitDelay bounds how long Cmd.Wait blocks copying a killed git
+// subprocess's remaining stdout/stderr after its context expires — cmd.Stdout/
+// Stderr here are bytes.Buffers, not *os.File, so exec copies through a pipe
+// in a background goroutine that Wait() would otherwise wait on
+// indefinitely. Without it, a subprocess that ignores its kill signal (or a
+// child it spawned inheriting the pipe) could reintroduce the exact hang
+// gatePlumbingTimeout/gateTreeTimeout exist to close off.
+const gateWaitDelay = 5 * time.Second
+
+// ErrGitTimeout marks a git subprocess killed by a gate timeout (or an even
+// tighter caller-supplied deadline) rather than one that ran to completion
+// and failed on its own — the distinction a doctor/operator surface needs to
+// tell "git hung" from "git rejected the operation".
 var ErrGitTimeout = errors.New("gate: git subprocess timed out")
+
+// gateGitEnv pins LC_ALL=C on every git subprocess this package launches, on
+// top of the caller's own environment. refCASRejectionMarker (and any future
+// stderr text match) depends on git's untranslated EN-US wording; a LANG/
+// LC_ALL the caller's shell happens to export can otherwise translate that
+// wording out from under the match, turning a real CAS rejection into a
+// misreported infra error (loto-in5f). extra is appended after, so a caller's
+// own env override (e.g. GIT_INDEX_FILE) still wins on a duplicate key.
+func gateGitEnv(extra ...string) []string {
+	return append(append(os.Environ(), "LC_ALL=C"), extra...)
+}
 
 // BlobRef pins one path's content identity: a git blob SHA and its file mode
 // ("100644" regular, "100755" executable, "120000" symlink). A nil *BlobRef in
@@ -369,18 +395,20 @@ func (g gitRunner) treeAt(ctx context.Context, treeish, path string) (bool, erro
 }
 
 // run executes one read-only git plumbing call against repoTop and returns
-// trimmed stdout. No stdin, no env override — every caller in this file only
-// ever needs a tree-ish and a pathspec.
+// trimmed stdout. No stdin, no working-tree touch — every caller in this file
+// only ever needs a tree-ish and a pathspec.
 func (g gitRunner) run(ctx context.Context, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, gatePlumbingTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.repoTop
+	cmd.Env = gateGitEnv()
+	cmd.WaitDelay = gateWaitDelay
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", fmt.Errorf("%w: git %s", ErrGitTimeout, strings.Join(args, " "))
 		}
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))

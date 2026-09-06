@@ -468,6 +468,93 @@ func TestPromote_UndecodablePromotingClaimBlocksReselection(t *testing.T) {
 	}
 }
 
+// TestPromote_UnreadableCandidateListBlocksWholeRound pins the review
+// follow-up on loto-fxja: when a promoting claim's OWN candidate list is
+// missing or garbled (not just its PID/ProcStart), reclaimDeadPromotions
+// cannot name which candidates it is protecting, so marking "the ones we
+// could read" would under-claim for real — nothing decoded. The fail-safe is
+// to block the whole round: two otherwise-eligible, unrelated candidates must
+// both stay unselected, and a warning must say why.
+func TestPromote_UnreadableCandidateListBlocksWholeRound(t *testing.T) {
+	repoTop, integration := newIntegrationRepo(t)
+	bootstrapIntegration(t, repoTop, integration)
+	idA, _ := plantCandidate(t, repoTop, integration, tfFileA, "package gate\n\nvar A = 2\n", tpAgentA, tpBeadA)
+	idB, _ := plantCandidate(t, repoTop, integration, tfFileB, "package gate\n", tpAgentB, tpBeadB)
+
+	// A promoting ref with valid PID/ProcStart trailers but no Batch-Candidates
+	// trailer at all — readPromotionClaim parses everything else fine but has
+	// no candidate ids to protect.
+	batchID := newBatchID()
+	msg := strings.Join([]string{
+		"loto: promote (garbled claim)", "",
+		trailerBatch + ": " + batchID,
+		trailerHost + ": h",
+		trailerPID + ": 4194304",
+		trailerProcStart + ": 12345",
+	}, "\n") + "\n"
+	tree := gitT(t, repoTop, "rev-parse", integration+"^{tree}")
+	commit := gitT(t, repoTop, "commit-tree", tree, "-p", integration, "-m", msg)
+	gitT(t, repoTop, "update-ref", promotingRef(batchID), commit)
+
+	rec := &claimRecorder{}
+	p := promoteParams(repoTop, rec)
+	p.MaxRounds = 1
+	res, err := Promote(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	if len(res.Outcomes) != 0 {
+		t.Errorf("neither candidate should be selectable while the round is blocked: %+v", res.Outcomes)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "blocking this round") {
+		t.Errorf("warnings = %+v, want one row explaining the block", res.Warnings)
+	}
+	if !refExists(t, repoTop, candidateRef(idA)) || !refExists(t, repoTop, candidateRef(idB)) {
+		t.Error("both candidates must stay queued for a later round, once the bad claim is cleared")
+	}
+}
+
+// TestPromote_UnreadablePromotingRefSkipsOnlyThatClaim pins the review
+// follow-up on loto-fxja: a promoting ref that fails to read for a reason
+// that ISN'T a decode problem (here, a ref pointing at an object that does
+// not exist — a real git-level failure, not a parse failure) must skip only
+// that one claim and warn, restoring the pre-fix behavior for infra errors
+// rather than aborting the whole reclaim sweep (and with it, every candidate
+// in the queue).
+func TestPromote_UnreadablePromotingRefSkipsOnlyThatClaim(t *testing.T) {
+	repoTop, integration := newIntegrationRepo(t)
+	bootstrapIntegration(t, repoTop, integration)
+	id, _ := plantCandidate(t, repoTop, integration, tfFileA, "package gate\n\nvar A = 2\n", tpAgentA, tpBeadA)
+
+	// A loose ref written directly (bypassing update-ref's object-existence
+	// check) pointing at a well-formed but nonexistent SHA: `git log -1` on it
+	// fails with "fatal: bad object", a real git error, not a trailer parse
+	// failure — readPromotionClaim returns it un-wrapped, before errBadPromotingClaim
+	// ever enters the picture.
+	batchID := newBatchID()
+	refPath := filepath.Join(repoTop, ".git", "refs", "loto", "promoting", batchID)
+	if err := os.MkdirAll(filepath.Dir(refPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(refPath, []byte(strings.Repeat("d", 40)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := &claimRecorder{}
+	p := promoteParams(repoTop, rec)
+	p.MaxRounds = 1 // one round: the bad ref is never cleared, so a later round would re-warn
+	res, err := Promote(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	if got := outcomeFor(t, res, id).Class; got != OutcomePromoted {
+		t.Errorf("class = %q, want the healthy candidate promoted despite the unrelated unreadable claim", got)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], batchID) {
+		t.Errorf("warnings = %+v, want one row naming the unreadable batch %s", res.Warnings, batchID)
+	}
+}
+
 // --- supporting units ---------------------------------------------------
 
 // TestBuildChain_AppliesCreateModifyDelete pins the transition triple: the
@@ -811,4 +898,39 @@ func writeBlobT(t *testing.T, repoTop, content string) string {
 		t.Fatalf("hash-object: %v", err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// TestUpdateRefsTxTimesOutOnHungGit pins the review follow-up on loto-4bde:
+// UpdateRefsTx must still return promptly with ErrGitTimeout on a hung
+// update-ref --stdin now that it carries a SIGTERM-first cmd.Cancel and a
+// cmd.WaitDelay grace period, rather than either regressing to an indefinite
+// hang or silently waiting out the full grace period on every timeout. The
+// fake git execs straight into `sleep`, so the process SIGTERM actually
+// reaches is the same one gitRunner would be trying to interrupt — if
+// cmd.Cancel failed to signal it at all, the process would survive to
+// WaitDelay's eventual force-kill and this test's elapsed bound would catch
+// it (WaitDelay alone is longer than the assertion below allows).
+func TestUpdateRefsTxTimesOutOnHungGit(t *testing.T) {
+	dir := t.TempDir()
+	fakeGit := filepath.Join(dir, "git")
+	if err := os.WriteFile(fakeGit, []byte("#!/bin/sh\nexec sleep 3\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := UpdateRefsTx(ctx, t.TempDir(), []RefUpdate{
+		{Verb: VerbCreate, Ref: "refs/loto/x", NewSHA: strings.Repeat("1", 40)},
+	})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ErrGitTimeout) {
+		t.Errorf("hung update-ref err = %v, want ErrGitTimeout", err)
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("UpdateRefsTx took %v to return from a hung git subprocess, want well under its 3s sleep", elapsed)
+	}
 }

@@ -94,6 +94,10 @@ type PromoteResult struct {
 	Outcomes    []CandidateOutcome
 	// Verifies is one entry per phase-2 verify, in the order they ran.
 	Verifies []VerifyRun
+	// Warnings are non-fatal, one line each — a promoting-claim reclaim that
+	// could not fully make sense of a refs/loto/promoting/* ref. Rendering
+	// (the ⚠ row, design.md) belongs to the CLI.
+	Warnings []string
 }
 
 // VerifyRun is one phase-2 verify: which batch it judged, how many candidates
@@ -221,7 +225,7 @@ func Promote(ctx context.Context, p PromoteParams) (PromoteResult, error) {
 
 	var res PromoteResult
 	for range p.MaxRounds {
-		batch, outcomes, err := promotePhase1(ctx, p)
+		batch, outcomes, err := promotePhase1(ctx, p, &res.Warnings)
 		res.Outcomes = append(res.Outcomes, outcomes...)
 		if err != nil {
 			return finish(ctx, res, p), err
@@ -230,7 +234,7 @@ func Promote(ctx context.Context, p PromoteParams) (PromoteResult, error) {
 			break // nothing eligible; the queue is drained for now
 		}
 
-		done, stop, err := promoteVerifyAndCommit(ctx, p, batch, &res.Verifies)
+		done, stop, err := promoteVerifyAndCommit(ctx, p, batch, &res.Verifies, &res.Warnings)
 		res.Outcomes = append(res.Outcomes, done...)
 		if err != nil {
 			return finish(ctx, res, p), err
@@ -257,7 +261,7 @@ func finish(ctx context.Context, res PromoteResult, p PromoteParams) PromoteResu
 // the red-batch fallback. stop reports that the round loop should end
 // (infrastructure trouble, which is environmental and not worth a tight
 // retry).
-func promoteVerifyAndCommit(ctx context.Context, p PromoteParams, b *batch, rec *[]VerifyRun) (outcomes []CandidateOutcome, stop bool, err error) {
+func promoteVerifyAndCommit(ctx context.Context, p PromoteParams, b *batch, rec *[]VerifyRun, warn *[]string) (outcomes []CandidateOutcome, stop bool, err error) {
 	vr, verr := timedVerify(ctx, p, b, rec)
 	if verr != nil {
 		// Could not reach a verdict. Release the claim, leave every candidate
@@ -271,7 +275,7 @@ func promoteVerifyAndCommit(ctx context.Context, p PromoteParams, b *batch, rec 
 		if derr := releaseBatch(ctx, p.RepoTop, b); derr != nil {
 			return nil, true, derr
 		}
-		return redBatchSweep(ctx, p, b, rec)
+		return redBatchSweep(ctx, p, b, rec, warn)
 	}
 
 	if promoteBeforePhase3Fn != nil {
@@ -301,11 +305,11 @@ func promoteVerifyAndCommit(ctx context.Context, p PromoteParams, b *batch, rec 
 // of attributing a red to exactly one candidate instead of punishing the batch
 // — and a candidate that is red on its own must be rejected, or it wedges
 // every future promotion behind it.
-func redBatchSweep(ctx context.Context, p PromoteParams, red *batch, rec *[]VerifyRun) (outcomes []CandidateOutcome, stop bool, err error) {
+func redBatchSweep(ctx context.Context, p PromoteParams, red *batch, rec *[]VerifyRun, warn *[]string) (outcomes []CandidateOutcome, stop bool, err error) {
 	solo := p
 	solo.MaxBatch = 1
 	for i := range red.members {
-		outs, stop, err := promoteSolo(ctx, p, solo, red.members[i].candidateID, rec)
+		outs, stop, err := promoteSolo(ctx, p, solo, red.members[i].candidateID, rec, warn)
 		outcomes = append(outcomes, outs...)
 		if err != nil || stop {
 			return outcomes, true, err
@@ -317,8 +321,8 @@ func redBatchSweep(ctx context.Context, p PromoteParams, red *batch, rec *[]Veri
 // promoteSolo runs the full three-phase flow for one candidate on a fresh
 // snapshot. stop reports that the sweep should abandon the remaining
 // candidates — infrastructure trouble is environmental, not per-candidate.
-func promoteSolo(ctx context.Context, p, solo PromoteParams, id string, rec *[]VerifyRun) (outcomes []CandidateOutcome, stop bool, err error) {
-	one, outs, perr := promotePhase1For(ctx, solo, id)
+func promoteSolo(ctx context.Context, p, solo PromoteParams, id string, rec *[]VerifyRun, warn *[]string) (outcomes []CandidateOutcome, stop bool, err error) {
+	one, outs, perr := promotePhase1For(ctx, solo, id, warn)
 	outcomes = append(outcomes, outs...)
 	if perr != nil {
 		return outcomes, true, perr
@@ -460,13 +464,15 @@ func releaseBatch(ctx context.Context, repoTop string, b *batch) error {
 }
 
 // promotePhase1 selects and claims a batch under the promotion flock.
-func promotePhase1(ctx context.Context, p PromoteParams) (*batch, []CandidateOutcome, error) {
-	return promotePhase1For(ctx, p, "")
+func promotePhase1(ctx context.Context, p PromoteParams, warn *[]string) (*batch, []CandidateOutcome, error) {
+	return promotePhase1For(ctx, p, "", warn)
 }
 
 // promotePhase1For is phase 1, optionally restricted to a single candidate id
-// (the red-batch sweep's solo round).
-func promotePhase1For(ctx context.Context, p PromoteParams, only string) (*batch, []CandidateOutcome, error) {
+// (the red-batch sweep's solo round). warn accumulates one-line, non-fatal
+// diagnostics from reclaimDeadPromotions (the ⚠ rows a CLI caller renders),
+// mirroring timedVerify's *[]VerifyRun accumulator.
+func promotePhase1For(ctx context.Context, p PromoteParams, only string, warn *[]string) (*batch, []CandidateOutcome, error) {
 	fl, err := acquirePromoteFlock(ctx, p.RepoTop)
 	if err != nil {
 		return nil, nil, err
@@ -477,11 +483,18 @@ func promotePhase1For(ctx context.Context, p PromoteParams, only string) (*batch
 	if err != nil {
 		return nil, nil, err
 	}
-	claimed, err := reclaimDeadPromotions(ctx, p)
+	rec, err := reclaimDeadPromotions(ctx, p)
 	if err != nil {
 		return nil, nil, err
 	}
-	members, outcomes, err := selectCandidates(ctx, p, snapshot, claimed, only)
+	*warn = append(*warn, rec.warnings...)
+	if rec.blocked {
+		// A promoting claim's own candidate list could not be read: select
+		// nothing this round rather than under-claim. Reads to the caller
+		// exactly like "nothing eligible" (a nil batch, no error).
+		return nil, nil, nil
+	}
+	members, outcomes, err := selectCandidates(ctx, p, snapshot, rec.claimed, only)
 	if err != nil || len(members) == 0 {
 		return nil, outcomes, err
 	}
@@ -627,6 +640,17 @@ func overlaps(taken map[string]bool, writeSet []string) bool {
 	return false
 }
 
+// reclaimVerdict is reclaimDeadPromotions' result: which candidates a live
+// (or unreadably-owned) promoting claim has spoken for, whether the whole
+// round must be blocked because some claim's own candidate list could not be
+// read, and any warnings a caller should surface — one ⚠ row each; rendering
+// belongs to the CLI, same as PromoteResult's other fields.
+type reclaimVerdict struct {
+	claimed  map[string]bool
+	blocked  bool
+	warnings []string
+}
+
 // reclaimDeadPromotions sweeps refs/loto/promoting/*, deleting the claims of
 // pushers that are provably gone and reporting which candidates the surviving
 // claims own.
@@ -635,52 +659,90 @@ func overlaps(taken map[string]bool, writeSet []string) bool {
 // nil probe or an UNKNOWN verdict both leave the claim standing. Reclaiming on
 // an absence of evidence would let two pushers build chains on the same
 // candidates.
-func reclaimDeadPromotions(ctx context.Context, p PromoteParams) (map[string]bool, error) {
+func reclaimDeadPromotions(ctx context.Context, p PromoteParams) (reclaimVerdict, error) {
 	refs, err := listRefsWithSHAs(ctx, p.RepoTop, promotingRefPrefix)
 	if err != nil {
-		return nil, err
+		return reclaimVerdict{}, err
 	}
-	claimed := map[string]bool{}
+	batchIDs := make([]string, 0, len(refs))
+	for batchID := range refs {
+		batchIDs = append(batchIDs, batchID)
+	}
+	sort.Strings(batchIDs) // deterministic warning order (design.md)
+
+	v := reclaimVerdict{claimed: map[string]bool{}}
 	ec := domain.EvalContext{Now: time.Now(), Live: p.Live}
-	for batchID, tip := range refs {
-		cl, err := readPromotionClaim(ctx, p.RepoTop, tip)
-		if err != nil {
-			if !errors.Is(err, errBadPromotingClaim) {
-				// Not a decode failure — a git-read error, a cancelled
-				// context. Fail-safe-continue is the wrong response to a
-				// reason that isn't "we can't parse this claim"; surface it.
-				return nil, fmt.Errorf("gate: read promoting claim %s: %w", batchID, err)
-			}
-			// Undecodable claim: fail SAFE. Mark every candidate we could
-			// still read (readPromotionClaim parses Batch-Candidates before
-			// it can fail on PID/ProcStart) as spoken for, and leave the ref
-			// alone — deleting a claim we cannot read is how a live peer's
-			// batch gets stolen; a residue sweep, not selectCandidates, is
-			// what should eventually clean up a claim nobody can read.
-			for _, id := range cl.candidates {
-				claimed[id] = true
-			}
-			continue
-		}
-		if !ec.CandidateClaimIsDead(domain.CandidateClaim{
-			// OwnerUUID stays empty: the probe reads only host/pid/proc-start,
-			// and inventing an owner would imply an identity gate does not have.
-			Host:      cl.host,
-			PID:       cl.pid,
-			ProcStart: cl.procStart,
-		}) {
-			for _, id := range cl.candidates {
-				claimed[id] = true
-			}
-			continue
-		}
-		if err := UpdateRefsTx(ctx, p.RepoTop, []RefUpdate{
-			{Verb: VerbDelete, Ref: promotingRef(batchID), OldSHA: tip},
-		}); err != nil {
-			return nil, fmt.Errorf("gate: reclaim promoting claim %s: %w", batchID, err)
+	for _, batchID := range batchIDs {
+		if err := reclaimOnePromotion(ctx, p, ec, batchID, refs[batchID], &v); err != nil {
+			return reclaimVerdict{}, err
 		}
 	}
-	return claimed, nil
+	return v, nil
+}
+
+// reclaimOnePromotion handles one refs/loto/promoting/* ref and folds its
+// verdict into v. Split out of reclaimDeadPromotions to keep this function's
+// branching out of that one's cognitive-complexity count.
+//
+//   - A claim whose candidate list parses, but whose PID/ProcStart does not,
+//     marks exactly those candidates spoken for (fail-safe) and leaves the ref
+//     alone.
+//   - A claim whose candidate list itself is missing or garbled names no
+//     candidates to protect, so fail-safe instead blocks the WHOLE round —
+//     under-claiming for the ones we cannot even name would be worse than
+//     stalling until doctor clears it.
+//   - Any other read failure (a git error, a cancelled context) is not a
+//     decode problem; skip just this claim, the pre-loto-fxja behavior for an
+//     infra failure, now visible via a warning instead of a silent continue.
+//   - A live claim's candidates are marked spoken for; a dead one is deleted.
+func reclaimOnePromotion(ctx context.Context, p PromoteParams, ec domain.EvalContext, batchID, tip string, v *reclaimVerdict) error {
+	cl, err := readPromotionClaim(ctx, p.RepoTop, tip)
+	if err != nil {
+		return reclaimBadClaim(cl, err, batchID, v)
+	}
+	if !ec.CandidateClaimIsDead(domain.CandidateClaim{
+		// OwnerUUID stays empty: the probe reads only host/pid/proc-start,
+		// and inventing an owner would imply an identity gate does not have.
+		Host:      cl.host,
+		PID:       cl.pid,
+		ProcStart: cl.procStart,
+	}) {
+		for _, id := range cl.candidates {
+			v.claimed[id] = true
+		}
+		return nil
+	}
+	if err := UpdateRefsTx(ctx, p.RepoTop, []RefUpdate{
+		{Verb: VerbDelete, Ref: promotingRef(batchID), OldSHA: tip},
+	}); err != nil {
+		return fmt.Errorf("gate: reclaim promoting claim %s: %w", batchID, err)
+	}
+	return nil
+}
+
+// reclaimBadClaim folds a readPromotionClaim failure into v and always
+// returns nil: every branch here is a fail-safe skip or block, never a sweep-
+// aborting error (that stays reclaimOnePromotion's UpdateRefsTx branch).
+func reclaimBadClaim(cl promotionClaim, err error, batchID string, v *reclaimVerdict) error {
+	if !errors.Is(err, errBadPromotingClaim) {
+		v.warnings = append(v.warnings, fmt.Sprintf("promoting claim %s unreadable, skipped this round: %v", batchID, err))
+		return nil
+	}
+	if len(cl.candidates) == 0 {
+		// Batch-Candidates itself is missing or garbled: there is nothing to
+		// mark claimed that would actually protect the right candidates, so
+		// block the whole round instead of under-claiming.
+		v.blocked = true
+		v.warnings = append(v.warnings, fmt.Sprintf("promoting claim %s names no readable candidates — blocking this round until doctor clears it", batchID))
+		return nil
+	}
+	// PID/ProcStart failed to parse, but the candidate list is intact: mark
+	// exactly those candidates spoken for and leave the ref alone — deleting
+	// a claim we cannot fully read is how a live peer's batch gets stolen.
+	for _, id := range cl.candidates {
+		v.claimed[id] = true
+	}
+	return nil
 }
 
 // promotionClaim is what a promoting ref's tip commit says about the pusher
@@ -874,11 +936,15 @@ func promoteIdentityEnv() []string {
 // process-wide variable would be visible to every concurrent git call in this
 // process, including a peer goroutine's.
 func gitWithIndex(ctx context.Context, repoTop, idxPath string, stdin *bytes.Buffer, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, gatePlumbingTimeout)
+	// gateTreeTimeout, not gatePlumbingTimeout: read-tree/write-tree/
+	// update-index walk or write a full tree, which a cold packfile or a
+	// large candidate can legitimately stretch well past a plumbing read.
+	ctx, cancel := context.WithTimeout(ctx, gateTreeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = repoTop
-	cmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+idxPath)
+	cmd.Env = gateGitEnv("GIT_INDEX_FILE=" + idxPath)
+	cmd.WaitDelay = gateWaitDelay
 	if stdin != nil {
 		cmd.Stdin = stdin
 	}
@@ -886,7 +952,7 @@ func gitWithIndex(ctx context.Context, repoTop, idxPath string, stdin *bytes.Buf
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", fmt.Errorf("%w: git %s", ErrGitTimeout, strings.Join(args, " "))
 		}
 		return "", fmt.Errorf("gate: git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
