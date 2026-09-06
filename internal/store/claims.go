@@ -188,7 +188,7 @@ func (s *Store) ReleaseClaim(ctx context.Context, prefix string, owner domain.Ag
 	// prefix came out of the row it is deleting.
 	k := s.keys()
 	res, err := tx.ExecContext(ctx,
-		`DELETE FROM claims WHERE `+k.col("path_prefix")+` = ? AND owner_uuid = ?`,
+		`DELETE FROM claims WHERE `+k.col("path_prefix")+` = ? AND owner_uuid = ?`, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
 		k.key(prefix), string(owner))
 	if err != nil {
 		return out, err

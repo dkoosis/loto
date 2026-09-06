@@ -184,18 +184,15 @@ func (s *Store) ListAliveByTargets(ctx context.Context, canonicals []domain.Cano
 // targetCanonical (if any). No self-tag filter — non-holder surfaces (status,
 // lock conflict) show everyone's tags. Empty result when no live lock.
 func (s *Store) ListAliveForTarget(ctx context.Context, targetCanonical domain.Canonical) ([]Tag, error) {
-	k := s.keys() // typed name in the WHERE, mixed-vintage keys across the JOIN
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT t.id, t.target_canonical, t.lock_owner_uuid, t.lock_created_at,
-		       t.tagger_uuid, t.text, t.created_at, t.acked_at
-		FROM tags t
-		JOIN locks l
-		  ON `+k.col("l.target_canonical")+` = `+k.col("t.target_canonical")+`
-		 AND l.owner_uuid       = t.lock_owner_uuid
-		 AND l.created_at       = t.lock_created_at
-		WHERE `+k.col("t.target_canonical")+` = ?
-		  AND t.acked_at IS NULL
-		ORDER BY t.created_at ASC, t.id ASC`, k.key(string(targetCanonical)))
+	k := s.keys()                                                                                                 // typed name in the WHERE, mixed-vintage keys across the JOIN
+	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.target_canonical, t.lock_owner_uuid, t.lock_created_at,`+ //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
+		` t.tagger_uuid, t.text, t.created_at, t.acked_at`+
+		` FROM tags t JOIN locks l`+
+		`   ON `+k.col("l.target_canonical")+` = `+k.col("t.target_canonical")+
+		`  AND l.owner_uuid       = t.lock_owner_uuid`+
+		`  AND l.created_at       = t.lock_created_at`+
+		` WHERE `+k.col("t.target_canonical")+` = ? AND t.acked_at IS NULL`+
+		` ORDER BY t.created_at ASC, t.id ASC`, k.key(string(targetCanonical)))
 	if err != nil {
 		return nil, err
 	}
