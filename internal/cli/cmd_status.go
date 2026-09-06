@@ -167,7 +167,7 @@ func statusCollisions(stdout, stderr io.Writer, rt *runtime) int {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
+	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe(), CaseFold: rt.CaseFold}
 	ownersByTarget := map[string]map[string]bool{}
 	for i := range all {
 		l := &all[i]
@@ -227,7 +227,7 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord) {
 		fmt.Fprintln(stdout, "✓ no locks")
 		return
 	}
-	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
+	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe(), CaseFold: rt.CaseFold}
 	// Classify every row up front so the summary line and the per-row marks
 	// agree on the same verdict (sd-kck) — a lock past its TTL backstop or
 	// whose holder is provably gone is DEAD, and printing ✓ on it read as "53
@@ -311,7 +311,7 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 	}
 	// ec is only consumed by the per-holder rows below; build it after the
 	// no-overlap early return so the happy path skips the closure + time.Now.
-	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
+	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe(), CaseFold: rt.CaseFold}
 	fmt.Fprintf(w, "✗ overlap count=%d target=%s\n", len(overlapping), relPath(t.Canonical))
 	for i := range overlapping {
 		l := &overlapping[i]

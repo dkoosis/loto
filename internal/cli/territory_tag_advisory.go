@@ -19,6 +19,13 @@ import (
 // the segment-boundary rule that keeps `internal/store` off
 // `internal/storefront`. A second prefix definition would be a second thing to
 // keep true.
+//
+// ‡ Byte-exact, deliberately — not EvalContext.PrefixCovers (loto-8soe). Both
+// sides here are minted by resolveCLIPrefix/resolveCLITarget, so on a
+// case-folding filesystem both are already folded and the widened form would
+// find nothing extra. The widened form exists for rows an OLDER loto wrote,
+// and the worst a missed one costs here is an unprinted ⚠ note — no grant
+// turns on it, so it does not earn an EvalContext through this call.
 func territoryTagCovers(n store.TerritoryTag, targetCanonical string, nowNs int64) bool {
 	return n.Live(nowNs) && domain.PrefixOverlaps(n.PathPrefix, targetCanonical)
 }

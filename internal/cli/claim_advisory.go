@@ -29,21 +29,24 @@ func foreignClaimAdvisoriesFor(rt *runtime, targets []domain.Target, now time.Ti
 	if err != nil {
 		return nil
 	}
-	return collectForeignClaimAdvisories(targets, claims, rt.Agent.UUID, now)
+	return collectForeignClaimAdvisories(targets, claims, rt.Agent.UUID,
+		domain.EvalContext{Now: now, CaseFold: rt.CaseFold})
 }
 
 // collectForeignClaimAdvisories returns one advisory per (target, covering
 // live foreign claim), deduped and deterministically sorted by
 // (Target, Owner, Prefix). Empty when no claim covers any target. Shares
-// domain.ClaimCoversTarget with check --gate's gateDecide — same predicate,
-// two dispositions (deny vs advisory).
-func collectForeignClaimAdvisories(targets []domain.Target, claims []domain.ClaimRecord, myUUID string, now time.Time) []foreignClaimAdvisory {
+// EvalContext.ClaimCovers with check --gate's gateDecide — same predicate,
+// two dispositions (deny vs advisory). ec carries the clock AND the
+// filesystem's case class, so the advisory cannot go quiet on a row the gate
+// would deny (loto-8soe).
+func collectForeignClaimAdvisories(targets []domain.Target, claims []domain.ClaimRecord, myUUID string, ec domain.EvalContext) []foreignClaimAdvisory {
 	var rows []foreignClaimAdvisory
 	seen := map[string]bool{}
 	for _, t := range targets {
 		for i := range claims {
 			c := &claims[i]
-			if !domain.ClaimCoversTarget(*c, t.Canonical, myUUID, now) {
+			if !ec.ClaimCovers(*c, t.Canonical, myUUID) {
 				continue
 			}
 			key := t.Canonical + "|" + c.PathPrefix + "|" + string(c.OwnerUUID)

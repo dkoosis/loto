@@ -180,7 +180,7 @@ func runViolationScan(rt *runtime, repoTop string) (store.ScanResult, error) {
 		}
 		return store.ScanResult{}, err
 	}
-	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
+	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe(), CaseFold: rt.CaseFold}
 	return rt.Store.ReconcileScan(rt.Ctx, scan, ec)
 }
 

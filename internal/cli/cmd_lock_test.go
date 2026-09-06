@@ -647,7 +647,7 @@ func TestCollectForeignClaimAdvisories_OwnAndForeignClaim_OnlyForeignEmits(t *te
 		{PathPrefix: tcPrefixStore, OwnerUUID: meUUID, Intent: "own-intent", ExpiresAt: now.Add(time.Hour)},
 		{PathPrefix: "internal", OwnerUUID: foeUUID, Intent: "foreign-intent", ExpiresAt: now.Add(time.Hour)},
 	}
-	rows := collectForeignClaimAdvisories([]domain.Target{target}, claims, meUUID, now)
+	rows := collectForeignClaimAdvisories([]domain.Target{target}, claims, meUUID, domain.EvalContext{Now: now})
 	if len(rows) != 1 {
 		t.Fatalf("want 1 row (own claim filtered out), got %d: %+v", len(rows), rows)
 	}
@@ -668,7 +668,7 @@ func TestCollectForeignClaimAdvisories_DedupsDuplicateTarget(t *testing.T) {
 	claims := []domain.ClaimRecord{
 		{PathPrefix: tcPrefixStore, OwnerUUID: "foe-uuid", Intent: "foe", ExpiresAt: now.Add(time.Hour)},
 	}
-	rows := collectForeignClaimAdvisories([]domain.Target{target, target}, claims, "my-uuid", now)
+	rows := collectForeignClaimAdvisories([]domain.Target{target, target}, claims, "my-uuid", domain.EvalContext{Now: now})
 	if len(rows) != 1 {
 		t.Fatalf("want 1 deduped row for duplicate target input, got %d: %+v", len(rows), rows)
 	}
@@ -690,7 +690,7 @@ func TestCollectForeignClaimAdvisories_OwnerTieBreak(t *testing.T) {
 		{PathPrefix: tcPrefixStore, OwnerUUID: ownerB, Intent: "b", ExpiresAt: now.Add(time.Hour)},
 		{PathPrefix: tcPrefixStore, OwnerUUID: ownerA, Intent: "a", ExpiresAt: now.Add(time.Hour)},
 	}
-	rows := collectForeignClaimAdvisories([]domain.Target{target}, claims, "my-uuid", now)
+	rows := collectForeignClaimAdvisories([]domain.Target{target}, claims, "my-uuid", domain.EvalContext{Now: now})
 	if len(rows) != 2 {
 		t.Fatalf("want 2 rows, got %d: %+v", len(rows), rows)
 	}

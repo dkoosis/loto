@@ -46,7 +46,7 @@ func (s *Store) withLockBatchTx(ctx context.Context, targets []domain.Target, li
 	}
 
 	now := time.Now()
-	if err := fn(tx, existing, domain.EvalContext{Now: now, Live: live}, now); err != nil {
+	if err := fn(tx, existing, domain.EvalContext{Now: now, Live: live, CaseFold: s.caseFold}, now); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

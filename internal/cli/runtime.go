@@ -96,6 +96,13 @@ type runtime struct {
 	SessionUUID   domain.SessionUUID // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID or CLAUDE_CODE_SESSION_ID
 	SessionPinned bool               // true iff either of those was in env; gates session-scoped semantics
 	AgentPinned   bool               // true iff a non-empty LOTO_AGENT_ID, a usable LOTO_SUBAGENT_ID (SubagentIDPins), or CLAUDE_CODE_SESSION_ID pins an identity; false → Agent is a display-only throwaway (identity.Ephemeral)
+	// CaseFold: this checkout is on a case-folding filesystem, probed ONCE per
+	// invocation (loto-8soe). It is the same answer foldTargetKey mints keys
+	// with, handed to the store and to every EvalContext the CLI builds, so
+	// the key a caller presents and the rows it is compared against are judged
+	// under one rule. ✗ re-probe per command — the answer cannot change
+	// mid-invocation and the probe reads a directory.
+	CaseFold bool
 }
 
 // errIdentityUnpinned is what a write verb prints when nothing in the
@@ -169,7 +176,9 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	s, err := store.OpenContext(ctx, filepath.Join(dir, "loto.db"), store.WithRepoTop(top))
+	fold := caseInsensitiveFS(top)
+	s, err := store.OpenContext(ctx, filepath.Join(dir, "loto.db"),
+		store.WithRepoTop(top), store.WithCaseFoldedKeys(fold))
 	if err != nil {
 		return nil, fmt.Errorf("store.Open: %w", err)
 	}
@@ -193,6 +202,7 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 		HostKnown:     hostKnown,
 		StateDir:      dir,
 		RepoTop:       top,
+		CaseFold:      fold,
 		SessionUUID:   domain.SessionUUID(sid),
 		SessionPinned: pinned,
 		AgentPinned:   agentPinned,

@@ -377,7 +377,7 @@ func syncStoreDecideApply(rt *runtime, repoTop, expectedIntegration string, deci
 			return fmt.Errorf("%w: expected=%s actual=%s", errSyncIntegrationChanged, expectedIntegration, currentIntegration)
 		}
 
-		ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe())}
+		ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold}
 		apply, decidedConflicts := syncDecide(decidable, locks, claims, cands, ec)
 		sweep, residueConflicts := syncDecideResidue(residue, locks, claims, cands, ec)
 		out.Conflicts = mergeSyncConflicts(decidedConflicts, residueConflicts)
@@ -905,7 +905,7 @@ func syncConflictFor(path string, locks []domain.LockRecord, claims []domain.Cla
 	}
 	for i := range claims {
 		c := &claims[i]
-		if domain.ClaimCoversTarget(*c, path, "", ec.Now) && !ec.ClaimIsStale(*c) {
+		if ec.ClaimCovers(*c, path, "") && !ec.ClaimIsStale(*c) {
 			return syncReasonTerritoryClaim, string(c.OwnerUUID), true
 		}
 	}

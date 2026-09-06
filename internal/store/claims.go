@@ -97,7 +97,7 @@ func (s *Store) ClaimPrefix(ctx context.Context, rec domain.ClaimRecord, live do
 	if err != nil {
 		return err
 	}
-	blockers, expired := partitionClaims(all, rec, domain.EvalContext{Now: time.Now(), Live: live})
+	blockers, expired := partitionClaims(all, rec, domain.EvalContext{Now: time.Now(), Live: live, CaseFold: s.caseFold})
 	if len(blockers) > 0 {
 		return &ClaimConflictError{Blockers: blockers}
 	}
@@ -129,7 +129,7 @@ func (s *Store) ClaimPrefix(ctx context.Context, rec domain.ClaimRecord, live do
 func partitionClaims(all []domain.ClaimRecord, rec domain.ClaimRecord, ec domain.EvalContext) (blockers, expired []domain.ClaimRecord) {
 	for i := range all {
 		ex := &all[i]
-		if !domain.PrefixOverlaps(ex.PathPrefix, rec.PathPrefix) || ex.OwnerUUID == rec.OwnerUUID {
+		if !ec.PrefixCovers(ex.PathPrefix, rec.PathPrefix) || ex.OwnerUUID == rec.OwnerUUID {
 			continue
 		}
 		if ec.ClaimIsStale(*ex) {

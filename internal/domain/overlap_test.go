@@ -119,3 +119,49 @@ func TestSameCanonical(t *testing.T) {
 		})
 	}
 }
+
+// TestEvalContextFoldedComparisonsResolveLegacyKeys: a row an OLDER loto wrote
+// carries the on-disk spelling, and the CLI now presents the folded key. On a
+// case-folding filesystem those name one file and must still collide —
+// otherwise the fold's own arrival re-opens the double-grant it closes
+// (loto-8soe). With CaseFold off the same pair stays two independent files.
+func TestEvalContextFoldedComparisonsResolveLegacyKeys(t *testing.T) {
+	legacy := Target{Canonical: "docs/README.md"} // as a pre-fold loto stored it
+	folded := Target{Canonical: "docs/readme.md"} // as the CLI mints it now
+	const target = "docs/guides/x.md"
+	claim := ClaimRecord{PathPrefix: "docs/Guides", OwnerUUID: "owner-a"}
+
+	for _, c := range []struct {
+		name string
+		fold bool
+		want bool
+	}{{"case-folding-fs", true, true}, {"case-sensitive-fs", false, false}} {
+		t.Run(c.name, func(t *testing.T) {
+			ec := EvalContext{Now: time.Now(), CaseFold: c.fold}
+			claim.ExpiresAt = ec.Now.Add(time.Hour)
+			if got := ec.SameTarget(folded, legacy); got != c.want {
+				t.Errorf("SameTarget(%q,%q) = %v; want %v", folded.Canonical, legacy.Canonical, got, c.want)
+			}
+			if got := ec.PrefixCovers(claim.PathPrefix, target); got != c.want {
+				t.Errorf("PrefixCovers(%q,%q) = %v; want %v", claim.PathPrefix, target, got, c.want)
+			}
+			if got := ec.ClaimCovers(claim, target, "owner-b"); got != c.want {
+				t.Errorf("ClaimCovers = %v; want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestEvalContextFoldWidensOnlyThePathLeg: a claim that is the caller's own, or
+// expired, covers nothing however the spellings line up.
+func TestEvalContextFoldWidensOnlyThePathLeg(t *testing.T) {
+	ec := EvalContext{Now: time.Now(), CaseFold: true}
+	mine := ClaimRecord{PathPrefix: "Docs", OwnerUUID: "me", ExpiresAt: ec.Now.Add(time.Hour)}
+	if ec.ClaimCovers(mine, "docs/x.md", "me") {
+		t.Error("a caller's own claim must not cover its own target")
+	}
+	dead := ClaimRecord{PathPrefix: "Docs", OwnerUUID: "other", ExpiresAt: ec.Now.Add(-time.Hour)}
+	if ec.ClaimCovers(dead, "docs/x.md", "me") {
+		t.Error("an expired claim must not cover a target")
+	}
+}

@@ -93,7 +93,7 @@ func cmdSubmit(ctx context.Context, args []string, stdout, stderr io.Writer) int
 // reject: render why, write nothing).
 func runSubmit(rt *runtime, repoTop, bead, msg string, targets []domain.Target, stdout, stderr io.Writer) int {
 	owner := domain.AgentUUID(rt.Agent.UUID)
-	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
+	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe(), CaseFold: rt.CaseFold}
 
 	// 1. LEASE CHECK — "fail at the cheap end": no git plumbing, no envelope,
 	// no admission call until every target is confirmed held, live, exclusive.

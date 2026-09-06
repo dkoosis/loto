@@ -69,7 +69,7 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 		l := &locks[i]
 		// Kin rows (ec.Kin — the parent identity behind a subagent stamp) are
 		// this caller's own, same as myUUID (loto-wofb).
-		if !domain.SameCanonical(t, l.Target) || string(l.OwnerUUID) == myUUID || ec.IsKin(l.OwnerUUID) || ec.IsStale(*l) {
+		if !ec.SameTarget(t, l.Target) || string(l.OwnerUUID) == myUUID || ec.IsKin(l.OwnerUUID) || ec.IsStale(*l) {
 			continue
 		}
 		key := "lock|" + t.Canonical + "|" + string(l.OwnerUUID)
@@ -87,7 +87,7 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 		// ClaimCoversTarget settles overlap + foreign + TTL; ec.ClaimIsStale adds
 		// the owner-liveness leg so the path-scoped gate and the repo-wide
 		// gateDecideAny apply one standard of "live" to claims (loto-tzmv.9).
-		if ec.IsKin(c.OwnerUUID) || !domain.ClaimCoversTarget(*c, t.Canonical, myUUID, ec.Now) || ec.ClaimIsStale(*c) {
+		if ec.IsKin(c.OwnerUUID) || !ec.ClaimCovers(*c, t.Canonical, myUUID) || ec.ClaimIsStale(*c) {
 			continue
 		}
 		key := "claim|" + t.Canonical + "|" + c.PathPrefix + "|" + string(c.OwnerUUID)
@@ -229,7 +229,7 @@ func runCheckGate(ctx context.Context, paths []string, base, repoTop string, std
 
 	// memoized: gateDecide evaluates the predicate per (target × record), so a
 	// wide staged set would otherwise re-probe one holder hundreds of times.
-	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe())}
+	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold}
 	// A stamped sibling also owns its parent's rows — its Bash-side locks and
 	// claims were taken unstamped (loto-wofb). Resolution failure here is the
 	// same infra class as an unreachable store: say so, fail open.

@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/dkoosis/atomicfile"
@@ -232,7 +231,7 @@ func resolveCLITarget(cc *caseCache, base, repoTop, raw string) (domain.Target, 
 	if err != nil {
 		return domain.Target{}, err
 	}
-	t.Canonical = resolveDiskCase(cc, repoTop, t.Canonical)
+	t.Canonical = foldTargetKey(cc, repoTop, t.Canonical)
 	return t, nil
 }
 
@@ -426,67 +425,58 @@ func foldContains(parent, child string) (string, bool) {
 	return child[len(parent)+1:], true
 }
 
-// resolveDiskCase rewrites a repo-relative POSIX path to the spelling the
-// filesystem actually records, so two agents typing internal/store/x.go and
-// internal/Store/x.go mint ONE lock key (loto-f8m8).
+// foldTargetKey turns a repo-relative POSIX path into the key the store
+// records, so every spelling of one file on a case-folding filesystem mints
+// ONE key (loto-f8m8, loto-8soe).
 //
-// ‡ The bug this closes: every conflict decision — lock overlap, claim prefix
-// overlap, `check --gate` admission — is a byte comparison over
+// ‡ The key is a pure function of the caller's spelling and the filesystem's
+// case class. It never reads a directory entry, and that is the fix: its
+// predecessor resolveDiskCase asked disk what the file was called, and disk
+// cannot answer twice the same way (loto-8soe, Codex's two P1s on #306). It
+// has NO answer for a path nobody has written yet — the whole purpose of
+// `loto beacon` — so `internal/store/New.go` and `internal/store/new.go` stayed
+// two keys and both agents were admitted. And its answer MOVES: rename an
+// entry by case alone (`git mv foo.go Foo.go`) and a live lock minted as
+// foo.go no longer matches the Foo.go a peer now resolves to.
+//
+// ‡ The bug the fold closes at all: every conflict decision — lock overlap,
+// claim prefix overlap, `check --gate` admission — is a byte comparison over
 // Target.Canonical (domain.SameCanonical, domain.PrefixOverlaps). On APFS or
-// NTFS the two spellings above are one inode and were two keys, so no overlap
-// was detected and both agents were granted the same file. Folding at the
-// domain comparisons was rejected: the canonical string is also the SQL key
-// for every lock, claim and violation row, so the fix has to converge the key
-// itself, once, at the CLI boundary.
+// NTFS two case-variant spellings are one inode and were two keys, so no
+// overlap was detected and both agents were granted the same file.
 //
 // Guarded on caseInsensitiveFS, so on a case-sensitive filesystem — where a.go
-// and A.go are genuinely two files — nothing changes.
+// and A.go are genuinely two files — the caller's spelling IS the key and
+// nothing changes.
 //
-// Segments below the deepest one that exists keep the caller's casing: a
-// `beacon` names a file that does not exist yet, and disk has no truth to
-// offer about it. Directory case, the realistic divergence, still converges.
-func resolveDiskCase(cc *caseCache, repoTop, rel string) string {
+// strings.ToLower, not the filesystem's own folding table: it is deterministic
+// on every platform and its worst case is two exotic Unicode names sharing a
+// key, which over-blocks rather than under-blocks. Under-blocking is the bug.
+func foldTargetKey(cc *caseCache, repoTop, rel string) string {
 	if repoTop == "" || rel == "" || rel == "." || filepath.IsAbs(rel) {
 		return rel
 	}
 	if !cc.foldsAt(repoTop) {
 		return rel
 	}
-	segs := strings.Split(rel, "/")
-	dir := repoTop
-	for i, seg := range segs {
-		if seg == "" || seg == "." || seg == ".." {
-			return rel // not a shape this walk can reason about
-		}
-		onDisk, ok := lookupEntryFold(cc, dir, seg)
-		if !ok {
-			break // nothing below this point exists; keep the typed tail
-		}
-		segs[i] = onDisk
-		dir = filepath.Join(dir, onDisk)
-	}
-	return strings.Join(segs, "/")
+	return strings.ToLower(rel)
 }
 
-// caseCache memoizes the two filesystem questions resolveDiskCase asks, for the
-// life of one command's target batch. A nil *caseCache is legal and answers
-// every question from disk — the single-target verbs pass nil.
+// caseCache memoizes the filesystem question foldTargetKey asks, for the life
+// of one command's target batch. A nil *caseCache is legal and answers from
+// disk — the single-target verbs pass nil.
 //
-// ‡ Without it the walk is quadratic (loto-f8m8, codex review on #306): every
-// target re-read every directory on its path, so `check --staged` over N files
-// in one N-entry directory did N ReadDirs of N entries. Measured on APFS, 300
-// targets in a 300-entry directory: 71ms uncached.
+// ‡ Without it the probe re-ran per target (loto-f8m8, codex review on #306).
 //
 // Scoped to a batch rather than the process because the cache must not outlive
 // the moment it describes — `loto lane` creates files between batches, and the
 // package's own tests mkdir mid-test.
 type caseCache struct {
-	folds map[string]bool     // dir → its filesystem folds case
-	dirs  map[string][]string // dir → entry names, nil when unreadable
+	folds map[string]bool // dir → its filesystem folds case
 }
 
 func newCaseCache() *caseCache {
-	return &caseCache{folds: map[string]bool{}, dirs: map[string][]string{}}
+	return &caseCache{folds: map[string]bool{}}
 }
 
 // foldsAt is caseInsensitiveFS memoized per directory.
@@ -502,46 +492,6 @@ func (c *caseCache) foldsAt(dir string) bool {
 	return v
 }
 
-// entryNames returns dir's entry names, reading dir at most once per cache. ok
-// is false when dir cannot be read.
-func (c *caseCache) entryNames(dir string) ([]string, bool) {
-	if c != nil {
-		if v, cached := c.dirs[dir]; cached {
-			return v, v != nil
-		}
-	}
-	var names []string
-	if ents, err := os.ReadDir(dir); err == nil {
-		names = make([]string, len(ents))
-		for i := range ents {
-			names[i] = ents[i].Name()
-		}
-	}
-	if c != nil {
-		c.dirs[dir] = names
-	}
-	return names, names != nil
-}
-
-// lookupEntryFold returns the entry of dir whose name equals name ignoring
-// case. An exact match wins over a folded one — a case-sensitive filesystem
-// can hold both, and this must not rename a path that was already right.
-func lookupEntryFold(cc *caseCache, dir, name string) (string, bool) {
-	names, ok := cc.entryNames(dir)
-	if !ok {
-		return "", false
-	}
-	if slices.Contains(names, name) {
-		return name, true
-	}
-	for _, n := range names {
-		if strings.EqualFold(n, name) {
-			return n, true
-		}
-	}
-	return "", false
-}
-
 // caseInsensitiveFS reports whether dir resides on a case-insensitive filesystem
 // by checking that a case-flipped variant of some existing path resolves to the
 // same inode. dir must exist. Returns false — the conservative, case-sensitive
@@ -553,7 +503,7 @@ func lookupEntryFold(cc *caseCache, dir, name string) (string, bool) {
 // directory named without an ASCII letter — `/Users/dk/2026/proj`'s parent, a
 // numeric release dir, and every `t.TempDir()` in this package's own tests,
 // whose basenames are digits. That is the quiet-disable failure: the fold in
-// resolveDiskCase turns itself off and the case-variant bug returns with no
+// foldTargetKey turns itself off and the case-variant bug returns with no
 // signal. Probing an entry inside dir stays on dir's own volume, so it cannot
 // answer for a different filesystem the way walking up to a parent could.
 func caseInsensitiveFS(dir string) bool {
@@ -599,8 +549,9 @@ func probeFoldedPath(path string) (answer, ok bool) {
 	// case-SENSITIVE filesystem (`/work/Repo -> repo`). A folding filesystem
 	// cannot hold both spellings as separate entries, so seeing both listed is
 	// proof the filesystem does not fold (loto-f8m8, codex review on #306).
-	// Without this the probe answers "folds", and resolveDiskCase then rewrites
-	// A.go to an existing a.go — `loto lock A.go` would lock a different file.
+	// Without this the probe answers "folds", and foldTargetKey then mints one
+	// key for A.go and a.go — two genuinely distinct files, so a lock on one
+	// would refuse a peer standing on the other.
 	if bothSpellingsListed(path, flipped) {
 		return false, true
 	}

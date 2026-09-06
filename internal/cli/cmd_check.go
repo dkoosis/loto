@@ -129,7 +129,7 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// Filter stale/dead-PID holders the same way AcquireLocks does
 	// (reclaimStaleAndCollectBlockers → domain.IsStale): a lock that `loto lock`
 	// would silently reclaim must not read as a hard conflict here (loto-9t0q).
-	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe()}
+	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe(), CaseFold: rt.CaseFold}
 
 	// Resolve targets once, up front. Invalid input exits 2 before any claim
 	// read — so the wasted ListClaims/resolve on the error path is gone, and

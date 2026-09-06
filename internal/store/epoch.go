@@ -55,7 +55,7 @@ RETURNING epoch`, path).Scan(&epoch)
 // reclaim would.
 func resolveEpoch(ctx context.Context, tx *sql.Tx, l domain.LockRecord, all []domain.LockRecord, ec domain.EvalContext) (int64, error) {
 	for i := range all {
-		if all[i].OwnerUUID == l.OwnerUUID && domain.SameCanonical(all[i].Target, l.Target) && !ec.IsStale(all[i]) {
+		if all[i].OwnerUUID == l.OwnerUUID && ec.SameTarget(all[i].Target, l.Target) && !ec.IsStale(all[i]) {
 			return all[i].Epoch, nil // renewal: preserve
 		}
 	}
