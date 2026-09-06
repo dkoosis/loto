@@ -451,24 +451,27 @@ func syncApplyDecision(ctx context.Context, repoTop string, apply []syncDiff, sw
 	return deleteErr
 }
 
-// syncResidueState is what one probe of a residue path found.
-type syncResidueState int
+// syncProbeState is what one probe of a worktree path found.
+type syncProbeState int
 
 const (
-	// residueStateHashed: an ordinary file, and the probe's oid is its current
-	// content. Whether that content is still the candidate's is the CALLER's
-	// comparison — the probe reports what is there, it does not judge it.
-	residueStateHashed syncResidueState = iota
-	// residueStateVanished: nothing at the path any more. Someone got there
-	// first; there is nothing to delete and nothing to report as done.
-	residueStateVanished
-	// residueStateNotRegular: a directory or a symlink now stands there.
-	residueStateNotRegular
+	// syncProbeHashed: an ordinary file, and the probe's oid is its current
+	// content. Whether that content is the one the caller expected is the
+	// CALLER's comparison — the probe reports what is there, it does not
+	// judge it.
+	syncProbeHashed syncProbeState = iota
+	// syncProbeVanished: nothing at the path any more. Someone got there
+	// first.
+	syncProbeVanished
+	// syncProbeNotRegular: a directory or a symlink now stands there.
+	syncProbeNotRegular
 )
 
-// probeResidue answers, for one path, the only question that authorizes a
-// deletion: is this still an ordinary file holding exactly the bytes the
-// rejected candidate wrote?
+// syncProbePath answers, for one path, the only question that authorizes
+// touching it: is this still an ordinary file, and what does it hold RIGHT
+// NOW? Both halves of sync ask immediately before they act — the deletion
+// half against the blob a rejected candidate wrote, the fast-forward half
+// against the oid the divergence scan hashed.
 //
 // ‡ Lstat FIRST, then hash, and both per file. Ordering: `git hash-object`
 // follows a symlink, so hashing first reads a live link's target and fails
@@ -476,22 +479,23 @@ const (
 // `git hash-object --stdin-paths` exits 128 and takes the WHOLE sync down when
 // any one of its paths has vanished since the scan — a peer cleaning up its
 // own residue mid-run should cost that one path, not the fast-forward of every
-// other file in the tree. One process per residue file is affordable because
-// the residue set is bounded by what a rejection declared, unlike the
-// divergence scan's whole-tree manifest, which keeps the batch.
+// other file in the tree. One process per probed file is affordable because
+// both callers probe a bounded set — what a rejection declared, or what the
+// scan already found divergent — unlike the divergence scan's whole-tree
+// manifest, which keeps the batch.
 //
 // A hash failure is re-probed rather than trusted: if the file is gone by
 // then, the failure WAS the race and the path is simply vanished.
-func probeResidue(ctx context.Context, repoTop, path string) (oid string, state syncResidueState, err error) {
+func syncProbePath(ctx context.Context, repoTop, path string) (oid string, state syncProbeState, err error) {
 	full := filepath.Join(repoTop, filepath.FromSlash(path))
 	fi, statErr := os.Lstat(full)
 	switch {
 	case os.IsNotExist(statErr):
-		return "", residueStateVanished, nil
+		return "", syncProbeVanished, nil
 	case statErr != nil:
-		return "", residueStateVanished, fmt.Errorf("lstat %s: %w", syncPathField(path), statErr)
+		return "", syncProbeVanished, fmt.Errorf("lstat %s: %w", syncPathField(path), statErr)
 	case !fi.Mode().IsRegular():
-		return "", residueStateNotRegular, nil
+		return "", syncProbeNotRegular, nil
 	}
 
 	c, cancel := context.WithTimeout(ctx, gitTimeout)
@@ -499,15 +503,15 @@ func probeResidue(ctx context.Context, repoTop, path string) (oid string, state 
 	oid, hashErr := hashExceptionalPath(c, repoTop, path)
 	if hashErr != nil {
 		if _, again := os.Lstat(full); os.IsNotExist(again) {
-			return "", residueStateVanished, nil
+			return "", syncProbeVanished, nil
 		}
-		return "", residueStateVanished, hashErr
+		return "", syncProbeVanished, hashErr
 	}
-	return oid, residueStateHashed, nil
+	return oid, syncProbeHashed, nil
 }
 
 // syncClassifyResidue decides which attributed residue is still the rejected
-// candidate's own bytes, and is therefore deletable. See probeResidue for the
+// candidate's own bytes, and is therefore deletable. See syncProbePath for the
 // two gates and why they run in that order, per file.
 //
 // ‡ The content gate is the review's correction, and the asymmetry behind it
@@ -517,14 +521,14 @@ func probeResidue(ctx context.Context, repoTop, path string) (oid string, state 
 // file with their own work — the path matched, the file did not.
 func syncClassifyResidue(ctx context.Context, repoTop string, sweep []syncResidue) (deletable []syncResidue, skips []syncConflict, modified []syncResidueMismatch, err error) {
 	for _, r := range sweep {
-		oid, state, probeErr := probeResidue(ctx, repoTop, r.Path)
+		oid, state, probeErr := syncProbePath(ctx, repoTop, r.Path)
 		if probeErr != nil {
 			return nil, nil, nil, probeErr
 		}
 		switch {
-		case state == residueStateVanished:
+		case state == syncProbeVanished:
 			continue
-		case state == residueStateNotRegular:
+		case state == syncProbeNotRegular:
 			skips = append(skips, syncConflict{Path: r.Path, Reason: syncReasonResidueNotFile, Holder: r.CandidateID})
 		case oid == r.Blob:
 			deletable = append(deletable, r)
@@ -575,14 +579,14 @@ func syncDecideResidue(residue []syncResidue, locks []domain.LockRecord, claims 
 // recursive form is a mistake this function must not be able to make.
 func syncDeleteResidue(ctx context.Context, repoTop string, deletable []syncResidue) (deleted []syncResidue, skips []syncConflict, modified []syncResidueMismatch, err error) {
 	for _, r := range deletable {
-		oid, state, probeErr := probeResidue(ctx, repoTop, r.Path)
+		oid, state, probeErr := syncProbePath(ctx, repoTop, r.Path)
 		if probeErr != nil {
 			return deleted, skips, modified, probeErr
 		}
 		switch {
-		case state == residueStateVanished:
+		case state == syncProbeVanished:
 			continue
-		case state == residueStateNotRegular:
+		case state == syncProbeNotRegular:
 			skips = append(skips, syncConflict{Path: r.Path, Reason: syncReasonResidueNotFile, Holder: r.CandidateID})
 			continue
 		case oid != r.Blob:
