@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -150,6 +153,36 @@ func TestVerifyReportsCommandFailure(t *testing.T) {
 	}
 }
 
+// TestKillVerifyGroupNormalizesESRCHToProcessDone pins the review fix on
+// loto-wtxe: exec's own Cancel contract (os/exec's watchCtx) only skips
+// injecting a spurious cancel error into an otherwise-successful Wait when
+// Cancel returns exactly os.ErrProcessDone. A ctx cancel racing a genuine
+// pass makes syscall.Kill on the already-exited group return raw ESRCH;
+// returning that raw errno (instead of os.ErrProcessDone) would make Wait
+// report errVerifyAborted for a command that actually exited 0.
+func TestKillVerifyGroupNormalizesESRCHToProcessDone(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	c := exec.Command("sh", "-c", "exit 0")
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := c.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+
+	// The group has already exited (Wait returned above), mirroring Cancel
+	// firing just after a genuine pass. killVerifyGroup must report exactly
+	// os.ErrProcessDone here, not nil (which exec would read as "successfully
+	// interrupted" and inject ctx.Err() anyway) and not the raw ESRCH.
+	if err := killVerifyGroup(c.Process.Pid); !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("killVerifyGroup on an already-exited group = %v, want os.ErrProcessDone", err)
+	}
+}
+
 // TestRunVerifyCmdCtxExpiryIsInfraError pins the loto-px54 fix: when the ctx
 // deadline/cancel kills a RUNNING verify command, exec returns an *exec.ExitError
 // ("signal: killed"). That is an infrastructure abort, not a test verdict, so it
@@ -165,6 +198,59 @@ func TestRunVerifyCmdCtxExpiryIsInfraError(t *testing.T) {
 	}
 	if passed {
 		t.Error("Passed=true for a ctx-killed command; an aborted run has no verdict")
+	}
+}
+
+// TestRunVerifyCmdKillsOrphanedGrandchild pins the loto-wtxe fix. Mirrors the
+// bead's own repro (sh -c "sleep N & sleep N" under a short ctx): the
+// backgrounded sleep inherits the captured-output pipe's write end, and on
+// unfixed code (no WaitDelay, no process group) that keeps Wait blocked until
+// the grandchild exits on its own — 30s here, not the ~200ms ctx. The pid
+// file lets the test assert the grandchild is actually killed, not merely
+// detached and left running.
+func TestRunVerifyCmdKillsOrphanedGrandchild(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	script := "sleep 30 & echo $! > " + pidFile + "; sleep 30"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, passed, err := runVerifyCmd(ctx, t.TempDir(), []string{"sh", "-c", script})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, errVerifyAborted) {
+		t.Errorf("err = %v, want errVerifyAborted", err)
+	}
+	if passed {
+		t.Error("Passed=true for a ctx-killed command")
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("runVerifyCmd took %s to return past a 200ms ctx — the orphaned grandchild wedged Wait", elapsed)
+	}
+
+	raw, rerr := os.ReadFile(pidFile)
+	if rerr != nil {
+		t.Fatalf("grandchild never wrote its pid: %v", rerr)
+	}
+	pid, perr := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if perr != nil {
+		t.Fatalf("bad pid file content %q: %v", raw, perr)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if kerr := syscall.Kill(pid, 0); errors.Is(kerr, syscall.ESRCH) {
+			break // gone: the grandchild was killed, not merely detached
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("grandchild pid %d still alive; want it killed alongside its parent", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

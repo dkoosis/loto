@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -17,6 +18,15 @@ import (
 // module — so the bound is minutes, not seconds. It only guards a wedged
 // command; a shorter caller ctx deadline, if any, still wins.
 const verifyTimeout = 15 * time.Minute
+
+// verifyWaitDelay bounds how long c.Wait keeps draining the command's
+// stdout/stderr pipe after Cancel fires. Left at zero (the default), Wait
+// reads the pipe until EOF, which does not occur until every process holding
+// the write end closes it — including an orphaned grandchild that survives
+// the direct child's death (loto-wtxe). A few seconds is enough for the
+// process group's fds to close once SIGKILLed; it is not a second verify
+// budget.
+const verifyWaitDelay = 5 * time.Second
 
 // errVerifyInput is the stable target for a malformed Verify call (repo
 // convention: static error, not an ad-hoc string).
@@ -125,6 +135,22 @@ func Verify(ctx context.Context, repoTop, commit string, cmd []string) (VerifyRe
 // — quietly voiding the "this is the commit's tree, isolated" guarantee
 // Verify sells. No go.work exists in this repo today, so this guards a real
 // but not-yet-triggered failure mode, not one observed here.
+// killVerifyGroup SIGKILLs the process group led by pid (the verify command,
+// started with Setpgid so its own pid doubles as the group id). It normalizes
+// ESRCH — the group has already exited, e.g. a ctx cancel racing a genuine
+// pass — to os.ErrProcessDone: exec's Cancel contract (os/exec's watchCtx)
+// only skips injecting a spurious cancel error into an otherwise-successful
+// Wait when Cancel returns exactly os.ErrProcessDone, not a raw ESRCH.
+// Returning the raw errno there would misclassify a real pass as
+// errVerifyAborted whenever ctx expiry lands after the group already exited.
+func killVerifyGroup(pid int) error {
+	err := syscall.Kill(-pid, syscall.SIGKILL)
+	if errors.Is(err, syscall.ESRCH) {
+		return os.ErrProcessDone
+	}
+	return err
+}
+
 func runVerifyCmd(ctx context.Context, dir string, cmd []string) (string, bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -152,6 +178,19 @@ func runVerifyCmd(ctx context.Context, dir string, cmd []string) (string, bool, 
 	// nil-Env was already doing implicitly; this line preserves that, not a
 	// new behavior.
 	c.Env = append(os.Environ(), "GOWORK=off", "PWD="+dir)
+	// Run in its own process group: make/go test spawn grandchildren, and
+	// without this, killing only the direct child (exec's default Cancel)
+	// leaves them holding the stdout/stderr pipe open, so Wait blocks on
+	// draining it long after ctx expired (loto-wtxe). Setpgid with no Pgid
+	// makes the child the group leader, so its own pid doubles as the group id.
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Override the default Cancel (Process.Kill, direct child only) to SIGKILL
+	// the whole group, so an orphaned grandchild dies with its parent instead
+	// of surviving ctx expiry.
+	c.Cancel = func() error {
+		return killVerifyGroup(c.Process.Pid)
+	}
+	c.WaitDelay = verifyWaitDelay
 	var buf bytes.Buffer
 	c.Stdout = &buf
 	c.Stderr = &buf
