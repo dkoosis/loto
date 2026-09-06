@@ -64,11 +64,16 @@ func (s *Store) InsertTag(ctx context.Context, t NewTag) (string, error) {
 	}
 	defer cleanup()
 
+	// ‡ Both probes key on the target a CALLER typed (`loto tag <path>`), so
+	// both fold when the store folds. A legacy holder spelled `Foo.go` would
+	// otherwise answer ErrNoHostLock to a tag on foo.go — the note refused on
+	// exactly the ground it is about (loto-8soe).
+	k := s.keys()
 	var hostExists int
 	err = tx.QueryRowContext(ctx, `
 		SELECT 1 FROM locks
-		WHERE target_canonical = ? AND owner_uuid = ? AND created_at = ?`,
-		string(t.TargetCanonical), t.LockOwnerUUID, t.LockCreatedAt).Scan(&hostExists)
+		WHERE `+k.col("target_canonical")+` = ? AND owner_uuid = ? AND created_at = ?`,
+		k.key(string(t.TargetCanonical)), t.LockOwnerUUID, t.LockCreatedAt).Scan(&hostExists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNoHostLock
 	}
@@ -79,9 +84,9 @@ func (s *Store) InsertTag(ctx context.Context, t NewTag) (string, error) {
 	var n int
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM tags
-		WHERE target_canonical = ? AND lock_owner_uuid = ? AND lock_created_at = ?
+		WHERE `+k.col("target_canonical")+` = ? AND lock_owner_uuid = ? AND lock_created_at = ?
 		  AND acked_at IS NULL`,
-		string(t.TargetCanonical), t.LockOwnerUUID, t.LockCreatedAt).Scan(&n); err != nil {
+		k.key(string(t.TargetCanonical)), t.LockOwnerUUID, t.LockCreatedAt).Scan(&n); err != nil {
 		return "", err
 	}
 	if n >= tagCap {
@@ -141,14 +146,21 @@ func (s *Store) ListAliveByTargets(ctx context.Context, canonicals []domain.Cano
 	for i, c := range canonicals {
 		ss[i] = string(c)
 	}
-	placeholders, args := inClauseStrings(ss)
+	// ‡ The WHERE keys on targets a CALLER typed, so it folds when the store
+	// folds. So does the JOIN, and that one is not row-to-row bookkeeping: a
+	// tag minted by this binary carries the folded key while its host lock row
+	// may carry an older loto's on-disk spelling, and a byte-exact join would
+	// leave the note undeliverable on the very lock it was pinned to
+	// (loto-8soe).
+	k := s.keys()
+	placeholders, args := k.inStrings(ss)
 	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.target_canonical, t.lock_owner_uuid, t.lock_created_at,`+ //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 		` t.tagger_uuid, t.text, t.created_at, t.acked_at`+
 		` FROM tags t JOIN locks l`+
-		`   ON l.target_canonical = t.target_canonical`+
+		`   ON `+k.col("l.target_canonical")+` = `+k.col("t.target_canonical")+
 		`  AND l.owner_uuid       = t.lock_owner_uuid`+
 		`  AND l.created_at       = t.lock_created_at`+
-		` WHERE t.target_canonical IN (`+placeholders+`) AND t.acked_at IS NULL`+
+		` WHERE `+k.col("t.target_canonical")+` IN (`+placeholders+`) AND t.acked_at IS NULL`+
 		` ORDER BY t.created_at ASC, t.id ASC`, args...)
 	if err != nil {
 		return nil, err
@@ -160,8 +172,10 @@ func (s *Store) ListAliveByTargets(ctx context.Context, canonicals []domain.Cano
 	}
 	out := make(map[string][]Tag, len(canonicals))
 	for _, t := range all {
-		k := string(t.TargetCanonical) // map keyed by plain path to match Target.Canonical callers
-		out[k] = append(out[k], t)
+		// Keyed under the same rule the caller indexes by (Target.Canonical),
+		// so a legacy row's stored spelling does not hide its own tags.
+		key := k.key(string(t.TargetCanonical))
+		out[key] = append(out[key], t)
 	}
 	return out, nil
 }
@@ -170,17 +184,18 @@ func (s *Store) ListAliveByTargets(ctx context.Context, canonicals []domain.Cano
 // targetCanonical (if any). No self-tag filter — non-holder surfaces (status,
 // lock conflict) show everyone's tags. Empty result when no live lock.
 func (s *Store) ListAliveForTarget(ctx context.Context, targetCanonical domain.Canonical) ([]Tag, error) {
+	k := s.keys() // typed name in the WHERE, mixed-vintage keys across the JOIN
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT t.id, t.target_canonical, t.lock_owner_uuid, t.lock_created_at,
 		       t.tagger_uuid, t.text, t.created_at, t.acked_at
 		FROM tags t
 		JOIN locks l
-		  ON l.target_canonical = t.target_canonical
+		  ON `+k.col("l.target_canonical")+` = `+k.col("t.target_canonical")+`
 		 AND l.owner_uuid       = t.lock_owner_uuid
 		 AND l.created_at       = t.lock_created_at
-		WHERE t.target_canonical = ?
+		WHERE `+k.col("t.target_canonical")+` = ?
 		  AND t.acked_at IS NULL
-		ORDER BY t.created_at ASC, t.id ASC`, string(targetCanonical))
+		ORDER BY t.created_at ASC, t.id ASC`, k.key(string(targetCanonical)))
 	if err != nil {
 		return nil, err
 	}

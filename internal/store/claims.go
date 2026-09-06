@@ -180,9 +180,16 @@ func (s *Store) ReleaseClaim(ctx context.Context, prefix string, owner domain.Ag
 	}
 	defer cleanup()
 
+	// ‡ Both statements below look the row up BY THE PREFIX A CALLER TYPED, so
+	// they fold when the store folds — otherwise `loto unclaim docs` reported
+	// no-claim, exit 0, against a live legacy row spelled `Docs`, which went on
+	// covering every path beneath it until its TTL (loto-8soe). The
+	// lazy-reclaim delete in insertClaimTx keeps the byte-exact form: its
+	// prefix came out of the row it is deleting.
+	k := s.keys()
 	res, err := tx.ExecContext(ctx,
-		`DELETE FROM claims WHERE path_prefix = ? AND owner_uuid = ?`,
-		prefix, string(owner))
+		`DELETE FROM claims WHERE `+k.col("path_prefix")+` = ? AND owner_uuid = ?`,
+		k.key(prefix), string(owner))
 	if err != nil {
 		return out, err
 	}
@@ -196,8 +203,8 @@ func (s *Store) ReleaseClaim(ctx context.Context, prefix string, owner domain.Ag
 	}
 	var holder string
 	err = tx.QueryRowContext(ctx,
-		`SELECT owner_uuid FROM claims WHERE path_prefix = ? AND expires_at > ? ORDER BY created_at ASC, owner_uuid ASC LIMIT 1`,
-		prefix, time.Now().UnixNano()).Scan(&holder)
+		`SELECT owner_uuid FROM claims WHERE `+k.col("path_prefix")+` = ? AND expires_at > ? ORDER BY created_at ASC, owner_uuid ASC LIMIT 1`,
+		k.key(prefix), time.Now().UnixNano()).Scan(&holder)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		out.State = ClaimStateNoClaim

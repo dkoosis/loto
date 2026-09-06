@@ -199,13 +199,14 @@ func ackTagsForReleaseTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals
 	placeholders, args := k.inStrings(canonicals)
 	args = append([]any{time.Now().UnixNano()}, args...)
 	args = append(args, byAgent)
-	// ‡ The inner SELECT matches the caller's names under k; the outer tuple IN
-	// compares the tag's stored target against the LOCK's stored target, both
-	// from rows, so it stays byte-exact (loto-8soe).
+	// ‡ Every leg keys under k, the tuple's target member included: a tag this
+	// binary minted carries the folded key while its host lock row may carry an
+	// older loto's on-disk spelling, so a byte-exact tuple would orphan the tag
+	// instead of acking it and lose the release half of the audit (loto-8soe).
 	_, err := tx.ExecContext(ctx, `UPDATE tags SET acked_at = ?`+ //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 		` WHERE acked_at IS NULL`+
-		` AND (target_canonical, lock_owner_uuid, lock_created_at) IN (`+
-		`   SELECT target_canonical, owner_uuid, created_at FROM locks`+
+		` AND (`+k.col("target_canonical")+`, lock_owner_uuid, lock_created_at) IN (`+
+		`   SELECT `+k.col("target_canonical")+`, owner_uuid, created_at FROM locks`+
 		`   WHERE `+k.col("target_canonical")+` IN (`+placeholders+`) AND owner_uuid = ?`+
 		` )`, args...)
 	return err

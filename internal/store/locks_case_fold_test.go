@@ -106,3 +106,59 @@ func TestLocksAtFindsLegacyMixedCaseRow(t *testing.T) {
 			" case-sensitive filesystem", folded.Canonical, len(got), err)
 	}
 }
+
+// TestUnclaimFindsLegacyMixedCasePrefix is the same defect on the claim
+// surface: `loto unclaim docs` reported no-claim, exit 0, against a live legacy
+// row spelled `Docs` — which went on covering every path beneath it until its
+// TTL.
+func TestUnclaimFindsLegacyMixedCasePrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fold bool
+		want ClaimReleaseState
+		left int // claim rows surviving the release
+	}{
+		{"case-folding-store", true, ClaimStateReleased, 0},
+		{"byte-exact-store", false, ClaimStateNoClaim, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dbPath := filepath.Join(t.TempDir(), "loto.db")
+			now := time.Now()
+
+			// A prefix an older loto reserved, in the on-disk spelling.
+			legacy := domain.ClaimRecord{
+				PathPrefix: "Docs", OwnerUUID: tcAlice, SessionUUID: tcAlice,
+				Intent: tcTest, CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+				Host: tcHost,
+			}
+			seed, err := OpenContext(ctx, dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := seed.ClaimPrefix(ctx, legacy, aliveOn(tcHost)); err != nil {
+				t.Fatalf("seed legacy claim: %v", err)
+			}
+			seed.Close()
+
+			s := reopen(t, dbPath, tc.fold)
+			got, err := s.ReleaseClaim(ctx, "docs", tcAlice) // the folded prefix the CLI mints
+			if err != nil {
+				t.Fatalf("ReleaseClaim: %v", err)
+			}
+			if got.State != tc.want {
+				t.Errorf("unclaim of %q against stored %q = %v; want %v",
+					"docs", legacy.PathPrefix, got.State, tc.want)
+			}
+			rows, err := s.ListClaims(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != tc.left {
+				t.Errorf("%d claim rows survive the unclaim; want %d — a claim that reports"+
+					" released but stays in the table covers its whole subtree until its TTL",
+					len(rows), tc.left)
+			}
+		})
+	}
+}
