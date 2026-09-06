@@ -47,6 +47,8 @@
 #
 # The rule is therefore about COLLISION, not about /tmp: a per-run or per-tree
 # path under /tmp is fine and passes, because no second checkout can name it.
+# Variable assignments are held to it too — factoring the fixed name into
+# `ARCH_JSON := /tmp/...` moves the collision, it does not remove it.
 #
 # The scan follows `include` lines, so a recipe in .sandbox/lib/*.mk is held
 # to the same rules as one in the root Makefile.
@@ -216,8 +218,10 @@ report_scratch() {
 #
 # A `$` anywhere in the path token clears it: `/tmp/$$$$.json`,
 # `/tmp/$(NAME)-$$$$` and the output of `$$(mktemp)` are per-run or per-tree by
-# construction. Only the literal form is reported, because only the literal
-# form collides.
+# construction. So does a run of three or more `X`, which is mktemp's template
+# form — `out=$$(mktemp /tmp/loto.XXXXXX)` names a fresh file per invocation
+# and cannot collide. Only the literal form is reported, because only the
+# literal form collides.
 scratch_hazard() {
 	local s=$1 rest tok
 	rest=$s
@@ -228,10 +232,27 @@ scratch_hazard() {
 		case "$tok" in
 		"") continue ;;
 		*'$'*) continue ;;
+		*XXX*) continue ;;
 		esac
 		return 0
 	done
 	return 1
+}
+
+# scratch_assign <line> <lineno> — the same rule for a VARIABLE assignment.
+#
+# A recipe that writes `>$(ARCH_JSON)` carries no `/tmp/` text of its own, so
+# the recipe walk cannot see the collision when the path is factored into a
+# make variable (Codex, PR #316). The assignment is where the fixed name is
+# written, so that is where it is reported.
+scratch_assign() {
+	local line=$1 at=$2 value=${1#*=}
+	case "$line" in
+	*"# shared-tmp: ok"*) return 0 ;;
+	esac
+	if scratch_hazard "$value"; then
+		report_scratch "$at" "$line"
+	fi
 }
 
 flush() {
@@ -319,8 +340,14 @@ scan() {
 			else
 				case "$line" in
 				\#*) ;;
-				*:=* | *::=* | *+=* | *\?=*) in_recipe=0 ;;
-				*=*) in_recipe=0 ;;
+				*:=* | *::=* | *+=* | *\?=*)
+					in_recipe=0
+					scratch_assign "$line" "$lineno"
+					;;
+				*=*)
+					in_recipe=0
+					scratch_assign "$line" "$lineno"
+					;;
 				*:*) in_recipe=1 ;;
 				*) in_recipe=0 ;;
 				esac
@@ -394,9 +421,10 @@ Put scratch under the checkout instead:
 	@producer >$(CACHE_DIR)/report.json
 ```
 
-`$(CACHE_DIR)` and `.fo/` are per-worktree and already gitignored; `$$(mktemp)`
-and any `/tmp/...$$$$...` form are per-run and pass. Genuinely machine-global
-on purpose? Annotate it `# shared-tmp: ok — <reason>`.
+`$(CACHE_DIR)` and `.fo/` are per-worktree and already gitignored; `$$(mktemp)`,
+an `XXXXXX` template and any `/tmp/...$$$$...` form are per-run and pass. A row
+naming a variable assignment is the same collision factored into a variable.
+Genuinely machine-global on purpose? Annotate it `# shared-tmp: ok — <reason>`.
 FIX
 fi
 exit 1

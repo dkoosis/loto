@@ -172,6 +172,21 @@ want_pass "an explicit shared-tmp marker opts out" \
 want_pass "/tmp inside a word that is not a path is not a finding" \
 	"$(printf 'demo:\n\t@echo done')"
 
+want_pass "an mktemp template names a fresh file per run" \
+	"$(printf 'arch:\n\t@out=$$(mktemp /tmp/loto.XXXXXX); go-arch-lint check --json >"$$out"')"
+
+want_fail "a fixed /tmp path factored into a make variable is a finding" \
+	"$(printf 'ARCH_JSON := /tmp/loto-archcheck.json\narch:\n\t@jq -e . $(ARCH_JSON) >/dev/null')"
+
+want_pass "a per-run /tmp path in a make variable passes" \
+	"$(printf 'ARCH_JSON := /tmp/loto-archcheck-$$$$.json\narch:\n\t@jq -e . $(ARCH_JSON) >/dev/null')"
+
+want_pass "an assignment carrying the shared-tmp marker opts out" \
+	"$(printf 'LOCKFILE := /tmp/loto-machine.lock # shared-tmp: ok — one per machine on purpose\narch:\n\t@touch $(LOCKFILE)')"
+
+want_pass "a checkout-local scratch variable passes" \
+	"$(printf 'CACHE_DIR := $(CURDIR)/.cache\narch:\n\t@go-arch-lint check --json >$(CACHE_DIR)/archcheck.json')"
+
 # --- the real thing ------------------------------------------------------
 if out=$(bash "$checker" "$repo_root/Makefile" 2>&1); then
 	ok "the repo's own Makefile passes"
