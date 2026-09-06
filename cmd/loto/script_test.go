@@ -27,6 +27,25 @@ func TestMain(m *testing.M) {
 	})
 }
 
+// readForCacheKey opens every regular file directly under dir so `go test`
+// records their contents as inputs to this package's cached result. Callers
+// want the side effect on the cache key, not the bytes.
+func readForCacheKey(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if _, err := os.ReadFile(filepath.Join(dir, e.Name())); err != nil {
+			return fmt.Errorf("read %s: %w", filepath.Join(dir, e.Name()), err)
+		}
+	}
+	return nil
+}
+
 // TestScripts runs every *.txtar under testdata/script.
 func TestScripts(t *testing.T) {
 	testscript.Run(t, testscript.Params{
@@ -61,6 +80,18 @@ func TestScripts(t *testing.T) {
 				return err
 			}
 			env.Setenv("REALHOOKS", realHooks)
+
+			// Go's test cache keys on the files the TEST BINARY opens; it
+			// cannot see what a child process reads. guard_precommit.txtar
+			// runs the tracked dispatcher through a real `git` subprocess, so
+			// with the cache live (Makefile TEST_COUNT, loto-4ivy) an edit to
+			// .githooks/pre-commit would leave a cached PASS standing until CI
+			// ran it cold. Reading the directory here puts every hook's bytes
+			// into this package's cache inputs, so changing one invalidates
+			// the result. The contents are not otherwise used.
+			if err := readForCacheKey(realHooks); err != nil {
+				return err
+			}
 
 			// Two personas scripts swap between via `env LOTO_AGENT_ID=$ALICE`.
 			// An explicit LOTO_AGENT_ID is the owner with nothing on disk to

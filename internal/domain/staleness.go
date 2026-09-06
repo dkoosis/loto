@@ -110,12 +110,38 @@ func (c EvalContext) HolderLiveness(l LockRecord) (v Liveness, probed bool) {
 // froze every tree-move in the repo for its full lease with no reclaim path.
 // One predicate, two record kinds — drift here is the bug.
 func (c EvalContext) ClaimIsStale(cl ClaimRecord) bool {
-	return c.IsStale(LockRecord{
+	return c.IsStale(claimAsLock(cl))
+}
+
+// claimAsLock lifts a claim into the lock shape the probe and the staleness
+// predicates take as their subject. The PID-0 sentinel is deliberate: a claim
+// carries no PID and no start time, so the pid fallback must read UNKNOWN and
+// leave the uuid-keyed session oracle as the only witness.
+func claimAsLock(cl ClaimRecord) LockRecord {
+	return LockRecord{
 		OwnerUUID:   cl.OwnerUUID,
 		SessionUUID: cl.SessionUUID,
 		Host:        cl.Host,
 		ExpiresAt:   cl.ExpiresAt,
-	})
+	}
+}
+
+// ClaimHolderIsLive reports whether the claim's owner is PROVABLY running now,
+// whatever the claim's TTL says. It is HolderLiveness for claims, narrowed to
+// the one verdict that is safe to act on here (loto-3dhl).
+//
+// ‡ The narrowing is the design, and it is why this is not simply
+// HolderLiveness(claimAsLock(cl)). A lock row carries a PID and a start time,
+// so its probe has a local fallback and can return DEAD; refusing an overwrite
+// on UNKNOWN there costs one operator glance at another host and still
+// self-heals. A claim carries neither, so a claim whose session record has
+// aged out probes UNKNOWN forever. Refusing on UNKNOWN would let one crashed
+// agent's lapsed claim block `loto sync` across its whole prefix with no
+// reclaim path — the freeze ClaimIsStale's comment above was written to end.
+// Only ALIVE, a positive witness from the session oracle, holds the bytes back.
+func (c EvalContext) ClaimHolderIsLive(cl ClaimRecord) bool {
+	v, probed := c.HolderLiveness(claimAsLock(cl))
+	return probed && v == LivenessAlive
 }
 
 // Liveness is the display-tier refinement of IsStale: it splits a non-stale

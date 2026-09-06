@@ -102,6 +102,20 @@ const (
 	// operator's next move is different: this one is a question about another
 	// machine, not a wait.
 	syncReasonLeaseLapsedHolderUnknown = "lease-lapsed-holder-unknown"
+	// syncReasonClaimLapsedHolderLive refuses a fast-forward inside a territory
+	// claim whose TTL lapsed while its owner is still provably running
+	// (loto-3dhl). The claim leg had the same hole the lease leg did: a claim
+	// that lapsed mid-session stopped covering its prefix, and the agent's
+	// uncommitted edits under it were fast-forwarded away while the agent was
+	// still writing them.
+	//
+	// ‡ There is deliberately NO claim-lapsed-holder-unknown twin. A lease row
+	// carries a PID and a start time, so an UNKNOWN verdict there is rare and
+	// self-heals; a claim carries neither, so every claim whose session record
+	// has aged out probes UNKNOWN forever, and refusing on that would freeze
+	// sync over the whole prefix with no reclaim path. See
+	// domain.EvalContext.ClaimHolderIsLive for the full argument.
+	syncReasonClaimLapsedHolderLive = "claim-lapsed-holder-live"
 	// syncReasonResidueNotFile refuses a deletion whose target stopped being an
 	// ordinary file between the scan and the delete — a directory or a symlink
 	// now stands where the rejected candidate created a blob. Advisory (⚠), not
@@ -1099,7 +1113,7 @@ func syncDecide(diffs []syncDiff, locks []domain.LockRecord, claims []domain.Cla
 
 // syncConflictFor checks, in order, whether path is covered by a live lease
 // (any owner, beacons included), a live territory claim (no owner
-// carve-out — ClaimCoversTarget called with an empty uuid per plan-review
+// carve-out — ClaimCovers called with an empty uuid per plan-review
 // P1-1), or any candidate-claim row (liveness irrelevant — durable by
 // design, a dead one is doctor's reclaim job, not sync's).
 //
@@ -1116,6 +1130,12 @@ func syncDecide(diffs []syncDiff, locks []domain.LockRecord, claims []domain.Cla
 // edits exactly as thoroughly as one on this one. Both refusals get a row
 // naming which it was, because the operator's next move differs: wait out a
 // live agent, go look at the other host for an unknown one.
+//
+// ‡ The claim leg asks the same second question and answers it more narrowly
+// (loto-3dhl): a lapsed claim holds the bytes back only when its owner probes
+// ALIVE, never on UNKNOWN, because a claim carries no PID to make UNKNOWN
+// recoverable. domain.EvalContext.ClaimHolderIsLive carries that argument.
+//
 // syncLapsedReason names which non-dead verdict refused a lapsed lease.
 func syncLapsedReason(v domain.Liveness) string {
 	if v == domain.LivenessAlive {
@@ -1136,8 +1156,17 @@ func syncConflictFor(path string, locks []domain.LockRecord, claims []domain.Cla
 	}
 	for i := range claims {
 		c := &claims[i]
-		if ec.ClaimCovers(*c, path, "") && !ec.ClaimIsStale(*c) {
+		if !ec.ClaimTerritoryCovers(*c, path, "") {
+			continue
+		}
+		if !ec.ClaimIsStale(*c) {
 			return syncReasonTerritoryClaim, string(c.OwnerUUID), true
+		}
+		// Lapsed, so the RESERVATION is gone and the next claim may take the
+		// prefix — but the bytes under it are a separate question, the same
+		// one the lease leg above asks (loto-3dhl).
+		if ec.ClaimHolderIsLive(*c) {
+			return syncReasonClaimLapsedHolderLive, string(c.OwnerUUID), true
 		}
 	}
 	if len(cands) > 0 {

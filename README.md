@@ -217,7 +217,11 @@ See `docs/DESIGN.md` for the full contract.
 
 ```sh
 make check    # fmt + vet + test + build
-make test     # go test -json -count=1 -cover ./...
+make test     # go test -json -cover ./...
 make race     # go test -race -json -timeout=20m -count=1 ./...
 make install  # install to $GOPATH/bin
 ```
+
+`make test` reuses Go's test cache, so a re-run over unchanged packages is
+near-instant. Setting `CI` (GitHub Actions always does) adds `-count=1` and
+forces the cold run. `make race` is cold unconditionally.

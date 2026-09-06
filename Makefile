@@ -40,6 +40,30 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -X main.Version=$(VERSION) -X main.GitCommit=$(COMMIT)
 
+# ── Per-checkout scratch (loto-4ivy) ──
+#
+# Parallel agent worktrees under .claude/worktrees/ are routine here, and every
+# one of them runs this Makefile against the same $HOME. Anything a recipe
+# writes to a path shared across checkouts is a race between lanes, so scratch
+# lives HERE, under the checkout that produced it. $(CURDIR) is per-worktree by
+# construction; .cache/ and .fo/ are already gitignored.
+#
+# ‡ A new recipe that needs a scratch file puts it under $(CACHE_DIR) or .fo/.
+#   A literal /tmp/<fixed-name> in a recipe is the bug this section closes —
+#   `make arch` had one, and two lanes checking at once made each other fail.
+CACHE_DIR := $(CURDIR)/.cache
+
+# golangci-lint keys its result cache on the package import path, and every
+# worktree of this repo shares the module path. Two checkouts with byte-identical
+# sources therefore hit the same entry, and a cached diagnostic replays with the
+# ABSOLUTE FILENAME of whichever checkout produced it — so a lint in worktree A
+# reports findings at ../worktree-B/internal/... long after B was deleted, with
+# `failed to parse file` warnings beside them. .golangci.yml's `\.claude/` path
+# exclusion cannot catch it: the replayed path is relative and starts `../`.
+# One cache per checkout removes the sharing that makes the replay possible.
+# Cold cost, measured: ~22s for a full-repo lint, once per new worktree.
+export GOLANGCI_LINT_CACHE ?= $(CACHE_DIR)/golangci-lint
+
 # Every fo-rendered check runs through gate.sh so a producer that dies before
 # emitting findings reports its own diagnostic instead of "+ no findings"
 # (loto-fcbp). The wrapper preserves the producer's exit status, so these
@@ -140,15 +164,24 @@ report-human: ## Same as report, rendered for humans (always exits 0)
 vet: ## Run go vet (fo-rendered)
 	@$(GATE) vet diag -- go vet $(PKG)
 
+# ‡ The JSON report is written under this checkout, NOT /tmp (loto-4ivy). It
+# used to be /tmp/loto-archcheck.json — one fixed name for every worktree on the
+# machine — so two lanes running `make check` at once had one lane's `tee`
+# truncating the file the other lane's `jq` was reading. The loser failed with
+# "go-arch-lint found warnings" and no warnings, which reads as a real layering
+# break and is not one. Measured 2026-09-06 with two concurrent worktrees.
+ARCH_JSON := $(CACHE_DIR)/archcheck.json
+
 arch: ## Enforce layering (.go-arch-lint.yml)
 	@if ! command -v go-arch-lint >/dev/null 2>&1; then \
 		echo "go-arch-lint not installed; 'go install github.com/fe3dback/go-arch-lint@v1.15.0'"; \
 		exit 1; \
 	fi
-	@set -o pipefail; go-arch-lint check --json 2>/dev/null | tee /tmp/loto-archcheck.json | fo wrap archlint | fo --format llm
-	@jq -e '.Payload.ArchHasWarnings == false' /tmp/loto-archcheck.json >/dev/null || { \
+	@mkdir -p $(CACHE_DIR)
+	@set -o pipefail; go-arch-lint check --json 2>/dev/null | tee $(ARCH_JSON) | fo wrap archlint | fo --format llm
+	@jq -e '.Payload.ArchHasWarnings == false' $(ARCH_JSON) >/dev/null || { \
 		echo "✗ go-arch-lint found warnings the fo summary above did not render (loto-lu52 — fo's archlint wrapper drops ArchWarningsNotMatched into an empty SARIF results array):"; \
-		jq '.Payload | {ArchWarningsNotMatched, ArchWarningsDeps, ArchWarningsDeepScan}' /tmp/loto-archcheck.json; \
+		jq '.Payload | {ArchWarningsNotMatched, ArchWarningsDeps, ArchWarningsDeepScan}' $(ARCH_JSON); \
 		exit 1; \
 	}
 
@@ -159,8 +192,21 @@ lint: ## Run golangci-lint (full)
 	fi
 	@$(GATE) lint sarif -- golangci-lint run --output.sarif.path=/dev/stdout $(PKG)
 
-test: ## Run tests with coverage (fo-rendered)
-	@$(GATE) test testjson -- go test -json -count=1 -cover $(PKG)
+# -count=1 defeats Go's test cache, so every local `make check` re-ran the whole
+# suite — 81s of the ~150s total, paid again for a one-line docs edit, and paid
+# once PER LANE when several worktrees check at the same time (loto-4ivy). CI is
+# a fresh runner with a cold cache, so the flag buys it nothing but a name for
+# what already happens; locally it is the single biggest cost in the gate.
+#
+# So: the cache is live locally and the cold run is forced wherever CI is set
+# (GitHub Actions sets CI=true on every job). Go invalidates on any change to
+# the package, its dependencies, or the files and env vars a test reads, so a
+# reused PASS is a PASS for these exact bytes. `make race` still runs cold
+# unconditionally — it is the pre-merge gate, not the inner loop.
+TEST_COUNT ?= $(if $(CI),-count=1,)
+
+test: ## Run tests with coverage (fo-rendered; Go test cache live locally, cold under CI)
+	@$(GATE) test testjson -- go test -json $(TEST_COUNT) -cover $(PKG)
 
 # -timeout is per test binary. go test runs packages in parallel, so under
 # -race the slowest package (internal/cli, ~175s alone) is CPU-starved and blew
@@ -212,8 +258,8 @@ install: ## Build and install loto to $GOPATH/bin
 tidy: ## Tidy go.mod
 	go mod tidy
 
-clean: ## Remove build artifacts
-	rm -rf $(BIN_DIR)
+clean: ## Remove build artifacts and this checkout's scratch/lint cache
+	rm -rf $(BIN_DIR) $(CACHE_DIR)
 
 hooks: ## Route git hooks to the tracked .githooks/ dir (bd integration, ccp-th5.2). Local-only, per-clone; run once after cloning.
 	@missing=""; \
