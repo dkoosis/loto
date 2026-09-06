@@ -846,6 +846,8 @@ func promoteIdentityEnv() []string {
 // process-wide variable would be visible to every concurrent git call in this
 // process, including a peer goroutine's.
 func gitWithIndex(ctx context.Context, repoTop, idxPath string, stdin *bytes.Buffer, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, gatePlumbingTimeout)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = repoTop
 	cmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+idxPath)
@@ -856,6 +858,9 @@ func gitWithIndex(ctx context.Context, repoTop, idxPath string, stdin *bytes.Buf
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("%w: git %s", ErrGitTimeout, strings.Join(args, " "))
+		}
 		return "", fmt.Errorf("gate: git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(out.String()), nil

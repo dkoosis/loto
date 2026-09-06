@@ -20,9 +20,24 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 
 	"loto/internal/domain"
 )
+
+// gatePlumbingTimeout bounds every git subprocess this package launches
+// directly (gitRunner.run, UpdateRefsTx, gitWithIndex) so a wedged git
+// process — a stale index.lock, a hung fsmonitor — cannot block for the full
+// lifetime of whatever context the caller happened to pass in. Mirrors
+// internal/cli's gitTimeout value; kept as this package's own constant since
+// the two latency budgets are free to diverge later.
+const gatePlumbingTimeout = 5 * time.Second
+
+// ErrGitTimeout marks a git subprocess killed by gatePlumbingTimeout (or an
+// even tighter caller-supplied deadline) rather than one that ran to
+// completion and failed on its own — the distinction a doctor/operator
+// surface needs to tell "git hung" from "git rejected the operation".
+var ErrGitTimeout = errors.New("gate: git subprocess timed out")
 
 // BlobRef pins one path's content identity: a git blob SHA and its file mode
 // ("100644" regular, "100755" executable, "120000" symlink). A nil *BlobRef in
@@ -357,12 +372,17 @@ func (g gitRunner) treeAt(ctx context.Context, treeish, path string) (bool, erro
 // trimmed stdout. No stdin, no env override — every caller in this file only
 // ever needs a tree-ish and a pathspec.
 func (g gitRunner) run(ctx context.Context, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, gatePlumbingTimeout)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.repoTop
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("%w: git %s", ErrGitTimeout, strings.Join(args, " "))
+		}
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(out.String()), nil

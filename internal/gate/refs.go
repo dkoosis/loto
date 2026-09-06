@@ -75,12 +75,17 @@ func UpdateRefsTx(ctx context.Context, repoTop string, updates []RefUpdate) erro
 	}
 	stdin.WriteString("commit\n")
 
+	ctx, cancel := context.WithTimeout(ctx, gatePlumbingTimeout)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "update-ref", "--stdin")
 	cmd.Dir = repoTop
 	cmd.Stdin = &stdin
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("%w: git update-ref --stdin", ErrGitTimeout)
+		}
 		return fmt.Errorf("gate: update-ref --stdin: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
