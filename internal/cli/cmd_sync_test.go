@@ -561,6 +561,29 @@ func TestSync_DeletesResidueAttributedToARejectedCandidate(t *testing.T) {
 	}
 }
 
+// TestSync_DeleteRowCarriesTheBlobOID pins loto-q2i6: the deleted file's blob
+// is the ONLY handle left on its bytes — the rejection's proposal ref is gone,
+// so nothing else references them — and the report must hand it over in full,
+// with the cat-file command that spends it.
+func TestSync_DeleteRowCarriesTheBlobOID(t *testing.T) {
+	repo := syncBaseRepo(t)
+	blob := blobOf(t, repo, tcResidueBody)
+	plantResidue(t, repo, tcResidueNewGo, tcResidueBody)
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	wantRow := "ℹ target=" + tcResidueNewGo + " action=delete candidate=" + tcResidueCandidate + " blob=" + blob
+	if !strings.Contains(out.String(), wantRow) {
+		t.Errorf("delete row must carry the full blob oid, want %q in: %q", wantRow, out.String())
+	}
+	if !strings.Contains(out.String(), "git cat-file blob <blob> > <target>") {
+		t.Errorf("fix block must name the recovery command: %q", out.String())
+	}
+}
+
 // TestSync_LeavesResidueRecreatedWithDifferentBytes is the review's correction:
 // a peer re-created the same path with their own work. The path still matches
 // the rejection's record, the CONTENT does not — and a deletion restores

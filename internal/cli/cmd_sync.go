@@ -311,8 +311,30 @@ func emitSyncPartial(w io.Writer, out syncOutcome) {
 		fmt.Fprintf(w, "✓ target=%s action=fast-forward\n", syncPathField(p))
 	}
 	for _, r := range out.Deleted {
-		fmt.Fprintf(w, "ℹ target=%s action=delete candidate=%s\n", syncPathField(r.Path), r.CandidateID)
+		fmt.Fprintf(w, "ℹ target=%s action=delete candidate=%s blob=%s\n", syncPathField(r.Path), r.CandidateID, r.Blob)
 	}
+	emitSyncRecoverBlock(w, out)
+}
+
+// syncRecoverLine is the one command that gets a deleted file's bytes back,
+// shared by the full report's fix block and the partial report's.
+//
+// ‡ The blob on the delete row is the whole point of it: a rejected candidate's
+// proposal ref is already gone, so nothing but that row references those bytes
+// and git will GC them. It prints in FULL, never shortened — an operator pastes
+// it into cat-file, and an 8-character prefix is a lookup that can go ambiguous
+// rather than a handle (loto-q2i6).
+const syncRecoverLine = "git cat-file blob <blob> > <target>   # recover a deleted row's bytes"
+
+// emitSyncRecoverBlock gives the partial report — which has no fix block of its
+// own — the recovery command for the deletions it already made.
+func emitSyncRecoverBlock(w io.Writer, out syncOutcome) {
+	if len(out.Deleted) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "```bash")
+	fmt.Fprintln(w, syncRecoverLine)
+	fmt.Fprintln(w, "```")
 }
 
 // syncScanResidue lists every untracked, non-ignored worktree file and splits
@@ -1229,7 +1251,7 @@ func syncReportRows(out syncOutcome, skipped []syncDiff, unattributed []string, 
 		rows = append(rows, syncReportRow{path: p, line: fmt.Sprintf("✓ target=%s action=%s", syncPathField(p), ffAction)})
 	}
 	for _, r := range out.Deleted {
-		rows = append(rows, syncReportRow{path: r.Path, line: fmt.Sprintf("ℹ target=%s action=%s candidate=%s", syncPathField(r.Path), delAction, r.CandidateID)})
+		rows = append(rows, syncReportRow{path: r.Path, line: fmt.Sprintf("ℹ target=%s action=%s candidate=%s blob=%s", syncPathField(r.Path), delAction, r.CandidateID, r.Blob)})
 	}
 	for _, c := range out.Conflicts {
 		rows = append(rows, syncReportRow{path: c.Path, line: formatSyncConflictRow(c)})
@@ -1263,11 +1285,15 @@ func syncReportRows(out syncOutcome, skipped []syncDiff, unattributed []string, 
 }
 
 // emitSyncFixBlock prints the one actionable next step per finding class, per
-// design.md's inline-fix rule: how to see a conflict's holder, and how to see
-// the untracked files sync deliberately did not touch.
+// design.md's inline-fix rule: how to see a conflict's holder, how to recover
+// a deleted file's bytes, and how to see the untracked files sync deliberately
+// did not touch.
 func emitSyncFixBlock(w io.Writer, out syncOutcome, unattributed []string, opts syncOpts) {
 	showLeftAlone := (len(unattributed) > 0 || len(out.Modified) > 0) && !opts.Verbose
-	if len(out.Conflicts) == 0 && len(out.TargetSkips) == 0 && !showLeftAlone {
+	// Under --dry-run the delete rows say would-delete and the bytes are still
+	// on disk, so the recovery line would answer a question nobody has yet.
+	showRecover := len(out.Deleted) > 0 && !opts.DryRun
+	if len(out.Conflicts) == 0 && len(out.TargetSkips) == 0 && !showLeftAlone && !showRecover {
 		return
 	}
 	fmt.Fprintln(w, "```bash")
@@ -1279,6 +1305,9 @@ func emitSyncFixBlock(w io.Writer, out syncOutcome, unattributed []string, opts 
 		// The bytes on disk are safe — what a target-modified row's reader
 		// needs is the content sync declined to write over them.
 		fmt.Fprintln(w, "git cat-file blob <want>   # integration's bytes for a target-modified row")
+	}
+	if showRecover {
+		fmt.Fprintln(w, syncRecoverLine)
 	}
 	if showLeftAlone {
 		fmt.Fprintln(w, "loto sync --verbose        # name the untracked files sync left alone")
