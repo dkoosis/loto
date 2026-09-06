@@ -78,7 +78,22 @@ func (c EvalContext) PrefixCovers(a, b string) bool {
 // ClaimCovers is ClaimCoversTarget under this context's filesystem case class,
 // reading the clock from the context rather than a positional now.
 func (c EvalContext) ClaimCovers(cl ClaimRecord, t string, myUUID string) bool {
+	return !cl.Expired(c.Now) && c.ClaimTerritoryCovers(cl, t, myUUID)
+}
+
+// ClaimTerritoryCovers is ClaimCovers with the TTL filter removed: foreign
+// owner, and a prefix that reserves t under this context's case class. It
+// answers "whose territory is this path in?" without also answering "is that
+// reservation still in force?".
+//
+// ‡ Every gate wants both questions and should keep calling ClaimCovers. The
+// one caller that needs them apart is `loto sync` (loto-3dhl), which must look
+// at a LAPSED claim before it overwrites bytes inside it — the expiry filter
+// made a lapsed claim invisible, so a live agent's uncommitted edits
+// fast-forwarded away while the agent was still writing them. Splitting the
+// predicate makes that question answerable without widening what any existing
+// caller sees.
+func (c EvalContext) ClaimTerritoryCovers(cl ClaimRecord, t string, myUUID string) bool {
 	return string(cl.OwnerUUID) != myUUID &&
-		!cl.Expired(c.Now) &&
 		c.PrefixCovers(cl.PathPrefix, t)
 }

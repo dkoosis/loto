@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 #
-# makefile_check.sh — refuse a recipe line that pipes without pipefail.
+# makefile_check.sh — refuse a recipe line that runs differently than it reads.
 #
-# Why this exists (loto-uekt). The Makefile declares:
+# Two rules, one recipe-line walk:
+#
+#   pipe-without-pipefail  the line's exit status depends on the make VERSION
+#   shared-tmp-scratch     the line's result depends on what ANOTHER CHECKOUT
+#                          on this machine is doing at the same moment
+#
+# Rule 1 — why this exists (loto-uekt). The Makefile declares:
 #
 #     SHELL := /bin/bash
 #     .SHELLFLAGS := -euo pipefail -c
@@ -30,8 +36,20 @@
 # (`out="$$(producer | renderer)"`), where the quote-stripping pass would
 # otherwise hide the pipeline.
 #
+# Rule 2 — why this exists (loto-4ivy). Parallel agent worktrees under
+# .claude/worktrees/ are routine in this repo, and every one of them runs this
+# Makefile against the same /tmp. `make arch` wrote its JSON report to
+# /tmp/loto-archcheck.json — one fixed name for the whole machine — so two
+# lanes checking at once had one lane's `tee` truncating the file the other
+# lane's `jq` was reading. The loser failed with "go-arch-lint found warnings"
+# and no warnings listed, which reads as a real layering break and is not one.
+# Measured 2026-09-06 with two concurrent worktrees.
+#
+# The rule is therefore about COLLISION, not about /tmp: a per-run or per-tree
+# path under /tmp is fine and passes, because no second checkout can name it.
+#
 # The scan follows `include` lines, so a recipe in .sandbox/lib/*.mk is held
-# to the same rule as one in the root Makefile.
+# to the same rules as one in the root Makefile.
 #
 # Run: make makefilecheck   (or: bash scripts/makefile_check.sh [Makefile])
 
@@ -49,6 +67,8 @@ if [ ! -f "$makefile" ]; then
 fi
 
 findings=0
+pipe_findings=0
+scratch_findings=0
 declare -a rows=()
 declare -a files=()
 
@@ -180,12 +200,55 @@ split_segments() {
 
 report() {
 	rows+=("✗ $rel:$1 pipe-without-pipefail recipe=${2:0:72}")
+	pipe_findings=$((pipe_findings + 1))
 	findings=$((findings + 1))
+}
+
+report_scratch() {
+	rows+=("✗ $rel:$1 shared-tmp-scratch recipe=${2:0:72}")
+	scratch_findings=$((scratch_findings + 1))
+	findings=$((findings + 1))
+}
+
+# scratch_hazard <text> — true when the line names a /tmp path with a FIXED
+# basename, i.e. one that every checkout on the machine resolves to the same
+# file.
+#
+# A `$` anywhere in the path token clears it: `/tmp/$$$$.json`,
+# `/tmp/$(NAME)-$$$$` and the output of `$$(mktemp)` are per-run or per-tree by
+# construction. Only the literal form is reported, because only the literal
+# form collides.
+scratch_hazard() {
+	local s=$1 rest tok
+	rest=$s
+	while [ "${rest#*/tmp/}" != "$rest" ]; do
+		rest=${rest#*/tmp/}
+		# The path token ends at whitespace, a quote, or shell punctuation.
+		tok=${rest%%[[:space:]\'\"\|\;\)\&\<\>]*}
+		case "$tok" in
+		"") continue ;;
+		*'$'*) continue ;;
+		esac
+		return 0
+	done
+	return 1
 }
 
 flush() {
 	local text=$1 at=$2
 	[ -z "$text" ] && return 0
+
+	# Rule 2 is judged before rule 1's exemptions, because the two are
+	# unrelated: `set -o pipefail` says nothing about where a recipe puts its
+	# scratch, and the arch recipe that provoked this rule said it already.
+	case "$text" in
+	*"# shared-tmp: ok"*) ;;
+	*)
+		if scratch_hazard "$text"; then
+			report_scratch "$at" "$text"
+		fi
+		;;
+	esac
 
 	# Line-scoped exemptions. `set -o pipefail` is a shell-wide setting: once
 	# the recipe says it, it holds for every later command in the same shell,
@@ -295,16 +358,19 @@ for f in "${files[@]}"; do
 done
 
 if [ "$findings" -eq 0 ]; then
-	echo "✓ makefilecheck: 0 recipe lines pipe without pipefail files=${#files[@]}"
+	echo "✓ makefilecheck: 0 recipe lines read differently than they run files=${#files[@]}"
 	exit 0
 fi
 
-echo "✗ makefilecheck count=$findings — a piped recipe line is only gated on GNU Make 3.82+"
+echo "✗ makefilecheck count=$findings pipe-without-pipefail=$pipe_findings shared-tmp-scratch=$scratch_findings"
 printf '%s\n' "${rows[@]}"
-cat <<'FIX'
 
-Each line above is enforced on CI (make 4.3) and NOT on macOS (make 3.81),
-so it can pass locally and fail in CI. Say pipefail in the recipe itself:
+if [ "$pipe_findings" -gt 0 ]; then
+	cat <<'FIX'
+
+pipe-without-pipefail is enforced on CI (make 4.3) and NOT on macOS (make
+3.81), so such a line can pass locally and fail in CI. Say pipefail in the
+recipe itself:
 
 ```bash
 	@set -o pipefail; producer | renderer
@@ -313,4 +379,24 @@ so it can pass locally and fail in CI. Say pipefail in the recipe itself:
 Deliberately non-gating? End the line with `|| true`, or annotate it
 `# make-strict: ok — <reason>`.
 FIX
+fi
+
+if [ "$scratch_findings" -gt 0 ]; then
+	cat <<'FIX'
+
+shared-tmp-scratch is a fixed /tmp path, so every worktree on this machine
+writes and reads the SAME file. Two lanes running `make check` at once then
+corrupt each other's run, and the loser reports a failure that is not real.
+Put scratch under the checkout instead:
+
+```bash
+	@mkdir -p $(CACHE_DIR)
+	@producer >$(CACHE_DIR)/report.json
+```
+
+`$(CACHE_DIR)` and `.fo/` are per-worktree and already gitignored; `$$(mktemp)`
+and any `/tmp/...$$$$...` form are per-run and pass. Genuinely machine-global
+on purpose? Annotate it `# shared-tmp: ok — <reason>`.
+FIX
+fi
 exit 1

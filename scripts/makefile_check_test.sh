@@ -144,6 +144,34 @@ want_pass "every segment opting out on its own is clean" \
 want_pass "a ; inside quotes does not split a segment" \
 	"$(printf 'demo:\n\t@echo "x | y; z" | cat || true')"
 
+# --- rule 2: shared /tmp scratch (loto-4ivy) ------------------------------
+want_fail "a fixed /tmp path is a finding — every worktree writes the same file" \
+	"$(printf 'arch:\n\t@go-arch-lint check --json >/tmp/loto-archcheck.json')"
+
+want_fail "reading a fixed /tmp path counts too, not just writing it" \
+	"$(printf 'arch:\n\t@jq -e . /tmp/loto-archcheck.json >/dev/null')"
+
+want_fail "pipefail on the line does not excuse it — unrelated rules" \
+	"$(printf 'arch:\n\t@set -o pipefail; producer | tee /tmp/loto-archcheck.json | renderer')"
+
+want_pass "a per-run /tmp path is per-checkout by construction" \
+	"$(printf 'arch:\n\t@go-arch-lint check --json >/tmp/arch-$$$$.json')"
+
+want_pass "a make-variable /tmp path is the author naming the scope" \
+	"$(printf 'arch:\n\t@go-arch-lint check --json >/tmp/$(ARCH_NAME).json')"
+
+want_pass "mktemp is per-run" \
+	"$(printf 'arch:\n\t@out=$$(mktemp); go-arch-lint check --json >"$$out"')"
+
+want_pass "scratch under the checkout is the fix" \
+	"$(printf 'arch:\n\t@go-arch-lint check --json >$(CACHE_DIR)/archcheck.json')"
+
+want_pass "an explicit shared-tmp marker opts out" \
+	"$(printf 'arch:\n\t@touch /tmp/loto-machine-wide.lock # shared-tmp: ok — one per machine on purpose')"
+
+want_pass "/tmp inside a word that is not a path is not a finding" \
+	"$(printf 'demo:\n\t@echo done')"
+
 # --- the real thing ------------------------------------------------------
 if out=$(bash "$checker" "$repo_root/Makefile" 2>&1); then
 	ok "the repo's own Makefile passes"

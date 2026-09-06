@@ -908,13 +908,19 @@ func TestSync_RejectsStrayArgs(t *testing.T) {
 
 // --- syncDecide: pure unit table (plan step 3) ---
 
+// Fixtures the syncDecide unit tests below share: one holder uuid, one blob
+// OID, one claimed prefix. Package-scoped so the three tests name the same
+// values rather than repeating the literals.
+const (
+	syncOwner    = "owner-1"
+	syncBlobOID  = "deadbeef"
+	syncPrefixWT = "docs"
+)
+
 func TestSyncDecide_ConflictTable(t *testing.T) {
 	now := time.Now()
-	const (
-		path      = "internal/a.go"
-		syncOwner = "owner-1"
-	)
-	diffs := []syncDiff{{syncEntry: syncEntry{Path: path, Mode: "100644", OID: "deadbeef"}, State: syncModified}}
+	const path = "internal/a.go"
+	diffs := []syncDiff{{syncEntry: syncEntry{Path: path, Mode: "100644", OID: syncBlobOID}, State: syncModified}}
 	ec := domain.EvalContext{Now: now}
 
 	tests := []struct {
@@ -1009,9 +1015,9 @@ func TestSyncDecide_ConflictTable(t *testing.T) {
 func TestSyncDecide_LapsedLeaseWithLiveHolder(t *testing.T) {
 	now := time.Now()
 	const path = "internal/a.go"
-	diffs := []syncDiff{{syncEntry: syncEntry{Path: path, Mode: "100644", OID: "deadbeef"}, State: syncModified}}
+	diffs := []syncDiff{{syncEntry: syncEntry{Path: path, Mode: "100644", OID: syncBlobOID}, State: syncModified}}
 	lapsed := []domain.LockRecord{
-		{Target: domain.Target{Canonical: path}, OwnerUUID: "owner-1", ExpiresAt: now.Add(-time.Hour)},
+		{Target: domain.Target{Canonical: path}, OwnerUUID: syncOwner, ExpiresAt: now.Add(-time.Hour)},
 	}
 	probeOf := func(v domain.Liveness) domain.HolderLiveProbe {
 		return func(domain.LockRecord) domain.Liveness { return v }
@@ -1056,6 +1062,96 @@ func TestSyncDecide_LapsedLeaseWithLiveHolder(t *testing.T) {
 	t.Run("no probe -> fast-forward, TTL is sole authority", func(t *testing.T) {
 		ec := domain.EvalContext{Now: now}
 		apply, conflicts := syncDecide(diffs, lapsed, nil, nil, ec)
+		if len(apply) != 1 || len(conflicts) != 0 {
+			t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
+		}
+	})
+}
+
+// TestSyncDecide_LapsedClaimWithLiveHolder pins loto-3dhl, the claim-shaped
+// half of the hole loto-0o0j closed for leases. The claim leg filtered expired
+// claims out before asking anything about the holder, so an agent whose 2h
+// territory claim lapsed mid-session had its uncommitted edits fast-forwarded
+// away while it was still writing them.
+//
+// The asymmetry with the lease test above is deliberate and load-bearing: a
+// lapsed lease refuses on UNKNOWN too, a lapsed claim does not. A claim carries
+// no PID and no start time, so UNKNOWN is the permanent answer for any claim
+// whose session record has aged out, and refusing on it would freeze sync over
+// the whole prefix with no reclaim path.
+func TestSyncDecide_LapsedClaimWithLiveHolder(t *testing.T) {
+	now := time.Now()
+	const path = syncPrefixWT + "/a.md"
+	diffs := []syncDiff{{syncEntry: syncEntry{Path: path, Mode: "100644", OID: syncBlobOID}, State: syncModified}}
+	lapsed := []domain.ClaimRecord{
+		{PathPrefix: syncPrefixWT, OwnerUUID: syncOwner, ExpiresAt: now.Add(-time.Hour)},
+	}
+	probeOf := func(v domain.Liveness) domain.HolderLiveProbe {
+		return func(domain.LockRecord) domain.Liveness { return v }
+	}
+
+	t.Run("holder alive -> conflict", func(t *testing.T) {
+		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessAlive)}
+		apply, conflicts := syncDecide(diffs, nil, lapsed, nil, ec)
+		if len(apply) != 0 || len(conflicts) != 1 {
+			t.Fatalf("want 1 conflict, got apply=%d conflicts=%+v", len(apply), conflicts)
+		}
+		if conflicts[0].Reason != syncReasonClaimLapsedHolderLive {
+			t.Errorf("got reason=%s want %s", conflicts[0].Reason, syncReasonClaimLapsedHolderLive)
+		}
+		if conflicts[0].Holder != syncOwner {
+			t.Errorf("got holder=%s want %s", conflicts[0].Holder, syncOwner)
+		}
+	})
+
+	t.Run("holder dead -> fast-forward", func(t *testing.T) {
+		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessDead)}
+		apply, conflicts := syncDecide(diffs, nil, lapsed, nil, ec)
+		if len(apply) != 1 || len(conflicts) != 0 {
+			t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
+		}
+	})
+
+	t.Run("holder unknown -> fast-forward, no permanent freeze", func(t *testing.T) {
+		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessUnknown)}
+		apply, conflicts := syncDecide(diffs, nil, lapsed, nil, ec)
+		if len(apply) != 1 || len(conflicts) != 0 {
+			t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
+		}
+	})
+
+	t.Run("no probe -> fast-forward, TTL is sole authority", func(t *testing.T) {
+		ec := domain.EvalContext{Now: now}
+		apply, conflicts := syncDecide(diffs, nil, lapsed, nil, ec)
+		if len(apply) != 1 || len(conflicts) != 0 {
+			t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
+		}
+	})
+
+	// An UNEXPIRED claim still blocks on the old reason — the split of
+	// ClaimCovers into ClaimTerritoryCovers + expiry must not change this leg.
+	t.Run("claim still live -> territory-claim", func(t *testing.T) {
+		live := []domain.ClaimRecord{
+			{PathPrefix: syncPrefixWT, OwnerUUID: syncOwner, ExpiresAt: now.Add(time.Hour)},
+		}
+		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessAlive)}
+		apply, conflicts := syncDecide(diffs, nil, live, nil, ec)
+		if len(apply) != 0 || len(conflicts) != 1 {
+			t.Fatalf("want 1 conflict, got apply=%d conflicts=%+v", len(apply), conflicts)
+		}
+		if conflicts[0].Reason != syncReasonTerritoryClaim {
+			t.Errorf("got reason=%s want %s", conflicts[0].Reason, syncReasonTerritoryClaim)
+		}
+	})
+
+	// A lapsed claim over a DIFFERENT prefix is not this path's business, live
+	// holder or not: the territory predicate still gates the liveness question.
+	t.Run("lapsed claim elsewhere -> fast-forward", func(t *testing.T) {
+		elsewhere := []domain.ClaimRecord{
+			{PathPrefix: tcPrefixParent, OwnerUUID: syncOwner, ExpiresAt: now.Add(-time.Hour)},
+		}
+		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessAlive)}
+		apply, conflicts := syncDecide(diffs, nil, elsewhere, nil, ec)
 		if len(apply) != 1 || len(conflicts) != 0 {
 			t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
 		}
