@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/gate"
 )
 
 const (
@@ -126,17 +127,67 @@ func (s *Store) collectExpiredClaims(ctx context.Context, r *DoctorReport, now t
 	return nil
 }
 
+// promotableCandidates reports the candidate ids whose refs/loto/candidates/<id>
+// ref still stands, and whether that answer can be trusted. A claim belonging
+// to one of them is territory a live candidate is holding, never residue.
+//
+// ‡ Ref presence, not holder liveness, is what makes a candidate promotable
+// (loto-11ds). A session that submits and then ends NORMALLY is LivenessDead by
+// every probe while its candidate is still queued: sweeping its claims on the
+// liveness verdict alone re-opens the path to a fresh lease while the
+// candidate — and the preimage it captured — still stands. The claims come off
+// on promotion, rejection or withdrawal (ReleaseCandidateClaims); an
+// acceptance that died between the claim insert and the ref write leaves no
+// ref, which is exactly what makes the sweep below safe.
+//
+// ‡ false means "cannot tell", and the caller must then keep every claim —
+// gate.ListCandidateIDs' own contract is that a failed ref read must never be
+// read as "no refs exist", because that reading deletes every live candidate's
+// claims. An unset repoTop reads the same way: openRuntime refuses outside a
+// git checkout, so a store with no root has no candidates namespace to consult
+// rather than an empty one.
+func (s *Store) promotableCandidates(ctx context.Context) (map[string]bool, bool) {
+	if s.repoTop == "" {
+		return nil, false
+	}
+	ids, err := gate.ListCandidateIDs(ctx, s.repoTop)
+	if err != nil {
+		return nil, false
+	}
+	present := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		present[id] = true
+	}
+	return present, true
+}
+
 // collectStaleCandidateClaims fills r.StaleCandidateClaims with every
 // candidate_claims row domain.EvalContext.CandidateClaimIsAbandoned judges
-// abandoned — the audit half of gcCandidateClaimsTx's sweep (loto-u2p7).
+// abandoned AND whose candidate has no ref left to promote — the audit half of
+// gcCandidateClaimsTx's sweep (loto-u2p7), held to the same ref gate so
+// --dry-run never names a row --repair will keep (loto-11ds).
 // ListCandidateClaims already returns (path_canonical, candidate_id) order;
 // filtering preserves it rather than re-deriving a sort.
+//
+// Reads the refs itself rather than taking them from DoctorAudit: the audit
+// holds no transaction and no op-flock, so the git subprocess costs nothing but
+// its own runtime here.
 func (s *Store) collectStaleCandidateClaims(ctx context.Context, r *DoctorReport, ec domain.EvalContext) error {
 	claims, err := s.ListCandidateClaims(ctx)
 	if err != nil {
 		return err
 	}
+	if len(claims) == 0 {
+		return nil // nothing to judge: don't pay for a ref read
+	}
+	promotable, refsKnown := s.promotableCandidates(ctx)
+	if !refsKnown {
+		return nil
+	}
 	for i := range claims {
+		if promotable[claims[i].CandidateID] {
+			continue
+		}
 		if ec.CandidateClaimIsAbandoned(claims[i]) {
 			r.StaleCandidateClaims = append(r.StaleCandidateClaims, claims[i])
 		}
@@ -211,6 +262,12 @@ func checkSidecar(l domain.LockRecord, sc SidecarCheck) (SidecarFinding, bool) {
 // falls back to the process CWD (loto-gc82).
 func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live domain.HolderLiveProbe) error {
 	byAgent := string(agent) // internal store helpers thread the owner as a plain string
+	// Read the candidate refs BEFORE the op-flock: promotableCandidates shells
+	// out to git, and neither the flock hold nor the tx below should span a
+	// subprocess (loto-3qev makes the same argument for the detached audit).
+	// Refs are repo-wide, so this vantage point sees what every worktree of the
+	// same checkout sees.
+	promotable, refsKnown := s.promotableCandidates(ctx)
 	// Hold the op-flock across the tx AND the post-commit chmod restores
 	// so concurrent AcquireLocks can't race the filesystem half of the
 	// reclaim (loto-4qt).
@@ -251,8 +308,12 @@ func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live d
 	if err := gcClaimsTx(ctx, tx, now); err != nil {
 		return err
 	}
-	if _, err := gcCandidateClaimsTx(ctx, tx, ec); err != nil {
-		return err
+	// refsKnown false means the candidates namespace could not be read, and an
+	// unreadable ref state keeps every claim — see promotableCandidates.
+	if refsKnown {
+		if _, err := gcCandidateClaimsTx(ctx, tx, ec, promotable); err != nil {
+			return err
+		}
 	}
 	if err := gcTerritoryTagsTx(ctx, tx, now); err != nil {
 		return err
@@ -467,12 +528,16 @@ func gcClaimsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 // candidate_claims row(s) only. refs/loto/candidates/* and
 // refs/loto/proposals/* are left untouched — the store, not refs, is the
 // attribution home (loto-ovno.13), so the refs are inert once nothing blocks
-// on them.
+// on them. That is also why promotable gates the sweep (loto-11ds): a
+// candidate whose ref this pass would leave standing is still promotable, so
+// deleting its claims alone frees the path while the candidate and its
+// preimage remain outstanding. The caller reads the ref set (see
+// promotableCandidates) and skips this sweep entirely when it cannot.
 //
 // ‡ ec carries the ambient triple rather than (live, now) positionally — the
 // arg-order hazard domain.EvalContext exists to remove, and the only way this
 // helper inherits the store's filesystem case class (loto-8soe).
-func gcCandidateClaimsTx(ctx context.Context, tx *sql.Tx, ec domain.EvalContext) (int, error) {
+func gcCandidateClaimsTx(ctx context.Context, tx *sql.Tx, ec domain.EvalContext, promotable map[string]bool) (int, error) {
 	claims, err := listCandidateClaimsTx(ctx, tx)
 	if err != nil {
 		return 0, err
@@ -481,7 +546,7 @@ func gcCandidateClaimsTx(ctx context.Context, tx *sql.Tx, ec domain.EvalContext)
 	var ids []string
 	for i := range claims {
 		id := claims[i].CandidateID
-		if seen[id] {
+		if seen[id] || promotable[id] {
 			continue
 		}
 		seen[id] = true

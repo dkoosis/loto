@@ -819,8 +819,14 @@ func TestDoctorAudit_ListsExpiredClaims(t *testing.T) {
 // 10h, well past domain.CandidateClaimReclaimGrace (30m, PR #298 review) —
 // TestDoctorAudit_FreshCandidateClaimSurvivesGrace pins the fresh case this
 // fixture deliberately does not exercise.
+//
+// The store carries a repo root because the sweep now reads
+// refs/loto/candidates/* before it deletes anything (loto-11ds), and an
+// unreadable namespace keeps every claim. The repo here holds no candidate
+// ref, which is this fixture's premise: nothing is promotable.
 func TestDoctorRepair_ReclaimsAbandonedCandidateClaim(t *testing.T) {
-	s := mustOpen(t)
+	repoTop, _ := newGateRepo(t)
+	s := mustOpenWithRepoTop(t, repoTop)
 	ctx := context.Background()
 	l := mkFileLock(t, tcAGo, tcBob, time.Hour)
 
@@ -905,6 +911,61 @@ func TestDoctorAudit_FreshCandidateClaimSurvivesGrace(t *testing.T) {
 	}
 	if len(remaining) != 1 {
 		t.Fatalf("repair must not remove a fresh candidate claim still inside the grace floor, got %d remaining: %+v", len(remaining), remaining)
+	}
+}
+
+// TestDoctorRepair_KeepsCandidateClaimWhileItsRefStands (loto-11ds): a session
+// that submits and then ends NORMALLY is LivenessDead by every probe while its
+// candidate is still queued for promotion. Its claims are territory that
+// candidate is holding, not residue, so neither --dry-run's audit nor
+// --repair's sweep may touch them while refs/loto/candidates/<id> stands —
+// dropping them re-opens the path to a fresh lease while the candidate and the
+// preimage it captured are still outstanding. Deleting the ref (the
+// acceptance-residue shape, refs written last) puts the claim back in scope,
+// which is what keeps the first half from passing vacuously.
+func TestDoctorRepair_KeepsCandidateClaimWhileItsRefStands(t *testing.T) {
+	ctx := context.Background()
+	repoTop, head := newGateRepo(t)
+	s := mustOpenWithRepoTop(t, repoTop)
+	gitT(t, repoTop, "update-ref", "refs/loto/candidates/"+tcCand1, head)
+
+	cc := domain.CandidateClaim{
+		PathCanonical: tcAGo, CandidateID: tcCand1,
+		OwnerUUID: tcAlice, SessionUUID: tcAlice,
+		CreatedAt: time.Now().Add(-10 * time.Hour), Host: tcHost, PID: 4242,
+	}
+	if err := s.insertCandidateClaimsUnguarded(ctx, []domain.CandidateClaim{cc}); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := s.DoctorAudit(ctx, tcHost, true, deadProbe, SidecarCheck{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.StaleCandidateClaims) != 0 {
+		t.Errorf("a promotable candidate's claim must not be named stale, got %+v", report.StaleCandidateClaims)
+	}
+	if err := s.DoctorRepair(ctx, "doctor-agent", deadProbe); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := s.ListCandidateClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 1 {
+		t.Fatalf("repair must keep the claim while its candidate ref stands, got %+v", remaining)
+	}
+
+	gitT(t, repoTop, "update-ref", "-d", "refs/loto/candidates/"+tcCand1)
+	if err := s.DoctorRepair(ctx, "doctor-agent", deadProbe); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err = s.ListCandidateClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("with the candidate ref gone the dead session's claim is residue and must be swept, got %+v", remaining)
 	}
 }
 
