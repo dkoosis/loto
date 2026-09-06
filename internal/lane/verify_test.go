@@ -153,6 +153,36 @@ func TestVerifyReportsCommandFailure(t *testing.T) {
 	}
 }
 
+// TestKillVerifyGroupNormalizesESRCHToProcessDone pins the review fix on
+// loto-wtxe: exec's own Cancel contract (os/exec's watchCtx) only skips
+// injecting a spurious cancel error into an otherwise-successful Wait when
+// Cancel returns exactly os.ErrProcessDone. A ctx cancel racing a genuine
+// pass makes syscall.Kill on the already-exited group return raw ESRCH;
+// returning that raw errno (instead of os.ErrProcessDone) would make Wait
+// report errVerifyAborted for a command that actually exited 0.
+func TestKillVerifyGroupNormalizesESRCHToProcessDone(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	c := exec.Command("sh", "-c", "exit 0")
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := c.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+
+	// The group has already exited (Wait returned above), mirroring Cancel
+	// firing just after a genuine pass. killVerifyGroup must report exactly
+	// os.ErrProcessDone here, not nil (which exec would read as "successfully
+	// interrupted" and inject ctx.Err() anyway) and not the raw ESRCH.
+	if err := killVerifyGroup(c.Process.Pid); !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("killVerifyGroup on an already-exited group = %v, want os.ErrProcessDone", err)
+	}
+}
+
 // TestRunVerifyCmdCtxExpiryIsInfraError pins the loto-px54 fix: when the ctx
 // deadline/cancel kills a RUNNING verify command, exec returns an *exec.ExitError
 // ("signal: killed"). That is an infrastructure abort, not a test verdict, so it

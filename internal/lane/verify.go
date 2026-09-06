@@ -135,6 +135,22 @@ func Verify(ctx context.Context, repoTop, commit string, cmd []string) (VerifyRe
 // — quietly voiding the "this is the commit's tree, isolated" guarantee
 // Verify sells. No go.work exists in this repo today, so this guards a real
 // but not-yet-triggered failure mode, not one observed here.
+// killVerifyGroup SIGKILLs the process group led by pid (the verify command,
+// started with Setpgid so its own pid doubles as the group id). It normalizes
+// ESRCH — the group has already exited, e.g. a ctx cancel racing a genuine
+// pass — to os.ErrProcessDone: exec's Cancel contract (os/exec's watchCtx)
+// only skips injecting a spurious cancel error into an otherwise-successful
+// Wait when Cancel returns exactly os.ErrProcessDone, not a raw ESRCH.
+// Returning the raw errno there would misclassify a real pass as
+// errVerifyAborted whenever ctx expiry lands after the group already exited.
+func killVerifyGroup(pid int) error {
+	err := syscall.Kill(-pid, syscall.SIGKILL)
+	if errors.Is(err, syscall.ESRCH) {
+		return os.ErrProcessDone
+	}
+	return err
+}
+
 func runVerifyCmd(ctx context.Context, dir string, cmd []string) (string, bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -172,7 +188,7 @@ func runVerifyCmd(ctx context.Context, dir string, cmd []string) (string, bool, 
 	// the whole group, so an orphaned grandchild dies with its parent instead
 	// of surviving ctx expiry.
 	c.Cancel = func() error {
-		return syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+		return killVerifyGroup(c.Process.Pid)
 	}
 	c.WaitDelay = verifyWaitDelay
 	var buf bytes.Buffer
