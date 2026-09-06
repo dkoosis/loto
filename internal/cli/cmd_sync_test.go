@@ -159,6 +159,47 @@ func TestSync_RestoresDeletedPath(t *testing.T) {
 	}
 }
 
+// TestSync_LeavesTargetOverwrittenBetweenClassifyAndApply closes the
+// fast-forward half's window — the one syncDeleteResidue has always closed for
+// deletions (loto-gai7). The scan hashed the divergent path, sync decided to
+// overwrite it, and a peer holding no lease wrote its own work there before the
+// apply loop got to it. The pre-write re-probe must catch that: the peer's
+// bytes stay, and the row names what it found against what it would have
+// written.
+func TestSync_LeavesTargetOverwrittenBetweenClassifyAndApply(t *testing.T) {
+	repo := syncBaseRepo(t)
+	target := filepath.Join(repo, tcTargetA)
+	if err := os.WriteFile(target, []byte("junk\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const peerWork = "package p\n\nfunc LandedMidSync() {}\n"
+	syncBeforeApplyFn = func() {
+		if err := os.WriteFile(target, []byte(peerWork), 0o644); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { syncBeforeApplyFn = nil })
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdSync}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if got := readFileT(t, target); got != peerWork {
+		t.Errorf("sync overwrote work that landed after classification: %q", got)
+	}
+	if !strings.Contains(out.String(), "✓ sync synced=0 conflicts=0 skipped=1") {
+		t.Errorf("missing triage line: %q", out.String())
+	}
+	row := "⚠ target=" + tcTargetA + " reason=target-modified" +
+		" found=" + shortOID(syncGitT(t, repo, "hash-object", tcTargetA)) +
+		" want=" + shortOID(syncGitT(t, repo, "rev-parse", "refs/loto/integration:"+tcTargetA))
+	if !strings.Contains(out.String(), row) {
+		t.Errorf("missing row %q in: %q", row, out.String())
+	}
+}
+
 // --- Step 3: conflict red ---
 
 // TestSync_LeaseAcquireCannotRaceFinalApply pauses sync after its final state
@@ -186,6 +227,9 @@ func TestSync_LeaseAcquireCannotRaceFinalApply(t *testing.T) {
 	diff := syncDiff{
 		syncEntry: syncEntry{Path: tcTargetA, Mode: "100644", OID: syncGitT(t, repo, "rev-parse", "refs/loto/integration:"+tcTargetA)},
 		State:     syncModified,
+		// What a real divergence scan would have hashed — the apply half
+		// re-probes against it before writing.
+		Observed: syncGitT(t, repo, "hash-object", tcTargetA),
 	}
 	done := make(chan int, 1)
 	expectedIntegration := syncGitT(t, repo, "rev-parse", "refs/loto/integration")
@@ -950,9 +994,10 @@ func TestSync_PostPublishFailureReportsCurrentPath(t *testing.T) {
 	syncParentDirFn = func(string) error { return syncErr }
 	t.Cleanup(func() { syncParentDirFn = originalSyncParentDir })
 
-	synced, err := syncApply(t.Context(), repo, []syncDiff{{
+	synced, _, err := syncApply(t.Context(), repo, []syncDiff{{
 		syncEntry: syncEntry{Path: tcTargetA, Mode: "100644", OID: oid},
 		State:     syncModified,
+		Observed:  syncGitT(t, repo, "hash-object", tcTargetA),
 	}})
 	if !errors.Is(err, syncErr) {
 		t.Fatalf("syncApply error = %v, want %v", err, syncErr)
