@@ -19,6 +19,153 @@ const (
 	tcFlagRestoreOrphan = "--restore-orphan-mode"
 )
 
+// --- guard reachability (loto-jomg) -----------------------------------------
+
+// writeHookFixture lays out a minimal but structurally real .githooks tree:
+// an executable dispatcher plus an (always-present) hooks.d/<hook> chain dir
+// for every guard in guardSpecs, and — only for the hooks named in withLoto —
+// a loto-owned executable entry inside that chain dir. Mirrors the real repo
+// layout (.githooks/<hook> dispatcher, .githooks/hooks.d/<hook>/NN-loto-*
+// entry) closely enough for checkGuardReachability to exercise the real
+// filesystem checks rather than a mock.
+func writeHookFixture(t *testing.T, repo string, withLoto ...string) {
+	t.Helper()
+	hasLoto := make(map[string]bool, len(withLoto))
+	for _, h := range withLoto {
+		hasLoto[h] = true
+	}
+	script := []byte("#!/usr/bin/env sh\nexit 0\n")
+	for _, spec := range guardSpecs {
+		dispatcher := filepath.Join(repo, ".githooks", spec.hook)
+		if err := os.MkdirAll(filepath.Dir(dispatcher), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dispatcher, script, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		chainDir := filepath.Join(repo, ".githooks", "hooks.d", spec.hook)
+		if err := os.MkdirAll(chainDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if hasLoto[spec.hook] {
+			entry := filepath.Join(chainDir, "10-loto-"+spec.hook)
+			if err := os.WriteFile(entry, script, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// setHooksPath points core.hooksPath at value via `git config --local`,
+// matching both `make hooks` (value ".githooks") and a foreign tool
+// repointing the slot (an absolute path outside the repo).
+func setHooksPath(t *testing.T, repo, value string) {
+	t.Helper()
+	submitGitT(t, repo, "config", "--local", "core.hooksPath", value)
+}
+
+// TestDoctorGuard_ForeignHooksPath is AC1: a core.hooksPath pointing outside
+// the repo (dk's own clone, 2026-09-07: /Users/dkoosis/.config/git/hooks)
+// makes both guards unreachable — nothing routes to .githooks at all — and
+// `status` reports guard=inert.
+func TestDoctorGuard_ForeignHooksPath(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeHookFixture(t, repo, "pre-commit", "post-checkout")
+	foreign := filepath.Join(t.TempDir(), "global-hooks")
+	setHooksPath(t, repo, foreign)
+
+	out := runOK(t, tcCmdDoctor)
+	if !strings.Contains(out, "✗ guard=pre-commit-gate unreachable reason=hooksPath-foreign detail="+foreign) {
+		t.Errorf("expected foreign-hooksPath row naming the resolved path: %q", out)
+	}
+	if !strings.Contains(out, "✗ guard=tree-move-guard unreachable reason=hooksPath-foreign detail="+foreign) {
+		t.Errorf("expected foreign-hooksPath row for the other guard too: %q", out)
+	}
+	if !strings.Contains(out, "```bash\nmake hooks\n```") {
+		t.Errorf("expected a bash fix block under the ✗ rows: %q", out)
+	}
+
+	status := runOK(t, tcCmdStatus)
+	if !strings.Contains(status, "guard:   inert\n") {
+		t.Errorf("expected guard: inert in status: %q", status)
+	}
+}
+
+// TestDoctorGuard_AfterMakeHooks is AC2: hooksPath correctly bound to
+// .githooks and both guards' loto entries present and executable — both rows
+// read ✓ and status reads guard=ok.
+func TestDoctorGuard_AfterMakeHooks(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeHookFixture(t, repo, "pre-commit", "post-checkout")
+	setHooksPath(t, repo, ".githooks")
+
+	out := runOK(t, tcCmdDoctor)
+	if !strings.Contains(out, "✓ guard=pre-commit-gate reachable entry=.githooks/hooks.d/pre-commit/10-loto-pre-commit") {
+		t.Errorf("expected pre-commit-gate reachable row: %q", out)
+	}
+	if !strings.Contains(out, "✓ guard=tree-move-guard reachable entry=.githooks/hooks.d/post-checkout/10-loto-post-checkout") {
+		t.Errorf("expected tree-move-guard reachable row: %q", out)
+	}
+	if strings.Contains(out, "✗ guard=") {
+		t.Errorf("no guard row should fail once make hooks has run: %q", out)
+	}
+
+	status := runOK(t, tcCmdStatus)
+	if !strings.Contains(status, "guard:   ok\n") {
+		t.Errorf("expected guard: ok in status: %q", status)
+	}
+}
+
+// TestDoctorGuard_PostCheckoutEntryRemoved is AC3: hooksPath correct, but the
+// post-checkout guard's loto entry is missing. The rows are independent — the
+// pre-commit row must stay ✓ while only the post-checkout row fails — and
+// status still reads guard=inert because one guard is enough to make the
+// whole surface untrustworthy.
+func TestDoctorGuard_PostCheckoutEntryRemoved(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeHookFixture(t, repo, "pre-commit") // post-checkout gets no loto entry
+	setHooksPath(t, repo, ".githooks")
+
+	out := runOK(t, tcCmdDoctor)
+	if !strings.Contains(out, "✓ guard=pre-commit-gate reachable") {
+		t.Errorf("pre-commit row must stay ✓ when only post-checkout's entry is missing: %q", out)
+	}
+	if !strings.Contains(out, "✗ guard=tree-move-guard unreachable reason=missing-entry detail=.githooks/hooks.d/post-checkout") {
+		t.Errorf("expected a missing-entry row for tree-move-guard: %q", out)
+	}
+
+	status := runOK(t, tcCmdStatus)
+	if !strings.Contains(status, "guard:   inert\n") {
+		t.Errorf("one unreachable guard must still read guard=inert: %q", status)
+	}
+}
+
+// TestDoctorGuard_ByteIdenticalAcrossRuns is the golden-test requirement
+// (design.md, bead AC4): unchanged state must produce byte-identical guard
+// rows across repeated reads. No wall-clock field is involved, so no
+// normalization is needed — a plain equality holds.
+func TestDoctorGuard_ByteIdenticalAcrossRuns(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeHookFixture(t, repo, "pre-commit")
+	setHooksPath(t, repo, ".githooks")
+
+	first := runOK(t, tcCmdDoctor)
+	second := runOK(t, tcCmdDoctor)
+	if first != second {
+		t.Errorf("doctor's guard rows must be stable across runs on unchanged state:\n first  %q\n second %q", first, second)
+	}
+
+	firstStatus := runOK(t, tcCmdStatus)
+	secondStatus := runOK(t, tcCmdStatus)
+	if firstStatus != secondStatus {
+		t.Errorf("status's guard line must be stable across runs on unchanged state:\n first  %q\n second %q", firstStatus, secondStatus)
+	}
+}
+
 func TestDoctorHealthyEmpty(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)

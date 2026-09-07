@@ -137,9 +137,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 3
 	}
 
-	fmt.Fprintf(stdout, "project: %s\n", ResolveAndPinProjectSlug(repoTop))
-	fmt.Fprintf(stdout, "repo:    %s\n", repoTop)
-	fmt.Fprintf(stdout, "state:   %s\n", rt.StateDir)
+	printDoctorHeader(ctx, stdout, repoTop, rt.StateDir)
 	renderIdentityGC(stdout, sessionsReaped, sessionsResidual)
 
 	renderDoctorReport(stdout, report)
@@ -180,6 +178,17 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 3
 	}
 	return 0
+}
+
+// printDoctorHeader writes doctor's environment-identity lines (project/repo/
+// state) plus the guard-reachability rows (loto-jomg): both answer "is my
+// environment sound" ahead of the audit findings below, and folding them into
+// one call keeps cmdDoctor under funlen's statement budget.
+func printDoctorHeader(ctx context.Context, stdout io.Writer, repoTop, stateDir string) {
+	fmt.Fprintf(stdout, "project: %s\n", ResolveAndPinProjectSlug(repoTop))
+	fmt.Fprintf(stdout, "repo:    %s\n", repoTop)
+	fmt.Fprintf(stdout, "state:   %s\n", stateDir)
+	renderGuardReachability(stdout, checkGuardReachability(ctx, repoTop))
 }
 
 // orphanFlags bundles the doctor flags that gate orphan-mode scanning.
@@ -503,4 +512,185 @@ func releaseClaimResidue(rt *runtime, residue []claimResidue, stdout, stderr io.
 		fmt.Fprintf(stdout, "✓ claim-residue-released candidates=%d paths=%d\n", len(residue), released)
 	}
 	return 0
+}
+
+// --- guard reachability (loto-jomg) -----------------------------------------
+//
+// Reachability has ONE definition now that loto-ea8y.1 (PR #318) landed the
+// hooks.d chain-runner: core.hooksPath resolves to the repo's tracked
+// .githooks, the dispatcher for the hook exists and is executable, and a
+// loto-owned entry exists and is executable under .githooks/hooks.d/<hook>/.
+// No PATH probe, no alias probe — that delivery is gone (decision e10cdeda65c9).
+
+// guardSpec names one guard's git hook and the label doctor/status print for it.
+type guardSpec struct {
+	hook  string // git hook name: the dispatcher + hooks.d/<hook> chain dir
+	label string // printed as guard=<label>
+}
+
+// guardSpecs is the fixed, ordered set of guards this bead reports on. Order
+// is print order, so it is deterministic on its own — no sort needed.
+var guardSpecs = []guardSpec{
+	{hook: "pre-commit", label: "pre-commit-gate"},
+	{hook: "post-checkout", label: "tree-move-guard"},
+}
+
+// guardStatus is one guard's reachability verdict. reason and detail are only
+// meaningful when !OK.
+type guardStatus struct {
+	spec   guardSpec
+	ok     bool
+	reason string // machine-stable token, e.g. "hooksPath-foreign", "missing-entry"
+	detail string // the value or path that names the specific problem
+}
+
+// checkGuardReachability evaluates every guard in guardSpecs against the one
+// definition above. The rows are independent by construction: a hooksPath
+// problem fails every guard (nothing can fire without it), but a per-guard
+// dispatcher/entry problem fails only that guard.
+func checkGuardReachability(ctx context.Context, repoTop string) []guardStatus {
+	out := make([]guardStatus, len(guardSpecs))
+	if repoTop == "" {
+		for i, spec := range guardSpecs {
+			out[i] = guardStatus{spec: spec, reason: "no-repo", detail: "not inside a git repository"}
+		}
+		return out
+	}
+	resolved, hooksPathOK, err := resolveGitHooksPath(ctx, repoTop)
+	for i, spec := range guardSpecs {
+		switch {
+		case err != nil:
+			out[i] = guardStatus{spec: spec, reason: "hooksPath-unreadable", detail: err.Error()}
+		case !hooksPathOK:
+			out[i] = guardStatus{spec: spec, reason: "hooksPath-foreign", detail: resolved}
+		default:
+			out[i] = checkOneGuard(repoTop, spec)
+		}
+	}
+	return out
+}
+
+// resolveGitHooksPath resolves core.hooksPath (or git's unset-default,
+// $GIT_DIR/hooks) to an absolute path and reports whether it matches the
+// repo's tracked .githooks. Mirrors the comparison `make hooks` makes, but
+// resolves to an absolute path so a foreign value can be named in full
+// (make hooks compares the raw config string only).
+func resolveGitHooksPath(ctx context.Context, repoTop string) (resolved string, ok bool, err error) {
+	want := filepath.Clean(filepath.Join(repoTop, ".githooks"))
+
+	raw, cerr := gitCmd(ctx, repoTop, "config", "--get", "core.hooksPath")
+	raw = strings.TrimSpace(raw)
+	if cerr != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(cerr, &exitErr) || exitErr.ExitCode() != 1 {
+			return "", false, fmt.Errorf("git config --get core.hooksPath: %w", cerr)
+		}
+		raw = "" // exit 1: key unset, not an error
+	}
+
+	if raw == "" {
+		gitDirRaw, derr := gitCmd(ctx, repoTop, "rev-parse", "--git-dir")
+		if derr != nil {
+			return "", false, fmt.Errorf("git rev-parse --git-dir: %w", derr)
+		}
+		gitDir := strings.TrimSpace(gitDirRaw)
+		if !filepath.IsAbs(gitDir) {
+			gitDir = filepath.Join(repoTop, gitDir)
+		}
+		resolved = filepath.Clean(filepath.Join(gitDir, "hooks"))
+		return resolved, resolved == want, nil
+	}
+
+	if filepath.IsAbs(raw) {
+		resolved = filepath.Clean(raw)
+	} else {
+		resolved = filepath.Clean(filepath.Join(repoTop, raw))
+	}
+	return resolved, resolved == want, nil
+}
+
+// checkOneGuard runs the dispatcher + hooks.d entry half of the definition for
+// one guard, given that core.hooksPath already resolves to .githooks.
+func checkOneGuard(repoTop string, spec guardSpec) guardStatus {
+	dispatcherRel := ".githooks/" + spec.hook
+	fi, err := os.Stat(filepath.Join(repoTop, filepath.FromSlash(dispatcherRel)))
+	if err != nil || fi.IsDir() || fi.Mode()&0o111 == 0 {
+		return guardStatus{spec: spec, reason: "missing-dispatcher", detail: dispatcherRel}
+	}
+
+	chainDirRel := ".githooks/hooks.d/" + spec.hook
+	entries, err := os.ReadDir(filepath.Join(repoTop, filepath.FromSlash(chainDirRel)))
+	if err != nil {
+		return guardStatus{spec: spec, reason: "missing-entry", detail: chainDirRel}
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !isScannableHookEntry(name) || !strings.Contains(name, "loto") {
+			continue
+		}
+		entryRel := chainDirRel + "/" + name
+		info, statErr := os.Stat(filepath.Join(repoTop, filepath.FromSlash(entryRel)))
+		if statErr != nil || info.Mode()&0o111 == 0 {
+			return guardStatus{spec: spec, reason: "not-executable", detail: entryRel}
+		}
+		return guardStatus{spec: spec, ok: true, detail: entryRel}
+	}
+	return guardStatus{spec: spec, reason: "missing-entry", detail: chainDirRel}
+}
+
+// isScannableHookEntry mirrors run-chain.sh's own skip rules (its header,
+// .githooks/lib/run-chain.sh): *.orig, *.sample, *.disabled and dotfiles are
+// never run, so they must never count as the loto entry either.
+func isScannableHookEntry(name string) bool {
+	if strings.HasPrefix(name, ".") {
+		return false
+	}
+	switch filepath.Ext(name) {
+	case ".orig", ".sample", ".disabled":
+		return false
+	}
+	return true
+}
+
+// guardsAllReachable reduces a reachability report to the single bool status
+// prints as guard=ok / guard=inert.
+func guardsAllReachable(statuses []guardStatus) bool {
+	for _, s := range statuses {
+		if !s.ok {
+			return false
+		}
+	}
+	return true
+}
+
+// guardSummary renders checkGuardReachability's verdict for status's one-line
+// header: "ok" only when every guard is reachable, "inert" otherwise — a
+// guard that cannot prove it is installed is reported as absent (loto-jomg).
+func guardSummary(statuses []guardStatus) string {
+	if guardsAllReachable(statuses) {
+		return "ok"
+	}
+	return "inert"
+}
+
+// renderGuardReachability prints one row per guard and, when any is
+// unreachable, one shared fix block (design.md: a ```bash fix block under a ✗
+// row). Returns whether every guard is reachable, for callers that also need
+// the bool (status's guard=ok/guard=inert line).
+func renderGuardReachability(stdout io.Writer, statuses []guardStatus) bool {
+	anyFail := false
+	for _, s := range statuses {
+		if s.ok {
+			fmt.Fprintf(stdout, "✓ guard=%s reachable entry=%s\n", s.spec.label, s.detail)
+			continue
+		}
+		anyFail = true
+		fmt.Fprintf(stdout, "✗ guard=%s unreachable reason=%s detail=%s\n", s.spec.label, s.reason, s.detail)
+	}
+	if anyFail {
+		fmt.Fprintln(stdout, "```bash")
+		fmt.Fprintln(stdout, "make hooks")
+		fmt.Fprintln(stdout, "```")
+	}
+	return !anyFail
 }

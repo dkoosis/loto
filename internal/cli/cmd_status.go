@@ -35,6 +35,7 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fmt.Fprintf(stdout, "project: %s\n", ResolveAndPinProjectSlug(repoTop))
 	fmt.Fprintf(stdout, "repo:    %s\n", repoTop)
 	fmt.Fprintf(stdout, "state:   %s\n", rt.StateDir)
+	fmt.Fprintf(stdout, "guard:   %s\n", guardSummary(checkGuardReachability(ctx, repoTop)))
 
 	if *collisions {
 		return statusCollisions(stdout, stderr, rt)
