@@ -354,10 +354,10 @@ func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, s
 	// same owner. Without it, the gate minting a beacon for an agent that
 	// already ran `loto lock` rewrote that agent's own row to shared / pid 0 /
 	// no branch / 2m — silently downgrading a declared exclusive 30m lease and
-	// then letting the same-session waiver treat it as a beacon and release it
-	// out from under uncommitted work. A beacon says "an agent of mine is
-	// writing here";
-	// a row that already says something stronger needs no weakening. The
+	// then letting the same-session beacon waiver treat it as a beacon and
+	// wave a tree-move through, out from under uncommitted work. A beacon says
+	// "an agent of mine is writing here"; a row that already says something
+	// stronger needs no weakening. The
 	// converse still applies: an explicit lock upgrades over a beacon, because
 	// then excluded.beacon is 0 and the update runs.
 	//
