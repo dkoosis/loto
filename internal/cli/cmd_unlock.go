@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"sort"
+	"strings"
+	"time"
 
 	"loto/internal/domain"
 	"loto/internal/render"
@@ -154,6 +157,16 @@ func breakTargets(rt *runtime, args []string, intent, repoTop string, expect hol
 	if code != 0 {
 		return code
 	}
+	// Snapshot every current holder BEFORE the break (loto-sblu). BreakLocks
+	// deletes the lock rows — and gc-sweeps their tags — inside its own
+	// transaction, so this is the only chance to learn who is about to be
+	// dispossessed; asking again after the call would always find nobody.
+	before := make(map[string][]domain.LockRecord, len(targets))
+	for i := range targets {
+		if holders, herr := rt.Store.LocksAt(rt.Ctx, targets[i]); herr == nil {
+			before[targets[i].Canonical] = holders
+		}
+	}
 	var expectations store.BreakExpectations
 	if len(expect) > 0 {
 		// Restates locally what checkExpectHolderUsage already enforced
@@ -176,7 +189,51 @@ func breakTargets(rt *runtime, args []string, intent, repoTop string, expect hol
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	return render.EmitBreakResults(stdout, stderr, results)
+	exit := render.EmitBreakResults(stdout, stderr, results)
+	notifyDispossessed(rt, intent, time.Now(), before, results, stdout)
+	return exit
+}
+
+// notifyDispossessed tells whoever a successful --force break just dispossessed
+// (loto-sblu). A lock-scoped tag cannot survive the break — the host lock row
+// it hangs off is gone the instant BreakLocks commits — so this pins a
+// territory tag to the bare path instead, the same channel `loto tag` already
+// uses to leave a note on ground nobody currently holds (D9, nug
+// b2b0a9df507c: reuse the existing per-path channel, no new store).
+//
+// Best-effort: a write failure here never changes the break's own exit code
+// (Rule 3) — it prints a ⚠ advisory row and moves on to the next target.
+func notifyDispossessed(rt *runtime, intent string, brokenAt time.Time, before map[string][]domain.LockRecord, results []store.BreakResult, stdout io.Writer) {
+	breaker := rt.Agent.UUID
+	expires := brokenAt.Add(territoryTagTTL)
+	text := fmt.Sprintf("unlock --force by %s at %s: %s",
+		breaker, brokenAt.UTC().Format(time.RFC3339), intent)
+	for i := range results {
+		if results[i].Err != nil {
+			continue // nothing was broken here — nothing to tell anyone
+		}
+		target := results[i].Target
+		holders := before[target.Canonical]
+		var dispossessed []string
+		for j := range holders {
+			if string(holders[j].OwnerUUID) != breaker {
+				dispossessed = append(dispossessed, string(holders[j].OwnerUUID))
+			}
+		}
+		if len(dispossessed) == 0 {
+			continue
+		}
+		if _, err := rt.Store.InsertTerritoryTag(rt.Ctx, store.NewTerritoryTag{
+			PathPrefix: target.Canonical,
+			TaggerUUID: breaker,
+			Text:       text,
+			ExpiresAt:  expires.UnixNano(),
+		}); err != nil {
+			sort.Strings(dispossessed)
+			fmt.Fprintf(stdout, "⚠ notify-failed target=%s holder=%s err=%v\n",
+				relPath(target.Canonical), strings.Join(dispossessed, ","), err)
+		}
+	}
 }
 
 func resolveUnlockArgs(args []string, repoTop string, stderr io.Writer) ([]domain.Target, int) {
