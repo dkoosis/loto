@@ -166,8 +166,8 @@ func emitBeaconErr(err error, stdout, stderr io.Writer) int {
 //
 // SessionUUID is carried so a beacon can be told apart from a genuine peer's:
 // siblings of one Claude session share a session id while holding distinct
-// owner uuids, and that is the discriminator `loto guard` uses to let a session
-// move its own tree (loto-xwod AC).
+// owner uuids, and that is the discriminator gateDecideAny uses to let a
+// session's own write through its siblings' beacons (loto-xwod AC).
 //
 // ‡ Beacon: true is what marks the row — not the shared/pid-0 shape, which an
 // ordinary `loto lock --shared` placed without LOTO_PID wears too (loto-dm4i).

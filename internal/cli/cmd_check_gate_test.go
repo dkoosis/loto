@@ -234,8 +234,14 @@ func TestGateDecide_SameOwnerTwoPrefixes_BlockerPathTieBreak(t *testing.T) {
 }
 
 // gateDecideAny unit tests (ccp-vx4w): the repo-wide sibling of gateDecide,
-// used by `loto guard`. Table-driven per ADR-008 — one lock/claim fixture
-// set per row, no target list since the predicate is path-free.
+// for an operation with no path operand — a branch switch. It has NO caller
+// today: `loto guard` was its only one and #318 deleted it; `loto check
+// --gate` reaches gateDecide, not this. loto-ea8y.2 (post-checkout warns on
+// peer-locked paths the move changed) is the intended next consumer, and
+// these tests are what keeps the predicate honest until it arrives — delete
+// them only alongside gateDecideAny itself. Table-driven per ADR-008 — one
+// lock/claim fixture set per row, no target list since the predicate is
+// path-free.
 func TestGateDecideAny(t *testing.T) {
 	now := time.Now()
 	cases := []struct {

@@ -96,11 +96,11 @@ func (l LockRecord) EffectiveMode() string {
 // writing agent's behalf rather than taken by an agent that asked for it
 // (loto-xwod). It reads the persisted flag and nothing else.
 //
-// The distinction is not cosmetic. `loto guard` lets a session move its own
-// tree past its OWN siblings' beacons — they only say "an agent of mine is
-// writing here" — while a sibling's real exclusive lock still refuses the move.
-// A checkout under declared, uncommitted territory is precisely what destroyed
-// an agent's work on 2026-08-14.
+// The distinction is not cosmetic. gateDecideAny lets a session's own write
+// through its OWN siblings' beacons — they only say "an agent of mine is
+// writing here" — while a sibling's real exclusive lock still refuses it. A
+// write under declared, uncommitted territory is precisely what destroyed an
+// agent's work on 2026-08-14.
 //
 // ‡ The flag is persisted because the shape cannot carry it (loto-dm4i, Codex
 // #249). A beacon is shared with PID 0 — shared so two siblings' beacons never
@@ -108,9 +108,9 @@ func (l LockRecord) EffectiveMode() string {
 // after the write it announces. But an ordinary `loto lock --shared` placed
 // without LOTO_PID stores exactly that shape too: PID 0 is the documented
 // "no durable liveness handle" sentinel, not a beacon marker. Reading the
-// shape therefore classified a real shared lease as a beacon, and guard's
-// same-session carve-out then waived it and moved the tree — the failure the
-// carve-out was written to avoid, pointed the other way.
+// shape therefore classified a real shared lease as a beacon, and the
+// same-session carve-out then waived it — the failure the carve-out was
+// written to avoid, pointed the other way.
 func (l LockRecord) IsBeacon() bool {
 	return l.Beacon
 }
