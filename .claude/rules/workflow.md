@@ -45,3 +45,5 @@ unpromoted work. The check is the backstop for branch-shaped publication.
 
 ‡ **Tests are stdlib-only — no testify/go-cmp.** Convention is plain `t.Errorf`/`errors.Is` (φ `internal/domain/target_test.go`). Reject PRs that add assertion-helper deps/packages; fold their value in stdlib style. (#176 dragged in testcmp/testrequire clones — closed, rewritten.)
 ‡ **Arch linter rejects black-box `*_test` self-import.** `package foo_test` importing its own `loto/internal/foo` trips `make check`'s dependency-violation gate. Use internal `package foo` for in-package tests.
+
+‡ **File-collision / overwrite questions start at the conflict-class survey, ✗ at strategy.** `itzy ask "conflict class survey"` → nug `b2b0a9df507c` (kg `Project/loto/plans/loto-yofe-conflict-class-survey.md`) holds nine decisions with evidence and rejected alternatives; the work is in bd (titles name the guard, stash, doctor, unlock verbs) and lane-as-default is inquiry `Project/dk/Inquiries/lane-as-default-commit-path/`. A session re-deriving these from source is a regression (2026-09-07: three turns burned before recall fired).
