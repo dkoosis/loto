@@ -144,6 +144,11 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 	renderDoctorReport(stdout, report)
 
+	// Dangling-stash report (loto-kotb): advisory only, never touched by
+	// --repair below — D8 forbids doctor from popping/applying/dropping a
+	// stash it did not create.
+	renderDanglingStashes(stdout, time.Now(), scanDanglingStashes(rt.Ctx, repoTop, lockOwnerUUIDs(ctx, rt.Store)))
+
 	residue := reportClaimResidue(rt, repoTop, stdout)
 
 	orphans, scanIncomplete := scanOrphansAndHint(rt, repoTop, live, orphanFlags{

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -272,5 +273,133 @@ func TestUnlock_LiveForeignLock_StaysNotOwner(t *testing.T) {
 	wantOwner := "owner=" + alice.UUID
 	if !strings.Contains(out.String(), wantOwner) {
 		t.Errorf("expected not-owner row naming alice as %q: %q", wantOwner, out.String())
+	}
+}
+
+// TestUnlockForce_TagsDispossessedHolder is loto-sblu's central AC: alice
+// holds a.go, bob force-breaks it, and a.go carries a territory tag naming
+// bob and bob's intent by the time alice next reads that path — the lock row
+// the note would otherwise hang off is gone the instant the break commits, so
+// this is the one channel that survives it (D9, nug b2b0a9df507c).
+func TestUnlockForce_TagsDispossessedHolder(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("alice lock failed")
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	intent := "loto-sblu: reclaim, alice unresponsive"
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcTargetA, tcFlagForce, "-t", intent}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("force break exit %d; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✓ broken") {
+		t.Fatalf("expected a broken row: %q", out.String())
+	}
+
+	// alice reads the path next and must see the note.
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	var check bytes.Buffer
+	if code := Run([]string{tcCmdCheck, tcTargetA}, &check, io.Discard); code != 0 {
+		t.Fatalf("check exit %d: %q", code, check.String())
+	}
+	got := check.String()
+	if !strings.Contains(got, "ℹ territory-tag") {
+		t.Fatalf("expected a territory-tag row naming the break: %q", got)
+	}
+	if !strings.Contains(got, "from="+bob.UUID) {
+		t.Errorf("tag must name the breaker: %q", got)
+	}
+	if !strings.Contains(got, intent) {
+		t.Errorf("tag must carry the break's bead/intent: %q", got)
+	}
+	timeRe := regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z`)
+	if !timeRe.MatchString(got) {
+		t.Errorf("tag row must carry a time: %q", got)
+	}
+}
+
+// TestUnlockForce_TagByteIdenticalAcrossReads is the golden-test requirement:
+// unlike doctor's stash rows, a territory tag's fields (from=, prefix=,
+// expires_at=, text=) are all fixed at write time, so two reads of the same
+// note are byte-identical with no normalization needed.
+func TestUnlockForce_TagByteIdenticalAcrossReads(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("alice lock failed")
+	}
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	if code := Run([]string{tcCmdUnlock, tcTargetA, tcFlagForce, "-t", "loto-sblu: reclaim"}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("bob force break failed")
+	}
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	var first, second bytes.Buffer
+	Run([]string{tcCmdCheck, tcTargetA}, &first, io.Discard)
+	Run([]string{tcCmdCheck, tcTargetA}, &second, io.Discard)
+	if first.String() != second.String() {
+		t.Errorf("the tag row must be byte-identical across reads:\n first  %q\n second %q", first.String(), second.String())
+	}
+}
+
+// TestUnlockForce_NotifyFailure_WarnRowExitZero is Rule 3: a notification
+// write that fails (here: the per-prefix territory-tag cap already exhausted)
+// must not sink the break — it still succeeds, exit 0, with a ⚠ advisory row
+// naming the failure instead of silently losing it.
+func TestUnlockForce_NotifyFailure_WarnRowExitZero(t *testing.T) {
+	withTempProject(t)
+	alice, bob, carol := threeAgents(t)
+
+	// Exhaust the per-prefix territory-tag cap on a.go while it is unlocked,
+	// as a third voice, before alice ever takes the lock.
+	t.Setenv("LOTO_AGENT_ID", carol.UUID)
+	for i := range 5 {
+		if code := Run([]string{tcCmdTag, tcTargetA, "loto-xyz: filler note"}, io.Discard, io.Discard); code != 0 {
+			t.Fatalf("filler tag %d failed", i)
+		}
+	}
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("alice lock failed")
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcTargetA, tcFlagForce, "-t", tcIntentTest}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("a failed notification must not sink the break; exit %d out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✓ broken") {
+		t.Errorf("break must still succeed: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "⚠ notify-failed") {
+		t.Errorf("expected a ⚠ notify-failed row: %q", out.String())
+	}
+}
+
+// TestUnlockForce_NoDispossession_NoTag: force-breaking a target nobody else
+// holds (already stale, or self-owned) must not manufacture a note — the
+// Rule is "dispossessed holder", not "every force break".
+func TestUnlockForce_NoDispossession_NoTag(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+
+	// No lock at all on tcTargetA: --force on an unlocked target is a
+	// no-lock-at-target error, not a dispossession.
+	var out, errBuf bytes.Buffer
+	Run([]string{tcCmdUnlock, tcTargetA, tcFlagForce, "-t", tcIntentTest}, &out, &errBuf)
+
+	var check bytes.Buffer
+	Run([]string{tcCmdCheck, tcTargetA}, &check, io.Discard)
+	if strings.Contains(check.String(), "territory-tag") {
+		t.Errorf("no dispossession happened; no tag should exist: %q", check.String())
 	}
 }
