@@ -1,0 +1,38 @@
+#!/usr/bin/env sh
+#
+# 10-loto-staged-locks — refuse a commit whose staged set reaches a path a
+# peer holds a live lock or claim on (ccp-vx4w, decision nug 682b236fdd2d /
+# 7a2b16d6aaaf).
+#
+# `loto check --gate --staged` already implements the exact decision (foreign
+# live lock/claim -> deny, naming the holder); this wires it in and adds the
+# escape hatch. Runs before 50-beads because a refusal should not leave bd
+# half-run — the chain stops at the first non-zero exit.
+#
+# Fail-open: no `loto` on PATH -> skip silently.
+
+command -v loto >/dev/null 2>&1 || exit 0
+
+if [ "${LOTO_GUARD_OVERRIDE:-}" = "1" ]; then
+	echo "pre-commit: LOTO_GUARD_OVERRIDE=1 — skipping loto staged-lock guard" >&2
+	exit 0
+fi
+
+# stderr deliberately NOT merged into the capture (loto-tzmv.8, Codex #246):
+# the capture is echoed only on exit 1, so `2>&1` swallowed every fail-open
+# notice — the one signal saying the gate did not run. Letting stderr pass
+# straight through means the ⚠ row reaches the committer on exits 0 and 3
+# too, which is the point of moving it off stdout.
+_loto_gate_out=$(loto check --gate --staged)
+_loto_gate_exit=$?
+
+if [ "$_loto_gate_exit" -eq 1 ]; then
+	echo "$_loto_gate_out" >&2
+	echo "pre-commit: refused — staged paths include a peer's live lock/claim" >&2
+	echo "pre-commit: override with LOTO_GUARD_OVERRIDE=1 git commit ..." >&2
+	exit 1
+fi
+
+# exit 0 (no conflicts) or 3 (gate infra unreachable, fail-open) both proceed
+# — only a confirmed foreign live conflict (exit 1) blocks.
+exit 0
