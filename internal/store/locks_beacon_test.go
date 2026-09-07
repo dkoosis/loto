@@ -28,8 +28,8 @@ func beaconOf(l domain.LockRecord, ttl time.Duration) domain.LockRecord {
 // its own agent uuid — so the gate minting a beacon for an agent that had
 // already run `loto lock` REPLACED that agent's row: exclusive → shared,
 // durable pid → 0, branch cleared, 30m → 2m. The agent's declared lease
-// silently shrank, and `loto guard` then read the downgraded row as this
-// session's own beacon and waived it, moving the tree out from under
+// silently shrank, and the same-session waiver then read the downgraded row
+// as this session's own beacon and waived it, leaving the path open under
 // uncommitted work — the 2026-08-14 incident, reintroduced by the fix for it.
 func TestBeaconYieldsToOwnExplicitLock(t *testing.T) {
 	s := mustOpen(t)

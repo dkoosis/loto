@@ -234,8 +234,9 @@ func TestGateDecide_SameOwnerTwoPrefixes_BlockerPathTieBreak(t *testing.T) {
 }
 
 // gateDecideAny unit tests (ccp-vx4w): the repo-wide sibling of gateDecide,
-// used by `loto guard`. Table-driven per ADR-008 — one lock/claim fixture
-// set per row, no target list since the predicate is path-free.
+// reached through `loto check --gate`. Table-driven per ADR-008 — one
+// lock/claim fixture set per row, no target list since the predicate is
+// path-free.
 func TestGateDecideAny(t *testing.T) {
 	now := time.Now()
 	cases := []struct {

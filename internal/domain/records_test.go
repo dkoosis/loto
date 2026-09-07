@@ -15,12 +15,13 @@ func mk(owner, mode string) LockRecord {
 	}
 }
 
-// IsBeacon is what lets `loto guard` tell "an agent of my own session is
-// writing here" apart from "a peer holds this territory" (loto-xwod). The
-// marker is persisted, never inferred: the shared/pid-0 shape a beacon wears is
-// also the shape of an ordinary `loto lock --shared` placed without LOTO_PID,
-// and reading the shape let guard waive that real lease and move the tree
-// (loto-dm4i, Codex #249). The pid-0 shared row below is the regression pin.
+// IsBeacon is what lets the gate's same-session waiver (gateDecideAny) tell
+// "an agent of my own session is writing here" apart from "a peer holds this
+// territory" (loto-xwod). The marker is persisted, never inferred: the
+// shared/pid-0 shape a beacon wears is also the shape of an ordinary `loto
+// lock --shared` placed without LOTO_PID, and reading the shape let the waiver
+// release that real lease (loto-dm4i, Codex #249). The pid-0 shared row below
+// is the regression pin.
 func TestLockRecordIsBeacon(t *testing.T) {
 	withPID := func(l LockRecord, pid int) LockRecord { l.PID = pid; return l }
 	asBeacon := func(l LockRecord) LockRecord { l.Beacon = true; return l }
