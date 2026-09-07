@@ -35,10 +35,16 @@ include .sandbox/lib/Makefile.cross.mk
 
 BIN_DIR := bin
 BIN     := $(BIN_DIR)/loto
+
 PKG     := ./...
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -X main.Version=$(VERSION) -X main.GitCommit=$(COMMIT)
+
+# The git hooks this repo delivers. Each name is BOTH a dispatcher
+# (.githooks/<name>) and a chain dir (.githooks/hooks.d/<name>/); `make hooks`
+# refuses to install if either half is absent.
+GIT_HOOKS := pre-commit post-merge pre-push post-checkout prepare-commit-msg
 
 # ── Per-checkout scratch (loto-4ivy) ──
 #
@@ -261,27 +267,56 @@ tidy: ## Tidy go.mod
 clean: ## Remove build artifacts and this checkout's scratch/lint cache
 	rm -rf $(BIN_DIR) $(CACHE_DIR)
 
-hooks: ## Route git hooks to the tracked .githooks/ dir (bd integration, ccp-th5.2). Local-only, per-clone; run once after cloning.
-	@missing=""; \
-	for h in pre-commit post-merge pre-push post-checkout prepare-commit-msg; do \
+hooks: ## Point core.hooksPath at the tracked .githooks/ chain-runner. Local-only, per-clone; run once after cloning.
+	@# Writes no git aliases: guards are delivered by hooks only.
+	@# A foreign core.hooksPath — a global one, or bd's .beads/hooks — is
+	@# REPORTED, never overwritten: whatever it routes to is somebody's live
+	@# guard, and the chain-runner's whole point is that both can be installed.
+	@set -u; \
+	missing=""; \
+	for h in $(GIT_HOOKS); do \
 		if [ ! -x ".githooks/$$h" ]; then missing="$$missing $$h"; fi; \
+		if [ ! -d ".githooks/hooks.d/$$h" ]; then missing="$$missing hooks.d/$$h"; fi; \
 	done; \
 	if [ -n "$$missing" ]; then \
-		echo "make hooks: missing or non-executable dispatcher(s):$$missing" >&2; \
+		echo "✗ hooks: missing dispatcher or chain dir:$$missing"; \
 		exit 1; \
-	fi
-	git config core.hooksPath .githooks
-	@echo "git hooks enabled (.githooks): pre-commit / post-merge / pre-push / post-checkout / prepare-commit-msg (bd)."
-	@bd hooks list 2>/dev/null || true
-	@# Tree-move claim (ccp-vx4w): git has no pre-checkout hook, so checkout/
-	@# switch/restore are guarded via git aliases instead — `-c alias.<verb>=`
-	@# inside `loto guard` strips the alias for its own real-git call, so this
-	@# does not recurse. Fires for any session (shell, script, agent), not
-	@# just wrap flows, since git itself resolves the alias.
-	git config alias.checkout '!f(){ loto guard checkout "$$@"; }; f'
-	git config alias.switch   '!f(){ loto guard switch "$$@"; }; f'
-	git config alias.restore  '!f(){ loto guard restore "$$@"; }; f'
-	@echo "git aliases enabled: checkout / switch / restore route through 'loto guard'."
+	fi; \
+	inert=""; \
+	for e in .githooks/hooks.d/*/*; do \
+		case "$$e" in *.*) continue;; esac; \
+		if [ -f "$$e" ] && [ ! -x "$$e" ]; then inert="$$inert $${e#.githooks/hooks.d/}"; fi; \
+	done; \
+	if [ -n "$$inert" ]; then \
+		echo "⚠ hooks: non-executable entry, skipped by the runner:$$inert"; \
+		echo '```bash'; \
+		echo "chmod +x .githooks/hooks.d/<hook>/<entry>"; \
+		echo '```'; \
+	fi; \
+	cur=$$(git config --get core.hooksPath || true); \
+	if [ -n "$$cur" ] && [ "$$cur" != ".githooks" ]; then \
+		raw=$$(git config --show-origin --get core.hooksPath 2>/dev/null || true); \
+		echo "✗ hooks: core.hooksPath is foreign — nothing changed"; \
+		echo "ℹ core.hooksPath=$$cur"; \
+		echo "ℹ origin=$$raw"; \
+		echo "ℹ .githooks is a chain-runner: keep those hooks by copying each into .githooks/hooks.d/<hook>/ as a 50-* entry"; \
+		echo '```bash'; \
+		echo "cp $$cur/<hook> .githooks/hooks.d/<hook>/50-<name> && chmod +x .githooks/hooks.d/<hook>/50-<name>"; \
+		echo "git config --local core.hooksPath .githooks   # this repo only"; \
+		echo "git config --unset-all core.hooksPath         # only if that routing is stale"; \
+		echo '```'; \
+		exit 1; \
+	fi; \
+	git config --local core.hooksPath .githooks; \
+	echo "✓ hooks core.hooksPath=.githooks"; \
+	for h in $(GIT_HOOKS); do \
+		names=""; \
+		for e in .githooks/hooks.d/$$h/*; do \
+			if [ -f "$$e" ] && [ -x "$$e" ]; then names="$$names $${e##*/}"; fi; \
+		done; \
+		if [ -z "$$names" ]; then names=" (none)"; fi; \
+		echo "ℹ $$h$$names"; \
+	done
 
 ## ---------------------------------------------------------------------
 ## Utilities

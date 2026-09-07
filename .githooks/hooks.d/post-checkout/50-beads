@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# 50-beads — hand the post-checkout event to beads (bd). Body: ../../lib/bd-run.sh.
+exec "$(dirname -- "$0")/../../lib/bd-run.sh" post-checkout "$@"
