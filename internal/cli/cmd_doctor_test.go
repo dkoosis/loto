@@ -193,7 +193,7 @@ func TestDoctorDryRunDoesNotMutate(t *testing.T) {
 		t.Errorf("expected dry-run line: %q", out.String())
 	}
 	out.Reset()
-	if code := Run([]string{"status", tcFlagMine}, &out, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdStatus, tcFlagMine}, &out, &bytes.Buffer{}); code != 0 {
 		t.Fatal("status failed")
 	}
 	if !strings.Contains(out.String(), "target=a.go") {

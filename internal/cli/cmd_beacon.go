@@ -97,10 +97,26 @@ func cmdBeacon(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 2
 	}
 
-	repoTop, _ := repoTopForCwd(ctx)
+	callerRepoTop, _ := repoTopForCwd(ctx)
+	// loto-72i: a target may not live in the project the caller stands in at
+	// all — a lease on it belongs to the project that OWNS the path. Group
+	// before any validation so a path in no known project is refused by name
+	// and never silently folded into the caller's own group.
+	groups, invalidProject := groupTargetsByOwningProject(ctx, fs.Args(), callerBase(), callerRepoTop)
+	if len(invalidProject) > 0 {
+		render.EmitInvalid(stderr, invalidProject)
+		return 2
+	}
+
 	// loto-z5nb: a beacon may name a path that does not exist yet — announcing
 	// a Write about to CREATE it is the case a beacon exists to protect.
-	targets, invalid := validateLockTargets(fs.Args(), repoTop, true)
+	resolved := make([]resolvedBeaconGroup, 0, len(groups))
+	var invalid []render.InvalidTarget
+	for _, g := range groups {
+		targets, inv := validateLockTargets(g.rawArgs, g.repoTop, true)
+		invalid = append(invalid, inv...)
+		resolved = append(resolved, resolvedBeaconGroup{group: g, targets: targets})
+	}
 	if len(invalid) > 0 {
 		render.EmitInvalid(stderr, invalid)
 		return 2
@@ -114,15 +130,53 @@ func cmdBeacon(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "✗ %v\n", errIdentityUnpinned)
 		return 3
 	}
-	rt, err := openRuntime(ctx)
+
+	now := time.Now()
+	worst := 0
+	for _, rg := range resolved {
+		code := acquireBeaconGroup(ctx, rg, now, *ttl, stdout, stderr)
+		if code > worst {
+			worst = code
+		}
+	}
+	return worst
+}
+
+// resolvedBeaconGroup pairs a beaconGroup with its already-canonicalized,
+// already-validated targets — split from groupTargetsByOwningProject's output
+// so every group's targets are validated (and any invalid path reported)
+// BEFORE any group's store is opened, matching validateLockTargets' own
+// contract of zero side effects on a rejection.
+type resolvedBeaconGroup struct {
+	group   beaconGroup
+	targets []domain.Target
+}
+
+// acquireBeaconGroup opens the runtime for one project group and acquires its
+// beacon records, in isolation from every other group: one foreign project's
+// conflict or store failure must not stop a beacon from landing in another
+// (loto-72i — a single `loto beacon` call can now span more than one
+// project's store).
+//
+// rg.group.isCaller picks openRuntime (which re-derives repoTop itself,
+// including the errNotInGitRepo path) over openRuntimeForRepoTop, so the
+// single-project call shape is unchanged byte-for-byte (AC: "Same-project
+// beacon and violations behaviour is unchanged (golden diff)").
+func acquireBeaconGroup(ctx context.Context, rg resolvedBeaconGroup, now time.Time, ttl time.Duration, stdout, stderr io.Writer) int {
+	var rt *runtime
+	var err error
+	if rg.group.isCaller {
+		rt, err = openRuntime(ctx)
+	} else {
+		rt, err = openRuntimeForRepoTop(ctx, rg.group.repoTop)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
 	defer rt.Close()
 
-	now := time.Now()
-	recs := buildBeaconRecords(targets, rt, now, *ttl)
+	recs := buildBeaconRecords(rg.targets, rt, now, ttl)
 	// Under a subagent stamp the parent's exclusive lock is kin, not a blocker:
 	// a worker locks from Bash (unstamped → parent-owned) and then writes through
 	// the hook (stamped). Refusing the beacon here would leave two siblings on
@@ -136,7 +190,7 @@ func cmdBeacon(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	if err != nil {
 		return emitBeaconErr(err, stdout, stderr)
 	}
-	render.EmitBeaconSuccess(stdout, acquired, *ttl)
+	render.EmitBeaconSuccess(stdout, acquired, ttl)
 	return 0
 }
 
