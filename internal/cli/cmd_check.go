@@ -26,13 +26,13 @@ type checkConflict struct {
 // altSurfaceArgs carries the parsed flags that decide whether `check` is
 // being asked one of the questions its path machinery cannot answer.
 type altSurfaceArgs struct {
-	branchTyped                    bool
-	branch                         string
-	held, gate, staged, cwdUnknown bool
+	branchTyped                           bool
+	branch                                string
+	held, moved, gate, staged, cwdUnknown bool
 }
 
-// checkAltSurface dispatches `check`'s non-path questions — --branch and
-// --held — before any repo resolution or store IO, the way --gate
+// checkAltSurface dispatches `check`'s non-path questions — --branch,
+// --held, --moved — before any repo resolution or store IO, the way --gate
 // branches before openRuntime. handled=false means none applied and the
 // caller carries on down the ordinary path check.
 //
@@ -43,15 +43,15 @@ type altSurfaceArgs struct {
 // shell expanded to nothing. It refuses instead.
 func checkAltSurface(ctx context.Context, fs *flag.FlagSet, a altSurfaceArgs, stdout, stderr io.Writer) (rc int, handled bool) {
 	if a.branchTyped {
-		if fs.NArg() > 0 || a.staged || a.gate || a.cwdUnknown || a.held {
+		if fs.NArg() > 0 || a.staged || a.gate || a.cwdUnknown || a.held || a.moved {
 			fmt.Fprintln(stderr, "✗ --branch takes no paths and no other check flag")
 			return 2, true
 		}
 		return runCheckBranch(ctx, a.branch, stdout, stderr), true
 	}
-	if a.held {
-		return routeHeld(ctx, heldArgs{
-			gate: a.gate, staged: a.staged, args: fs.Args(),
+	if a.held || a.moved {
+		return routeHeldOrMoved(ctx, heldMovedArgs{
+			held: a.held, moved: a.moved, gate: a.gate, staged: a.staged, args: fs.Args(),
 		}, stdout, stderr), true
 	}
 	return 0, false
@@ -68,6 +68,7 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 	gateFlag := fs.Bool("gate", false, "read-only deny gate: exit 1 if a foreign live claim or lock/beacon covers any path; never acquires, refreshes, or writes")
 	branch := fs.String("branch", "", "check a BRANCH instead of paths: exit 1 if another checkout has it and its owner is not provably gone")
 	held := fs.Bool("held", false, "exit 1 if any path is NOT locked by this session (the commit gate's question, the inverse of --gate); LOTO_GATE_MODE=warn downgrades to ⚠ rows and exit 0")
+	moved := fs.Bool("moved", false, "advisory only: given two HEADs, print a ⚠ row for each path the move changed that a live peer holds; always exits 0")
 	cwdUnknown := fs.Bool("cwd-unknown", false, "the caller's working directory is not knowable here (e.g. mcp__trixi__agent_shell): refuse relative paths instead of resolving them against the wrong base")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return nil, "", "", false, 2, true
@@ -75,7 +76,7 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 
 	if rc, handled := checkAltSurface(ctx, fs, altSurfaceArgs{
 		branchTyped: flagWasSet(fs, "branch"), branch: *branch,
-		held: *held, gate: *gateFlag, staged: *staged, cwdUnknown: *cwdUnknown,
+		held: *held, moved: *moved, gate: *gateFlag, staged: *staged, cwdUnknown: *cwdUnknown,
 	}, stdout, stderr); handled {
 		return nil, "", "", false, rc, true
 	}

@@ -34,28 +34,38 @@ import (
 // reconsidered. The promotion is a follow-up bead filed at merge, never a
 // timer in the code.
 
-// heldArgs carries checkPreflight's parsed flags into this surface.
-type heldArgs struct {
-	gate, staged bool
-	args         []string
+// heldMovedArgs carries checkPreflight's parsed flags into the two surfaces
+// that branch out of it.
+type heldMovedArgs struct {
+	held, moved, gate, staged bool
+	args                      []string
 }
 
-// routeHeld validates the flag combination and dispatches. --held branches
-// out of checkPreflight for the same reason --branch does: it asks a
-// question the shared path machinery cannot answer, needing rename-aware
-// staged loading (git diff --name-status -M, not --name-only). Combining it
+// routeHeldOrMoved validates the flag combination and dispatches. --held and
+// --moved branch out of checkPreflight for the same reason --branch does:
+// each asks a question the shared path machinery cannot answer. --held needs
+// rename-aware staged loading (git diff --name-status -M, not --name-only),
+// and --moved's operands are two HEADs rather than paths. Combining either
 // with --gate would be a caller who means one question and gets answered
 // about the other, so it is refused.
-func routeHeld(ctx context.Context, a heldArgs, stdout, stderr io.Writer) int {
+func routeHeldOrMoved(ctx context.Context, a heldMovedArgs, stdout, stderr io.Writer) int {
 	switch {
-	case a.gate:
+	case a.held && a.moved:
+		fmt.Fprintln(stderr, "✗ --held and --moved ask different questions; pass one")
+		return 2
+	case a.held && a.gate:
 		fmt.Fprintln(stderr, "✗ --held and --gate ask opposite questions; pass one")
 		return 2
-	case !a.staged && len(a.args) == 0:
+	case a.held && !a.staged && len(a.args) == 0:
 		fmt.Fprintln(stderr, "✗ --held needs --staged or at least one path")
 		return 2
-	default:
+	case a.held:
 		return runCheckHeld(ctx, a.staged, a.args, stdout, stderr)
+	case a.gate || a.staged:
+		fmt.Fprintln(stderr, "✗ --moved takes two HEADs, no other check flag")
+		return 2
+	default:
+		return runCheckMoved(ctx, a.args, stdout, stderr)
 	}
 }
 

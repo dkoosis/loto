@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 #
-# githooks_loto_entries_test.sh — golden tests for loto's own chain entries.
-# Today that is .githooks/hooks.d/pre-commit/10-loto-staged-locks (loto-7oik).
+# githooks_loto_entries_test.sh — golden tests for loto's own chain entries:
+# .githooks/hooks.d/pre-commit/10-loto-staged-locks (loto-7oik) and
+# .githooks/hooks.d/post-checkout/10-loto-moved-locks (loto-ea8y.2).
 #
 # The entries are shell, and what they get wrong is shell-shaped: which
-# stream a refusal lands on, and whether a warn-mode advisory survives an
-# exit 0. Neither is reachable from Go, so the golden lives here.
+# stream a refusal lands on, whether a warn-mode advisory survives an exit 0,
+# whether a ✓ is turned into the silence a post-checkout hook owes. None of
+# that is reachable from Go, so the golden lives here.
 #
 # `loto` is a stub on PATH driven by FAKE_*_OUT / FAKE_*_EXIT, so these
 # exercise the ENTRIES against the CLI contract rather than the CLI itself —
-# internal/cli/cmd_check_held_test.go pins the other side of it.
+# internal/cli/cmd_check_held_test.go and cmd_check_moved_test.go pin the
+# other side of it.
 #
 # Run: make scriptcheck   (or: bash scripts/githooks_loto_entries_test.sh)
 
@@ -18,13 +21,16 @@ set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd "$here/.." && pwd)
 precommit=$repo/.githooks/hooks.d/pre-commit/10-loto-staged-locks
+postcheckout=$repo/.githooks/hooks.d/post-checkout/10-loto-moved-locks
 fails=0
 ran=0
 
-if [ ! -x "$precommit" ]; then
-	echo "✗ githooks_loto_entries_test.sh: $precommit is missing or not executable" >&2
-	exit 2
-fi
+for entry in "$precommit" "$postcheckout"; do
+	if [ ! -x "$entry" ]; then
+		echo "✗ githooks_loto_entries_test.sh: $entry is missing or not executable" >&2
+		exit 2
+	fi
+done
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/loto-entries-test.XXXXXX") || {
 	echo "✗ githooks_loto_entries_test.sh: mktemp failed" >&2
@@ -45,6 +51,10 @@ case "$*" in
 *--held*)
 	[ -n "${FAKE_HELD_OUT:-}" ] && printf '%s\n' "$FAKE_HELD_OUT"
 	exit "${FAKE_HELD_EXIT:-0}"
+	;;
+*--moved*)
+	[ -n "${FAKE_MOVED_OUT:-}" ] && printf '%s\n' "$FAKE_MOVED_OUT"
+	exit "${FAKE_MOVED_EXIT:-0}"
 	;;
 esac
 exit 0
@@ -92,11 +102,44 @@ run_entry() {
 # reset_fakes clears every stub knob so a case only carries what it sets.
 reset_fakes() {
 	unset FAKE_GATE_OUT FAKE_GATE_EXIT FAKE_HELD_OUT FAKE_HELD_EXIT
-	unset LOTO_GUARD_OVERRIDE
+	unset FAKE_MOVED_OUT FAKE_MOVED_EXIT LOTO_GUARD_OVERRIDE
 	export PATH=$withloto
 }
 
 echo "githooks_loto_entries_test.sh"
+
+# ══ post-checkout/10-loto-moved-locks ═════════════════════════════════════
+
+# A clean move says ✓ on stdout; the entry turns that into silence, because a
+# ✓ after every `git checkout` trains the eye past the ⚠ that matters.
+reset_fakes
+export FAKE_MOVED_OUT='✓ moved-peer-locks count=0' FAKE_MOVED_EXIT=0
+run_entry "$postcheckout" abc123 def456 1
+check moved-clean-checkout-is-silent 0 '' '' "$STATUS" "$OUT" "$ERR"
+
+# A peer-held path reaches the mover on stderr, verbatim, and the checkout
+# still succeeds.
+moved_warn=$'⚠ moved-peer-locks count=1\n⚠ path=a.go kind=lock blocker=u1 intent="edit" expires_at=2026-09-07T00:00:00Z\nℹ options=tell-the-holder|move-back|carry-on — the move already happened'
+reset_fakes
+export FAKE_MOVED_OUT="$moved_warn" FAKE_MOVED_EXIT=0
+run_entry "$postcheckout" abc123 def456 1
+check moved-peer-lock-warns-on-stderr 0 '' "$moved_warn" "$STATUS" "$OUT" "$ERR"
+
+# The advisory never turns a checkout into a failure, whatever loto says.
+reset_fakes
+export FAKE_MOVED_EXIT=3
+run_entry "$postcheckout" abc123 def456 1
+check moved-nonzero-loto-still-exits-0 0 '' '' "$STATUS" "$OUT" "$ERR"
+
+reset_fakes
+export PATH=$noloto
+run_entry "$postcheckout" abc123 def456 1
+check moved-fails-open-without-loto 0 '' '' "$STATUS" "$OUT" "$ERR"
+
+reset_fakes
+export LOTO_GUARD_OVERRIDE=1 FAKE_MOVED_OUT="$moved_warn"
+run_entry "$postcheckout" abc123 def456 1
+check moved-override-is-silent 0 '' '' "$STATUS" "$OUT" "$ERR"
 
 # ══ pre-commit/10-loto-staged-locks ═══════════════════════════════════════
 
