@@ -29,6 +29,16 @@ func init() { //nolint:gochecknoinits // command registry pattern
 // passed" (.claude/rules/standard-checks.md).
 const reasonNotRegularFile = "not-regular-file"
 
+// reasonSymlink is the design.md token for "this path is a symlink" —
+// statFileTargetReason's refusal, echoed verbatim by cmd_check_held.go's
+// unlockableReason so the gate's exemption stays the lock verb's own refusal
+// rather than a second spelling that can drift from it.
+const reasonSymlink = "symlink"
+
+// reasonGlobNotSupported is the design.md token for domain.ErrTargetIsGlob —
+// `loto lock` takes literal paths, never a shell glob.
+const reasonGlobNotSupported = "glob-not-supported"
+
 // lockUsageHead is the point-of-use teaching surface for lock (loto-5rwc):
 // usage line plus worked examples. The flag list is appended by PrintDefaults.
 const lockUsageHead = `usage: loto lock <target> [<target>...] -t "why" [--shared]
@@ -241,7 +251,7 @@ func statFileTargetReason(repoTop, canonical string, allowMissing bool) string {
 		return "stat-failed: " + err.Error()
 	}
 	if lst.Mode()&os.ModeSymlink != 0 {
-		return "symlink"
+		return reasonSymlink
 	}
 	if !lst.Mode().IsRegular() {
 		return reasonNotRegularFile
@@ -269,7 +279,7 @@ func classifyCanonicalizeErr(err error) string {
 	case errors.Is(err, domain.ErrRepoEscape):
 		return "repo-escape"
 	case errors.Is(err, domain.ErrTargetIsGlob):
-		return "glob-not-supported"
+		return reasonGlobNotSupported
 	case errors.Is(err, domain.ErrTargetUnspellable):
 		return "not-a-path"
 	case errors.Is(err, domain.ErrTargetIsRepoRoot):

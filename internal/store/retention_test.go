@@ -185,6 +185,77 @@ func TestRotateEvents_CapByAge(t *testing.T) {
 	}
 }
 
+// tcGateModeWarn is the Reason a staged-lock gate firing carries in warn mode
+// — the shipped default, and so the counter's common row.
+const tcGateModeWarn = "warn"
+
+// loto-241n: the staged-lock gate's firing counter is appended on every commit
+// by a session that may never acquire a lock at all — which is precisely the
+// workload the advisory rollout exists to measure. AcquireLocks and
+// `doctor --repair` are the only other places rotation fires, so through the
+// plain AppendEvent this table grew past both retention bounds with nothing
+// trimming it. AppendEventRotating is the append that carries the pass.
+func TestAppendEventRotating_HoldsRetentionWithNoLockEverAcquired(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	base := time.Now().Add(-time.Hour)
+	const n = eventsRetentionMax + 50
+	for i := range n {
+		if _, err := s.AppendEventRotating(ctx, domain.Event{
+			Kind:      EventStagedGateFired,
+			ActorUUID: tcAlice,
+			Reason:    tcGateModeWarn,
+			CreatedAt: base.Add(time.Duration(i) * time.Millisecond),
+		}); err != nil {
+			t.Fatalf("AppendEventRotating[%d]: %v", i, err)
+		}
+	}
+
+	got, err := s.ListEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != eventsRetentionMax {
+		t.Fatalf("got %d events, want %d — the append must carry the retention pass", len(got), eventsRetentionMax)
+	}
+	// The rows that survive are the newest, so the counter a promotion
+	// decision reads is the most recent window and not an arbitrary slice.
+	want := base.Add(time.Duration(n-eventsRetentionMax) * time.Millisecond).UnixNano()
+	if got[0].CreatedAt.UnixNano() != want {
+		t.Errorf("oldest surviving event=%d, want %d", got[0].CreatedAt.UnixNano(), want)
+	}
+}
+
+// The plain AppendEvent is the raw insert primitive and deliberately does NOT
+// rotate — the contract AppendEventRotating exists to complete. Pinning it
+// keeps a future "just make AppendEvent rotate" from moving the retention pass
+// onto every audit write in the codebase without deciding to.
+func TestAppendEvent_DeliberatelyDoesNotRotate(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	base := time.Now().Add(-time.Hour)
+	const n = eventsRetentionMax + 50
+	for i := range n {
+		if _, err := s.AppendEvent(ctx, domain.Event{
+			Kind:      EventStagedGateFired,
+			ActorUUID: tcAlice,
+			Reason:    tcGateModeWarn,
+			CreatedAt: base.Add(time.Duration(i) * time.Millisecond),
+		}); err != nil {
+			t.Fatalf("AppendEvent[%d]: %v", i, err)
+		}
+	}
+	got, err := s.ListEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != n {
+		t.Errorf("AppendEvent must not rotate: got %d events, want %d", len(got), n)
+	}
+}
+
 // loto-bvdk: rotation must also fire on the release/break/downgrade append
 // paths, not just acquire/doctor. Each subtest seeds >cap events AFTER the
 // lock exists (so no acquire rotates them away), then drives the op under

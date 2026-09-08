@@ -51,7 +51,8 @@ func checkAltSurface(ctx context.Context, fs *flag.FlagSet, a altSurfaceArgs, st
 	}
 	if a.held || a.moved {
 		return routeHeldOrMoved(ctx, heldMovedArgs{
-			held: a.held, moved: a.moved, gate: a.gate, staged: a.staged, args: fs.Args(),
+			held: a.held, moved: a.moved, gate: a.gate, staged: a.staged,
+			cwdUnknown: a.cwdUnknown, args: fs.Args(),
 		}, stdout, stderr), true
 	}
 	return 0, false

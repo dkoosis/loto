@@ -36,11 +36,13 @@ var (
 //	name a caller meant to type.
 const shellMeta = "$`\"'"
 
-// hasControl reports whether s carries an ASCII control character. A newline or
+// HasControl reports whether s carries an ASCII control character. A newline or
 // tab in a target splits the one-row-per-line surfaces the PreToolUse hook and
-// `loto status` are parsed from, so it can never be a legal target regardless
-// of what a filesystem would accept.
-func hasControl(s string) bool {
+// `loto status` are parsed from, so a CALLER-TYPED target carrying one is
+// refused below. Exported because a git-provenance path is admitted with one
+// (see Provenance) and the surfaces that print it have to escape it rather
+// than emit a row that splits.
+func HasControl(s string) bool {
 	for _, r := range s {
 		if r < 0x20 || r == 0x7f {
 			return true
@@ -49,7 +51,37 @@ func hasControl(s string) bool {
 	return false
 }
 
+// Provenance says who produced a path token. It selects exactly one rule —
+// the shell-token rule below — and nothing else: containment, case folding,
+// NUL, backslash, glob and directory spelling apply to every provenance.
+//
+// ‡ The shell-token rule (shellMeta / HasControl / surrounding whitespace)
+// exists to refuse an unexpanded token a CALLER typed, in the belief the
+// shell had already rewritten it (loto-bl66). A path git printed —
+// `git diff --cached -z` — never passed through a shell, so a `"` or a tab in
+// it is a filename, not a token nobody expanded. Applying the rule there made
+// the staged-lock gate refuse to canonicalize an ordinary git state, and the
+// gate's caller read that refusal as "nothing to check" (loto-pgio).
+type Provenance int
+
+const (
+	// ProvenanceTyped is a token a caller typed: a CLI positional, a hook's
+	// extraction from a command line. The default, and the strict one.
+	ProvenanceTyped Provenance = iota
+	// ProvenanceGit is a token git printed with NUL framing. Every rule
+	// applies except the shell-token one.
+	ProvenanceGit
+)
+
+// Canonicalize applies the full spelling and containment policy to a
+// caller-typed token. It is CanonicalizeFrom(in, ProvenanceTyped).
 func Canonicalize(in string) (Target, error) {
+	return CanonicalizeFrom(in, ProvenanceTyped)
+}
+
+// CanonicalizeFrom is Canonicalize with the token's provenance named. See
+// Provenance for the single rule the choice moves.
+func CanonicalizeFrom(in string, prov Provenance) (Target, error) {
 	if in == "" {
 		return Target{}, ErrEmptyTarget
 	}
@@ -70,8 +102,9 @@ func Canonicalize(in string) (Target, error) {
 	// `beacon` (which must NOT, since it announces a write to a file that does
 	// not exist yet), `tag`, and `claim` through CanonicalizePrefix. Keeping it
 	// here is what stops beacon and lock from drifting apart (loto-bl66).
-	if strings.ContainsAny(in, shellMeta) || hasControl(in) ||
-		strings.TrimSpace(in) != in {
+	if prov == ProvenanceTyped &&
+		(strings.ContainsAny(in, shellMeta) || HasControl(in) ||
+			strings.TrimSpace(in) != in) {
 		return Target{}, ErrTargetUnspellable
 	}
 	if strings.HasSuffix(in, "/") {

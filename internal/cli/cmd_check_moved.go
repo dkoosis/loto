@@ -38,16 +38,20 @@ type movedRow struct {
 
 // loadMovedPaths lists the paths that differ between two HEADs, NUL-safe.
 //
-// ‡ Deliberately WITHOUT -M. `--held` wants renames detected because a
-// rename's two sides are one intent that both need locking; here the
-// question is only "which working-tree files did this move rewrite", and a
-// rename reported as one entry would name a single path where two files
-// changed on disk. Reported as a delete plus an add, both paths land in the
-// set, which is what the advisory owes its reader.
+// ‡ `--no-renames`, and it is the flag that does the work. The question here
+// is only "which working-tree files did this move rewrite", and BOTH sides of
+// a rename were rewritten — the source was removed, the destination written.
+// Omitting -M does not produce that: diff.renames has defaulted to true since
+// git 2.9, so a rename reports the DESTINATION alone and a peer's lock on the
+// source is never examined (measured on git 2.55.0; loto-l9ve). --no-renames
+// reports the delete and the add separately, which is what the advisory owes
+// its reader. `--held` keeps -M for the opposite reason: there a rename's two
+// sides are one intent that both need locking, and the destination row has to
+// be able to name its source.
 func loadMovedPaths(ctx context.Context, repoTop, oldHead, newHead string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "diff", "--name-only", "-z", oldHead, newHead)
+	cmd := exec.CommandContext(ctx, "git", "diff", "--name-only", "--no-renames", "-z", oldHead, newHead)
 	if repoTop != "" {
 		cmd.Dir = repoTop
 	}

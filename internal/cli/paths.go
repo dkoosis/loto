@@ -240,7 +240,21 @@ func callerBase() string {
 // re-based onto the cwd.
 // cc may be nil; a batch of targets shares one so each directory is read once.
 func resolveCLITarget(cc *caseCache, base, repoTop, raw string) (domain.Target, error) {
-	t, err := canonicalizeCLIToken(base, repoTop, raw)
+	return resolveTargetFrom(cc, base, repoTop, raw, domain.ProvenanceTyped)
+}
+
+// resolveGitTarget is resolveCLITarget for a token GIT printed — `git diff
+// --cached -z` and friends. Same base rule, same case fold, same containment;
+// only the shell-token spelling rule is dropped, because no shell ever touched
+// this string (domain.Provenance, loto-pgio). A staged file named `say "hi".go`
+// is an ordinary file, and refusing to canonicalize it used to take the whole
+// staged batch out of the gate's reach.
+func resolveGitTarget(cc *caseCache, base, repoTop, raw string) (domain.Target, error) {
+	return resolveTargetFrom(cc, base, repoTop, raw, domain.ProvenanceGit)
+}
+
+func resolveTargetFrom(cc *caseCache, base, repoTop, raw string, prov domain.Provenance) (domain.Target, error) {
+	t, err := canonicalizeCLIToken(base, repoTop, raw, prov)
 	if err != nil {
 		return domain.Target{}, err
 	}
@@ -250,16 +264,16 @@ func resolveCLITarget(cc *caseCache, base, repoTop, raw string) (domain.Target, 
 
 // canonicalizeCLIToken is resolveCLITarget's path translation, before the
 // case fold. Split out so the fold applies to every return path.
-func canonicalizeCLIToken(base, repoTop, raw string) (domain.Target, error) {
+func canonicalizeCLIToken(base, repoTop, raw string, prov domain.Provenance) (domain.Target, error) {
 	if repoTop == "" || filepath.IsAbs(raw) {
 		// No repo frame, or a token that carries its own base: today's path.
-		return domain.Canonicalize(normalizeRepoPath(raw, repoTop))
+		return domain.CanonicalizeFrom(normalizeRepoPath(raw, repoTop), prov)
 	}
 	// Spelling verdicts are base-independent and are decided on the RAW token;
 	// positional verdicts are base-dependent and are re-decided after the join.
 	// filepath.Join Cleans, which erases the spellings Canonicalize rules on
 	// (a trailing slash, a glob metacharacter), so they must be judged first.
-	if _, err := domain.Canonicalize(raw); err != nil {
+	if _, err := domain.CanonicalizeFrom(raw, prov); err != nil {
 		switch {
 		case errors.Is(err, domain.ErrTargetIsRepoRoot), errors.Is(err, domain.ErrRepoEscape):
 			// positional: base-dependent, re-decided below
@@ -274,7 +288,7 @@ func canonicalizeCLIToken(base, repoTop, raw string) (domain.Target, error) {
 	if err != nil {
 		return domain.Target{}, err
 	}
-	return domain.Canonicalize(rel)
+	return domain.CanonicalizeFrom(rel, prov)
 }
 
 // repoRelFromBase joins a relative token to its base and expresses the result
