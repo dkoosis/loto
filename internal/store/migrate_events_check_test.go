@@ -98,14 +98,14 @@ VALUES ('e1','a.go','lock_acquired','alice','','because','{"kept":true}',1);`
 		t.Fatalf("revert events table: %v", err)
 	}
 
-	pending, err := ensureEventsCheckStagedGate(ctx, s.db, false)
+	pending, err := ensureEventsCheckAllKinds(ctx, s.db, false)
 	if err != nil {
 		t.Fatalf("dry-run: %v", err)
 	}
 	if !pending {
 		t.Fatal("the older events shape must read as pending")
 	}
-	if _, err := ensureEventsCheckStagedGate(ctx, s.db, true); err != nil {
+	if _, err := ensureEventsCheckAllKinds(ctx, s.db, true); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 
@@ -121,7 +121,53 @@ VALUES ('e1','a.go','lock_acquired','alice','','because','{"kept":true}',1);`
 	}); err != nil {
 		t.Fatalf("new kind must insert after the rebuild: %v", err)
 	}
-	if pending, err := ensureEventsCheckStagedGate(ctx, s.db, false); err != nil || pending {
+	if pending, err := ensureEventsCheckAllKinds(ctx, s.db, false); err != nil || pending {
 		t.Errorf("must be a no-op after applying: pending=%v err=%v", pending, err)
+	}
+}
+
+// TestEnsureEventsCheckAllKinds_ReachesAnUpgradedDB is loto-qrgg's regression:
+// the one-file extension contract event_kinds.go promises has to hold for
+// databases that ALREADY EXIST, not just for fresh ones.
+//
+// The probe used to be the single newest kind, so it short-circuited on every
+// DB that already had staged_lock_gate_fired — kind thirteen would render into
+// schema.sql for fresh installs and never reach an upgraded one, whose old
+// CHECK then rejected the first write of it at runtime. No test caught that,
+// because tests open fresh DBs.
+//
+// Appending to allEventKinds here reproduces the upgrade exactly: schemaSQL is
+// substituted once at package init, so it is already frozen WITHOUT the new
+// kind by the time this runs. The DB this test opens therefore starts with the
+// old CHECK and only the migration can widen it — which is the production
+// shape, not a simulation of it.
+func TestEnsureEventsCheckAllKinds_ReachesAnUpgradedDB(t *testing.T) {
+	const futureKind = "future_kind_added_after_this_db_existed"
+	orig := allEventKinds
+	allEventKinds = append(append([]string{}, orig...), futureKind)
+	t.Cleanup(func() { allEventKinds = orig })
+
+	ctx := context.Background()
+	s, err := OpenContext(ctx, filepath.Join(t.TempDir(), "loto.db"))
+	if err != nil {
+		t.Fatalf("OpenContext: %v", err)
+	}
+	defer s.Close()
+
+	var ddl string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&ddl); err != nil {
+		t.Fatalf("read events ddl: %v", err)
+	}
+	if !strings.Contains(ddl, "'"+futureKind+"'") {
+		t.Fatalf("migrate must widen the CHECK to the newly declared kind: %s", ddl)
+	}
+	if _, err := s.AppendEvent(ctx, domain.Event{
+		Kind: futureKind, ActorUUID: tcAlice, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("a kind appended to allEventKinds must be insertable after migrate: %v", err)
+	}
+	if pending, err := ensureEventsCheckAllKinds(ctx, s.db, false); err != nil || pending {
+		t.Errorf("must be a no-op once every declared kind is admitted: pending=%v err=%v", pending, err)
 	}
 }

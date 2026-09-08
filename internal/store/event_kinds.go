@@ -12,7 +12,7 @@ import "strings"
 // Adding a kind now means one edit here: append the constant and add it to
 // allEventKinds below. schema.sql's CHECK clause (via the
 // eventKindCheckPlaceholder substitution in schemaSQL) and
-// ensureEventsCheckStagedGate's rebuild DDL both render from allEventKinds,
+// ensureEventsCheckAllKinds's rebuild DDL both render from allEventKinds,
 // so neither needs a second hand-typed copy of the list.
 //
 // ensureEventsCheckCurrent in store.go is the one deliberate exception: its

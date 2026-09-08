@@ -14,7 +14,7 @@ import (
 // TestEventKinds_AllDeclaredConstantsInAllEventKinds is the mechanical guard
 // the bead's Rule promises (loto-123y): a Go event-kind constant that exists
 // but was never appended to allEventKinds — the single site the schema CHECK
-// list and the current (ensureEventsCheckStagedGate) rebuild DDL both render
+// list and the current (ensureEventsCheckAllKinds) rebuild DDL both render
 // from — fails here, not at a runtime CHECK-constraint violation on someone's
 // first write of the new kind.
 //
@@ -111,7 +111,7 @@ func TestEventKindCheckSQL_FreshSchemaAdmitsEveryDeclaredKind(t *testing.T) {
 
 // TestMigrate_LegacyEventsDetailSurvivesFullMigrate is the end-to-end version
 // of the AC "existing event rows in a legacy database still migrate and read
-// back with detail preserved": rather than calling ensureEventsCheckStagedGate
+// back with detail preserved": rather than calling ensureEventsCheckAllKinds
 // directly (as TestEnsureEventsCheckStagedGate_PreservesDetailOnRebuild
 // does), it reverts a real, fully-current DB's events table to the pre-
 // loto-7oik shape and drives the upgrade through s.migrate — the exact path
