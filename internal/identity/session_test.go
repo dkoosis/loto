@@ -128,6 +128,72 @@ func TestSessionPID(t *testing.T) {
 	}
 }
 
+// --- LiveOwnerUUIDs -------------------------------------------------------------
+
+// plantWitnessedSession writes a record whose liveness is fully controlled by
+// pid, bypassing RecordSession: pid=os.Getpid() verdicts live (this test
+// process is always alive), any other positive pid verdicts dead once the OS
+// confirms it isn't running. No socket, so socket-missing never fires and the
+// pid witness is the only thing LiveOwnerUUIDs' Verdict() call can read.
+func plantWitnessedSession(t *testing.T, sid, owner string, pid int) {
+	t.Helper()
+	if err := os.MkdirAll(sessionDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(SessionRecord{SessionID: sid, UUID: owner, PID: pid, RecordedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir(), sid+".json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLiveOwnerUUIDs is loto-9spo's evidence that a session record answers
+// "is this owner alive" with no lock row involved: scanDanglingStashes has
+// only an owner uuid from a stash's LOTO_AGENT_ID stamp, never a lock to key
+// ProbeSession(sid) from.
+func TestLiveOwnerUUIDs(t *testing.T) {
+	clearIdentityEnv(t)
+	plantWitnessedSession(t, "live-sess", "owner-live", os.Getpid())
+	plantWitnessedSession(t, "dead-sess", "owner-dead", 999999999) // implausible pid, reads not-running
+	plantSession(t, "unknown-sess", "owner-unknown", time.Hour)    // no pid, no socket → SessionUnknown
+
+	got := LiveOwnerUUIDs()
+	if _, ok := got["owner-live"]; !ok {
+		t.Errorf("owner-live missing from %v, want present (its session verdicts live)", got)
+	}
+	if _, ok := got["owner-dead"]; ok {
+		t.Errorf("owner-dead present in %v, want absent (its session verdicts dead)", got)
+	}
+	if _, ok := got["owner-unknown"]; ok {
+		t.Errorf("owner-unknown present in %v, want absent — unknown is not evidence of life", got)
+	}
+}
+
+// TestLiveOwnerUUIDsAnyLiveSiblingCounts: one owner uuid can carry several
+// session records (sibling sessions, loto-81n). LiveOwnerUUIDs answers "is
+// this owner doing anything anywhere", so one live sibling is enough even
+// while another of the same owner's sessions has died.
+func TestLiveOwnerUUIDsAnyLiveSiblingCounts(t *testing.T) {
+	clearIdentityEnv(t)
+	plantWitnessedSession(t, "sib-dead", "shared-owner", 999999999)
+	plantWitnessedSession(t, "sib-live", "shared-owner", os.Getpid())
+
+	got := LiveOwnerUUIDs()
+	if _, ok := got["shared-owner"]; !ok {
+		t.Errorf("shared-owner missing from %v, want present — one live sibling is enough", got)
+	}
+}
+
+func TestLiveOwnerUUIDsMissingDirIsEmptyNotError(t *testing.T) {
+	clearIdentityEnv(t)
+	t.Setenv("LOTO_BASE", filepath.Join(t.TempDir(), "does-not-exist"))
+	if got := LiveOwnerUUIDs(); len(got) != 0 {
+		t.Errorf("missing session dir: got %v, want empty", got)
+	}
+}
+
 // --- GCSessions ---------------------------------------------------------------
 
 // plantSession writes a session record file for sid with the given owner and

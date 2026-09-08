@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // stashGitT runs git in dir and fails the test on error, mirroring the
@@ -105,6 +107,89 @@ func TestDoctorStashLiveAgentSuppressed(t *testing.T) {
 	out := runOK(t, tcCmdDoctor)
 	if strings.Contains(out, "dangling_stashes") {
 		t.Errorf("a live agent's stash must not be reported: %q", out)
+	}
+}
+
+// plantLiveSessionRecord writes a session record straight under
+// LOTO_BASE/session (bypassing `loto whoami`), keyed by sid, naming
+// ownerUUID as its owner and this test process's own pid as the witness —
+// always alive, so the record verdicts identity.SessionLive without touching
+// a real socket. Used to give an agent a live liveness witness while it
+// holds zero locks (loto-9spo) — LOTO_BASE-aware, unlike runtime_test.go's
+// writeDeadSession, because withTempProject isolates state under LOTO_BASE
+// rather than HOME.
+func plantLiveSessionRecord(t *testing.T, sid, ownerUUID string) {
+	t.Helper()
+	dir := filepath.Join(os.Getenv("LOTO_BASE"), "session")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"session_id":%q,"uuid":%q,"pid":%d,"recorded_at":%q}`,
+		sid, ownerUUID, os.Getpid(), time.Now().Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(dir, sid+".json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// plantDeadSessionRecord is plantLiveSessionRecord's opposite: a socket path
+// that does not exist, so SessionRecord.Verdict reads dead (reason
+// socket-missing) — the cheapest honest way to stage "this agent's session
+// has ended" without killing a real process, mirroring runtime_test.go's
+// writeDeadSession but under LOTO_BASE.
+func plantDeadSessionRecord(t *testing.T, sid, ownerUUID string) {
+	t.Helper()
+	dir := filepath.Join(os.Getenv("LOTO_BASE"), "session")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"session_id":%q,"uuid":%q,"socket":%q,"recorded_at":%q}`,
+		sid, ownerUUID, filepath.Join(t.TempDir(), "gone.sock"), time.Now().Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(dir, sid+".json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDoctorStashLiveSessionZeroLocksSuppressed is loto-9spo's central case:
+// an agent that holds ZERO locks but has a live session record (identity.
+// LiveOwnerUUIDs, not lock-holding) is live, and its stash must not be
+// reported — the bug loto-kotb left behind, where holding no lock read as
+// dead regardless of whether the agent was still up.
+func TestDoctorStashLiveSessionZeroLocksSuppressed(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	seedStashableCommit(t, repo)
+
+	const agent = "live-session-agent-uuid-0001"
+	plantLiveSessionRecord(t, "sess-live-0001", agent)
+
+	pushStash(t, repo, "rescue LOTO_AGENT_ID="+agent+" mid-edit")
+
+	out := runOK(t, tcCmdDoctor)
+	if strings.Contains(out, "dangling_stashes") {
+		t.Errorf("an agent live by session record alone (zero locks held) must not be reported: %q", out)
+	}
+}
+
+// TestDoctorStashDeadSessionRecordStillReported is Rule 3's session-signal
+// half: an agent with a session record that verdicts dead (and zero locks)
+// is genuinely gone, and its stash is still listed and attributed — the new
+// signal must not turn into a blanket amnesty.
+func TestDoctorStashDeadSessionRecordStillReported(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	seedStashableCommit(t, repo)
+
+	const agent = "dead-session-agent-uuid-0001"
+	plantDeadSessionRecord(t, "sess-dead-0001", agent)
+
+	pushStash(t, repo, "rescue LOTO_AGENT_ID="+agent+" mid-edit")
+
+	out := runOK(t, tcCmdDoctor)
+	if !strings.Contains(out, "ℹ dangling_stashes count=1") {
+		t.Fatalf("expected one dangling stash row: %q", out)
+	}
+	if !strings.Contains(out, "agent="+agent) {
+		t.Errorf("row must attribute the dead agent: %q", out)
 	}
 }
 
