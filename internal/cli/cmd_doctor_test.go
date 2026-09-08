@@ -92,6 +92,49 @@ func TestDoctorGuard_ForeignHooksPath(t *testing.T) {
 	}
 }
 
+// TestDoctorGuard_InheritedGlobalHooksPath is loto-p6zs: local core.hooksPath
+// is UNSET (not overridden to a foreign value — inherited from a foreign
+// GLOBAL config, dk's own machine shape measured 2026-09-07 across four
+// repos). Distinct from TestDoctorGuard_ForeignHooksPath, which sets the
+// foreign value with `git config --local`: that exercises a local override,
+// this exercises git's own local-unset fallthrough to global. The two must
+// report identically — the check reads the EFFECTIVE hooksPath, not whether a
+// local override was explicitly set.
+func TestDoctorGuard_InheritedGlobalHooksPath(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeHookFixture(t, repo, "pre-commit", "post-checkout")
+	foreign := filepath.Join(t.TempDir(), "global-hooks")
+	// --global, never --local. Resetting HOME is NOT enough to aim it at a temp
+	// file: git resolves --global to $GIT_CONFIG_GLOBAL first when that is set,
+	// and only falls back to $HOME/.gitconfig when it is not. A machine or CI
+	// runner exporting it would otherwise take this write into a real config —
+	// and GIT_CONFIG_GLOBAL=/dev/null, a common CI hardening, would have git
+	// replace the device with a regular file (loto-7ftx). Naming the file here
+	// makes the isolation this test claims true regardless of the environment.
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+	submitGitT(t, repo, "config", "--global", "core.hooksPath", foreign)
+	if local, err := gitCmd(context.Background(), repo, "config", "--local", "--get", "core.hooksPath"); err == nil {
+		t.Fatalf("local core.hooksPath must stay unset for this case, got %q", local)
+	}
+
+	out := runOK(t, tcCmdDoctor)
+	if !strings.Contains(out, "✗ guard=pre-commit-gate unreachable reason=hooksPath-foreign detail="+foreign) {
+		t.Errorf("expected foreign-hooksPath row naming the resolved global path: %q", out)
+	}
+	if !strings.Contains(out, "✗ guard=tree-move-guard unreachable reason=hooksPath-foreign detail="+foreign) {
+		t.Errorf("expected foreign-hooksPath row for the other guard too: %q", out)
+	}
+	if !strings.Contains(out, "```bash\nmake hooks\n```") {
+		t.Errorf("expected a bash fix block under the ✗ rows: %q", out)
+	}
+
+	status := runOK(t, tcCmdStatus)
+	if !strings.Contains(status, "guard:   inert\n") {
+		t.Errorf("expected guard: inert in status: %q", status)
+	}
+}
+
 // TestDoctorGuard_AfterMakeHooks is AC2: hooksPath correctly bound to
 // .githooks and both guards' loto entries present and executable — both rows
 // read ✓ and status reads guard=ok.
