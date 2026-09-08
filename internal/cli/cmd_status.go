@@ -70,7 +70,7 @@ func statusWholeRepo(stdout, stderr io.Writer, rt *runtime, mine bool) int {
 		}
 		return all[i].CreatedAt.Before(all[j].CreatedAt)
 	})
-	printStatusLocks(stdout, rt, all)
+	locksForeign := printStatusLocks(stdout, rt, all, mine)
 
 	claims, err := rt.Store.ListClaims(rt.Ctx)
 	if err != nil {
@@ -78,7 +78,15 @@ func statusWholeRepo(stdout, stderr io.Writer, rt *runtime, mine bool) int {
 		return 3
 	}
 	now := time.Now()
-	printStatusClaims(stdout, rt, claims, mine, now)
+	claimsForeign := printStatusClaims(stdout, rt, claims, mine, now)
+	// The fix block sits right after the two sections it can apply to
+	// (ferret-m3t): a row belonging to someone else is only ever a lock or a
+	// claim row (territory tags carry no self marker — see
+	// printStatusTerritoryTags), and `mine` already means every remaining row
+	// is the caller's own, so *Foreign is always false there — no gate needed.
+	if locksForeign || claimsForeign {
+		emitForeignRowFixBlock(stdout)
+	}
 	printStatusTerritoryTags(stdout, rt, mine, now)
 	// Read-only resurfacing: status reports what the store already knows, it
 	// does not run the sensor. Recording is a whole-tree git diff, and making
@@ -123,7 +131,12 @@ func printStatusTerritoryTags(stdout io.Writer, rt *runtime, mine bool, now time
 // rows only — Expired is display-time authority; the row itself dies lazily in
 // a later overlapping acquire — sorted prefix then created_at, --mine honored.
 // Explicit empty header per design.md: silence looks like a crash.
-func printStatusClaims(stdout io.Writer, rt *runtime, all []domain.ClaimRecord, mine bool, now time.Time) {
+// printStatusClaims returns foreign — whether any printed row belongs to
+// someone other than the caller (ferret-m3t) — on the same terms as
+// printStatusLocks: self=true marks the caller's own rows, suppressed under
+// --mine because every remaining row is already its own there and marking
+// them would move the golden output the AC pins unchanged.
+func printStatusClaims(stdout io.Writer, rt *runtime, all []domain.ClaimRecord, mine bool, now time.Time) (foreign bool) {
 	live := all[:0]
 	for i := range all {
 		if all[i].Expired(now) {
@@ -136,7 +149,7 @@ func printStatusClaims(stdout io.Writer, rt *runtime, all []domain.ClaimRecord, 
 	}
 	if len(live) == 0 {
 		fmt.Fprintln(stdout, "✓ no claims")
-		return
+		return false
 	}
 	sort.Slice(live, func(i, j int) bool {
 		if live[i].PathPrefix != live[j].PathPrefix {
@@ -147,11 +160,38 @@ func printStatusClaims(stdout io.Writer, rt *runtime, all []domain.ClaimRecord, 
 	fmt.Fprintf(stdout, "✓ claims count=%d\n", len(live))
 	for i := range live {
 		c := &live[i]
-		fmt.Fprintf(stdout, "✓ prefix=%s owner=%s intent=%q held_since=%s ttl_remaining=%s host=%s\n",
+		self := ""
+		if string(c.OwnerUUID) == rt.Agent.UUID {
+			if !mine {
+				self = " self=true"
+			}
+		} else {
+			foreign = true
+		}
+		fmt.Fprintf(stdout, "✓ prefix=%s owner=%s intent=%q held_since=%s ttl_remaining=%s host=%s%s\n",
 			relPath(c.PathPrefix), c.OwnerUUID, c.Intent,
 			c.CreatedAt.UTC().Format(time.RFC3339),
-			fmtTTL(c.ExpiresAt.Sub(now)), c.Host)
+			fmtTTL(c.ExpiresAt.Sub(now)), c.Host, self)
 	}
+	return foreign
+}
+
+// emitForeignRowFixBlock is the inline fix block design.md §9 requires under
+// an actionable finding (ferret-m3t): the unfiltered dump containing a row
+// the caller does not hold is exactly that finding — a raw owner=<uuid> the
+// reader cannot itself attribute — and status shipped no fix for it before
+// this. Names the verbs that resolve it: whoami confirms the caller's own
+// uuid (the same one self=true above is checked against), -mine narrows the
+// view to only what the caller holds, and tag reaches a peer holding a target
+// directly rather than guessing from timestamps — the guess that cost two
+// lanes the night this bead was filed.
+func emitForeignRowFixBlock(stdout io.Writer) {
+	fmt.Fprintln(stdout, "‡ rows above with no self=true belong to a peer — attribute before acting on them:")
+	fmt.Fprintln(stdout, "```bash")
+	fmt.Fprintln(stdout, "loto whoami                    # confirm your own uuid")
+	fmt.Fprintln(stdout, "loto status -mine               # narrow to only what you hold")
+	fmt.Fprintln(stdout, "loto tag <path> \"<bead>: ask\"   # reach the peer holding a target you need")
+	fmt.Fprintln(stdout, "```")
 }
 
 // statusCollisions reports every target held live by ≥2 DISTINCT owners — the
@@ -223,10 +263,17 @@ func filterLocksByOwner(all []domain.LockRecord, ownerUUID string) []domain.Lock
 	return filtered
 }
 
-func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord) {
+// printStatusLocks renders the locks section. mine gates the self marker
+// (ferret-m3t): when the caller already asked for --mine, every remaining row
+// is its own by construction and re-marking them would change output the AC
+// pins as a golden diff, so the marker only prints in the unfiltered view.
+// foreign reports whether any printed row belongs to someone else, so the
+// caller can decide whether the actionable-findings fix block
+// (emitForeignRowFixBlock) applies.
+func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord, mine bool) (foreign bool) {
 	if len(all) == 0 {
 		fmt.Fprintln(stdout, "✓ no locks")
-		return
+		return false
 	}
 	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe(), CaseFold: rt.CaseFold}
 	// Classify every row up front so the summary line and the per-row marks
@@ -270,15 +317,34 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord) {
 		if verdict == domain.LivenessDead {
 			mark = "✗"
 		}
+		// self=true is the marker this bead adds (ferret-m3t): a row's owner_
+		// uuid is opaque on its own, and an agent scanning the unfiltered dump
+		// for its own reservation had no way to tell one uuid from another
+		// without a second command. Derived from the exact identity `loto
+		// whoami` reports — rt.Agent.UUID — so the two can never disagree, and
+		// checked as a plain string equality regardless of which uuid space
+		// this row's owner lives in: a claim/exclusive-lock row carries the
+		// parent SESSION uuid, a `beacon:` row carries a PER-AGENT uuid, and
+		// rt.Agent.UUID already resolves to whichever space the CALLING
+		// process itself is in (identity.Ensure), so one comparison covers
+		// both. Suppressed under --mine (see mine gate above the loop).
+		self := ""
+		if string(l.OwnerUUID) == rt.Agent.UUID {
+			if !mine {
+				self = " self=true"
+			}
+		} else {
+			foreign = true
+		}
 		// epoch= is the generation half of this hold's identity: joined to
 		// owner= as `owner@epoch` it is the token `unlock --force
 		// --expect-holder` compares against (loto-tqcw). Printed as its own
 		// field rather than a pre-joined `hold=` so no row repeats the owner.
-		fmt.Fprintf(stdout, "%s target=%s owner=%s epoch=%d mode=%s intent=%q held_since=%s ttl_remaining=%s liveness=%s host=%s pid=%d%s\n",
+		fmt.Fprintf(stdout, "%s target=%s owner=%s epoch=%d mode=%s intent=%q held_since=%s ttl_remaining=%s liveness=%s host=%s pid=%d%s%s\n",
 			mark, relPath(l.Target.Canonical), l.OwnerUUID, l.Epoch, l.EffectiveMode(), l.Intent,
 			l.CreatedAt.UTC().Format(time.RFC3339),
 			fmtTTL(ec.RemainingTTL(*l)), verdict,
-			l.Host, l.PID, branch)
+			l.Host, l.PID, branch, self)
 		render.EmitTagRows(stdout, tagsByTarget[l.Target.Canonical])
 	}
 	if dead > 0 {
@@ -287,6 +353,7 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord) {
 		fmt.Fprintln(stdout, "loto doctor --repair")
 		fmt.Fprintln(stdout, "```")
 	}
+	return foreign
 }
 
 // fmtTTL renders a remaining-TTL duration deterministically (whole seconds,
