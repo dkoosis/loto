@@ -11,33 +11,12 @@ import (
 	"loto/internal/domain"
 )
 
-const (
-	EventLockAcquired       = "lock_acquired"
-	EventLockReleased       = "lock_released"
-	EventLockBroken         = "lock_broken"
-	EventLockReclaimedStale = "lock_reclaimed_stale"
-	// EventModeRestoreFailed is emitted only by doctor's chmod-era migration
-	// now (loto-zssw); EventAcquireRollbackStart is emitted by nothing at all.
-	// Both stay declared: the schema's event_kind CHECK still names them, and
-	// rows written before the strip retired are still readable.
-	EventModeRestoreFailed    = "mode_restore_failed"
-	EventAcquireRollbackStart = "acquire_rollback_started"
-	EventLockDowngraded       = "lock_downgraded"
-	EventLockRefreshed        = "lock_refreshed"
-	// EventGateBypass is emitted every time LOTO_GATE=off bypasses admission
-	// (loto-ovno.4, git-gate.md "The gate can never become the outage"). No
-	// Target — a bypass is a session-scoped fact, not a per-path one — so
-	// TargetCanonical is written empty. ActorUUID names who bypassed.
-	EventGateBypass = "gate_bypass"
-	// EventStagedGateFired is the firing counter behind `loto check --held`
-	// (loto-7oik). One row per firing — not per path — so counting rows of
-	// this kind answers "how often would this gate have refused a commit",
-	// which is the evidence the advisory-first rollout is gathering before
-	// the gate's default is reconsidered. No Target, same reason
-	// EventGateBypass has none: a firing is a commit-scoped fact, and the
-	// per-path detail rides in Detail as JSON. ActorUUID names the committer.
-	EventStagedGateFired = "staged_lock_gate_fired"
-)
+// Event kind constants used by this file (EventLockAcquired,
+// EventLockReleased, EventLockBroken, EventLockReclaimedStale,
+// EventModeRestoreFailed, EventAcquireRollbackStart, EventLockDowngraded,
+// EventLockRefreshed, EventGateBypass, EventStagedGateFired) are declared in
+// event_kinds.go — the single site for the whole event-kind vocabulary
+// (loto-123y).
 
 var ErrNoLockAtTarget = errors.New("no lock at target")
 

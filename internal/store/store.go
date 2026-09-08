@@ -388,7 +388,22 @@ var migrationEnsures = []struct {
 	{"add violations.worktree", ensureViolationsWorktree},
 	{"scope violations open index to worktree", ensureViolationsOpenIndexScoped},
 	{"add events.detail", ensureEventsDetail},
-	{"widen events check for staged_lock_gate_fired", ensureEventsCheckStagedGate},
+	{"widen events check to every declared kind", ensureEventsCheckAllKinds},
+}
+
+// eventsCheckAdmitsEveryKind reports whether the live events DDL's CHECK names
+// every kind allEventKinds declares. Substring matching on the quoted literal
+// is what the rest of this file's probes do and is sound here: the kinds are
+// lowercase identifiers, each appears in the DDL only inside that IN-list, and
+// the quotes make a partial match impossible ('lock_released' cannot match
+// inside 'lock_reclaimed_stale').
+func eventsCheckAdmitsEveryKind(ddl string) bool {
+	for _, k := range allEventKinds {
+		if !strings.Contains(ddl, "'"+k+"'") {
+			return false
+		}
+	}
+	return true
 }
 
 // schemaCurrent reports whether a re-migrate would be a pure no-op — the gate
@@ -908,13 +923,29 @@ CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);`
 // updating both the probe string and the rebuild DDL below. The probe doubles as
 // the events-table existence check for schemaCurrent (ErrNoRows → pending).
 // user_version not bumped.
+//
+// ‡ Deliberately NOT rendered from allEventKinds/eventKindCheckSQL()
+// (loto-123y). This DDL is a frozen historical snapshot — the CHECK list and
+// column set as they stood before events.detail and staged_lock_gate_fired
+// existed — and rebuilding it from the live kind list would also need to add
+// `detail` to both the CREATE and the INSERT ... SELECT to avoid dropping it
+// on any DB that reaches this step with the column already present. That
+// path is confirmed unreachable through loto's own migration ordering
+// (ensureEventsCheckCurrent always runs before ensureEventsDetail in
+// migrationEnsures, so no DB hits this rebuild with detail already added) —
+// the hazard is real in the code but latent in practice, and this bead
+// leaves it that way rather than reorder migrationEnsures to close it, which
+// would be a migration-semantics change this bead's Rules rule out ("no
+// migration is required by this bead"). ensureEventsCheckAllKinds below is
+// the one derived from allEventKinds — it is the step every fresh install
+// and every remaining legacy DB actually lands on.
 func ensureEventsCheckCurrent(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	var ddl string
 	if err := db.QueryRowContext(ctx,
 		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&ddl); err != nil {
 		return false, err
 	}
-	if strings.Contains(ddl, "'candidate_rejected'") {
+	if strings.Contains(ddl, "'"+EventCandidateRejected+"'") {
 		return false, nil // already current
 	}
 	const rebuild = `
@@ -943,34 +974,48 @@ CREATE INDEX IF NOT EXISTS idx_events_created_id ON events(created_at, id);`
 	return true, nil
 }
 
-// ensureEventsCheckStagedGate widens the events CHECK a second time, for
-// staged_lock_gate_fired (loto-7oik) — the firing counter behind
-// `loto check --held`.
+// ensureEventsCheckAllKinds rebuilds the events table whenever its live CHECK
+// admits fewer kinds than allEventKinds declares. It is the migration half of
+// the one-file extension contract event_kinds.go promises: appending a
+// constant there has to reach EXISTING databases, not only fresh ones.
+//
+// ‡ The probe is every declared kind, not the newest one (loto-qrgg). Keyed on
+// a single kind — it was `staged_lock_gate_fired`, the newest at the time —
+// this step short-circuited on every database that already had that kind, so
+// kind number thirteen would render into schema.sql for fresh installs and
+// never reach an upgraded one: its old CHECK stands and rejects the first
+// write of the new kind at runtime. Nothing caught it, because tests open
+// fresh databases. Probing the whole declared set makes the step self-
+// maintaining — it fires exactly when the declaration has moved ahead of the
+// table, whatever moved it.
 //
 // ‡ A SEPARATE step rather than another kind bolted into
-// ensureEventsCheckCurrent, and ordered AFTER "add events.detail", for the
-// hazard ensureEventsDetail's own comment names: that older rebuild copies a
-// column list with no `detail` in it, so widening there would silently drop
-// the column on every DB that has it. Rebuilding here, last, means `detail`
-// is guaranteed present and this DDL carries it on both sides of the
-// INSERT ... SELECT — the shape any future events rebuild must copy.
+// ensureEventsCheckCurrent, and ordered LAST — after "add events.detail" —
+// for the hazard ensureEventsDetail's own comment names: that older rebuild
+// copies a column list with no `detail` in it, so widening there would
+// silently drop the column on every DB that has it. Rebuilding here, last,
+// means `detail` is guaranteed present and this DDL carries it on both sides
+// of the INSERT ... SELECT — the shape any future events rebuild must copy.
 //
-// Probe is the newest kind, so this is a no-op on a fresh DB (schema.sql
-// already names it) and on a re-Open. user_version not bumped.
-func ensureEventsCheckStagedGate(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+// A fresh DB (schema.sql renders the same list) and a re-Open are no-ops.
+// user_version not bumped.
+func ensureEventsCheckAllKinds(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	var ddl string
 	if err := db.QueryRowContext(ctx,
 		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&ddl); err != nil {
 		return false, err
 	}
-	if strings.Contains(ddl, "'staged_lock_gate_fired'") {
+	if eventsCheckAdmitsEveryKind(ddl) {
 		return false, nil // already current
 	}
-	const rebuild = `
+	// The CHECK clause renders from allEventKinds (event_kinds.go) rather
+	// than naming the kinds here a second time — this is the current
+	// rebuild DDL, so it always carries every declared kind (loto-123y).
+	rebuild := `
 CREATE TABLE events_new (
   id               TEXT PRIMARY KEY,
   target_canonical TEXT NOT NULL,
-  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started','lock_downgraded','lock_refreshed','gate_bypass','candidate_accepted','candidate_rejected','staged_lock_gate_fired')),
+  event_kind       TEXT NOT NULL CHECK (event_kind IN (` + eventKindCheckSQL() + `)),
   actor_uuid       TEXT NOT NULL,
   subject_uuid     TEXT,
   reason           TEXT NOT NULL DEFAULT '',

@@ -11,18 +11,10 @@ import (
 	"loto/internal/gate"
 )
 
-// Admission verdict event kinds (loto-ovno.9). Every candidate that reaches a
-// verdict leaves exactly one of these, so the rejection taxonomy stops being
-// a thing the CLI prints once and becomes a thing the repo can count.
-//
-// ‡ The rejection CLASS rides in Event.Reason, not in the kind: a kind per
-// class would need a CHECK-constraint migration every time the taxonomy
-// grows, and would make "how many candidates were rejected at all" a query
-// over a list someone has to remember to extend.
-const (
-	EventCandidateAccepted = "candidate_accepted"
-	EventCandidateRejected = "candidate_rejected"
-)
+// EventCandidateAccepted and EventCandidateRejected — the admission verdict
+// event kinds this file writes (loto-ovno.9) — are declared in
+// event_kinds.go, the single site for the whole event-kind vocabulary
+// (loto-123y).
 
 // verdictDetail is the JSON payload a candidate_rejected event carries in
 // events.detail. Created is the subset of the candidate's declared write-set
