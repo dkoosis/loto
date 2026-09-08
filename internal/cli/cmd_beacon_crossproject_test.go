@@ -77,7 +77,7 @@ func TestCmdBeacon_CrossProjectRoutesToOwningProject(t *testing.T) {
 	// Rule: never silently leased against the caller's project — A's own
 	// store carries no trace of it.
 	var aOut, aErr bytes.Buffer
-	if code := Run([]string{"status"}, &aOut, &aErr); code != 0 {
+	if code := Run([]string{tcCmdStatus}, &aOut, &aErr); code != 0 {
 		t.Fatalf("status in A: exit=%d err=%q", code, aErr.String())
 	}
 	if strings.Contains(aOut.String(), targetRel) {

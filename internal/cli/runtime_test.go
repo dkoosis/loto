@@ -228,7 +228,7 @@ func TestLockRefusesUnpinned(t *testing.T) {
 
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "observer-"+tcSessID)
 	var status bytes.Buffer
-	if code := Run([]string{"status"}, &status, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdStatus}, &status, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("status exit %d", code)
 	}
 	if strings.Contains(status.String(), tcTargetA) {
