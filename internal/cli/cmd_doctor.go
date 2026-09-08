@@ -111,6 +111,15 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
+
+	// Binary identity ahead of openRuntime/DoctorAudit below, and ahead of
+	// both's failure returns (loto-jhbm review): a reader diagnosing a failed
+	// doctor run needs to know whether an outdated binary caused it, which the
+	// row can't say if it only prints after the calls that might fail.
+	repoTop, _ := repoTopForCwd(ctx)
+	id := readBuildIdentity()
+	renderBinaryIdentity(stdout, repoTop, id, checkBinaryStaleness(ctx, repoTop, id))
+
 	rt, err := openRuntime(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
@@ -127,7 +136,6 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 	live := rt.liveProbe()
 
-	repoTop, _ := repoTopForCwd(ctx)
 	report, err := rt.Store.DoctorAudit(rt.Ctx, rt.Host, rt.HostKnown, live, store.SidecarCheck{
 		SidecarDir: store.DefaultSidecarDir(),
 		RepoTop:    repoTop,
@@ -183,7 +191,9 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 // printDoctorHeader writes doctor's environment-identity lines (project/repo/
 // state) plus the guard-reachability rows (loto-jomg): both answer "is my
 // environment sound" ahead of the audit findings below, and folding them into
-// one call keeps cmdDoctor under funlen's statement budget.
+// one call keeps cmdDoctor under funlen's statement budget. Binary identity
+// (loto-jhbm) prints earlier still, in cmdDoctor itself, ahead of the calls
+// that can fail before ever reaching this header.
 func printDoctorHeader(ctx context.Context, stdout io.Writer, repoTop, stateDir string) {
 	fmt.Fprintf(stdout, "project: %s\n", ResolveAndPinProjectSlug(repoTop))
 	fmt.Fprintf(stdout, "repo:    %s\n", repoTop)
