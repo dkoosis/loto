@@ -12,21 +12,30 @@ import (
 )
 
 // TestEnsureCallerSet pins the production call graph of identity.Ensure to
-// the two sanctioned edges: openRuntime (every repo-scoped command that opens
-// the store) and cmdWhoami (whoami answers from anywhere, including outside a
-// git repo, so it can't route through openRuntime). A third edge is the
-// regression class this guardrail exists to catch — any future command
-// resolving identity directly bypasses the one-edge-per-process discipline and
-// reintroduces the env-drift bug Ensure's contract is meant to prevent.
-// (openMailRuntime was the third edge until mail was retired in loto-3wlb.)
+// the two sanctioned edges: openRuntimeForRepoTop (every repo-scoped command
+// that opens the store — openRuntime itself is now a thin wrapper that
+// resolves the caller's own repoTop and delegates, loto-72i) and cmdWhoami
+// (whoami answers from anywhere, including outside a git repo, so it can't
+// route through openRuntime). A third edge is the regression class this
+// guardrail exists to catch — any future command resolving identity directly
+// bypasses the one-edge-per-process discipline and reintroduces the
+// env-drift bug Ensure's contract is meant to prevent. (openMailRuntime was
+// the third edge until mail was retired in loto-3wlb.)
+//
+// openRuntimeForRepoTop can also be called with a repoTop the CALLER
+// resolved rather than one derived from this process's own cwd (a beacon
+// target that lives in a different project than the one the caller stands
+// in, loto-72i) — that does not add a new identity-resolution edge: identity
+// is per-AGENT, not per-project, so the one Ensure call and its rt.Agent
+// answer serve every project a single invocation touches.
 //
 // Do not silence this test by adding a sync.Once around Ensure. Memoizing
 // hides the very env-flipping that identity tests document as legal; the
 // discipline belongs in the call graph, not behind a cache.
 func TestEnsureCallerSet(t *testing.T) {
 	want := map[string]struct{}{
-		"openRuntime": {},
-		"cmdWhoami":   {},
+		"openRuntimeForRepoTop": {},
+		"cmdWhoami":             {},
 	}
 
 	got := ensureCallers(t, "../cli")

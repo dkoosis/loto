@@ -145,6 +145,25 @@ func sessionUUID() (id string, pinned bool) {
 }
 
 func openRuntime(ctx context.Context) (*runtime, error) {
+	top, err := gitRevParseToplevel(ctx)
+	if err != nil {
+		if isNotAGitRepo(err) {
+			return nil, errNotInGitRepo
+		}
+		return nil, fmt.Errorf("git rev-parse --show-toplevel: %w", err)
+	}
+	return openRuntimeForRepoTop(ctx, top)
+}
+
+// openRuntimeForRepoTop is openRuntime for a repo toplevel the CALLER has
+// already resolved, rather than one derived from this process's own cwd
+// (loto-72i): a beacon target that resolves into a different project than
+// the one the invoking agent stands in still needs a runtime scoped to ITS
+// OWN project's store — StateDir(top) below, not the caller's. top must
+// already be a validated git toplevel (as repoTopForPath returns); this does
+// no git-repo-ness check of its own and has no errNotInGitRepo path, unlike
+// openRuntime.
+func openRuntimeForRepoTop(ctx context.Context, top string) (*runtime, error) {
 	// Capture whether an explicit identity env var was set before Ensure runs.
 	// An unpinned read verb runs on a throwaway UUID that owns no locks and
 	// must not be used as an --all release scope — doing so produces a
@@ -164,13 +183,6 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("identity: %w", err)
-	}
-	top, err := gitRevParseToplevel(ctx)
-	if err != nil {
-		if isNotAGitRepo(err) {
-			return nil, errNotInGitRepo
-		}
-		return nil, fmt.Errorf("git rev-parse --show-toplevel: %w", err)
 	}
 	dir := StateDir(top)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
