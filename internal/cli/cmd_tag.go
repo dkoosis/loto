@@ -86,10 +86,11 @@ func cmdTag(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	warnIfNoBeadID(text, stderr)
 	repoTop, _ := repoTopForCwd(ctx)
 
-	// A directory is not a lockable target, so resolveCLITarget rejects it
-	// before any store call. That rejection is the ONLY thing loosened here:
-	// a directory can never be locked, so falling back to prefix
-	// canonicalization cannot change what happens to a file argument.
+	// A directory — the repo root included — is not a lockable target, so
+	// resolveCLITarget rejects it before any store call. That rejection is
+	// the ONLY thing loosened here: neither a directory nor the root can ever
+	// be locked, so falling back to prefix canonicalization cannot change
+	// what happens to a file argument.
 	canonical, prefixOnly, rc := resolveTagGround(repoTop, fs.Arg(0), stderr)
 	if rc != 0 {
 		return rc
@@ -108,7 +109,18 @@ func cmdTag(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 // resolveTagGround canonicalizes the tag's first argument. prefixOnly is true
-// when the argument named a directory, which can only ever be territory.
+// when the argument named a directory or the repo root, neither of which can
+// ever be a lock target — both can only ever be territory.
+//
+// loto-5stx: the repo root falls into the same prefixOnly arm as any other
+// directory, not a separate one. domain.Canonicalize refuses "." with
+// ErrTargetIsRepoRoot rather than ErrTargetIsDir (a distinct spelling rule,
+// not a distinct policy — see target.go), so both errors are caught here.
+// resolveCLIPrefix's CanonicalizePrefix already treats "." as the widest
+// legal claim prefix (sd-isv2) — the same ground `loto claim .` reserves —
+// so no change to canonicalization, overlap, or lock policy is needed to
+// let a note land there: this only widens which errors route to the
+// existing prefix path.
 //
 // A glob gets the existing ErrTargetIsGlob rejection plus the fix block: loto's
 // territory vocabulary is the bare prefix (`loto claim internal/store`), and a
@@ -119,7 +131,7 @@ func resolveTagGround(repoTop, raw string, stderr io.Writer) (canonical string, 
 	if err == nil {
 		return target.Canonical, false, 0
 	}
-	if errors.Is(err, domain.ErrTargetIsDir) {
+	if errors.Is(err, domain.ErrTargetIsDir) || errors.Is(err, domain.ErrTargetIsRepoRoot) {
 		prefix, perr := resolveCLIPrefix(nil, repoTop, raw)
 		if perr != nil {
 			fmt.Fprintf(stderr, "✗ %v\n", perr)

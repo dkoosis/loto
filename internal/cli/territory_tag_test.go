@@ -82,6 +82,58 @@ func TestTagDirectoryPrefix(t *testing.T) {
 	}
 }
 
+// TestTagRepoRoot is loto-5stx's acceptance criterion: the repo root is the
+// one claim that blocks every peer, and it must still be a legal `loto tag`
+// target — the tag-the-holder-and-defer route standard-tools.md prescribes
+// has to work at that scope, not just at an ordinary directory prefix.
+// Alongside TestTagDirectoryPrefix, its non-root counterpart.
+func TestTagRepoRoot(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+
+	for _, arg := range []string{".", "./"} {
+		out := runOK(t, tcCmdTag, arg, ttNoteText)
+		if !strings.Contains(out, "✓ territory-tag id=tt-") {
+			t.Fatalf("%q must pin a territory tag at the root, got %q", arg, out)
+		}
+		if !strings.Contains(out, "prefix=.") {
+			t.Errorf("%q must land on the root prefix, got %q", arg, out)
+		}
+	}
+}
+
+// TestTagRepoRootSurfacesToRootClaimHolder walks the bead's motivating
+// scenario end to end: alice takes the repo-root claim (the one that blocks
+// every ref mutation in the repo), bob — blocked by it — leaves a note on
+// that exact ground instead of paging alice out of band, and alice discovers
+// it through the same trailing footer that surfaces a tag on any other
+// claimed target (TestStatus_HolderSeesTrailingFooter's scenario, ground=.).
+func TestTagRepoRootSurfacesToRootClaimHolder(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	runOK(t, "claim", ".", "-t", tcIntentTest)
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	out := runOK(t, tcCmdTag, ".", ttNoteText)
+	if !strings.Contains(out, "✓ territory-tag id=tt-") {
+		t.Fatalf("bob must be able to tag the root claim alice holds: %q", out)
+	}
+
+	// Alice runs a plain `status` — the trailing footer must surface bob's
+	// note through the same surface non-root claims use, with no --gate or
+	// blocking-behavior change anywhere in the path.
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	statusOut := runOK(t, tcCmdStatus)
+	if !strings.Contains(statusOut, ttNoteText) {
+		t.Fatalf("root claim holder must see the tag via the trailing footer: %q", statusOut)
+	}
+	if !strings.Contains(statusOut, "ℹ territory-tags count=") {
+		t.Fatalf("expected the territory-tag footer header: %q", statusOut)
+	}
+}
+
 // A glob is the right idea in the wrong spelling — loto's territory vocabulary
 // is the bare prefix — so the rejection owes a fix block, not just a refusal.
 func TestTagGlobRejectedWithFix(t *testing.T) {
