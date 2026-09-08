@@ -127,6 +127,49 @@ func printStatusTerritoryTags(stdout io.Writer, rt *runtime, mine bool, now time
 	render.EmitTerritoryTagRows(stdout, notes, "territory-tags", "")
 }
 
+// rowOwnerMark answers, for ONE status row, how it is annotated for THIS
+// caller: the marker suffix to append, and whether the row belongs to somebody
+// else. Both printers route every row through it so a caller-dependent
+// annotation is decided in exactly one place — loto-p6zs adds a second one
+// (guard=inert) on top of this, and shaving branches inside each printer
+// instead would push both back over gocognit's ceiling a second time.
+//
+// owner is compared as a plain string regardless of which uuid space the row
+// lives in: a claim/exclusive-lock row carries the parent SESSION uuid, a
+// `beacon:` row carries a PER-AGENT uuid, and callerUUID already resolves to
+// whichever space the calling process is in (identity.Ensure), so one
+// comparison covers both. Suppressed under --mine, where every remaining row is
+// the caller's own by construction and marking them would move the golden
+// output the AC pins unchanged.
+func rowOwnerMark(owner, callerUUID string, mine bool) (mark string, foreign bool) {
+	if owner != callerUUID {
+		return "", true
+	}
+	if mine {
+		return "", false
+	}
+	return " self=true", false
+}
+
+// printLocksSummary writes the locks header and returns the dead count, which
+// the caller needs again for the reclaim fix block. Split out of
+// printStatusLocks to keep that function under gocognit's ceiling with the
+// self-marker branch added (ferret-m3t).
+func printLocksSummary(stdout io.Writer, all []domain.LockRecord, ec domain.EvalContext) (dead int) {
+	for i := range all {
+		if ec.Classify(all[i]) == domain.LivenessDead {
+			dead++
+		}
+	}
+	if dead == 0 {
+		fmt.Fprintf(stdout, "✓ locks count=%d\n", len(all))
+		return dead
+	}
+	fmt.Fprintf(stdout, "⚠ locks count=%d held=%d expired=%d — reclaim: loto doctor --repair\n",
+		len(all), len(all)-dead, dead)
+	return dead
+}
+
 // printStatusClaims renders the claims section after locks (loto-7af9): live
 // rows only — Expired is display-time authority; the row itself dies lazily in
 // a later overlapping acquire — sorted prefix then created_at, --mine honored.
@@ -160,12 +203,8 @@ func printStatusClaims(stdout io.Writer, rt *runtime, all []domain.ClaimRecord, 
 	fmt.Fprintf(stdout, "✓ claims count=%d\n", len(live))
 	for i := range live {
 		c := &live[i]
-		self := ""
-		if string(c.OwnerUUID) == rt.Agent.UUID {
-			if !mine {
-				self = " self=true"
-			}
-		} else {
+		self, other := rowOwnerMark(string(c.OwnerUUID), rt.Agent.UUID, mine)
+		if other {
 			foreign = true
 		}
 		fmt.Fprintf(stdout, "✓ prefix=%s owner=%s intent=%q held_since=%s ttl_remaining=%s host=%s%s\n",
@@ -283,18 +322,7 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord, mi
 	// enforcing for. dead=%d makes the reclaim gap visible without opening a
 	// single row; live/unknown fold together as "held" (both are non-stale —
 	// Classify's own docstring).
-	dead := 0
-	for i := range all {
-		if ec.Classify(all[i]) == domain.LivenessDead {
-			dead++
-		}
-	}
-	if dead == 0 {
-		fmt.Fprintf(stdout, "✓ locks count=%d\n", len(all))
-	} else {
-		fmt.Fprintf(stdout, "⚠ locks count=%d held=%d expired=%d — reclaim: loto doctor --repair\n",
-			len(all), len(all)-dead, dead)
-	}
+	dead := printLocksSummary(stdout, all, ec)
 	canonicals := make([]domain.Canonical, len(all))
 	for i := range all {
 		canonicals[i] = domain.Canonical(all[i].Target.Canonical)
@@ -328,12 +356,8 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord, mi
 		// rt.Agent.UUID already resolves to whichever space the CALLING
 		// process itself is in (identity.Ensure), so one comparison covers
 		// both. Suppressed under --mine (see mine gate above the loop).
-		self := ""
-		if string(l.OwnerUUID) == rt.Agent.UUID {
-			if !mine {
-				self = " self=true"
-			}
-		} else {
+		self, other := rowOwnerMark(string(l.OwnerUUID), rt.Agent.UUID, mine)
+		if other {
 			foreign = true
 		}
 		// epoch= is the generation half of this hold's identity: joined to

@@ -16,6 +16,12 @@ import (
 // same target coexist (Conflicts(shared,shared)=false), so `loto check` never
 // surfaces them — but `status --collisions` flags the target as a ≥2-owner
 // collision, the signal the shared beacon exists to expose.
+// tcFlagCollisions is declared here rather than in testconsts_test.go on
+// purpose: that file is a shared test-constants file held by another lane
+// (sd-xhap), and a second lane editing it is the collision this repo has been
+// avoiding all night. Move it there later if it earns a second caller.
+const tcFlagCollisions = "--collisions"
+
 func TestStatusCollisions(t *testing.T) {
 	withTempProject(t)
 	alice, bob := twoAgents(t)
@@ -30,7 +36,7 @@ func TestStatusCollisions(t *testing.T) {
 	lockShared(bob.UUID)
 
 	var out bytes.Buffer
-	if code := Run([]string{tcCmdStatus, "--collisions"}, &out, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdStatus, tcFlagCollisions}, &out, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("status --collisions exit: %q", out.String())
 	}
 	got := out.String()
@@ -55,7 +61,7 @@ func TestStatusCollisions_NoneWhenSingleOwner(t *testing.T) {
 		t.Fatal("shared lock failed")
 	}
 	var out bytes.Buffer
-	if code := Run([]string{tcCmdStatus, "--collisions"}, &out, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdStatus, tcFlagCollisions}, &out, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("exit: %q", out.String())
 	}
 	if !strings.Contains(out.String(), "✓ no collisions") {
@@ -287,7 +293,7 @@ func TestStatus_AcceptsAbsolutePathInsideRepo(t *testing.T) {
 // false pass/fail from an unrelated line elsewhere in the dump.
 func statusRowFor(t *testing.T, out, target string) string {
 	t.Helper()
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if strings.Contains(line, "target="+target+" ") {
 			return line
 		}
@@ -301,7 +307,7 @@ func statusRowFor(t *testing.T, out, target string) string {
 // owner= tells them apart.
 func statusRowForOwner(t *testing.T, out, uuid string) string {
 	t.Helper()
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if strings.Contains(line, "owner="+uuid) {
 			return line
 		}
@@ -510,7 +516,7 @@ func TestStatusMineAndCollisions_GoldenUnchanged(t *testing.T) {
 	}
 
 	var colOut bytes.Buffer
-	if code := Run([]string{tcCmdStatus, "--collisions"}, &colOut, &bytes.Buffer{}); code != 0 {
+	if code := Run([]string{tcCmdStatus, tcFlagCollisions}, &colOut, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("status --collisions exit: %q", colOut.String())
 	}
 	if strings.Contains(colOut.String(), "self=true") || strings.Contains(colOut.String(), "rows above with no self=true") {
