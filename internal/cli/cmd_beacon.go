@@ -48,6 +48,35 @@ examples:
   loto beacon internal/store/locks.go
 `
 
+// resolveBeaconGroups validates every group's targets, prints the refused ones,
+// and reports how many targets survived across all groups.
+//
+// ‡ loto-ngip: a refused target must not sink the whole call. The store
+// accumulated 33 dead lock rows keyed on tokens like "pinned"/"test"/"to" that
+// were never paths (a sentence split on whitespace and handed to this verb one
+// word per arg) — but the bug was not that they got validated as junk, it was
+// that a beacon MIXING one such token with a real path used to drop the real
+// path too: this validator already runs the same statFileTargetReason predicate
+// `loto lock` applies (just with ENOENT tolerated, per z5nb), so the refused
+// token is already caught here. Print it and its reason, then keep going with
+// what validated — exactly what `loto lock` deliberately does NOT do, because a
+// lock call is a caller's explicit typed request, not an automated announcement
+// racing a write that is happening either way.
+func resolveBeaconGroups(groups []beaconGroup, stderr io.Writer) (resolved []resolvedBeaconGroup, valid int) {
+	resolved = make([]resolvedBeaconGroup, 0, len(groups))
+	var invalid []render.InvalidTarget
+	for _, g := range groups {
+		targets, inv := validateLockTargets(g.rawArgs, g.repoTop, true)
+		invalid = append(invalid, inv...)
+		valid += len(targets)
+		resolved = append(resolved, resolvedBeaconGroup{group: g, targets: targets})
+	}
+	if len(invalid) > 0 {
+		render.EmitInvalid(stderr, invalid)
+	}
+	return resolved, valid
+}
+
 // cmdBeacon mints the shared, PID-less, short-TTL lease the gate reads as
 // "some agent is writing here right now" (loto-xwod).
 //
@@ -110,15 +139,11 @@ func cmdBeacon(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 	// loto-z5nb: a beacon may name a path that does not exist yet — announcing
 	// a Write about to CREATE it is the case a beacon exists to protect.
-	resolved := make([]resolvedBeaconGroup, 0, len(groups))
-	var invalid []render.InvalidTarget
-	for _, g := range groups {
-		targets, inv := validateLockTargets(g.rawArgs, g.repoTop, true)
-		invalid = append(invalid, inv...)
-		resolved = append(resolved, resolvedBeaconGroup{group: g, targets: targets})
-	}
-	if len(invalid) > 0 {
-		render.EmitInvalid(stderr, invalid)
+	resolved, valid := resolveBeaconGroups(groups, stderr)
+	// Nothing validated ANYWHERE — across every group, not just one of them.
+	// A call whose targets were all junk announces no write, and reporting
+	// success for it would be the silent half of this same bug.
+	if valid == 0 {
 		return 2
 	}
 

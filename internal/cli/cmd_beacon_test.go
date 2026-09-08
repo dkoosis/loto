@@ -153,6 +153,11 @@ func TestCmdUnlock_FromSubdirReleasesTheFileTheCallerMeans(t *testing.T) {
 	}
 }
 
+// tcShellToken is the unexpanded-shell-token fixture shared by every beacon
+// refusal test below — one constant so goconst does not flag the literal
+// repeating across them.
+const tcShellToken = "$FAKE_HOME"
+
 // TestCmdBeacon_RefusesShellToken is loto-bl66's CLI-level AC, and it pins
 // BOTH halves in one test because they pull against each other: beacon must
 // refuse a token that cannot be a path, while still accepting a well-formed
@@ -166,7 +171,7 @@ func TestCmdBeacon_RefusesShellToken(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 
-	for _, tok := range []string{"$FAKE_HOME", "$PROBE_VAR", "`whoami`", " leading.go"} {
+	for _, tok := range []string{tcShellToken, "$PROBE_VAR", "`whoami`", " leading.go"} {
 		var out, errBuf bytes.Buffer
 		code := Run([]string{gateIntentBeacon, tok}, &out, &errBuf)
 		if code == 0 {
@@ -188,5 +193,65 @@ func TestCmdBeacon_RefusesShellToken(t *testing.T) {
 	if code := Run([]string{gateIntentBeacon, "still-uncreated.go"}, &out, &errBuf); code != 0 {
 		t.Fatalf("beacon on a well-formed missing path: exit=%d out=%q err=%q",
 			code, out.String(), errBuf.String())
+	}
+}
+
+// TestCmdBeacon_MixedValidAndRefused is loto-ngip's AC: a beacon call mixing
+// one valid target with one the validator refuses must drop only the refused
+// one — printing it and its reason on stderr — and still record the valid
+// target, rather than aborting the whole call the way it used to.
+//
+// The store accumulated 33 dead lock rows this way: a caller handed `loto
+// beacon` a sentence split on whitespace (one token, "$FAKE_HOME"-shaped here,
+// stands in for that), and the previous behavior discarded the ENTIRE batch —
+// including a real path in the same call — on the first refused token.
+func TestCmdBeacon_MixedValidAndRefused(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+
+	valid := "brand-new.go"
+	refused := tcShellToken
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{gateIntentBeacon, valid, refused}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("mixed beacon: exit=%d out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "✓ beacon count=1") {
+		t.Errorf("want exactly one lock recorded, got stdout=%q", out.String())
+	}
+	if !strings.Contains(out.String(), "target="+valid) {
+		t.Errorf("want the valid target recorded, got stdout=%q", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "target="+refused) || !strings.Contains(errBuf.String(), "reason=not-a-path") {
+		t.Errorf("want the refused target and its reason on stderr, got %q", errBuf.String())
+	}
+
+	var st bytes.Buffer
+	if code := Run([]string{tcCmdStatus, tcFlagMine}, &st, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("status: exit=%d %q", code, st.String())
+	}
+	if !strings.Contains(st.String(), "target="+valid) {
+		t.Errorf("status must show the recorded target: %q", st.String())
+	}
+	if strings.Contains(st.String(), "target="+refused) {
+		t.Errorf("status must show no lock for the refused, non-path target: %q", st.String())
+	}
+}
+
+// TestCmdBeacon_AllRefusedStillFails pins the other edge: when every target in
+// the call is refused, there is nothing to record and the call must fail
+// (exit 2), not silently succeed with zero locks.
+func TestCmdBeacon_AllRefusedStillFails(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{gateIntentBeacon, tcShellToken, "`whoami`"}, &out, &errBuf)
+	if code == 0 {
+		t.Fatalf("beacon with zero valid targets must not succeed: out=%q err=%q", out.String(), errBuf.String())
+	}
+	if strings.Contains(out.String(), "✓ beacon") {
+		t.Errorf("no beacon should have been minted: out=%q", out.String())
 	}
 }
