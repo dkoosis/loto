@@ -39,3 +39,8 @@ report/
 # bd worktrees (loto-<bead>/ at repo root) — glob covers all, no per-branch churn
 /loto-*/
 .aider*
+
+# bd audit residue: passive re-export, Dolt is source of truth. bd rewrites it
+# on every field change, so tracking it would leave a dirty tree after any bead
+# write. Matches sdlc's .gitignore.
+.beads/interactions.jsonl
