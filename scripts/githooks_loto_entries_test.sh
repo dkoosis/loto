@@ -131,6 +131,23 @@ export FAKE_MOVED_EXIT=3
 run_entry "$postcheckout" abc123 def456 1
 check moved-nonzero-loto-still-exits-0 0 '' '' "$STATUS" "$OUT" "$ERR"
 
+# loto-ugsr: an exit-0 run whose only finding is a gate=not-protected row must
+# still reach the committer. A commit made up entirely of paths loto cannot lock
+# — a symlink, a submodule pointer, a deletion — exits 0 under a "✓ held"
+# header, so the old `"⚠ unheld"*` prefix match dropped the one line saying the
+# gate protected nothing.
+held_notes=$'✓ held count=1\nℹ path=link.go state=unlockable reason=symlink gate=not-protected'
+reset_fakes
+export FAKE_GATE_EXIT=0 FAKE_HELD_OUT="$held_notes" FAKE_HELD_EXIT=0
+run_entry "$precommit"
+check precommit-forwards-not-protected-rows-on-exit-0 0 '' "$held_notes" "$STATUS" "$OUT" "$ERR"
+
+# The clean case stays silent: a fully-held commit must not grow a new line.
+reset_fakes
+export FAKE_GATE_EXIT=0 FAKE_HELD_OUT='✓ held count=3' FAKE_HELD_EXIT=0
+run_entry "$precommit"
+check precommit-clean-held-run-stays-quiet 0 '' '' "$STATUS" "$OUT" "$ERR"
+
 reset_fakes
 export PATH=$noloto
 run_entry "$postcheckout" abc123 def456 1

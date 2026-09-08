@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -163,7 +164,7 @@ func TestCheckHeld_PeerLockedStagedPathNamesTheHolder(t *testing.T) {
 	want := "✗ unheld count=1 unlocked=0 peer=1 staged=2\n" +
 		"✗ path=b.go state=peer-lock blocker=" + alice.UUID + " intent=\"test\" expires_at=<T>\n" +
 		tcHeldFence + "\n" +
-		"git restore --staged 'b.go'  # a peer holds these; leave them out of your commit\n" +
+		"git --literal-pathspecs restore --staged -- 'b.go'  # a peer holds these; leave them out of your commit\n" +
 		"```\n"
 	if got != want {
 		t.Errorf("output\n got: %q\nwant: %q", got, want)
@@ -535,9 +536,17 @@ func TestDecideHeld_DuplicatePathsCollapse(t *testing.T) {
 // staged file with a quote in its name therefore disabled the ownership check
 // for every OTHER path in that commit.
 
-// AC 1: a staged name carrying a shell metacharacter is CHECKED, not refused.
+// AC 1: a staged name carrying a shell metacharacter is CHECKED, not refused —
 // git printed it, no shell was involved, so the unexpanded-token rule that
-// refuses it is answering a question nobody asked.
+// refuses it is answering a question nobody asked, and the OTHER staged paths
+// are judged normally.
+//
+// It is reported as not-protected rather than as an unlocked verdict
+// (loto-ugsr). The gate canonicalizes with ProvenanceGit and accepts the name;
+// `loto lock` canonicalizes what a caller TYPED and refuses it with
+// ErrTargetUnspellable. Naming it `unlocked` printed the remedy
+// `loto lock 'say "hi".go'`, which can never succeed — so in blocking mode the
+// commit had no route through the gate but unstaging or an override.
 func TestCheckHeld_QuotedStagedNameIsCheckedAndNeverSuppressesTheOthers(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)
@@ -550,11 +559,11 @@ func TestCheckHeld_QuotedStagedNameIsCheckedAndNeverSuppressesTheOthers(t *testi
 	if code != 1 {
 		t.Fatalf("want exit 1, got %d: %q", code, got)
 	}
-	want := "✗ unheld count=2 unlocked=2 peer=0 staged=2\n" +
+	want := "✗ unheld count=1 unlocked=1 peer=0 staged=2\n" +
 		"✗ path=b.go state=unlocked\n" +
-		"✗ path=" + quoted + " state=unlocked\n" +
+		"ℹ path=" + quoted + " state=unlockable reason=not-a-path gate=not-protected\n" +
 		tcHeldFence + "\n" +
-		"loto lock 'b.go' 'say \"hi\".go' -t \"<bead>: intent\"  # take what you are about to commit\n" +
+		"loto lock 'b.go' -t \"<bead>: intent\"  # take what you are about to commit\n" +
 		"```\n"
 	if got != want {
 		t.Errorf("output\n got: %q\nwant: %q", got, want)
@@ -581,7 +590,7 @@ func TestCheckHeld_UnresolvableStagedNameDoesNotSuppressTheOthers(t *testing.T) 
 		"✗ path=b.go state=unlocked\n" +
 		tcHeldFence + "\n" +
 		"loto lock 'b.go' -t \"<bead>: intent\"  # take what you are about to commit\n" +
-		"git restore --staged 'a[1].go'  # loto cannot read these paths; leave them out of your commit\n" +
+		"git --literal-pathspecs restore --staged -- 'a[1].go'  # loto cannot read these paths; leave them out of your commit\n" +
 		"```\n"
 	if got != want {
 		t.Errorf("output\n got: %q\nwant: %q", got, want)
@@ -590,9 +599,15 @@ func TestCheckHeld_UnresolvableStagedNameDoesNotSuppressTheOthers(t *testing.T) 
 
 // AC 2: a control character in the only staged name. The gate COMPLETES and
 // reports on it — it used to exit 2 and take the whole commit out of scope.
-// The row is Go-quoted so it cannot split the one-row-per-line surface, and
-// no `loto lock` line is printed for it: there is no portable shell spelling
-// of that token, and a remedy printed wrong is the defect this bead removes.
+// The row is Go-quoted so it cannot split the one-row-per-line surface.
+//
+// It is a not-protected note, not a verdict (loto-ugsr). `loto lock` refuses a
+// control character in a typed target, and there is no portable shell spelling
+// of the token to print either, so a verdict row here was a refusal with NO
+// runnable remedy — escapable only by unstaging or LOTO_GUARD_OVERRIDE, which
+// switches the gate off for the whole commit. Saying "I do not cover this path"
+// is the honest report; a wedge that teaches people to override is worse than
+// an admitted gap.
 func TestCheckHeld_ControlCharacterNameIsReportedNotRefusedAsABatch(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)
@@ -601,12 +616,11 @@ func TestCheckHeld_ControlCharacterNameIsReportedNotRefusedAsABatch(t *testing.T
 	gitT(t, repo, "--literal-pathspecs", "add", tabbed)
 
 	got, code := blockingRun(t)
-	if code != 1 {
-		t.Fatalf("want exit 1, got %d: %q", code, got)
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d: %q", code, got)
 	}
-	want := "✗ unheld count=1 unlocked=1 peer=0 staged=1\n" +
-		"✗ path=\"a\\tb.go\" state=unlocked\n" +
-		"ℹ fix-omitted count=1 reason=control-character-in-name\n"
+	want := "✓ held count=1\n" +
+		"ℹ path=\"a\\tb.go\" state=unlockable reason=not-a-path gate=not-protected\n"
 	if got != want {
 		t.Errorf("output\n got: %q\nwant: %q", got, want)
 	}
@@ -621,12 +635,11 @@ func TestCheckHeld_NewlineInAStagedNameDoesNotSplitTheRow(t *testing.T) {
 	gitT(t, repo, "--literal-pathspecs", "add", "new\nline.go")
 
 	got, code := blockingRun(t)
-	if code != 1 {
-		t.Fatalf("want exit 1, got %d: %q", code, got)
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d: %q", code, got)
 	}
-	want := "✗ unheld count=1 unlocked=1 peer=0 staged=1\n" +
-		"✗ path=\"new\\nline.go\" state=unlocked\n" +
-		"ℹ fix-omitted count=1 reason=control-character-in-name\n"
+	want := "✓ held count=1\n" +
+		"ℹ path=\"new\\nline.go\" state=unlockable reason=not-a-path gate=not-protected\n"
 	if got != want {
 		t.Errorf("output\n got: %q\nwant: %q", got, want)
 	}
@@ -714,7 +727,7 @@ func TestCheckHeld_PeerLockOnAnUnlockableTargetIsStillNamed(t *testing.T) {
 	want := "✗ unheld count=1 unlocked=0 peer=1 staged=1\n" +
 		"✗ path=a.go state=peer-lock blocker=" + alice.UUID + " intent=\"test\" expires_at=<T>\n" +
 		tcHeldFence + "\n" +
-		"git restore --staged 'a.go'  # a peer holds these; leave them out of your commit\n" +
+		"git --literal-pathspecs restore --staged -- 'a.go'  # a peer holds these; leave them out of your commit\n" +
 		"```\n"
 	if got != want {
 		t.Errorf("output\n got: %q\nwant: %q", got, want)
@@ -859,5 +872,144 @@ func TestRecordHeldFiring_RespectsRetentionWithoutALock(t *testing.T) {
 	}
 	if len(evs) == 0 {
 		t.Error("rotation must trim the table, not empty it")
+	}
+}
+
+// ── loto-ugsr: the gate never prints a remedy that cannot be run ──────────
+
+// A staged DELETION is the commonest path `loto lock` refuses. The file is gone
+// from the worktree, so statFileTargetReason answers not-found — and so would
+// `loto lock`. Naming it `unlocked` printed `loto lock <deleted path>` as the
+// remedy, which fails with the same not-found: a refusal whose only escape is
+// unstaging or LOTO_GUARD_OVERRIDE. It is reported as not-protected instead.
+//
+// This is the general form of Codex's gitlink finding on #325 (a submodule
+// pointer absent from the worktree). Reading the staged mode from the index
+// would have caught only the gitlink; asking whether the lock verb would take
+// the path catches the whole class.
+func TestCheckHeld_StagedDeletionIsNotToldToLockADeletedPath(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeT(t, repo, tcTargetB, "b")
+	gitT(t, repo, "add", tcTargetB)
+	gitT(t, repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "chore: seed")
+	gitT(t, repo, "rm", "-q", tcTargetB)
+
+	got, code := blockingRun(t)
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d: %q", code, got)
+	}
+	want := "✓ held count=1\n" +
+		"ℹ path=b.go state=unlockable reason=not-found gate=not-protected\n"
+	if got != want {
+		t.Errorf("output\n got: %q\nwant: %q", got, want)
+	}
+	if strings.Contains(got, "loto lock") {
+		t.Errorf("a deleted path must never be handed a loto lock remedy: %q", got)
+	}
+}
+
+// The persisted firing detail counts `unresolvable` on its own. It used to fold
+// every non-unlocked row into `peer`, so the evidence the advisory rollout is
+// judged on reported a peer conflict where there was an unreadable filename —
+// while the printed header, counting separately, said otherwise.
+func TestCheckHeld_FiringDetailCountsUnresolvableApartFromPeer(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	const globbed = "a[1].go"
+	writeT(t, repo, globbed, "g")
+	gitT(t, repo, "--literal-pathspecs", "add", globbed)
+
+	if _, code := blockingRun(t); code != 1 {
+		t.Fatalf("an unresolvable staged path must still be a verdict, got exit %d", code)
+	}
+
+	detail := lastFiringDetail(t)
+	for _, want := range []string{`"peer":0`, `"unresolvable":1`, `"unheld":1`} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("firing detail %s: want %s", detail, want)
+		}
+	}
+}
+
+// lastFiringDetail returns the detail payload of the most recent
+// staged_lock_gate_fired event.
+func lastFiringDetail(t *testing.T) string {
+	t.Helper()
+	rt, err := openRuntime(context.Background())
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer rt.Close()
+	evs, err := rt.Store.ListEvents(rt.Ctx)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	detail := ""
+	for i := range evs {
+		if evs[i].Kind == store.EventStagedGateFired {
+			detail = evs[i].Detail
+		}
+	}
+	if detail == "" {
+		t.Fatal("no staged_lock_gate_fired event carried a detail payload")
+	}
+	return detail
+}
+
+// The unstage remedy is RUN here, not just compared. `git restore` reads its
+// trailing operands as pathspecs, so the old `git restore --staged 'a[1].go'`
+// also unstaged a1.go — silently pulling a file out of the commit the committer
+// never named, from a block whose stated contract is that every line would
+// actually satisfy the gate. --literal-pathspecs plus the `--` terminator is
+// what makes the printed command mean the name it prints.
+func TestCheckHeld_UnstageRemedyTouchesOnlyThePathItNames(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	const globbed = "a[1].go"
+	const sibling = "a1.go"
+	// `git restore --staged` resolves against HEAD, so the repo needs one.
+	writeT(t, repo, "seed.txt", "seed")
+	gitT(t, repo, "add", "seed.txt")
+	gitT(t, repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--no-verify", "-m", "chore: seed")
+
+	writeT(t, repo, globbed, "g")
+	writeT(t, repo, sibling, "s")
+	gitT(t, repo, "--literal-pathspecs", "add", globbed, sibling)
+	if code := Run([]string{tcCmdLock, sibling, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("lock %s failed", sibling)
+	}
+
+	got, code := blockingRun(t)
+	if code != 1 {
+		t.Fatalf("want exit 1, got %d: %q", code, got)
+	}
+	remedy := ""
+	for line := range strings.SplitSeq(got, "\n") {
+		if strings.HasPrefix(line, "git ") {
+			remedy = line
+		}
+	}
+	if remedy == "" {
+		t.Fatalf("no unstage remedy was printed: %q", got)
+	}
+
+	cmd := exec.Command("sh", "-c", remedy)
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("the printed remedy must run: %v\n%s", err, out)
+	}
+
+	staged := exec.Command("git", "--literal-pathspecs", "diff", "--cached", "--name-only")
+	staged.Dir = repo
+	out, err := staged.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), globbed) {
+		t.Errorf("the remedy must unstage the path it names: %q", out)
+	}
+	if !strings.Contains(string(out), sibling) {
+		t.Errorf("the remedy must not unstage a sibling whose name the glob happens to match: %q", out)
 	}
 }

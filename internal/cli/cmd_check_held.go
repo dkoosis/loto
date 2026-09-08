@@ -335,6 +335,23 @@ func classifyUnheld(t domain.Target, renamedFrom string, locks []domain.LockReco
 // heldGlyph is ✗ in blocking mode and ⚠ in warn mode — the ONLY difference
 // between the two renderings, so "same output as ⚠ rows" is structural
 // rather than a second formatter that can drift.
+// tallyHeldStates is the one triage over a verdict set: the printed header and
+// the persisted firing detail both read it, so the numbers a reader sees and
+// the numbers the rollout is measured on cannot disagree (loto-ugsr).
+func tallyHeldStates(rows []heldRow) (unlocked, peer, unresolvable int) {
+	for i := range rows {
+		switch rows[i].State {
+		case heldStateUnlocked:
+			unlocked++
+		case heldStateUnresolvable:
+			unresolvable++
+		default:
+			peer++
+		}
+	}
+	return unlocked, peer, unresolvable
+}
+
 func heldGlyph(warn bool) string {
 	if warn {
 		return "⚠"
@@ -366,17 +383,7 @@ func printHeld(stdout io.Writer, rows, notes []heldRow, checked int, warn bool) 
 		return
 	}
 	g := heldGlyph(warn)
-	unlocked, peer, unresolvable := 0, 0, 0
-	for i := range rows {
-		switch rows[i].State {
-		case heldStateUnlocked:
-			unlocked++
-		case heldStateUnresolvable:
-			unresolvable++
-		default:
-			peer++
-		}
-	}
+	unlocked, peer, unresolvable := tallyHeldStates(rows)
 	fmt.Fprintf(stdout, "%s unheld count=%d unlocked=%d peer=%d staged=%d", g, len(rows), unlocked, peer, checked)
 	// Appended only when it happened: an unresolvable staged path is rare, and
 	// the field would otherwise widen every header line for nothing.
@@ -447,9 +454,17 @@ type heldFixLine struct {
 // that a reader would copy wrong — and a remedy printed wrong is the defect
 // this bead exists to remove.
 func printHeldFix(stdout io.Writer, rows []heldRow) {
+	// ‡ --literal-pathspecs and the `--` terminator are load-bearing, not
+	// hygiene (loto-ugsr). `git restore` reads its trailing operands as
+	// PATHSPECS, not literal names, so with `a[1].go` and `a1.go` both staged
+	// the shell-quoted remedy `git restore --staged 'a[1].go'` unstages BOTH —
+	// silently pulling a file out of the commit the committer never named. A
+	// leading-dash name is parsed as an option by the same route. These are
+	// exactly the odd names this block exists to hand back, so the remedy has
+	// to say "treat this as a name" out loud.
 	mine := heldFixLine{format: "loto lock %s -t \"<bead>: intent\"  # take what you are about to commit\n"}
-	theirs := heldFixLine{format: "git restore --staged %s  # a peer holds these; leave them out of your commit\n"}
-	unreadable := heldFixLine{format: "git restore --staged %s  # loto cannot read these paths; leave them out of your commit\n"}
+	theirs := heldFixLine{format: "git --literal-pathspecs restore --staged -- %s  # a peer holds these; leave them out of your commit\n"}
+	unreadable := heldFixLine{format: "git --literal-pathspecs restore --staged -- %s  # loto cannot read these paths; leave them out of your commit\n"}
 	omitted := 0
 	for i := range rows {
 		rel := relPath(rows[i].Path)
@@ -512,24 +527,25 @@ func heldWarnMode(stderr io.Writer) bool {
 // cannot take the row does not change the verdict, and the loss is said out
 // loud rather than swallowed.
 func recordHeldFiring(rt *runtime, stderr io.Writer, rows []heldRow, warn bool) {
-	unlocked, peer := 0, 0
-	for i := range rows {
-		if rows[i].State == heldStateUnlocked {
-			unlocked++
-		} else {
-			peer++
-		}
-	}
+	// ‡ Counted with the SAME helper the header uses (loto-ugsr). These two
+	// tallies disagreed: the header split `unresolvable` out while this one
+	// still folded every non-`unlocked` row into `peer`, so the persisted
+	// evidence claimed a peer conflict where there was an unreadable filename.
+	// That detail is what the advisory rollout is judged on — it is the one
+	// place a wrong count costs something — and two loops deriving one triage
+	// is how they drifted in the first place.
+	unlocked, peer, unresolvable := tallyHeldStates(rows)
 	mode := gateModeBlock
 	if warn {
 		mode = gateModeWarn
 	}
 	detail, err := json.Marshal(struct {
-		Mode     string `json:"mode"`
-		Unheld   int    `json:"unheld"`
-		Unlocked int    `json:"unlocked"`
-		Peer     int    `json:"peer"`
-	}{mode, len(rows), unlocked, peer})
+		Mode         string `json:"mode"`
+		Unheld       int    `json:"unheld"`
+		Unlocked     int    `json:"unlocked"`
+		Peer         int    `json:"peer"`
+		Unresolvable int    `json:"unresolvable"`
+	}{mode, len(rows), unlocked, peer, unresolvable})
 	if err != nil {
 		detail = nil
 	}
@@ -698,19 +714,32 @@ func resolveStagedPaths(base, repoTop string, raw []stagedPath, fromGit bool) (o
 	return out, invalid
 }
 
-// unlockableReason names why no session could ever hold a lock on this path,
-// or "" when one could. It asks `loto lock`'s OWN validator
-// (statFileTargetReason), so the gate's exemption is the lock verb's refusal
-// by construction rather than a second list that can drift from it.
+// unlockableReason names why `loto lock` would refuse this path, or "" when it
+// would take it. It asks the lock verb's OWN validators, so the gate's
+// exemption is that verb's refusal by construction rather than a second list
+// that can drift from it.
 //
-// Only the two permanent refusals count. `not-found` — a staged deletion, a
-// rename's source — is NOT one of them: that path was lockable right up until
-// the session deleted it, so the gate has a real thing to say about it.
+// ‡ EVERY refusal counts, not a chosen two (loto-ugsr). The first cut admitted
+// `not-found` as lockable on the theory that a staged deletion "was lockable
+// until the session deleted it" — true, and useless at the moment the gate
+// speaks: `loto lock` refuses an absent path, so the printed remedy could not
+// be run. That covered every staged deletion, a routine operation, plus a
+// gitlink absent from the worktree (a sparse-checkout submodule, or a pointer
+// staged with `git update-index --cacheinfo`, Codex #325). Reading the staged
+// mode from the index would have caught only the gitlink; asking whether the
+// lock verb would accept the path catches the whole class, deletions included.
+//
+// ‡ The spelling check is the second half, and it is not on disk at all. Since
+// this gate canonicalizes staged paths with domain.ProvenanceGit, a name
+// carrying a shell metacharacter — `say "hi".go` — resolves here and reads as
+// an ordinary unlocked file, while `loto lock` canonicalizes what a caller
+// TYPED (ProvenanceTyped) and refuses the same name with ErrTargetUnspellable.
+// In blocking mode that left the commit no route through the gate except
+// unstaging or LOTO_GUARD_OVERRIDE. A path loto cannot be asked to lock is a
+// path this gate does not protect, and says so.
 func unlockableReason(repoTop, canonical string) string {
-	switch reason := statFileTargetReason(repoTop, canonical, false); reason {
-	case reasonSymlink, reasonNotRegularFile:
-		return reason
-	default:
-		return ""
+	if _, err := domain.Canonicalize(canonical); err != nil {
+		return classifyCanonicalizeErr(err)
 	}
+	return statFileTargetReason(repoTop, canonical, false)
 }

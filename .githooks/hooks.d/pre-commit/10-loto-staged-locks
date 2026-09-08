@@ -72,8 +72,16 @@ fi
 _loto_held_out=$(loto check --held --staged)
 _loto_held_exit=$?
 
+# Two exit-0 shapes are worth forwarding, and the second was being dropped
+# (loto-ugsr). "⚠ unheld" is the warn-mode advisory. The other is the
+# gate=not-protected row: a staged path loto looked at and is telling the
+# committer it does NOT cover — a symlink, a submodule pointer, a name loto
+# cannot be asked to lock. A commit made up only of those exits 0 with a
+# "✓ held" header, so matching on the ⚠ prefix alone discarded the one line
+# saying the gate protected nothing. A gate that silently skips a path teaches
+# the reader it covered one.
 case "$_loto_held_out" in
-"⚠ unheld"*) echo "$_loto_held_out" >&2 ;;
+"⚠ unheld"* | *"gate=not-protected"*) echo "$_loto_held_out" >&2 ;;
 esac
 
 if [ "$_loto_held_exit" -eq 1 ]; then
