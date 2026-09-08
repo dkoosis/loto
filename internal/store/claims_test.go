@@ -47,7 +47,8 @@ func TestReleaseBySession_ClaimsScopedToSession(t *testing.T) {
 		}
 	}
 
-	_, got, err := s.ReleaseBySession(ctx, tcAlice, "session-1")
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "")
+	got := rel.ClaimPrefixes
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -85,7 +86,8 @@ func TestReleaseBySession_ClaimsAgentScopedFallback(t *testing.T) {
 		}
 	}
 
-	_, got, err := s.ReleaseBySession(ctx, tcAlice, "")
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "", "")
+	got := rel.ClaimPrefixes
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -108,7 +110,8 @@ func TestReleaseBySession_ClaimsNothingOwned(t *testing.T) {
 	if err := s.ClaimPrefix(ctx, mkClaimSession("internal/c", tcBob, "session-1", time.Hour), nil); err != nil {
 		t.Fatal(err)
 	}
-	_, got, err := s.ReleaseBySession(ctx, tcAlice, "")
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "", "")
+	got := rel.ClaimPrefixes
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}

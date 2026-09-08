@@ -7,5 +7,7 @@ Usage of unlock:
     	break a lock; BLIND unless --expect-holder names the hold to break
   -intent string
     	intent (required only with --force)
+  -only-intent string
+    	with --all, release only locks whose recorded intent exactly matches this — scopes the sweep to one lane's own locks when a shared owner id also covers peer lanes (sd-xhap)
   -t string
     	intent (required only with --force)

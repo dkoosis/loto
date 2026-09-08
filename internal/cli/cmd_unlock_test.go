@@ -403,3 +403,198 @@ func TestUnlockForce_NoDispossession_NoTag(t *testing.T) {
 		t.Errorf("no dispossession happened; no tag should exist: %q", check.String())
 	}
 }
+
+// TestUnlockAll_OnlyIntent_ScopesToOneLane pins sd-xhap AC1: two lanes of one
+// Claude Code session share an owner id (and, per loto-81n, can share a
+// session id too), so a lane's own release must be scoped by something a
+// lane controls per call — its lock-time intent — rather than by owner or
+// session. Lane A holds A and B under "laneA: work"; lane B holds C under
+// "laneB: work". Lane A's --only-intent release must take exactly A and B
+// and leave C held, provable via `status --mine`.
+func TestUnlockAll_OnlyIntent_ScopesToOneLane(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t) // one owner id for both "lanes" — the bug's precondition
+	for _, n := range []string{tcTargetB, tcTargetC} {
+		if err := os.WriteFile(filepath.Join(repo, n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const laneAIntent = "laneA: work"
+	const laneBIntent = "laneB: work"
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", laneAIntent}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("lane A lock a: exit %d", code)
+	}
+	if code := Run([]string{tcCmdLock, tcTargetB, "-t", laneAIntent}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("lane A lock b: exit %d", code)
+	}
+	if code := Run([]string{tcCmdLock, tcTargetC, "-t", laneBIntent}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("lane B lock c: exit %d", code)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcFlagAll, tcFlagOnlyIntent, laneAIntent}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("lane A scoped --all: exit %d, out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "count=2") {
+		t.Errorf("expected exactly A and B released (count=2); got %q", out.String())
+	}
+
+	var status bytes.Buffer
+	if code := Run([]string{tcCmdStatus, tcFlagMine}, &status, io.Discard); code != 0 {
+		t.Fatalf("status --mine: exit %d", code)
+	}
+	got := status.String()
+	if strings.Contains(got, tcTargetA) || strings.Contains(got, tcTargetB) {
+		t.Errorf("A and B should be released after scoped --all; status: %q", got)
+	}
+	if !strings.Contains(got, tcTargetC) {
+		t.Errorf("lane B's C must survive lane A's scoped --all; status: %q", got)
+	}
+}
+
+// TestUnlockAll_OnlyIntent_NoMatch_ReleasesNothing: an --only-intent that
+// matches none of the caller's own locks releases zero and leaves every lock
+// standing — the filter fails closed, never falling back to a full sweep.
+func TestUnlockAll_OnlyIntent_NoMatch_ReleasesNothing(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("seed lock exit %d", code)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcFlagAll, tcFlagOnlyIntent, "no-such-intent"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "no locks owned") {
+		t.Errorf("expected a no-op report, got %q", out.String())
+	}
+
+	var status bytes.Buffer
+	Run([]string{tcCmdStatus, tcFlagMine}, &status, io.Discard)
+	if !strings.Contains(status.String(), tcTargetA) {
+		t.Errorf("non-matching --only-intent must not release the seeded lock: %q", status.String())
+	}
+}
+
+// TestUnlockAll_OnlyIntentWithoutAll_Rejected: --only-intent means nothing
+// without --all — refuse rather than silently discard it (the same class of
+// footgun loto-e0mz fixed for -t on plain unlock).
+func TestUnlockAll_OnlyIntentWithoutAll_Rejected(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcTargetA, tcFlagOnlyIntent, "x"}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), tcFlagOnlyIntent) {
+		t.Errorf("diagnostic should name --only-intent: %q", errBuf.String())
+	}
+}
+
+// TestUnlockAll_PeerIntents_WarnsThenReleases pins sd-xhap AC2: a plain,
+// unfiltered `--all` whose own scope spans more than one intent — the signal
+// that a shared owner id is carrying more than one lane's locks — prints the
+// count and the distinct intents before releasing, then still releases
+// everything (warn-and-proceed, not refuse: Rules allow either, and a
+// deliberate full sweep across every lane is a legitimate call this repo
+// still needs, e.g. genuine session end).
+func TestUnlockAll_PeerIntents_WarnsThenReleases(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	if err := os.WriteFile(filepath.Join(repo, tcTargetB), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", "laneA: work"}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("lock a: exit %d", code)
+	}
+	if code := Run([]string{tcCmdLock, tcTargetB, "-t", "laneB: work"}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("lock b: exit %d", code)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcFlagAll, "-t", tcIntentDone}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "⚠ unlock-all-peer-intents count=2") {
+		t.Errorf("expected a peer-intents warning naming count=2, got %q", got)
+	}
+	if !strings.Contains(got, `"laneA: work"`) || !strings.Contains(got, `"laneB: work"`) {
+		t.Errorf("warning should name both intents, got %q", got)
+	}
+	// Warn-and-proceed: both locks are still released.
+	var status bytes.Buffer
+	Run([]string{tcCmdStatus, tcFlagMine}, &status, io.Discard)
+	if strings.Contains(status.String(), tcTargetA) || strings.Contains(status.String(), tcTargetB) {
+		t.Errorf("full sweep should still release both after warning: %q", status.String())
+	}
+}
+
+// TestUnlockAll_SingleIntent_NoWarning: the common case (one lane, one
+// intent) must stay silent on the peer-intents front — no new noise for the
+// well-behaved caller this bug was never about.
+func TestUnlockAll_SingleIntent_NoWarning(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	if err := os.WriteFile(filepath.Join(repo, tcTargetB), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("lock a: exit %d", code)
+	}
+	if code := Run([]string{tcCmdLock, tcTargetB, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("lock b: exit %d", code)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdUnlock, tcFlagAll, "-t", tcIntentDone}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	if strings.Contains(out.String(), "peer-intents") {
+		t.Errorf("single-intent sweep must not warn: %q", out.String())
+	}
+}
+
+// TestUnlockAll_OnlyIntentEmpty_Refused pins loto-lzap's first P1: a SUPPLIED
+// but empty --only-intent is refused, never read as an absent flag.
+//
+// `if onlyIntent != ""` cannot tell `--only-intent ""` from no flag at all, so
+// a script whose variable expanded empty —
+// `loto unlock --all --only-intent "$INTENT"` — fell through to the unfiltered
+// sweep and released every lock and claim in scope. That is sd-xhap's own
+// incident shape, reached through the flag added to prevent it. Seeding a lock
+// and proving it survives is the half that matters: an exit code alone would
+// pass even if the sweep had already run.
+func TestUnlockAll_OnlyIntentEmpty_Refused(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("seed lock exit %d", code)
+	}
+
+	for _, args := range [][]string{
+		{tcCmdUnlock, tcFlagAll, tcFlagOnlyIntent, ""},
+		{tcCmdUnlock, tcFlagAll, tcFlagOnlyIntent + "="},
+	} {
+		var out, errBuf bytes.Buffer
+		if code := Run(args, &out, &errBuf); code != 2 {
+			t.Errorf("%v: exit %d, want 2; out=%q err=%q", args, code, out.String(), errBuf.String())
+		}
+		if !strings.Contains(errBuf.String(), tcFlagOnlyIntent) {
+			t.Errorf("%v: diagnostic should name the flag: %q", args, errBuf.String())
+		}
+	}
+
+	var status bytes.Buffer
+	Run([]string{tcCmdStatus, tcFlagMine}, &status, io.Discard)
+	if !strings.Contains(status.String(), tcTargetA) {
+		t.Errorf("an empty --only-intent must release nothing: %q", status.String())
+	}
+}
