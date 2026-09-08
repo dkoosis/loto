@@ -301,7 +301,7 @@ hooks: ## Point core.hooksPath at the tracked .githooks/ chain-runner. Local-onl
 	fi; \
 	inert=""; \
 	for e in .githooks/hooks.d/*/*; do \
-		case "$$e" in *.*) continue;; esac; \
+		case "$${e##*/}" in *.*) continue;; esac; \
 		if [ -f "$$e" ] && [ ! -x "$$e" ]; then inert="$$inert $${e#.githooks/hooks.d/}"; fi; \
 	done; \
 	if [ -n "$$inert" ]; then \
@@ -309,6 +309,7 @@ hooks: ## Point core.hooksPath at the tracked .githooks/ chain-runner. Local-onl
 		echo '```bash'; \
 		echo "chmod +x .githooks/hooks.d/<hook>/<entry>"; \
 		echo '```'; \
+		exit 1; \
 	fi; \
 	cur=$$(git config --get core.hooksPath || true); \
 	if [ -n "$$cur" ] && [ "$$cur" != ".githooks" ]; then \
