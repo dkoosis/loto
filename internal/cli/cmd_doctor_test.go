@@ -105,9 +105,14 @@ func TestDoctorGuard_InheritedGlobalHooksPath(t *testing.T) {
 	pinAgent(t)
 	writeHookFixture(t, repo, "pre-commit", "post-checkout")
 	foreign := filepath.Join(t.TempDir(), "global-hooks")
-	// --global, never --local: HOME was reset to a fresh temp dir by
-	// withTempProject, so this lands in that temp $HOME/.gitconfig and cannot
-	// leak into any other test or the real machine's global config.
+	// --global, never --local. Resetting HOME is NOT enough to aim it at a temp
+	// file: git resolves --global to $GIT_CONFIG_GLOBAL first when that is set,
+	// and only falls back to $HOME/.gitconfig when it is not. A machine or CI
+	// runner exporting it would otherwise take this write into a real config —
+	// and GIT_CONFIG_GLOBAL=/dev/null, a common CI hardening, would have git
+	// replace the device with a regular file (loto-7ftx). Naming the file here
+	// makes the isolation this test claims true regardless of the environment.
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
 	submitGitT(t, repo, "config", "--global", "core.hooksPath", foreign)
 	if local, err := gitCmd(context.Background(), repo, "config", "--local", "--get", "core.hooksPath"); err == nil {
 		t.Fatalf("local core.hooksPath must stay unset for this case, got %q", local)
