@@ -84,6 +84,7 @@ func cmdUnlock(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	all := fs.Bool("all", false, "release every lock owned by my uuid")
 	intent := fs.String("t", "", "intent (required only with --force)")
 	fs.StringVar(intent, "intent", "", "intent (required only with --force)")
+	onlyIntent := fs.String("only-intent", "", "with --all, release only locks whose recorded intent exactly matches this — scopes the sweep to one lane's own locks when a shared owner id also covers peer lanes (sd-xhap)")
 	var expect holdRefList
 	fs.Var(&expect, "expect-holder", "owner@epoch (from loto status) this break must find; repeat per holder of a shared target; refuse if the holder set moved")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
@@ -102,7 +103,11 @@ func cmdUnlock(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 2
 	}
 	if !*all && fs.NArg() == 0 {
-		fmt.Fprintln(stderr, "usage: loto unlock <target> [<target>...] [-t \"why\"] [--force [--expect-holder owner@epoch]] | --all -t \"why\"")
+		fmt.Fprintln(stderr, "usage: loto unlock <target> [<target>...] [-t \"why\"] [--force [--expect-holder owner@epoch]] | --all [--only-intent \"intent\"] -t \"why\"")
+		return 2
+	}
+	if *onlyIntent != "" && !*all {
+		fmt.Fprintln(stderr, "✗ --only-intent scopes --all; it means nothing without it")
 		return 2
 	}
 
@@ -115,7 +120,7 @@ func cmdUnlock(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	defer rt.DeferredTagFooter(stdout)
 
 	if *all {
-		return unlockAll(rt, stdout, stderr)
+		return unlockAll(rt, *onlyIntent, stdout, stderr)
 	}
 	// Resolve repoTop so absolute paths inside the repo normalize to their
 	// repo-relative canonical key, exactly like lock/check/status/tag. Without
@@ -251,7 +256,7 @@ func resolveUnlockArgs(args []string, repoTop string, stderr io.Writer) ([]domai
 	return out, 0
 }
 
-func unlockAll(rt *runtime, stdout, stderr io.Writer) int {
+func unlockAll(rt *runtime, onlyIntent string, stdout, stderr io.Writer) int {
 	// Guard: if no identity env var was set, Ensure minted a throwaway UUID
 	// that owns zero locks. Reporting "0 released" and exiting 0 is a silent
 	// false-success — the caller's real locks (held under a now-unreachable
@@ -264,18 +269,40 @@ func unlockAll(rt *runtime, stdout, stderr io.Writer) int {
 	// Scope: session-pinned → release only this session's locks (NORTH_STAR
 	// invariant 5). Unpinned → agent-scoped fallback (empty sessionUUID
 	// tells ReleaseBySession to match all sessions for this agent).
-	//
-	// ReleaseBySession is atomic: one SQL query finds+deletes matching rows
-	// in a single tx, closing the TOCTOU gap where the old list+filter+release
-	// dance could miss locks created between ListLocks and ReleaseLocks.
 	var sessionFilter domain.SessionUUID
 	if rt.SessionPinned {
 		sessionFilter = rt.SessionUUID
 	}
+
+	// --only-intent scopes the sweep to one lane's own locks (sd-xhap): N
+	// concurrent Claude Code lanes share one owner id (and, per loto-81n's own
+	// fix, can share one session id too — sub-session identity is not carried
+	// through), so agent/session scoping alone cannot tell one lane's locks
+	// from a peer's mid-edit locks. Intent is the one field a lane controls
+	// per call (`loto lock ... -t "<bead>: intent"`); matching it exactly lets
+	// a lane release exactly what it took, in one command, without naming
+	// targets one by one.
+	if onlyIntent != "" {
+		return unlockAllByIntent(rt, onlyIntent, sessionFilter, stdout, stderr)
+	}
+
+	// Full, unfiltered sweep: warn before releasing if the caller's own scope
+	// spans more than one intent — the observable signal that a shared owner
+	// id is carrying more than this lane's locks (sd-xhap). Warn-and-proceed,
+	// not refuse: a genuine end-of-session sweep across every lane is often
+	// exactly what's wanted, and the caller who wants a surgical release has
+	// --only-intent above.
+	if code := warnPeerIntents(rt, sessionFilter, stdout, stderr); code != 0 {
+		return code
+	}
+
 	// ReleaseBySession releases the agent's locks AND claims in one atomic tx
 	// (same agent, session-if-pinned scope), so a session-end --all clears
 	// claimed territory too — a crashed/ended agent's claim otherwise squats its
-	// prefix until TTL, the reclamation-parity gap ei5 closes.
+	// prefix until TTL, the reclamation-parity gap ei5 closes. It is also the
+	// TOCTOU-closing replacement for a list+filter+release dance: one SQL query
+	// finds+deletes matching rows in a single tx, so nothing created between a
+	// preceding ListLocks (the warning above) and this call can be missed.
 	results, claimPrefixes, err := rt.Store.ReleaseBySession(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), sessionFilter)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
@@ -284,4 +311,88 @@ func unlockAll(rt *runtime, stdout, stderr io.Writer) int {
 	exit := render.EmitReleaseResults(stdout, results)
 	render.EmitClaimsReleased(stdout, claimPrefixes)
 	return exit
+}
+
+// scopedOwnLocks lists every lock this call's scope covers: owned by this
+// agent, and — when session-pinned — held under this session too. Shared by
+// warnPeerIntents (preview before a full sweep) and unlockAllByIntent (the
+// candidate set an --only-intent filter narrows), so the two paths agree on
+// what "mine" means without either reimplementing ReleaseBySession's own
+// scoping rule.
+func scopedOwnLocks(rt *runtime, sessionFilter domain.SessionUUID) ([]domain.LockRecord, error) {
+	all, err := rt.Store.ListLocks(rt.Ctx)
+	if err != nil {
+		return nil, err
+	}
+	mine := make([]domain.LockRecord, 0, len(all))
+	for i := range all {
+		l := all[i]
+		if string(l.OwnerUUID) != rt.Agent.UUID {
+			continue
+		}
+		if sessionFilter != "" && l.SessionUUID != sessionFilter {
+			continue
+		}
+		mine = append(mine, l)
+	}
+	return mine, nil
+}
+
+// warnPeerIntents previews a full --all sweep (sd-xhap AC2): when the
+// caller's own scope holds locks under more than one intent, that is the only
+// signal available today that a shared owner id is about to release another
+// lane's mid-edit locks alongside this one's. Prints the count and the
+// distinct intents before ReleaseBySession runs, then returns 0 to let the
+// release proceed — the release itself is unchanged by this preview.
+func warnPeerIntents(rt *runtime, sessionFilter domain.SessionUUID, stdout, stderr io.Writer) int {
+	mine, err := scopedOwnLocks(rt, sessionFilter)
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return 3
+	}
+	seen := make(map[string]bool, len(mine))
+	var intents []string
+	for i := range mine {
+		if in := mine[i].Intent; !seen[in] {
+			seen[in] = true
+			intents = append(intents, in)
+		}
+	}
+	if len(intents) <= 1 {
+		return 0
+	}
+	sort.Strings(intents)
+	quoted := make([]string, len(intents))
+	for i, in := range intents {
+		quoted[i] = fmt.Sprintf("%q", in)
+	}
+	fmt.Fprintf(stdout, "⚠ unlock-all-peer-intents count=%d intents=%s\n", len(mine), strings.Join(quoted, ","))
+	return 0
+}
+
+// unlockAllByIntent releases exactly the caller's own locks whose recorded
+// intent equals onlyIntent, leaving every other lock this owner id holds —
+// including a peer lane's, under a different intent — untouched. Goes through
+// ReleaseLocks (not ReleaseBySession) because the release set here is a named
+// subset, not "everything this session owns"; claims are not released on this
+// path since --only-intent targets locks a lane took, not directory-level
+// territory (sd-xhap AC1).
+func unlockAllByIntent(rt *runtime, onlyIntent string, sessionFilter domain.SessionUUID, stdout, stderr io.Writer) int {
+	mine, err := scopedOwnLocks(rt, sessionFilter)
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return 3
+	}
+	var targets []domain.Target
+	for i := range mine {
+		if mine[i].Intent == onlyIntent {
+			targets = append(targets, mine[i].Target)
+		}
+	}
+	results, err := rt.Store.ReleaseLocks(rt.Ctx, targets, domain.AgentUUID(rt.Agent.UUID), rt.liveProbe())
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return 3
+	}
+	return render.EmitReleaseResults(stdout, results)
 }
