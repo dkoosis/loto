@@ -40,6 +40,23 @@ case "$mode" in
 	*) die "unknown mode: $mode" ;;
 esac
 
+# sarif_line prints the first line of a stream that parses as a SARIF document,
+# and nothing at all when no line does. It exists because a producer may print
+# a human summary after the document on the same stream — see the sarif case
+# below for the measured shape. Scanning rather than taking line 1 blindly
+# keeps a producer that prefixes a warning line working too.
+sarif_line() {
+	while IFS= read -r line; do
+		case "$line" in
+		'{'*) printf '%s\n' "$line" | jq -e 'has("runs")' >/dev/null 2>&1 && {
+			printf '%s\n' "$line"
+			return 0
+		} ;;
+		esac
+	done <"$1"
+	return 0
+}
+
 tmp=$(mktemp -d) || die "mktemp failed"
 trap 'rm -rf "$tmp"' EXIT
 out="$tmp/out"
@@ -67,7 +84,28 @@ diag)
 	findings=$(jq '[.runs[]?.results[]?] | length' "$tmp/sarif" 2>/dev/null) || findings=0
 	;;
 sarif)
-	findings=$(jq '[.runs[]?.results[]?] | length' "$out" 2>/dev/null) || findings=0
+	# ‡ A SARIF producer may append a human summary to the same stream
+	# (loto-36q8). golangci-lint does, unconditionally: with
+	# --output.sarif.path=/dev/stdout it writes the document and then
+	#
+	#   2 issues:
+	#   * modernize: 1
+	#
+	# after it. That trailer is not JSON, so jq failed on the whole stream,
+	# findings fell back to 0, and the status!=0 branch below declared the tool
+	# never ran — for EVERY real lint finding, naming no file and no rule. It
+	# went unnoticed because a clean tree never reaches it. Not the text
+	# formatter (--output.text.path=stderr does not move it) and not the
+	# lint-locked wrapper: reproduced with the pinned binary run bare.
+	#
+	# The document is one line, so keeping the first line that parses as SARIF
+	# is enough, and it is what the renderer gets too — cleaning the stream only
+	# for the count would still hand `fo` a malformed document. A producer whose
+	# whole output is already clean SARIF is unaffected: line one is the
+	# document.
+	sarif_line "$out" >"$tmp/sarif"
+	render_input=$tmp/sarif
+	findings=$(jq '[.runs[]?.results[]?] | length' "$tmp/sarif" 2>/dev/null) || findings=0
 	;;
 testjson)
 	findings=$(grep -c '"Action":"fail"' "$out" || true)
