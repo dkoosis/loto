@@ -201,21 +201,19 @@ arch: ## Enforce layering (.go-arch-lint.yml)
 	}
 
 # Single source of truth: .sandbox/project.conf:GOLANGCI_LINT_VERSION — CI
-# reads the same key (.github/workflows/check.yml). ✗ @latest below: that
-# installed whatever golangci-lint had just shipped against a pin the same
-# repo carries, which is the drift loto-scmj closes.
-GOLANGCI_LINT_PIN := $(shell sed -n 's/^GOLANGCI_LINT_VERSION=//p' .sandbox/project.conf)
+# reads the same key (.github/workflows/check.yml).
+#
+# loto-46x1: a PATH/pin mismatch used to print a ⚠ naming the drift and then
+# run the unpinned binary anyway — findings silently drifted from CI's while
+# the gate reported clean. scripts/lint-locked (ported from ferret#160; also
+# GOLANGCILINT in conform/mnemd/trixi) closes that: on a mismatch it builds
+# the PINNED version once (`go run …@vX.Y.Z`, cached under Go's module cache
+# outside this mutex) and execs that instead, so the binary that runs always
+# matches the pin — no separate install step, no manual chmod.
+GOLANGCILINT := bash scripts/lint-locked
 
 lint: ## Run golangci-lint (full)
-	@if ! command -v golangci-lint >/dev/null 2>&1; then \
-		echo "golangci-lint not installed; source .sandbox/activate.sh or 'go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_PIN)'"; \
-		exit 1; \
-	fi
-	@set -o pipefail; INSTALLED="v$$(golangci-lint --version 2>/dev/null | sed -n 's/.*has version \([0-9.]*\).*/\1/p')"; \
-	if [ "$$INSTALLED" != "$(GOLANGCI_LINT_PIN)" ]; then \
-		echo "⚠ golangci-lint version mismatch: installed $$INSTALLED, pinned $(GOLANGCI_LINT_PIN) — go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_PIN) to match"; \
-	fi
-	@$(GATE) lint sarif -- golangci-lint run --output.sarif.path=/dev/stdout $(PKG)
+	@$(GATE) lint sarif -- $(GOLANGCILINT) run --output.sarif.path=/dev/stdout $(PKG)
 
 # -count=1 defeats Go's test cache, so every local `make check` re-ran the whole
 # suite — 81s of the ~150s total, paid again for a one-line docs edit, and paid
@@ -303,7 +301,7 @@ hooks: ## Point core.hooksPath at the tracked .githooks/ chain-runner. Local-onl
 	fi; \
 	inert=""; \
 	for e in .githooks/hooks.d/*/*; do \
-		case "$$e" in *.*) continue;; esac; \
+		case "$${e##*/}" in *.*) continue;; esac; \
 		if [ -f "$$e" ] && [ ! -x "$$e" ]; then inert="$$inert $${e#.githooks/hooks.d/}"; fi; \
 	done; \
 	if [ -n "$$inert" ]; then \
@@ -311,6 +309,7 @@ hooks: ## Point core.hooksPath at the tracked .githooks/ chain-runner. Local-onl
 		echo '```bash'; \
 		echo "chmod +x .githooks/hooks.d/<hook>/<entry>"; \
 		echo '```'; \
+		exit 1; \
 	fi; \
 	cur=$$(git config --get core.hooksPath || true); \
 	if [ -n "$$cur" ] && [ "$$cur" != ".githooks" ]; then \
