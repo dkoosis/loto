@@ -561,3 +561,40 @@ func TestUnlockAll_SingleIntent_NoWarning(t *testing.T) {
 		t.Errorf("single-intent sweep must not warn: %q", out.String())
 	}
 }
+
+// TestUnlockAll_OnlyIntentEmpty_Refused pins loto-lzap's first P1: a SUPPLIED
+// but empty --only-intent is refused, never read as an absent flag.
+//
+// `if onlyIntent != ""` cannot tell `--only-intent ""` from no flag at all, so
+// a script whose variable expanded empty —
+// `loto unlock --all --only-intent "$INTENT"` — fell through to the unfiltered
+// sweep and released every lock and claim in scope. That is sd-xhap's own
+// incident shape, reached through the flag added to prevent it. Seeding a lock
+// and proving it survives is the half that matters: an exit code alone would
+// pass even if the sweep had already run.
+func TestUnlockAll_OnlyIntentEmpty_Refused(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("seed lock exit %d", code)
+	}
+
+	for _, args := range [][]string{
+		{tcCmdUnlock, tcFlagAll, tcFlagOnlyIntent, ""},
+		{tcCmdUnlock, tcFlagAll, tcFlagOnlyIntent + "="},
+	} {
+		var out, errBuf bytes.Buffer
+		if code := Run(args, &out, &errBuf); code != 2 {
+			t.Errorf("%v: exit %d, want 2; out=%q err=%q", args, code, out.String(), errBuf.String())
+		}
+		if !strings.Contains(errBuf.String(), tcFlagOnlyIntent) {
+			t.Errorf("%v: diagnostic should name the flag: %q", args, errBuf.String())
+		}
+	}
+
+	var status bytes.Buffer
+	Run([]string{tcCmdStatus, tcFlagMine}, &status, io.Discard)
+	if !strings.Contains(status.String(), tcTargetA) {
+		t.Errorf("an empty --only-intent must release nothing: %q", status.String())
+	}
+}

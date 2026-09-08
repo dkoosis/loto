@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"sort"
 	"time"
 
 	"loto/internal/domain"
@@ -239,37 +240,45 @@ func deleteOwnedTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals []str
 // need no post-commit filesystem restore and fold safely into this tx — making
 // the lock+claim release atomic (Codex #219 P1: a separate claim tx could leave
 // claims squatting after the lock tx already committed).
-func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, sessionUUID domain.SessionUUID) ([]ReleaseResult, []string, error) {
+func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, sessionUUID domain.SessionUUID, onlyIntent string) (SessionRelease, error) {
 	byAgent := string(agent) // internal store helpers thread the owner as a plain string
 	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
 	if err != nil {
-		return nil, nil, err
+		return SessionRelease{}, err
 	}
 	defer flock.release()
 
 	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
-		return nil, nil, err
+		return SessionRelease{}, err
 	}
 	defer cleanup()
 
 	// Claims first: pure DB, nothing to restore after commit.
-	claimPrefixes, err := deleteClaimsBySessionTx(ctx, tx, byAgent, string(sessionUUID))
-	if err != nil {
-		return nil, nil, err
+	//
+	// ‡ Skipped under an intent filter (loto-lzap). A claim records territory a
+	// lane reserved, not the write-set it took, and carries no intent to match —
+	// sweeping claims on a filtered release would drop the one thing the filter
+	// exists to leave standing.
+	var claimPrefixes []string
+	if onlyIntent == "" {
+		claimPrefixes, err = deleteClaimsBySessionTx(ctx, tx, byAgent, string(sessionUUID))
+		if err != nil {
+			return SessionRelease{}, err
+		}
 	}
 
-	// Find all targets matching agent (+session if pinned).
-	canonicals, err := loadSessionTargetsTx(ctx, tx, byAgent, string(sessionUUID))
+	// Find all targets matching agent (+session if pinned, +intent if filtered).
+	canonicals, err := loadSessionTargetsTx(ctx, tx, byAgent, string(sessionUUID), onlyIntent)
 	if err != nil {
-		return nil, nil, err
+		return SessionRelease{}, err
 	}
 	if len(canonicals) == 0 {
 		// No locks — still commit any claim deletes above.
 		if err := tx.Commit(); err != nil {
-			return nil, nil, err
+			return SessionRelease{}, err
 		}
-		return []ReleaseResult{}, claimPrefixes, nil
+		return SessionRelease{Results: []ReleaseResult{}, ClaimPrefixes: claimPrefixes}, nil
 	}
 	paths := make([]string, len(canonicals))
 	for i, c := range canonicals {
@@ -278,16 +287,16 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 
 	// Ack tags before deleting host locks (same ordering as ReleaseLocks).
 	if err := ackTagsForReleaseTx(ctx, tx, s.keys(), paths, byAgent); err != nil {
-		return nil, nil, err
+		return SessionRelease{}, err
 	}
 	if err := deleteOwnedTx(ctx, tx, s.keys(), paths, byAgent); err != nil {
-		return nil, nil, err
+		return SessionRelease{}, err
 	}
 	if err := emitLockReleaseEventsTx(ctx, tx, canonicals, byAgent, time.Now()); err != nil {
-		return nil, nil, err
+		return SessionRelease{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, nil, err
+		return SessionRelease{}, err
 	}
 
 	results := make([]ReleaseResult, len(canonicals))
@@ -299,7 +308,38 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 		}
 	}
 	flock.release()
-	return results, claimPrefixes, nil
+	return SessionRelease{Results: results, ClaimPrefixes: claimPrefixes, Intents: distinctIntents(canonicals)}, nil
+}
+
+// SessionRelease is what one ReleaseBySession transaction actually did.
+//
+// ‡ Intents is the reason this is a struct rather than two return values
+// (loto-lzap). A caller that wants to warn "this sweep spanned more than one
+// lane's intent" used to read the intents from a ListLocks BEFORE the release,
+// which could observe one intent while the release deleted two — announcing
+// nothing about the very peer lock it took. Reporting the intents of the rows
+// the transaction deleted is the only version that cannot lie.
+type SessionRelease struct {
+	Results       []ReleaseResult
+	ClaimPrefixes []string
+	// Intents are the distinct intents of the released rows, sorted. Empty
+	// when nothing was released.
+	Intents []string
+}
+
+// distinctIntents collects the sorted, deduplicated intents of the rows a
+// release actually deleted.
+func distinctIntents(canonicals []sessionTarget) []string {
+	seen := make(map[string]bool, len(canonicals))
+	var out []string
+	for _, c := range canonicals {
+		if !seen[c.Intent] {
+			seen[c.Intent] = true
+			out = append(out, c.Intent)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // emitLockReleaseEventsTx appends one lock_released event per released target
@@ -323,26 +363,38 @@ func emitLockReleaseEventsTx(ctx context.Context, tx *sql.Tx, canonicals []sessi
 }
 
 // sessionTarget pairs a session-owned lock's canonical path with its mode so
-// the release restore guard can skip shared rows (loto-k5el.2 T4).
+// the release restore guard can skip shared rows (loto-k5el.2 T4), and with the
+// intent the row recorded AT DELETE TIME so the caller can report what it
+// actually swept rather than what it saw beforehand (loto-lzap).
 type sessionTarget struct {
 	Canonical string
 	Mode      string
+	Intent    string
 }
 
 // loadSessionTargetsTx returns canonical paths + modes for all locks owned by
 // agent (and optionally scoped to session). Returns them in deterministic order.
-func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID string) ([]sessionTarget, error) {
-	var rows *sql.Rows
-	var err error
+// onlyIntent, when non-empty, narrows the set to rows recording exactly that
+// intent. The filter belongs in this query — inside the release transaction —
+// rather than in a caller that lists first and deletes second: N lanes of one
+// Claude Code session share an owner id and can share a session id, so a
+// same-owner peer re-acquiring a target between a caller's list and its delete
+// upserts its own intent onto that row (insertOrRefreshLock's ON CONFLICT), and
+// a delete keyed on target and owner alone then takes the peer's lock — the
+// exact loss --only-intent exists to prevent (loto-lzap).
+func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID, onlyIntent string) ([]sessionTarget, error) {
+	q := `SELECT target_canonical, mode, intent FROM locks WHERE owner_uuid = ?`
+	args := []any{byAgent}
 	if sessionUUID != "" {
-		rows, err = tx.QueryContext(ctx,
-			`SELECT target_canonical, mode FROM locks WHERE owner_uuid = ? AND session_uuid = ? ORDER BY target_canonical`,
-			byAgent, sessionUUID)
-	} else {
-		rows, err = tx.QueryContext(ctx,
-			`SELECT target_canonical, mode FROM locks WHERE owner_uuid = ? ORDER BY target_canonical`,
-			byAgent)
+		q += ` AND session_uuid = ?`
+		args = append(args, sessionUUID)
 	}
+	if onlyIntent != "" {
+		q += ` AND intent = ?`
+		args = append(args, onlyIntent)
+	}
+	q += ` ORDER BY target_canonical`
+	rows, err := tx.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +402,7 @@ func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID 
 	var out []sessionTarget
 	for rows.Next() {
 		var c sessionTarget
-		if err := rows.Scan(&c.Canonical, &c.Mode); err != nil {
+		if err := rows.Scan(&c.Canonical, &c.Mode, &c.Intent); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

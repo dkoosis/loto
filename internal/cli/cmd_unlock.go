@@ -106,8 +106,22 @@ func cmdUnlock(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintln(stderr, "usage: loto unlock <target> [<target>...] [-t \"why\"] [--force [--expect-holder owner@epoch]] | --all [--only-intent \"intent\"] -t \"why\"")
 		return 2
 	}
-	if *onlyIntent != "" && !*all {
+	onlyIntentSet := flagWasSet(fs, "only-intent")
+	if onlyIntentSet && !*all {
 		fmt.Fprintln(stderr, "✗ --only-intent scopes --all; it means nothing without it")
+		return 2
+	}
+	// ‡ An empty value is refused rather than ignored (loto-lzap). Comparing
+	// the parsed string against "" cannot tell `--only-intent ""` from an
+	// absent flag, so a script whose variable expanded empty —
+	// `loto unlock --all --only-intent "$INTENT"` — fell through to the
+	// UNFILTERED sweep and released every lock and claim in scope. That is
+	// sd-xhap's own incident shape, reached through the flag added to prevent
+	// it. Passing the flag proves scoping was intended; an empty value means
+	// the scope could not be determined, and a guard that cannot determine its
+	// scope refuses instead of widening to everything.
+	if onlyIntentSet && *onlyIntent == "" {
+		fmt.Fprintln(stderr, "✗ --only-intent was given an empty value; it names the intent to release, and refusing beats sweeping every lock in scope")
 		return 2
 	}
 
@@ -282,117 +296,53 @@ func unlockAll(rt *runtime, onlyIntent string, stdout, stderr io.Writer) int {
 	// per call (`loto lock ... -t "<bead>: intent"`); matching it exactly lets
 	// a lane release exactly what it took, in one command, without naming
 	// targets one by one.
-	if onlyIntent != "" {
-		return unlockAllByIntent(rt, onlyIntent, sessionFilter, stdout, stderr)
-	}
-
-	// Full, unfiltered sweep: warn before releasing if the caller's own scope
-	// spans more than one intent — the observable signal that a shared owner
-	// id is carrying more than this lane's locks (sd-xhap). Warn-and-proceed,
-	// not refuse: a genuine end-of-session sweep across every lane is often
-	// exactly what's wanted, and the caller who wants a surgical release has
-	// --only-intent above.
-	if code := warnPeerIntents(rt, sessionFilter, stdout, stderr); code != 0 {
-		return code
-	}
-
-	// ReleaseBySession releases the agent's locks AND claims in one atomic tx
-	// (same agent, session-if-pinned scope), so a session-end --all clears
-	// claimed territory too — a crashed/ended agent's claim otherwise squats its
-	// prefix until TTL, the reclamation-parity gap ei5 closes. It is also the
-	// TOCTOU-closing replacement for a list+filter+release dance: one SQL query
-	// finds+deletes matching rows in a single tx, so nothing created between a
-	// preceding ListLocks (the warning above) and this call can be missed.
-	results, claimPrefixes, err := rt.Store.ReleaseBySession(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), sessionFilter)
+	//
+	// ‡ Both the filter and the peer-intent warning ride INSIDE the release
+	// transaction (loto-lzap). The first cut of this did the filtering in the
+	// CLI — ListLocks, keep the matching intents, ReleaseLocks those targets —
+	// and that dance loses the race it was written to win: insertOrRefreshLock
+	// upserts `intent` on the composite PK (target_canonical, owner_uuid), so a
+	// same-owner peer re-acquiring a target between the list and the delete
+	// rewrites its intent, and ReleaseLocks, which classifies on target and
+	// owner alone, then deletes the peer's lock. Same for the warning, which
+	// could observe one intent from a pre-release ListLocks while the sweep
+	// took two. One SELECT-and-DELETE under the op-flock answers both.
+	rel, err := rt.Store.ReleaseBySession(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), sessionFilter, onlyIntent)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	exit := render.EmitReleaseResults(stdout, results)
-	render.EmitClaimsReleased(stdout, claimPrefixes)
+
+	// Warn when an UNFILTERED sweep actually spanned more than one intent —
+	// the observable signal that a shared owner id was carrying more than this
+	// lane's locks (sd-xhap AC2). Warn-and-report, not refuse: a genuine
+	// end-of-session sweep across every lane is often exactly what is wanted,
+	// and the caller who wants a surgical release has --only-intent. Printed
+	// above the release rows so the count leads, per design.md.
+	if onlyIntent == "" {
+		warnPeerIntents(stdout, rel)
+	}
+
+	exit := render.EmitReleaseResults(stdout, rel.Results)
+	// Claims ride along on the unfiltered sweep only: a session-end --all must
+	// clear claimed territory too, or a crashed/ended agent's claim squats its
+	// prefix until TTL (the reclamation-parity gap ei5 closes). A filtered
+	// release returns none, so this is a no-op there.
+	render.EmitClaimsReleased(stdout, rel.ClaimPrefixes)
 	return exit
 }
 
-// scopedOwnLocks lists every lock this call's scope covers: owned by this
-// agent, and — when session-pinned — held under this session too. Shared by
-// warnPeerIntents (preview before a full sweep) and unlockAllByIntent (the
-// candidate set an --only-intent filter narrows), so the two paths agree on
-// what "mine" means without either reimplementing ReleaseBySession's own
-// scoping rule.
-func scopedOwnLocks(rt *runtime, sessionFilter domain.SessionUUID) ([]domain.LockRecord, error) {
-	all, err := rt.Store.ListLocks(rt.Ctx)
-	if err != nil {
-		return nil, err
+// warnPeerIntents names the distinct intents a full --all sweep just released,
+// when there was more than one. It reads the store's report of the rows the
+// transaction actually deleted — never a separate pre-release listing, which
+// could miss the peer lock the sweep went on to take (loto-lzap).
+func warnPeerIntents(stdout io.Writer, rel store.SessionRelease) {
+	if len(rel.Intents) <= 1 {
+		return
 	}
-	mine := make([]domain.LockRecord, 0, len(all))
-	for i := range all {
-		l := all[i]
-		if string(l.OwnerUUID) != rt.Agent.UUID {
-			continue
-		}
-		if sessionFilter != "" && l.SessionUUID != sessionFilter {
-			continue
-		}
-		mine = append(mine, l)
-	}
-	return mine, nil
-}
-
-// warnPeerIntents previews a full --all sweep (sd-xhap AC2): when the
-// caller's own scope holds locks under more than one intent, that is the only
-// signal available today that a shared owner id is about to release another
-// lane's mid-edit locks alongside this one's. Prints the count and the
-// distinct intents before ReleaseBySession runs, then returns 0 to let the
-// release proceed — the release itself is unchanged by this preview.
-func warnPeerIntents(rt *runtime, sessionFilter domain.SessionUUID, stdout, stderr io.Writer) int {
-	mine, err := scopedOwnLocks(rt, sessionFilter)
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return 3
-	}
-	seen := make(map[string]bool, len(mine))
-	var intents []string
-	for i := range mine {
-		if in := mine[i].Intent; !seen[in] {
-			seen[in] = true
-			intents = append(intents, in)
-		}
-	}
-	if len(intents) <= 1 {
-		return 0
-	}
-	sort.Strings(intents)
-	quoted := make([]string, len(intents))
-	for i, in := range intents {
+	quoted := make([]string, len(rel.Intents))
+	for i, in := range rel.Intents {
 		quoted[i] = fmt.Sprintf("%q", in)
 	}
-	fmt.Fprintf(stdout, "⚠ unlock-all-peer-intents count=%d intents=%s\n", len(mine), strings.Join(quoted, ","))
-	return 0
-}
-
-// unlockAllByIntent releases exactly the caller's own locks whose recorded
-// intent equals onlyIntent, leaving every other lock this owner id holds —
-// including a peer lane's, under a different intent — untouched. Goes through
-// ReleaseLocks (not ReleaseBySession) because the release set here is a named
-// subset, not "everything this session owns"; claims are not released on this
-// path since --only-intent targets locks a lane took, not directory-level
-// territory (sd-xhap AC1).
-func unlockAllByIntent(rt *runtime, onlyIntent string, sessionFilter domain.SessionUUID, stdout, stderr io.Writer) int {
-	mine, err := scopedOwnLocks(rt, sessionFilter)
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return 3
-	}
-	var targets []domain.Target
-	for i := range mine {
-		if mine[i].Intent == onlyIntent {
-			targets = append(targets, mine[i].Target)
-		}
-	}
-	results, err := rt.Store.ReleaseLocks(rt.Ctx, targets, domain.AgentUUID(rt.Agent.UUID), rt.liveProbe())
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return 3
-	}
-	return render.EmitReleaseResults(stdout, results)
+	fmt.Fprintf(stdout, "⚠ unlock-all-peer-intents count=%d intents=%s\n", len(rel.Results), strings.Join(quoted, ","))
 }
