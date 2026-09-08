@@ -176,8 +176,15 @@ func statIsDir(repoTop, rel string) bool {
 	if repoTop != "" {
 		probe = filepath.Join(repoTop, rel)
 	}
+	// Guard split from the return (rather than `err == nil && st.IsDir()`)
+	// because nilaway only correlates err with the value inside an `if`
+	// init+cond; across an assignment and a return it reports a false
+	// positive. Behavior is identical — Go short-circuits either way.
 	st, err := os.Stat(probe)
-	return err == nil && st.IsDir()
+	if err != nil {
+		return false
+	}
+	return st.IsDir()
 }
 
 // validateLockTargets canonicalizes and Lstat-validates each path before any
