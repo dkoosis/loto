@@ -908,13 +908,29 @@ CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);`
 // updating both the probe string and the rebuild DDL below. The probe doubles as
 // the events-table existence check for schemaCurrent (ErrNoRows → pending).
 // user_version not bumped.
+//
+// ‡ Deliberately NOT rendered from allEventKinds/eventKindCheckSQL()
+// (loto-123y). This DDL is a frozen historical snapshot — the CHECK list and
+// column set as they stood before events.detail and staged_lock_gate_fired
+// existed — and rebuilding it from the live kind list would also need to add
+// `detail` to both the CREATE and the INSERT ... SELECT to avoid dropping it
+// on any DB that reaches this step with the column already present. That
+// path is confirmed unreachable through loto's own migration ordering
+// (ensureEventsCheckCurrent always runs before ensureEventsDetail in
+// migrationEnsures, so no DB hits this rebuild with detail already added) —
+// the hazard is real in the code but latent in practice, and this bead
+// leaves it that way rather than reorder migrationEnsures to close it, which
+// would be a migration-semantics change this bead's Rules rule out ("no
+// migration is required by this bead"). ensureEventsCheckStagedGate below is
+// the one derived from allEventKinds — it is the step every fresh install
+// and every remaining legacy DB actually lands on.
 func ensureEventsCheckCurrent(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	var ddl string
 	if err := db.QueryRowContext(ctx,
 		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&ddl); err != nil {
 		return false, err
 	}
-	if strings.Contains(ddl, "'candidate_rejected'") {
+	if strings.Contains(ddl, "'"+EventCandidateRejected+"'") {
 		return false, nil // already current
 	}
 	const rebuild = `
@@ -963,14 +979,17 @@ func ensureEventsCheckStagedGate(ctx context.Context, db sqlExecQuerier, apply b
 		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&ddl); err != nil {
 		return false, err
 	}
-	if strings.Contains(ddl, "'staged_lock_gate_fired'") {
+	if strings.Contains(ddl, "'"+EventStagedGateFired+"'") {
 		return false, nil // already current
 	}
-	const rebuild = `
+	// The CHECK clause renders from allEventKinds (event_kinds.go) rather
+	// than naming the kinds here a second time — this is the current
+	// rebuild DDL, so it always carries every declared kind (loto-123y).
+	rebuild := `
 CREATE TABLE events_new (
   id               TEXT PRIMARY KEY,
   target_canonical TEXT NOT NULL,
-  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started','lock_downgraded','lock_refreshed','gate_bypass','candidate_accepted','candidate_rejected','staged_lock_gate_fired')),
+  event_kind       TEXT NOT NULL CHECK (event_kind IN (` + eventKindCheckSQL() + `)),
   actor_uuid       TEXT NOT NULL,
   subject_uuid     TEXT,
   reason           TEXT NOT NULL DEFAULT '',
