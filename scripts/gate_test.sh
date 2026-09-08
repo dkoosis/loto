@@ -65,6 +65,25 @@ expect diag-clean-producer-passes 0 'no findings' -- \
 expect sarif-stderr-survives-failure 1 'cannot load packages' -- \
 	lint sarif -- bash -c 'echo "level=error cannot load packages" >&2; exit 1'
 
+# loto-36q8: a SARIF producer may append a human summary to the SAME stream.
+# golangci-lint does, unconditionally — the document, then "2 issues:" and a
+# per-linter tally. That trailer is not JSON, so the whole stream failed to
+# parse, findings read 0, and every real lint finding surfaced as
+# "✗ lint did not run" naming no file and no rule.
+sarif_doc='{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"golangci-lint"}},"results":[{"ruleId":"modernize","level":"error","message":{"text":"stringsseq: Ranging over SplitSeq is more efficient"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"internal/x/y.go"},"region":{"startLine":7,"startColumn":2}}}]}]}]}'
+
+expect sarif-trailing-summary-still-renders-findings 1 'stringsseq' -- \
+	lint sarif -- bash -c "printf '%s\n2 issues:\n* modernize: 1\n' '$sarif_doc'; exit 1"
+
+# The same stream with no trailer must be unchanged by the scan.
+expect sarif-clean-document-renders-findings 1 'stringsseq' -- \
+	lint sarif -- bash -c "printf '%s\n' '$sarif_doc'; exit 1"
+
+# And a producer that really did die before emitting a document still gets the
+# infrastructure diagnostic — the scan must not invent findings out of noise.
+expect sarif-no-document-is-still-infra-failure 1 '✗ lint did not run' -- \
+	lint sarif -- bash -c 'echo "2 issues:"; echo "panic: boom" >&2; exit 1'
+
 # A compile error under -json yields no test JSON at all.
 expect testjson-build-failure-shows-cause 2 'undefined: Frobnicate' -- \
 	test testjson -- bash -c 'echo "internal/x/y.go:9:2: undefined: Frobnicate" >&2; exit 2'
