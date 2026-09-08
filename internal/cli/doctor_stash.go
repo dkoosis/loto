@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"loto/internal/identity"
 )
 
 // stashAgentUnknown and stashPathsNone are named so the two literals below
@@ -34,12 +36,28 @@ type danglingStash struct {
 }
 
 // scanDanglingStashes lists every stash in repoTop and keeps the ones whose
-// creating agent is not live: an unattributable stash (no LOTO_AGENT_ID stamp)
-// always counts as not live — there is no agent to check liveness against —
-// and a stamped one is live exactly when that agent currently holds a lock
-// (liveAgents membership, the same set runtime.go's lockOwnerUUIDs feeds to
-// GCSessions — this doctor pass has no other notion of "an agent is doing
-// something" to reuse without inventing a second one).
+// creating agent is not live. An unattributable stash (no LOTO_AGENT_ID
+// stamp) always counts as not live — there is no agent to check liveness
+// against. A stamped one is live when EITHER of two independent signals says
+// so:
+//
+//   - lockAgents membership: the agent currently holds a lock (the same set
+//     runtime.go's lockOwnerUUIDs feeds to GCSessions).
+//   - identity.LiveOwnerUUIDs(): the agent has a session record on this host
+//     (written by `loto whoami` at session start) that still verdicts live,
+//     whether or not it holds any lock right now.
+//
+// loto-kotb (PR #319) used lock-holding alone and reported no other liveness
+// signal existed to reuse. That was checked for loto-9spo and found false:
+// `loto status`'s per-lock liveness=alive|dead and `loto whoami`'s recorded
+// witnesses both come from the same session-record oracle (identity.
+// ProbeSession / SessionRecord.Verdict), and that oracle is keyed on a
+// session id, not on lock possession — an agent between beacon leases, or one
+// that never claimed anything, still has a findable record. The two sets are
+// unioned rather than one replacing the other: an agent pinned via a bare
+// LOTO_AGENT_ID that never ran `loto whoami` (so it has no session record at
+// all) is exactly the case lock-holding alone still needs to cover, and
+// TestDoctorStashLiveAgentSuppressed exercises it.
 //
 // Report only — this never pops, applies, or drops a stash (D8, "no silent
 // dispossession of bytes", nug b2b0a9df507c; loto-m2nr owns guarding `git
@@ -50,7 +68,7 @@ type danglingStash struct {
 // `git stash list` itself orders entries most-recent-first, and that is the
 // order this returns — deterministic for a given repo state with no extra
 // sort needed.
-func scanDanglingStashes(ctx context.Context, repoTop string, liveAgents map[string]struct{}) []danglingStash {
+func scanDanglingStashes(ctx context.Context, repoTop string, lockAgents map[string]struct{}) []danglingStash {
 	if repoTop == "" {
 		return nil
 	}
@@ -58,19 +76,30 @@ func scanDanglingStashes(ctx context.Context, repoTop string, liveAgents map[str
 	if err != nil {
 		return nil
 	}
+	sessionAgents := identity.LiveOwnerUUIDs()
 	var out []danglingStash
 	for line := range strings.SplitSeq(strings.TrimRight(raw, "\n"), "\n") {
 		s, ok := parseStashLine(line)
 		if !ok {
 			continue
 		}
-		if _, live := liveAgents[s.Agent]; s.Agent != "" && live {
+		if s.Agent != "" && stashAgentIsLive(s.Agent, lockAgents, sessionAgents) {
 			continue
 		}
 		s.Paths = stashPaths(ctx, repoTop, s.Ref)
 		out = append(out, s)
 	}
 	return out
+}
+
+// stashAgentIsLive is true when agent turns up in either liveness set —
+// see scanDanglingStashes for what each set means and why both are checked.
+func stashAgentIsLive(agent string, lockAgents, sessionAgents map[string]struct{}) bool {
+	if _, ok := lockAgents[agent]; ok {
+		return true
+	}
+	_, ok := sessionAgents[agent]
+	return ok
 }
 
 // parseStashLine decodes one `--format=%gd%x1f%ct%x1f%s` line into a

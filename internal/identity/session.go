@@ -117,6 +117,50 @@ func readSession(sid string) (SessionRecord, bool) {
 	return rec, true
 }
 
+// LiveOwnerUUIDs answers "which owner uuids have live evidence?" from session
+// records alone, with no lock row involved. ProbeSession already answers this
+// per-session (keyed on a lock row's SessionUUID field); this reshapes the
+// same oracle — readSession + SessionRecord.Verdict, the one liveness rule
+// the rest of loto uses — for a caller that starts from an owner uuid with no
+// lock to key a probe from, such as a stash's LOTO_AGENT_ID stamp (loto-9spo).
+// An owner holding zero locks still ran `loto whoami` at session start and
+// left a record behind; this is what makes that record findable without
+// going through a lock.
+//
+// One owner uuid may have several session records (sibling sessions,
+// loto-81n): any one of them verdicting Live is enough to count the owner as
+// live here — the caller is asking "is this owner doing anything anywhere",
+// not "is this specific session up" the way ProbeSession is. A record that
+// verdicts SessionUnknown (no witness, or none on disk) contributes nothing:
+// unknown is not evidence of life, so an owner with only unknown records is
+// left out of the returned set, same as an owner with no record at all — the
+// caller's own membership check governs what an absence means.
+//
+// A ReadDir failure (missing/unreadable session dir) returns nil rather than
+// an error, mirroring GCSessions' own non-fatal treatment of the same
+// failure — a caller that unions this into another set gets an empty set to
+// union against, not a special case to handle.
+func LiveOwnerUUIDs() map[string]struct{} {
+	entries, err := os.ReadDir(sessionDir())
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]struct{})
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		rec, ok := readSession(strings.TrimSuffix(e.Name(), ".json"))
+		if !ok || rec.UUID == "" {
+			continue
+		}
+		if rec.Verdict().Liveness == SessionLive {
+			out[rec.UUID] = struct{}{}
+		}
+	}
+	return out
+}
+
 // sessionGCMaxAge bounds how long a session record may linger before
 // GCSessions reaps it. Measured from the record's mtime, which RecordSession
 // refreshes on every `loto whoami`; a session that outlives it without ever
