@@ -6,8 +6,12 @@ exec git config core.hooksPath $REALHOOKS
 
 touch mine.go shared.go
 
-# Baseline: an unrelated file, no peer lock in play at all — commits clean.
+# Baseline: an unrelated file bob holds himself — no peer lock in play at
+# all — commits clean. The lock is what leg 2 (`--held`, loto-7oik) wants;
+# guard_precommit_held.txtar is where its refusal is exercised.
 env LOTO_AGENT_ID=$BOB
+loto lock mine.go -t 'bob: my own file'
+stdout '✓ locked count=1'
 exec git add mine.go
 exec git commit -m 'bob: unrelated file'
 stdout 'bob: unrelated file'

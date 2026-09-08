@@ -1,13 +1,26 @@
 #!/usr/bin/env sh
 #
-# 10-loto-staged-locks — refuse a commit whose staged set reaches a path a
-# peer holds a live lock or claim on (ccp-vx4w, decision nug 682b236fdd2d /
-# 7a2b16d6aaaf).
+# 10-loto-staged-locks — refuse a commit whose staged set this session may not
+# commit. Two legs, two questions:
 #
-# `loto check --gate --staged` already implements the exact decision (foreign
-# live lock/claim -> deny, naming the holder); this wires it in and adds the
-# escape hatch. Runs before 50-beads because a refusal should not leave bd
-# half-run — the chain stops at the first non-zero exit.
+#   leg 1  `loto check --gate --staged`  does a PEER hold any staged path?
+#          (ccp-vx4w, decision nug 682b236fdd2d / 7a2b16d6aaaf)
+#   leg 2  `loto check --held --staged`  do *I* hold ALL of them?
+#          (loto-7oik)
+#
+# Leg 2 is the one addition over mcp_agent_mail's guard, which checks staged
+# paths against other agents' reservations only. The cc-plugins 2026-08-10
+# incident swept a peer's files with ZERO reservations held anywhere — leg 1
+# passes that, leg 2 refuses it. A tree-wide `git commit -a` in a shared
+# checkout has the same shape.
+#
+# ‡ Leg 2 ships advisory-first (survey D5): LOTO_GATE_MODE=warn makes it
+# print ⚠ rows and exit 0 while the firing counter in loto's events log
+# gathers evidence. Promotion of that default is a follow-up bead filed at
+# merge, never a timer in this file.
+#
+# Runs before 50-beads because a refusal should not leave bd half-run — the
+# chain stops at the first non-zero exit.
 #
 # Fail-open: no `loto` on PATH -> skip silently.
 
@@ -33,6 +46,26 @@ if [ "$_loto_gate_exit" -eq 1 ]; then
 	exit 1
 fi
 
+# Leg 2. Same capture discipline as leg 1: stdout captured, stderr straight
+# through so a fail-open notice is never swallowed. Exit 1 is the only
+# refusal; 0 (all held, or nothing staged), 2 (unresolvable path) and 3
+# (store unreachable) all proceed. In LOTO_GATE_MODE=warn the command itself
+# exits 0 after printing ⚠ rows, so the rows must be echoed on exit 0 too —
+# otherwise the advisory period produces a counter nobody can see.
+_loto_held_out=$(loto check --held --staged)
+_loto_held_exit=$?
+
+case "$_loto_held_out" in
+"⚠ unheld"*) echo "$_loto_held_out" >&2 ;;
+esac
+
+if [ "$_loto_held_exit" -eq 1 ]; then
+	echo "$_loto_held_out" >&2
+	echo "pre-commit: refused — staged paths this session does not hold a lock on" >&2
+	echo "pre-commit: override with LOTO_GUARD_OVERRIDE=1 git commit ..." >&2
+	exit 1
+fi
+
 # exit 0 (no conflicts) or 3 (gate infra unreachable, fail-open) both proceed
-# — only a confirmed foreign live conflict (exit 1) blocks.
+# — only a confirmed refusal (exit 1) blocks.
 exit 0

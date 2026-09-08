@@ -23,6 +23,40 @@ type checkConflict struct {
 	// false: indeterminate/expiring liveness → advisory warn (does not set exit 1).
 }
 
+// altSurfaceArgs carries the parsed flags that decide whether `check` is
+// being asked one of the questions its path machinery cannot answer.
+type altSurfaceArgs struct {
+	branchTyped                    bool
+	branch                         string
+	held, gate, staged, cwdUnknown bool
+}
+
+// checkAltSurface dispatches `check`'s non-path questions — --branch and
+// --held — before any repo resolution or store IO, the way --gate
+// branches before openRuntime. handled=false means none applied and the
+// caller carries on down the ordinary path check.
+//
+// ‡ --branch is keyed on whether it was TYPED, not on whether it is
+// non-empty. `loto check --branch "$BRANCH"` with the variable unset would
+// otherwise fall through to the path check, find no paths, and print
+// "✓ no paths" — a green light to publish, handed out because the caller's
+// shell expanded to nothing. It refuses instead.
+func checkAltSurface(ctx context.Context, fs *flag.FlagSet, a altSurfaceArgs, stdout, stderr io.Writer) (rc int, handled bool) {
+	if a.branchTyped {
+		if fs.NArg() > 0 || a.staged || a.gate || a.cwdUnknown || a.held {
+			fmt.Fprintln(stderr, "✗ --branch takes no paths and no other check flag")
+			return 2, true
+		}
+		return runCheckBranch(ctx, a.branch, stdout, stderr), true
+	}
+	if a.held {
+		return routeHeld(ctx, heldArgs{
+			gate: a.gate, staged: a.staged, args: fs.Args(),
+		}, stdout, stderr), true
+	}
+	return 0, false
+}
+
 // checkPreflight parses check's flags, resolves the repo top, loads the target
 // paths, and applies the pre-resolution refusals that must fire before any
 // store IO. done=true means the caller must return rc immediately — the
@@ -33,28 +67,17 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 	staged := fs.Bool("staged", false, "read paths from git diff --cached")
 	gateFlag := fs.Bool("gate", false, "read-only deny gate: exit 1 if a foreign live claim or lock/beacon covers any path; never acquires, refreshes, or writes")
 	branch := fs.String("branch", "", "check a BRANCH instead of paths: exit 1 if another checkout has it and its owner is not provably gone")
+	held := fs.Bool("held", false, "exit 1 if any path is NOT locked by this session (the commit gate's question, the inverse of --gate); LOTO_GATE_MODE=warn downgrades to ⚠ rows and exit 0")
 	cwdUnknown := fs.Bool("cwd-unknown", false, "the caller's working directory is not knowable here (e.g. mcp__trixi__agent_shell): refuse relative paths instead of resolving them against the wrong base")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return nil, "", "", false, 2, true
 	}
 
-	// --branch asks a different question than every other check flag: not
-	// "may I write these paths" but "may I publish this branch". It shares
-	// no path resolution, no store read, and no target machinery, so it
-	// branches out here — before any of it — the way --gate branches before
-	// openRuntime. Combining it with the path flags would be a caller who
-	// means one of the two and will be answered about the other.
-	// Keyed on whether --branch was TYPED, not on whether it is non-empty.
-	// `loto check --branch "$BRANCH"` with the variable unset would otherwise
-	// fall through to the path check, find no paths, and print "✓ no paths"
-	// — a green light to publish, handed out because the caller's shell
-	// expanded to nothing. It refuses instead.
-	if flagWasSet(fs, "branch") {
-		if fs.NArg() > 0 || *staged || *gateFlag || *cwdUnknown {
-			fmt.Fprintln(stderr, "✗ --branch takes no paths and no other check flag")
-			return nil, "", "", false, 2, true
-		}
-		return nil, "", "", false, runCheckBranch(ctx, *branch, stdout, stderr), true
+	if rc, handled := checkAltSurface(ctx, fs, altSurfaceArgs{
+		branchTyped: flagWasSet(fs, "branch"), branch: *branch,
+		held: *held, gate: *gateFlag, staged: *staged, cwdUnknown: *cwdUnknown,
+	}, stdout, stderr); handled {
+		return nil, "", "", false, rc, true
 	}
 
 	// Resolve repoTop before shelling out to git so `git diff --cached` runs
