@@ -448,12 +448,20 @@ func TestParseStagedNameStatus_EmptyIsEmpty(t *testing.T) {
 
 // ── decideHeld: the pure verdict ──────────────────────────────────────────
 
+// decideHeldRows is decideHeld's verdict half, for the cases below that have
+// nothing unresolvable and no unlockable target. The ℹ-note half has its own
+// tests (TestCheckHeld_StagedSymlink*, TestDecideHeld_Unlockable*).
+func decideHeldRows(entries []stagedPath, locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ec domain.EvalContext) []heldRow {
+	rows, _ := decideHeld(entries, nil, locks, claims, myUUID, ec)
+	return rows
+}
+
 func TestDecideHeld_MySharedLockIsNotHeld(t *testing.T) {
 	now := time.Now()
 	locks := []domain.LockRecord{
 		{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateMyUUID, Mode: domain.ModeShared, ExpiresAt: now.Add(time.Hour)},
 	}
-	rows := decideHeld([]stagedPath{{Path: tcTargetA}}, locks, nil, gateMyUUID, gateEC(now))
+	rows := decideHeldRows([]stagedPath{{Path: tcTargetA}}, locks, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 1 || rows[0].State != heldStateUnlocked {
 		t.Fatalf("a shared self-lock is a read declaration, not a write claim: %+v", rows)
 	}
@@ -465,7 +473,7 @@ func TestDecideHeld_MyBeaconIsNotHeld(t *testing.T) {
 		{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateMyUUID, Mode: domain.ModeShared,
 			Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour), Beacon: true},
 	}
-	rows := decideHeld([]stagedPath{{Path: tcTargetA}}, locks, nil, gateMyUUID, gateEC(now))
+	rows := decideHeldRows([]stagedPath{{Path: tcTargetA}}, locks, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 1 || rows[0].State != heldStateUnlocked {
 		t.Fatalf("a beacon must not satisfy the gate: %+v", rows)
 	}
@@ -476,7 +484,7 @@ func TestDecideHeld_MyExclusiveLockIsHeld(t *testing.T) {
 	locks := []domain.LockRecord{
 		{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateMyUUID, Mode: domain.ModeExclusive, ExpiresAt: now.Add(time.Hour)},
 	}
-	if rows := decideHeld([]stagedPath{{Path: tcTargetA}}, locks, nil, gateMyUUID, gateEC(now)); len(rows) != 0 {
+	if rows := decideHeldRows([]stagedPath{{Path: tcTargetA}}, locks, nil, gateMyUUID, gateEC(now)); len(rows) != 0 {
 		t.Fatalf("my own exclusive lock must satisfy the gate: %+v", rows)
 	}
 }
@@ -489,7 +497,7 @@ func TestDecideHeld_PeerClaimIsNamedNotReportedUnlocked(t *testing.T) {
 	}
 	ec := gateEC(now)
 	ec.Live = aliveProbe
-	rows := decideHeld([]stagedPath{{Path: target}}, nil, claims, gateMyUUID, ec)
+	rows := decideHeldRows([]stagedPath{{Path: target}}, nil, claims, gateMyUUID, ec)
 	if len(rows) != 1 || rows[0].State != heldStatePeerClaim || rows[0].HolderUUID != gateFoeUUID {
 		t.Fatalf("a peer's covering claim must be named: %+v", rows)
 	}
@@ -505,7 +513,7 @@ func TestDecideHeld_StalePeerLockReadsUnlocked(t *testing.T) {
 	locks := []domain.LockRecord{
 		{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, Mode: domain.ModeExclusive, ExpiresAt: now.Add(-time.Minute)},
 	}
-	rows := decideHeld([]stagedPath{{Path: tcTargetA}}, locks, nil, gateMyUUID, gateEC(now))
+	rows := decideHeldRows([]stagedPath{{Path: tcTargetA}}, locks, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 1 || rows[0].State != heldStateUnlocked {
 		t.Fatalf("an expired peer lock is not a peer's: %+v", rows)
 	}
@@ -514,7 +522,246 @@ func TestDecideHeld_StalePeerLockReadsUnlocked(t *testing.T) {
 func TestDecideHeld_DuplicatePathsCollapse(t *testing.T) {
 	now := time.Now()
 	entries := []stagedPath{{Path: tcTargetA}, {Path: tcTargetA}}
-	if rows := decideHeld(entries, nil, nil, gateMyUUID, gateEC(now)); len(rows) != 1 {
+	if rows := decideHeldRows(entries, nil, nil, gateMyUUID, gateEC(now)); len(rows) != 1 {
 		t.Fatalf("want one row for a repeated path, got %+v", rows)
+	}
+}
+
+// ── loto-pgio: one odd staged name never switches the gate off ────────────
+//
+// The bug these pin was a full bypass, not a cosmetic one. resolveStagedPaths
+// collected any path Canonicalize refused into `invalid` and the whole batch
+// returned exit 2 — and the pre-commit leg proceeds on every exit but 1. One
+// staged file with a quote in its name therefore disabled the ownership check
+// for every OTHER path in that commit.
+
+// AC 1: a staged name carrying a shell metacharacter is CHECKED, not refused.
+// git printed it, no shell was involved, so the unexpanded-token rule that
+// refuses it is answering a question nobody asked.
+func TestCheckHeld_QuotedStagedNameIsCheckedAndNeverSuppressesTheOthers(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	const quoted = `say "hi".go`
+	writeT(t, repo, quoted, "q")
+	writeT(t, repo, tcTargetB, "b")
+	gitT(t, repo, "--literal-pathspecs", "add", quoted, tcTargetB)
+
+	got, code := blockingRun(t)
+	if code != 1 {
+		t.Fatalf("want exit 1, got %d: %q", code, got)
+	}
+	want := "✗ unheld count=2 unlocked=2 peer=0 staged=2\n" +
+		"✗ path=b.go state=unlocked\n" +
+		"✗ path=" + quoted + " state=unlocked\n" +
+		tcHeldFence + "\n" +
+		"loto lock 'b.go' 'say \"hi\".go' -t \"<bead>: intent\"  # take what you are about to commit\n" +
+		"```\n"
+	if got != want {
+		t.Errorf("output\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// AC 1, the other half: a staged name that STILL will not canonicalize —
+// containment and glob syntax survive the git carve-out — is reported with its
+// own reason and its own remedy, and the other staged paths are judged anyway.
+func TestCheckHeld_UnresolvableStagedNameDoesNotSuppressTheOthers(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	const globbed = "a[1].go"
+	writeT(t, repo, globbed, "g")
+	writeT(t, repo, tcTargetB, "b")
+	gitT(t, repo, "--literal-pathspecs", "add", globbed, tcTargetB)
+
+	got, code := blockingRun(t)
+	if code != 1 {
+		t.Fatalf("want exit 1, got %d: %q", code, got)
+	}
+	want := "✗ unheld count=2 unlocked=1 peer=0 staged=2 unresolvable=1\n" +
+		"✗ path=a[1].go state=unresolvable reason=glob-not-supported\n" +
+		"✗ path=b.go state=unlocked\n" +
+		tcHeldFence + "\n" +
+		"loto lock 'b.go' -t \"<bead>: intent\"  # take what you are about to commit\n" +
+		"git restore --staged 'a[1].go'  # loto cannot read these paths; leave them out of your commit\n" +
+		"```\n"
+	if got != want {
+		t.Errorf("output\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// AC 2: a control character in the only staged name. The gate COMPLETES and
+// reports on it — it used to exit 2 and take the whole commit out of scope.
+// The row is Go-quoted so it cannot split the one-row-per-line surface, and
+// no `loto lock` line is printed for it: there is no portable shell spelling
+// of that token, and a remedy printed wrong is the defect this bead removes.
+func TestCheckHeld_ControlCharacterNameIsReportedNotRefusedAsABatch(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	const tabbed = "a\tb.go"
+	writeT(t, repo, tabbed, "t")
+	gitT(t, repo, "--literal-pathspecs", "add", tabbed)
+
+	got, code := blockingRun(t)
+	if code != 1 {
+		t.Fatalf("want exit 1, got %d: %q", code, got)
+	}
+	want := "✗ unheld count=1 unlocked=1 peer=0 staged=1\n" +
+		"✗ path=\"a\\tb.go\" state=unlocked\n" +
+		"ℹ fix-omitted count=1 reason=control-character-in-name\n"
+	if got != want {
+		t.Errorf("output\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// A newline is the control character that would actually break a reader: it
+// splits one row into two, and a parser would read the tail as a second path.
+func TestCheckHeld_NewlineInAStagedNameDoesNotSplitTheRow(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeT(t, repo, "new\nline.go", "n")
+	gitT(t, repo, "--literal-pathspecs", "add", "new\nline.go")
+
+	got, code := blockingRun(t)
+	if code != 1 {
+		t.Fatalf("want exit 1, got %d: %q", code, got)
+	}
+	want := "✗ unheld count=1 unlocked=1 peer=0 staged=1\n" +
+		"✗ path=\"new\\nline.go\" state=unlocked\n" +
+		"ℹ fix-omitted count=1 reason=control-character-in-name\n"
+	if got != want {
+		t.Errorf("output\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// ── loto-pgio: a target no session could ever hold ────────────────────────
+
+// AC 4: `loto lock` refuses a symlink (reason=symlink), so demanding a lock on
+// a staged symlink printed a remedy that cannot succeed and, in block mode,
+// would refuse the commit forever. The gate exempts it and SAYS so — an ℹ row
+// naming the path it is not protecting.
+func TestCheckHeld_StagedSymlinkIsExemptAndSaysSo(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	if err := os.Symlink(tcTargetA, filepath.Join(repo, "link.go")); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, repo, "add", "link.go")
+
+	got, code := blockingRun(t)
+	if code != 0 {
+		t.Fatalf("a staged symlink alone must not refuse the commit; got exit %d: %q", code, got)
+	}
+	want := "✓ held count=1\n" +
+		"ℹ path=link.go state=unlockable reason=symlink gate=not-protected\n"
+	if got != want {
+		t.Errorf("output\n got: %q\nwant: %q", got, want)
+	}
+	if strings.Contains(got, tcCmdLock+" ") {
+		t.Errorf("a remedy that cannot succeed must not be printed: %q", got)
+	}
+}
+
+// AC 5: the same for a submodule pointer bump. The staged entry is a gitlink
+// and the worktree path is the submodule's directory, which `loto lock` refuses
+// with reason=not-regular-file — the exact token the ℹ row carries, because the
+// gate asks lock's own validator rather than keeping a second list.
+func TestCheckHeld_StagedSubmodulePointerIsExemptAndSaysSo(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	if err := os.MkdirAll(filepath.Join(repo, "vendored"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A gitlink without a real submodule checkout: the index entry is what the
+	// gate reads, and the directory on disk is what it stats.
+	gitT(t, repo, "update-index", "--add", "--cacheinfo", "160000,4b825dc642cb6eb9a060e54bf8d69288fbee4904,vendored")
+
+	got, code := blockingRun(t)
+	if code != 0 {
+		t.Fatalf("a staged submodule pointer alone must not refuse the commit; got exit %d: %q", code, got)
+	}
+	want := "✓ held count=1\n" +
+		"ℹ path=vendored state=unlockable reason=not-regular-file gate=not-protected\n"
+	if got != want {
+		t.Errorf("output\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// The exemption is scoped to the UNLOCKED verdict. A peer's lock on a path
+// that is a symlink today — they took it when it was a regular file — is still
+// real and still named, because `git restore --staged` is a remedy that works.
+func TestCheckHeld_PeerLockOnAnUnlockableTargetIsStillNamed(t *testing.T) {
+	repo := withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("alice lock %s failed", tcTargetA)
+	}
+	// a.go becomes a symlink under alice's live lock.
+	if err := os.Remove(filepath.Join(repo, tcTargetA)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("elsewhere.go", filepath.Join(repo, tcTargetA)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	gitT(t, repo, "add", tcTargetA)
+
+	got, code := blockingRun(t)
+	if code != 1 {
+		t.Fatalf("a peer's lock is still a refusal; got exit %d: %q", code, got)
+	}
+	want := "✗ unheld count=1 unlocked=0 peer=1 staged=1\n" +
+		"✗ path=a.go state=peer-lock blocker=" + alice.UUID + " intent=\"test\" expires_at=<T>\n" +
+		tcHeldFence + "\n" +
+		"git restore --staged 'a.go'  # a peer holds these; leave them out of your commit\n" +
+		"```\n"
+	if got != want {
+		t.Errorf("output\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// An exempt path is not a firing: the counter measures what the gate WOULD
+// refuse, and it would never refuse this one.
+func TestCheckHeld_ExemptPathDoesNotFireTheCounter(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	if err := os.Symlink(tcTargetA, filepath.Join(repo, "link.go")); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, repo, "add", "link.go")
+
+	before := countFiringEvents(t)
+	if _, code := heldRun(t); code != 0 {
+		t.Fatalf("want exit 0, got %d", code)
+	}
+	if after := countFiringEvents(t); after != before {
+		t.Errorf("an exempt path is not a firing: got %d, want %d", after, before)
+	}
+}
+
+// decideHeld's half of the exemption, without the filesystem.
+func TestDecideHeld_UnlockableIsANoteNotAVerdict(t *testing.T) {
+	now := time.Now()
+	entries := []stagedPath{{Path: "link.go", Unlockable: "symlink"}, {Path: tcTargetB}}
+	rows, notes := decideHeld(entries, nil, nil, nil, gateMyUUID, gateEC(now))
+	if len(rows) != 1 || rows[0].Path != tcTargetB {
+		t.Fatalf("only the lockable path is a verdict row: %+v", rows)
+	}
+	if len(notes) != 1 || notes[0].State != heldStateUnlockable || notes[0].Reason != "symlink" {
+		t.Fatalf("the unlockable path is an ℹ note: %+v", notes)
+	}
+}
+
+// An unresolvable path is a verdict row, not a note: the gate could not
+// complete a check it was asked for, and unstaging the path is a real remedy.
+func TestDecideHeld_UnresolvableIsAVerdictRow(t *testing.T) {
+	now := time.Now()
+	rows, notes := decideHeld(nil, []checkInvalid{{Path: "odd", Reason: "glob-not-supported"}}, nil, nil, gateMyUUID, gateEC(now))
+	if len(notes) != 0 {
+		t.Fatalf("want no notes: %+v", notes)
+	}
+	if len(rows) != 1 || rows[0].State != heldStateUnresolvable || rows[0].Reason != "glob-not-supported" {
+		t.Fatalf("want one unresolvable row: %+v", rows)
 	}
 }

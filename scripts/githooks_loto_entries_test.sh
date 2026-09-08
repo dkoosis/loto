@@ -177,11 +177,45 @@ run_entry "$precommit"
 check precommit-warn-mode-advises-and-proceeds 0 '' "$held_warn" "$STATUS" "$OUT" "$ERR"
 
 # A store loto cannot reach (exit 3) proceeds — the gate never becomes the
-# outage.
+# outage. Silent here on purpose: `loto` already wrote its fail-open notice to
+# stderr, which this entry never captures.
 reset_fakes
 export FAKE_GATE_EXIT=0 FAKE_HELD_EXIT=3
 run_entry "$precommit"
 check precommit-fails-open-on-infra 0 '' '' "$STATUS" "$OUT" "$ERR"
+
+# ── the unrecognized exit, decided rather than fallen into (loto-pgio) ─────
+#
+# 0, 1 and 3 are the exits this entry knows. Anything else is a check that did
+# not complete. It proceeds — the gate ships advisory, and a hook that refuses
+# on its own confusion is worse than the thing it guards — but it says so, with
+# the exit code and whatever the command printed. Proceeding SILENTLY on an
+# exit nobody understood is how a guard bypass survives: exit 2 used to land in
+# the fail-open bucket by accident, so one staged file with an odd name turned
+# the ownership check off for the whole commit and nothing said a word.
+held_invalid=$'✗ invalid count=1\n✗ path=weird reason=not-a-path'
+reset_fakes
+export FAKE_GATE_EXIT=0 FAKE_HELD_OUT="$held_invalid" FAKE_HELD_EXIT=2
+run_entry "$precommit"
+want=$held_invalid$'\n⚠ pre-commit: loto check --held exited 2 — staged-lock check did not complete; commit proceeds unchecked'
+check precommit-unknown-held-exit-reports-and-proceeds 0 '' "$want" "$STATUS" "$OUT" "$ERR"
+
+# Any other unrecognized exit, with nothing on stdout: still one line, still
+# not silence.
+reset_fakes
+export FAKE_GATE_EXIT=0 FAKE_HELD_EXIT=9
+run_entry "$precommit"
+want='⚠ pre-commit: loto check --held exited 9 — staged-lock check did not complete; commit proceeds unchecked'
+check precommit-unknown-held-exit-9-is-not-silent 0 '' "$want" "$STATUS" "$OUT" "$ERR"
+
+# Leg 1 gets the same rule: its exits are 0, 1 and 3, and anything else is
+# reported rather than swallowed.
+gate_invalid=$'✗ invalid count=1\n✗ path=weird reason=not-a-path'
+reset_fakes
+export FAKE_GATE_OUT="$gate_invalid" FAKE_GATE_EXIT=2 FAKE_HELD_EXIT=0
+run_entry "$precommit"
+want=$gate_invalid$'\n⚠ pre-commit: loto check --gate exited 2 — peer-lock check did not complete; commit proceeds unchecked'
+check precommit-unknown-gate-exit-reports-and-proceeds 0 '' "$want" "$STATUS" "$OUT" "$ERR"
 
 reset_fakes
 export PATH=$noloto

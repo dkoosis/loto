@@ -52,12 +52,23 @@ if [ "$_loto_gate_exit" -eq 1 ]; then
 	exit 1
 fi
 
+# An exit this leg does not recognize. 0 is a pass, 1 is the refusal above, 3
+# is the documented fail-open (loto already said why on stderr, which is not
+# captured). Anything else — 2 among them — is a check that did NOT COMPLETE,
+# and the commit proceeds because a gate must not become the outage. What it
+# may not do is proceed SILENTLY: an unseen exit 2 is how a bypass hides
+# (loto-pgio).
+if [ "$_loto_gate_exit" -ne 0 ] && [ "$_loto_gate_exit" -ne 3 ]; then
+	[ -n "$_loto_gate_out" ] && echo "$_loto_gate_out" >&2
+	echo "⚠ pre-commit: loto check --gate exited $_loto_gate_exit — peer-lock check did not complete; commit proceeds unchecked" >&2
+fi
+
 # Leg 2. Same capture discipline as leg 1: stdout captured, stderr straight
 # through so a fail-open notice is never swallowed. Exit 1 is the only
-# refusal; 0 (advisory rows, all held, or nothing staged), 2 (unresolvable
-# path) and 3 (store unreachable) all proceed. In the default warn mode the
-# command exits 0 after printing ⚠ rows, so the rows are echoed on exit 0 too
-# — otherwise the advisory period produces a counter nobody can see.
+# refusal; 0 (advisory rows, all held, or nothing staged) and 3 (store
+# unreachable) proceed. In the default warn mode the command exits 0 after
+# printing ⚠ rows, so the rows are echoed on exit 0 too — otherwise the
+# advisory period produces a counter nobody can see.
 _loto_held_out=$(loto check --held --staged)
 _loto_held_exit=$?
 
@@ -72,6 +83,21 @@ if [ "$_loto_held_exit" -eq 1 ]; then
 	exit 1
 fi
 
-# exit 0 (no conflicts) or 3 (gate infra unreachable, fail-open) both proceed
-# — only a confirmed refusal (exit 1) blocks.
+# ‡ The unrecognized-exit rule, stated rather than fallen into (loto-pgio).
+# `loto check --held --staged` no longer exits 2 on a staged path it cannot
+# canonicalize — it reports that path as a row — so an exit here that is
+# neither 0, 1 nor 3 means the check did not run. The commit still proceeds:
+# the gate ships advisory (epic loto-ea8y, "New gates ship in warn mode"), and
+# a hook that refuses on its own confusion is a worse failure than the one it
+# guards. But it says so, on stderr, with the exit code and whatever the
+# command printed — proceeding SILENTLY on an exit nobody understood is how a
+# guard bypass survives a year.
+if [ "$_loto_held_exit" -ne 0 ] && [ "$_loto_held_exit" -ne 3 ]; then
+	[ -n "$_loto_held_out" ] && echo "$_loto_held_out" >&2
+	echo "⚠ pre-commit: loto check --held exited $_loto_held_exit — staged-lock check did not complete; commit proceeds unchecked" >&2
+fi
+
+# exit 0 (no conflicts), 3 (gate infra unreachable, fail-open) and the reported
+# did-not-complete case above all proceed — only a confirmed refusal (exit 1)
+# blocks.
 exit 0

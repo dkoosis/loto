@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,18 +88,26 @@ const (
 
 // held row states, in the vocabulary the report prints.
 const (
-	heldStateUnlocked  = "unlocked"   // nobody holds it, including me
-	heldStatePeerLock  = "peer-lock"  // a live peer holds a lock/beacon on it
-	heldStatePeerClaim = "peer-claim" // a live peer's claim covers it
+	heldStateUnlocked     = "unlocked"     // nobody holds it, including me
+	heldStatePeerLock     = "peer-lock"    // a live peer holds a lock/beacon on it
+	heldStatePeerClaim    = "peer-claim"   // a live peer's claim covers it
+	heldStateUnresolvable = "unresolvable" // the gate could not canonicalize it
+	heldStateUnlockable   = "unlockable"   // no session could ever hold it
 )
 
 // heldRow is one staged path this session may not commit, and why.
 // RenamedFrom is the rename's other side when git reported this path as one
 // half of an `R`/`C` entry — printed so a refusal on the destination still
 // names the source (loto-7oik AC "both paths printed").
+//
+// Reason carries the design.md token for the two states that have one:
+// `unresolvable` (classifyCanonicalizeErr's token) and `unlockable`
+// (statFileTargetReason's — the SAME token `loto lock` would print when it
+// refused the path, so the exemption and the refusal cannot drift apart).
 type heldRow struct {
 	Path        string
 	State       string
+	Reason      string
 	HolderUUID  string
 	Intent      string
 	ExpiresAt   time.Time
@@ -108,9 +117,15 @@ type heldRow struct {
 
 // stagedPath is one entry of the staged change set: a path plus, for a
 // rename or copy, the other side of it.
+//
+// Unlockable is non-empty when `loto lock` would REFUSE this path — a symlink
+// or a non-regular target such as a submodule's gitlink directory. Such a path
+// can never be held by any session, so demanding a lock on it would print a
+// remedy that cannot succeed (loto-pgio). The value is the reason token.
 type stagedPath struct {
 	Path        string
 	RenamedFrom string
+	Unlockable  string
 }
 
 // loadStagedChangeSet reads the staged set with rename detection, NUL-safe.
@@ -201,8 +216,11 @@ func appendStagedEntry(set []stagedPath, paths []string) []stagedPath {
 // mints) is not a write claim at all — counting either as held would let the
 // hook-minted beacon that covers a whole session's tree satisfy the gate for
 // every path in it, which is the gate switched off.
-func decideHeld(entries []stagedPath, locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ec domain.EvalContext) []heldRow {
-	var rows []heldRow
+// It returns two slices. rows are the verdict — what the gate would refuse in
+// block mode. notes are ℹ rows: paths the gate looked at and is telling the
+// reader it does NOT protect, which never affect the exit code and never fire
+// the counter.
+func decideHeld(entries []stagedPath, unresolved []checkInvalid, locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ec domain.EvalContext) (rows, notes []heldRow) {
 	seen := map[string]bool{}
 	for _, e := range entries {
 		t := domain.Target{Canonical: e.Path}
@@ -213,8 +231,33 @@ func decideHeld(entries []stagedPath, locks []domain.LockRecord, claims []domain
 		if heldByMe(t, locks, myUUID, ec) {
 			continue
 		}
-		rows = append(rows, classifyUnheld(t, e.RenamedFrom, locks, claims, myUUID, ec))
+		row := classifyUnheld(t, e.RenamedFrom, locks, claims, myUUID, ec)
+		// ‡ The exemption applies ONLY to the unlocked verdict. A peer's lock
+		// on a path that is a symlink today (it was a regular file when they
+		// took it) is still real, still actionable, and still named — the
+		// remedy there is `git restore --staged`, which always works.
+		if e.Unlockable != "" && row.State == heldStateUnlocked {
+			notes = append(notes, heldRow{Path: e.Path, State: heldStateUnlockable, Reason: e.Unlockable, RenamedFrom: e.RenamedFrom})
+			continue
+		}
+		rows = append(rows, row)
 	}
+	// A path the gate could not canonicalize is a check it could not complete,
+	// so it is a verdict row and not a note: `git restore --staged` takes it
+	// out of the commit, which is a remedy that works.
+	for _, iv := range unresolved {
+		if seen[iv.Path] {
+			continue
+		}
+		seen[iv.Path] = true
+		rows = append(rows, heldRow{Path: iv.Path, State: heldStateUnresolvable, Reason: iv.Reason})
+	}
+	sortHeldRows(rows)
+	sortHeldRows(notes)
+	return rows, notes
+}
+
+func sortHeldRows(rows []heldRow) {
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Path != rows[j].Path {
 			return rows[i].Path < rows[j].Path
@@ -224,7 +267,6 @@ func decideHeld(entries []stagedPath, locks []domain.LockRecord, claims []domain
 		}
 		return rows[i].HolderUUID < rows[j].HolderUUID
 	})
-	return rows
 }
 
 // heldByMe reports whether this session (or its kin) holds a live exclusive
@@ -295,37 +337,82 @@ func heldGlyph(warn bool) string {
 	return "✗"
 }
 
+// rowPath renders a path for a one-row-per-line surface. A control character
+// in a NAME would otherwise split the row or move the cursor, and since
+// loto-pgio the gate accepts such a name rather than refusing the whole staged
+// batch over it (domain.ProvenanceGit) — so the escape has to happen here, at
+// the point of print. An ordinary path is untouched, so every existing golden
+// is byte-identical.
+func rowPath(p string) string {
+	rel := relPath(p)
+	if domain.HasControl(rel) {
+		return strconv.Quote(rel)
+	}
+	return rel
+}
+
 // printHeld renders the verdict. Deterministic: rows arrive sorted from
 // decideHeld and the fix block's path lists are sorted, so the same store
 // state produces byte-identical output.
-func printHeld(stdout io.Writer, rows []heldRow, checked int, warn bool) {
+func printHeld(stdout io.Writer, rows, notes []heldRow, checked int, warn bool) {
 	if len(rows) == 0 {
 		fmt.Fprintf(stdout, "✓ held count=%d\n", checked)
+		printHeldNotes(stdout, notes)
 		return
 	}
 	g := heldGlyph(warn)
-	unlocked, peer := 0, 0
+	unlocked, peer, unresolvable := 0, 0, 0
 	for i := range rows {
-		if rows[i].State == heldStateUnlocked {
+		switch rows[i].State {
+		case heldStateUnlocked:
 			unlocked++
-		} else {
+		case heldStateUnresolvable:
+			unresolvable++
+		default:
 			peer++
 		}
 	}
-	fmt.Fprintf(stdout, "%s unheld count=%d unlocked=%d peer=%d staged=%d\n", g, len(rows), unlocked, peer, checked)
+	fmt.Fprintf(stdout, "%s unheld count=%d unlocked=%d peer=%d staged=%d", g, len(rows), unlocked, peer, checked)
+	// Appended only when it happened: an unresolvable staged path is rare, and
+	// the field would otherwise widen every header line for nothing.
+	if unresolvable > 0 {
+		fmt.Fprintf(stdout, " unresolvable=%d", unresolvable)
+	}
+	fmt.Fprintln(stdout)
 	for i := range rows {
 		printHeldRow(stdout, g, &rows[i])
 	}
+	printHeldNotes(stdout, notes)
 	printHeldFix(stdout, rows)
+}
+
+// printHeldNotes emits the ℹ rows: staged paths the gate is NOT protecting,
+// each naming the reason `loto lock` would refuse it. Saying so out loud is
+// the whole point — a gate that silently skips a path teaches the reader it
+// covered one.
+func printHeldNotes(stdout io.Writer, notes []heldRow) {
+	for i := range notes {
+		r := &notes[i]
+		var b strings.Builder
+		fmt.Fprintf(&b, "ℹ path=%s state=%s reason=%s", rowPath(r.Path), r.State, r.Reason)
+		if r.RenamedFrom != "" {
+			fmt.Fprintf(&b, " renamed_from=%s", rowPath(r.RenamedFrom))
+		}
+		fmt.Fprint(&b, " gate=not-protected")
+		fmt.Fprintln(stdout, b.String())
+	}
 }
 
 func printHeldRow(stdout io.Writer, g string, r *heldRow) {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s path=%s state=%s", g, relPath(r.Path), r.State)
-	if r.RenamedFrom != "" {
-		fmt.Fprintf(&b, " renamed_from=%s", relPath(r.RenamedFrom))
+	fmt.Fprintf(&b, "%s path=%s state=%s", g, rowPath(r.Path), r.State)
+	if r.Reason != "" {
+		fmt.Fprintf(&b, " reason=%s", r.Reason)
 	}
-	if r.State != heldStateUnlocked {
+	if r.RenamedFrom != "" {
+		fmt.Fprintf(&b, " renamed_from=%s", rowPath(r.RenamedFrom))
+	}
+	if r.State != heldStateUnlocked && r.State != heldStateUnresolvable {
 		fmt.Fprintf(&b, " blocker=%s", r.HolderUUID)
 		if r.BlockerPath != "" {
 			fmt.Fprintf(&b, " prefix=%s", relPath(r.BlockerPath))
@@ -335,28 +422,60 @@ func printHeldRow(stdout io.Writer, g string, r *heldRow) {
 	fmt.Fprintln(stdout, b.String())
 }
 
+// heldFixLine is one class of remedy: the paths it applies to, and the command
+// that clears them. Every line here is a command that would ACTUALLY satisfy
+// the gate — a path no session could lock never reaches this block (loto-pgio).
+type heldFixLine struct {
+	format string
+	paths  []string
+}
+
 // printHeldFix emits the one actionable block: `loto lock` for the paths
-// nobody holds, `git restore --staged` for a peer's. Two lines at most, each
-// carrying every path in its class — a per-row block would repeat the same
-// command once per path for the common tree-wide-add case.
+// nobody holds, `git restore --staged` for a peer's, and the same unstage for
+// a path the gate could not read. Three lines at most, each carrying every
+// path in its class — a per-row block would repeat the same command once per
+// path for the common tree-wide-add case.
+//
+// ‡ A path whose NAME carries a control character is omitted, with an ℹ row
+// saying so. Every shell spelling of such a token is either non-portable
+// ($'...' is bash/zsh, not sh) or a literal newline inside the fenced block
+// that a reader would copy wrong — and a remedy printed wrong is the defect
+// this bead exists to remove.
 func printHeldFix(stdout io.Writer, rows []heldRow) {
-	var mine, theirs []string
+	mine := heldFixLine{format: "loto lock %s -t \"<bead>: intent\"  # take what you are about to commit\n"}
+	theirs := heldFixLine{format: "git restore --staged %s  # a peer holds these; leave them out of your commit\n"}
+	unreadable := heldFixLine{format: "git restore --staged %s  # loto cannot read these paths; leave them out of your commit\n"}
+	omitted := 0
 	for i := range rows {
-		q := shellQuote(relPath(rows[i].Path))
-		if rows[i].State == heldStateUnlocked {
-			mine = append(mine, q)
-		} else {
-			theirs = append(theirs, q)
+		rel := relPath(rows[i].Path)
+		if domain.HasControl(rel) {
+			omitted++
+			continue
+		}
+		q := shellQuote(rel)
+		switch rows[i].State {
+		case heldStateUnlocked:
+			mine.paths = append(mine.paths, q)
+		case heldStateUnresolvable:
+			unreadable.paths = append(unreadable.paths, q)
+		default:
+			theirs.paths = append(theirs.paths, q)
 		}
 	}
-	sort.Strings(mine)
-	sort.Strings(theirs)
-	fmt.Fprintln(stdout, "```bash")
-	if len(mine) > 0 {
-		fmt.Fprintf(stdout, "loto lock %s -t \"<bead>: intent\"  # take what you are about to commit\n", strings.Join(mine, " "))
+	if omitted > 0 {
+		fmt.Fprintf(stdout, "ℹ fix-omitted count=%d reason=control-character-in-name\n", omitted)
 	}
-	if len(theirs) > 0 {
-		fmt.Fprintf(stdout, "git restore --staged %s  # a peer holds these; leave them out of your commit\n", strings.Join(theirs, " "))
+	lines := []*heldFixLine{&mine, &theirs, &unreadable}
+	if len(mine.paths)+len(theirs.paths)+len(unreadable.paths) == 0 {
+		return // every path was omitted: an empty fence is not a fix block
+	}
+	fmt.Fprintln(stdout, "```bash")
+	for _, line := range lines {
+		if len(line.paths) == 0 {
+			continue
+		}
+		sort.Strings(line.paths)
+		fmt.Fprintf(stdout, line.format, strings.Join(line.paths, " "))
 	}
 	fmt.Fprintln(stdout, "```")
 }
@@ -431,8 +550,8 @@ func runCheckHeld(ctx context.Context, staged bool, posArgs []string, stdout, st
 	warnIfContractStale(stderr)
 	repoTop, _ := repoTopForCwd(ctx)
 
-	entries, code := heldTargets(ctx, repoTop, staged, posArgs, stdout, stderr)
-	if code != 0 || len(entries) == 0 {
+	entries, unresolved, code := heldTargets(ctx, repoTop, staged, posArgs, stdout, stderr)
+	if code != 0 || (len(entries) == 0 && len(unresolved) == 0) {
 		return code
 	}
 
@@ -461,8 +580,8 @@ func runCheckHeld(ctx context.Context, staged bool, posArgs []string, stdout, st
 	ec.Kin = kin
 
 	warn := heldWarnMode(stderr)
-	rows := decideHeld(entries, locks, claims, rt.Agent.UUID, ec)
-	printHeld(stdout, rows, len(entries), warn)
+	rows, notes := decideHeld(entries, unresolved, locks, claims, rt.Agent.UUID, ec)
+	printHeld(stdout, rows, notes, len(entries)+len(unresolved), warn)
 	if len(rows) == 0 {
 		return 0
 	}
@@ -476,13 +595,20 @@ func runCheckHeld(ctx context.Context, staged bool, posArgs []string, stdout, st
 // heldTargets loads and canonicalizes the paths --held will judge. Returns
 // an empty set (and 0) when there is nothing staged — printing the same
 // `✓ no paths` plain check prints, because an empty commit is not a refusal.
-func heldTargets(ctx context.Context, repoTop string, staged bool, posArgs []string, stdout, stderr io.Writer) ([]stagedPath, int) {
+//
+// ‡ A STAGED path that will not canonicalize is returned as an unresolved row,
+// never as an exit-2 refusal of the whole batch. That refusal was a full
+// bypass: the pre-commit leg proceeds on any exit but 1, so one staged file
+// with an odd name switched the ownership check off for every other path in
+// the commit (loto-pgio). A TYPED path is still exit 2 — that is a caller
+// error, with a caller to correct it.
+func heldTargets(ctx context.Context, repoTop string, staged bool, posArgs []string, stdout, stderr io.Writer) (entries []stagedPath, unresolved []checkInvalid, code int) {
 	var raw []stagedPath
 	if staged {
 		set, err := loadStagedChangeSet(ctx, repoTop)
 		if err != nil {
 			fmt.Fprintf(stderr, "✗ git diff: %v\n", err)
-			return nil, 3
+			return nil, nil, 3
 		}
 		raw = set
 	} else {
@@ -492,7 +618,7 @@ func heldTargets(ctx context.Context, repoTop string, staged bool, posArgs []str
 	}
 	if len(raw) == 0 {
 		fmt.Fprintln(stdout, "✓ no paths")
-		return nil, 0
+		return nil, nil, 0
 	}
 
 	// --staged paths come from git run with cmd.Dir=repoTop, so they are
@@ -502,34 +628,61 @@ func heldTargets(ctx context.Context, repoTop string, staged bool, posArgs []str
 	if staged {
 		base = repoTop
 	}
-	out, invalid := resolveStagedPaths(base, repoTop, raw)
-	if len(invalid) > 0 {
-		sort.Slice(invalid, func(i, j int) bool { return invalid[i].Path < invalid[j].Path })
+	out, invalid := resolveStagedPaths(base, repoTop, raw, staged)
+	sort.Slice(invalid, func(i, j int) bool { return invalid[i].Path < invalid[j].Path })
+	if len(invalid) > 0 && !staged {
 		printCheckInvalid(stdout, invalid)
-		return nil, 2
+		return nil, nil, 2
 	}
-	return out, 0
+	return out, invalid, 0
 }
 
-// resolveStagedPaths canonicalizes both sides of every entry. A rename's
-// source that fails to resolve — the common case, since the move already
-// deleted it from disk — keeps its raw form rather than failing the entry:
-// it is printed, never matched against a lock.
-func resolveStagedPaths(base, repoTop string, raw []stagedPath) (out []stagedPath, invalid []checkInvalid) {
+// resolveStagedPaths canonicalizes both sides of every entry and records, for
+// each, whether `loto lock` could ever take it. A rename's source that fails
+// to resolve — the common case, since the move already deleted it from disk —
+// keeps its raw form rather than failing the entry: it is printed, never
+// matched against a lock.
+//
+// fromGit selects the canonicalization policy. git-produced tokens are
+// admitted with a `"` or a control character in the name (domain.ProvenanceGit):
+// no shell ever touched them, so the unexpanded-token rule that refuses them
+// is answering a question nobody asked.
+func resolveStagedPaths(base, repoTop string, raw []stagedPath, fromGit bool) (out []stagedPath, invalid []checkInvalid) {
+	resolve := resolveCLITarget
+	if fromGit {
+		resolve = resolveGitTarget
+	}
 	cc := newCaseCache()
 	for _, e := range raw {
-		t, err := resolveCLITarget(cc, base, repoTop, e.Path)
+		t, err := resolve(cc, base, repoTop, e.Path)
 		if err != nil {
 			invalid = append(invalid, checkInvalid{Path: e.Path, Reason: classifyCanonicalizeErr(err)})
 			continue
 		}
 		from := e.RenamedFrom
 		if from != "" {
-			if ft, ferr := resolveCLITarget(cc, base, repoTop, from); ferr == nil {
+			if ft, ferr := resolve(cc, base, repoTop, from); ferr == nil {
 				from = ft.Canonical
 			}
 		}
-		out = append(out, stagedPath{Path: t.Canonical, RenamedFrom: from})
+		out = append(out, stagedPath{Path: t.Canonical, RenamedFrom: from, Unlockable: unlockableReason(repoTop, t.Canonical)})
 	}
 	return out, invalid
+}
+
+// unlockableReason names why no session could ever hold a lock on this path,
+// or "" when one could. It asks `loto lock`'s OWN validator
+// (statFileTargetReason), so the gate's exemption is the lock verb's refusal
+// by construction rather than a second list that can drift from it.
+//
+// Only the two permanent refusals count. `not-found` — a staged deletion, a
+// rename's source — is NOT one of them: that path was lockable right up until
+// the session deleted it, so the gate has a real thing to say about it.
+func unlockableReason(repoTop, canonical string) string {
+	switch reason := statFileTargetReason(repoTop, canonical, false); reason {
+	case "symlink", reasonNotRegularFile:
+		return reason
+	default:
+		return ""
+	}
 }
