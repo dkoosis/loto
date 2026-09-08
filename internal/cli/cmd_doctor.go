@@ -188,6 +188,12 @@ func printDoctorHeader(ctx context.Context, stdout io.Writer, repoTop, stateDir 
 	fmt.Fprintf(stdout, "project: %s\n", ResolveAndPinProjectSlug(repoTop))
 	fmt.Fprintf(stdout, "repo:    %s\n", repoTop)
 	fmt.Fprintf(stdout, "state:   %s\n", stateDir)
+	// Binary identity first, and the staleness row ahead of the guard rows
+	// below (loto-jhbm): a binary predating a guard prints that guard's row
+	// wrong, so the reader needs to know which binary spoke before believing
+	// what it said.
+	id := readBuildIdentity()
+	renderBinaryIdentity(stdout, repoTop, id, checkBinaryStaleness(ctx, repoTop, id))
 	renderGuardReachability(stdout, checkGuardReachability(ctx, repoTop))
 }
 

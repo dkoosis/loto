@@ -14,8 +14,8 @@ import (
 
 // stashAgentUnknown and stashPathsNone are named so the two literals below
 // don't add a third goconst-tripping occurrence of strings the rest of the
-// package already repeats (cmd_version.go's "unknown", cmd_lane.go/cmd_sync.go's
-// "none").
+// package already repeats (doctor_binary.go's unknownBuildField, which
+// cmd_version.go also renders, and cmd_lane.go/cmd_sync.go's "none").
 const (
 	stashAgentUnknown = "unknown"
 	stashPathsNone    = "none"
