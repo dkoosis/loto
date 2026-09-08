@@ -533,7 +533,12 @@ func recordHeldFiring(rt *runtime, stderr io.Writer, rows []heldRow, warn bool) 
 	if err != nil {
 		detail = nil
 	}
-	if _, err := rt.Store.AppendEvent(rt.Ctx, domain.Event{
+	// ‡ AppendEventRotating, not AppendEvent (loto-241n). This counter is the
+	// one event a session appends on every commit while acquiring no lock at
+	// all — the exact workload the advisory rollout is meant to measure — and
+	// the plain append never rotates, so the events table would grow past both
+	// retention bounds with nothing trimming it.
+	if _, err := rt.Store.AppendEventRotating(rt.Ctx, domain.Event{
 		Kind:      store.EventStagedGateFired,
 		ActorUUID: rt.Agent.UUID,
 		Reason:    mode,

@@ -88,13 +88,29 @@ func (s *Store) AppendEvent(ctx context.Context, e domain.Event) (string, error)
 	return evs[0].ID, nil
 }
 
+// AppendEventRotating is AppendEvent plus the retention pass, in one tx. It is
+// the append for an operation that produces events at volume WITHOUT touching
+// locks — the staged-lock gate's firing counter most of all, which a session
+// can append to on every commit while never acquiring a lock (loto-241n).
+// AcquireLocks and `doctor --repair` are the only other places rotation fires,
+// so such a workload rotates never and grows the table past both documented
+// retention bounds.
+func (s *Store) AppendEventRotating(ctx context.Context, e domain.Event) (string, error) {
+	evs := []domain.Event{e}
+	if err := s.appendEventsRotating(ctx, evs); err != nil {
+		return "", err
+	}
+	return evs[0].ID, nil
+}
+
 // AppendEvents inserts a batch of events in a single transaction. Empty input
 // is a no-op. Event.ID is assigned in-place when empty so callers can read it
 // back after the call.
 //
 // Deliberately does NOT rotate: this is the raw insert primitive, and the
 // retention pass belongs to the ops that produce events at volume
-// (AcquireLocks and friends, appendAuditDetached below).
+// (AcquireLocks and friends, appendAuditDetached and AppendEventRotating
+// above).
 func (s *Store) AppendEvents(ctx context.Context, evs []domain.Event) error {
 	if len(evs) == 0 {
 		return nil

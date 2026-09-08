@@ -826,3 +826,38 @@ func TestCheckHeld_CwdUnknownAbsolutePathStillWorks(t *testing.T) {
 		t.Errorf("want the absolute path judged: %q", out.String())
 	}
 }
+
+// ── loto-241n: the firing counter rotates ─────────────────────────────────
+
+// The gate's own recording path, driven past the row limit with no lock ever
+// acquired — the workflow the advisory rollout exists to measure. AppendEvent
+// never rotates; AcquireLocks and `doctor --repair` are the only other places
+// rotation fires, so this workload used to grow the table without bound.
+func TestRecordHeldFiring_RespectsRetentionWithoutALock(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	rt, err := openRuntime(context.Background())
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer rt.Close()
+
+	rows := []heldRow{{Path: tcTargetB, State: heldStateUnlocked}}
+	var errBuf bytes.Buffer
+	for range store.EventsRetentionMaxRows + 50 {
+		recordHeldFiring(rt, &errBuf, rows, true)
+	}
+	if errBuf.Len() != 0 {
+		t.Fatalf("firing counter reported a loss: %q", errBuf.String())
+	}
+	evs, err := rt.Store.ListEvents(rt.Ctx)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(evs) > store.EventsRetentionMaxRows {
+		t.Errorf("events table grew past retention: %d rows, limit %d", len(evs), store.EventsRetentionMaxRows)
+	}
+	if len(evs) == 0 {
+		t.Error("rotation must trim the table, not empty it")
+	}
+}
