@@ -743,12 +743,12 @@ func TestCheckHeld_ExemptPathDoesNotFireTheCounter(t *testing.T) {
 // decideHeld's half of the exemption, without the filesystem.
 func TestDecideHeld_UnlockableIsANoteNotAVerdict(t *testing.T) {
 	now := time.Now()
-	entries := []stagedPath{{Path: "link.go", Unlockable: "symlink"}, {Path: tcTargetB}}
+	entries := []stagedPath{{Path: "link.go", Unlockable: reasonSymlink}, {Path: tcTargetB}}
 	rows, notes := decideHeld(entries, nil, nil, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 1 || rows[0].Path != tcTargetB {
 		t.Fatalf("only the lockable path is a verdict row: %+v", rows)
 	}
-	if len(notes) != 1 || notes[0].State != heldStateUnlockable || notes[0].Reason != "symlink" {
+	if len(notes) != 1 || notes[0].State != heldStateUnlockable || notes[0].Reason != reasonSymlink {
 		t.Fatalf("the unlockable path is an ℹ note: %+v", notes)
 	}
 }
@@ -757,11 +757,11 @@ func TestDecideHeld_UnlockableIsANoteNotAVerdict(t *testing.T) {
 // complete a check it was asked for, and unstaging the path is a real remedy.
 func TestDecideHeld_UnresolvableIsAVerdictRow(t *testing.T) {
 	now := time.Now()
-	rows, notes := decideHeld(nil, []checkInvalid{{Path: "odd", Reason: "glob-not-supported"}}, nil, nil, gateMyUUID, gateEC(now))
+	rows, notes := decideHeld(nil, []checkInvalid{{Path: "odd", Reason: reasonGlobNotSupported}}, nil, nil, gateMyUUID, gateEC(now))
 	if len(notes) != 0 {
 		t.Fatalf("want no notes: %+v", notes)
 	}
-	if len(rows) != 1 || rows[0].State != heldStateUnresolvable || rows[0].Reason != "glob-not-supported" {
+	if len(rows) != 1 || rows[0].State != heldStateUnresolvable || rows[0].Reason != reasonGlobNotSupported {
 		t.Fatalf("want one unresolvable row: %+v", rows)
 	}
 }

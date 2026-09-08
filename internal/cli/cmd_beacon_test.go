@@ -50,7 +50,7 @@ func TestCmdBeacon_StillRefusesSymlink(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("beacon on a symlink must be refused, got exit 0: out=%q", out.String())
 	}
-	if !strings.Contains(errBuf.String(), "symlink") {
+	if !strings.Contains(errBuf.String(), reasonSymlink) {
 		t.Errorf("refusal must name the reason: %q", errBuf.String())
 	}
 }
@@ -78,7 +78,7 @@ func TestCmdBeacon_SymlinkRefusedFromNestedCwd(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("beacon on a symlink must be refused from a nested cwd too, got exit 0: out=%q", out.String())
 	}
-	if !strings.Contains(errBuf.String(), "symlink") {
+	if !strings.Contains(errBuf.String(), reasonSymlink) {
 		t.Errorf("refusal must name the reason: %q", errBuf.String())
 	}
 }

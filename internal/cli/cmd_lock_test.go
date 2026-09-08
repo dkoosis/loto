@@ -427,7 +427,7 @@ func TestLock_RejectsSymlinks(t *testing.T) {
 		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
 	}
 	combined := out.String() + errBuf.String()
-	if !strings.Contains(combined, "symlink") {
+	if !strings.Contains(combined, reasonSymlink) {
 		t.Errorf("expected reason=symlink: %q", combined)
 	}
 }

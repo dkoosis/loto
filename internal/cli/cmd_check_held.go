@@ -708,7 +708,7 @@ func resolveStagedPaths(base, repoTop string, raw []stagedPath, fromGit bool) (o
 // the session deleted it, so the gate has a real thing to say about it.
 func unlockableReason(repoTop, canonical string) string {
 	switch reason := statFileTargetReason(repoTop, canonical, false); reason {
-	case "symlink", reasonNotRegularFile:
+	case reasonSymlink, reasonNotRegularFile:
 		return reason
 	default:
 		return ""
