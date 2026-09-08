@@ -67,7 +67,7 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 	staged := fs.Bool("staged", false, "read paths from git diff --cached")
 	gateFlag := fs.Bool("gate", false, "read-only deny gate: exit 1 if a foreign live claim or lock/beacon covers any path; never acquires, refreshes, or writes")
 	branch := fs.String("branch", "", "check a BRANCH instead of paths: exit 1 if another checkout has it and its owner is not provably gone")
-	held := fs.Bool("held", false, "exit 1 if any path is NOT locked by this session (the commit gate's question, the inverse of --gate); LOTO_GATE_MODE=warn downgrades to ⚠ rows and exit 0")
+	held := fs.Bool("held", false, "report every path NOT locked by this session (the commit gate's question, the inverse of --gate); ships advisory — ⚠ rows and exit 0 — and LOTO_GATE_MODE=block turns the same rows into ✗ and exit 1")
 	moved := fs.Bool("moved", false, "advisory only: given two HEADs, print a ⚠ row for each path the move changed that a live peer holds; always exits 0")
 	cwdUnknown := fs.Bool("cwd-unknown", false, "the caller's working directory is not knowable here (e.g. mcp__trixi__agent_shell): refuse relative paths instead of resolving them against the wrong base")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {

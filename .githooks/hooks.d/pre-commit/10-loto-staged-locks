@@ -14,10 +14,16 @@
 # passes that, leg 2 refuses it. A tree-wide `git commit -a` in a shared
 # checkout has the same shape.
 #
-# ‡ Leg 2 ships advisory-first (survey D5): LOTO_GATE_MODE=warn makes it
-# print ⚠ rows and exit 0 while the firing counter in loto's events log
-# gathers evidence. Promotion of that default is a follow-up bead filed at
-# merge, never a timer in this file.
+# ‡ LEG 2 IS ADVISORY BY DEFAULT and refuses nothing until asked to (survey
+# D5; epic loto-ea8y "New gates ship in warn mode and promote to blocking on
+# evidence"). With LOTO_GATE_MODE unset it prints ⚠ rows and exits 0 while
+# the firing counter in loto's events log gathers evidence; the same rows
+# become a refusal under LOTO_GATE_MODE=block. Promotion of that default is a
+# follow-up bead read off the counter, never a timer in this file.
+#
+# The default lives in `loto check --held` itself, not in an export here, so
+# there is one place that decides it — the CLI and the hook cannot drift into
+# disagreeing about which mode ships.
 #
 # Runs before 50-beads because a refusal should not leave bd half-run — the
 # chain stops at the first non-zero exit.
@@ -48,10 +54,10 @@ fi
 
 # Leg 2. Same capture discipline as leg 1: stdout captured, stderr straight
 # through so a fail-open notice is never swallowed. Exit 1 is the only
-# refusal; 0 (all held, or nothing staged), 2 (unresolvable path) and 3
-# (store unreachable) all proceed. In LOTO_GATE_MODE=warn the command itself
-# exits 0 after printing ⚠ rows, so the rows must be echoed on exit 0 too —
-# otherwise the advisory period produces a counter nobody can see.
+# refusal; 0 (advisory rows, all held, or nothing staged), 2 (unresolvable
+# path) and 3 (store unreachable) all proceed. In the default warn mode the
+# command exits 0 after printing ⚠ rows, so the rows are echoed on exit 0 too
+# — otherwise the advisory period produces a counter nobody can see.
 _loto_held_out=$(loto check --held --staged)
 _loto_held_exit=$?
 

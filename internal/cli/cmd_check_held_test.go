@@ -70,14 +70,25 @@ func writeT(t *testing.T, dir, name, content string) {
 	}
 }
 
-// heldRun executes `loto check --held --staged` and returns scrubbed stdout
-// plus the exit code.
+// heldRun executes `loto check --held --staged` in whatever mode the
+// environment currently says, and returns scrubbed stdout plus the exit code.
 func heldRun(t *testing.T) (string, int) {
 	t.Helper()
 	var out, errBuf bytes.Buffer
 	code := Run([]string{tcCmdCheck, tcFlagHeld, tcFlagStaged}, &out, &errBuf)
 	t.Logf("stderr: %q", errBuf.String())
 	return scrubTime(out.String()), code
+}
+
+// blockingRun is heldRun with the gate asked to refuse. The AC cases below
+// describe what the gate REFUSES and what it prints; the mode it ships in is
+// a separate question, pinned by TestCheckHeld_DefaultModeIsAdvisory. Asking
+// for blocking here keeps the two independent, so flipping the shipped
+// default can never quietly gut the refusal tests.
+func blockingRun(t *testing.T) (string, int) {
+	t.Helper()
+	t.Setenv(gateModeEnv, gateModeBlock)
+	return heldRun(t)
 }
 
 // countFiringEvents reads the advisory-first firing counter straight out of
@@ -113,7 +124,7 @@ func TestCheckHeld_UnlockedStagedPathRefuses(t *testing.T) {
 	}
 	gitT(t, repo, "add", tcTargetA, tcTargetB)
 
-	got, code := heldRun(t)
+	got, code := blockingRun(t)
 	if code != 1 {
 		t.Fatalf("want exit 1, got %d: %q", code, got)
 	}
@@ -145,7 +156,7 @@ func TestCheckHeld_PeerLockedStagedPathNamesTheHolder(t *testing.T) {
 	}
 	gitT(t, repo, "add", tcTargetA, tcTargetB)
 
-	got, code := heldRun(t)
+	got, code := blockingRun(t)
 	if code != 1 {
 		t.Fatalf("want exit 1, got %d: %q", code, got)
 	}
@@ -176,7 +187,7 @@ func TestCheckHeld_StagedRenameNeedsBothSidesLocked(t *testing.T) {
 	}
 	gitT(t, repo, "add", "-A", tcTargetA, tcTargetC)
 
-	got, code := heldRun(t)
+	got, code := blockingRun(t)
 	if code != 1 {
 		t.Fatalf("want exit 1, got %d: %q", code, got)
 	}
@@ -241,7 +252,7 @@ func TestCheckHeld_WarnDiffersFromBlockOnlyByTheGlyph(t *testing.T) {
 	}
 	gitT(t, repo, "add", tcTargetA, tcTargetB)
 
-	blocked, blockCode := heldRun(t)
+	blocked, blockCode := blockingRun(t)
 	t.Setenv(gateModeEnv, gateModeWarn)
 	warned, warnCode := heldRun(t)
 	if blockCode != 1 || warnCode != 0 {
@@ -287,8 +298,46 @@ func TestCheckHeld_NothingStagedPasses(t *testing.T) {
 	}
 }
 
-// An unrecognized LOTO_GATE_MODE must not disarm the gate.
-func TestCheckHeld_UnknownGateModeStillBlocks(t *testing.T) {
+// THE SHIPPED DEFAULT. With LOTO_GATE_MODE unset an unheld staged path is an
+// advisory: ⚠ rows, exit 0, and the firing counter still moves. The epic's
+// Rules ("New gates ship in warn mode and promote to blocking on evidence")
+// and its own acceptance criteria ("session staging an unlocked file gets a
+// ⚠ warn row and the commit proceeds") both say so, and this is the test
+// that fails if a later change flips the default without deciding to.
+func TestCheckHeld_DefaultModeIsAdvisory(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeT(t, repo, tcTargetB, "b")
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock %s failed", tcTargetA)
+	}
+	gitT(t, repo, "add", tcTargetA, tcTargetB)
+
+	// Explicitly UNSET, not merely absent: another test in this package may
+	// have exported it, and the default is the whole subject here.
+	t.Setenv(gateModeEnv, "")
+	before := countFiringEvents(t)
+	got, code := heldRun(t)
+	if code != 0 {
+		t.Fatalf("the shipped default must not refuse a commit; got exit %d: %q", code, got)
+	}
+	want := "⚠ unheld count=1 unlocked=1 peer=0 staged=2\n" +
+		"⚠ path=b.go state=unlocked\n" +
+		tcHeldFence + "\n" +
+		"loto lock 'b.go' -t \"<bead>: intent\"  # take what you are about to commit\n" +
+		"```\n"
+	if got != want {
+		t.Errorf("output\n got: %q\nwant: %q", got, want)
+	}
+	if after := countFiringEvents(t); after != before+1 {
+		t.Errorf("the advisory period is worthless without the counter: got %d, want %d", after, before+1)
+	}
+}
+
+// An unrecognized LOTO_GATE_MODE falls back to the shipped default and names
+// the value. Blocking is opted into by name; a string nobody meant must not
+// be able to start refusing commits.
+func TestCheckHeld_UnknownGateModeFallsBackToWarn(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)
 	writeT(t, repo, tcTargetB, "b")
@@ -296,11 +345,31 @@ func TestCheckHeld_UnknownGateModeStillBlocks(t *testing.T) {
 	t.Setenv(gateModeEnv, "advisory")
 	var out, errBuf bytes.Buffer
 	code := Run([]string{tcCmdCheck, tcFlagHeld, tcFlagStaged}, &out, &errBuf)
-	if code != 1 {
-		t.Fatalf("want exit 1 on an unrecognized mode, got %d", code)
+	if code != 0 {
+		t.Fatalf("want exit 0 on an unrecognized mode, got %d", code)
 	}
-	if !strings.Contains(errBuf.String(), "⚠ LOTO_GATE_MODE=\"advisory\" unrecognized gate=blocking") {
+	if !strings.Contains(errBuf.String(), "⚠ LOTO_GATE_MODE=\"advisory\" unrecognized gate=warn") {
 		t.Errorf("want an unrecognized-mode notice on stderr: %q", errBuf.String())
+	}
+	if !strings.HasPrefix(out.String(), "⚠ unheld") {
+		t.Errorf("want advisory rows: %q", out.String())
+	}
+}
+
+// LOTO_GATE_MODE=block is what turns the advisory into a refusal, and it must
+// keep working from any starting state.
+func TestCheckHeld_BlockModeRefuses(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeT(t, repo, tcTargetB, "b")
+	gitT(t, repo, "add", tcTargetB)
+	t.Setenv(gateModeEnv, gateModeBlock)
+	var out, errBuf bytes.Buffer
+	if code := Run([]string{tcCmdCheck, tcFlagHeld, tcFlagStaged}, &out, &errBuf); code != 1 {
+		t.Fatalf("LOTO_GATE_MODE=%s must refuse; got exit %d out=%q", gateModeBlock, code, out.String())
+	}
+	if !strings.HasPrefix(out.String(), "✗ unheld") {
+		t.Errorf("want blocking rows: %q", out.String())
 	}
 }
 

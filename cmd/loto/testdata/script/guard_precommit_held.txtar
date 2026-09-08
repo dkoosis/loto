@@ -1,11 +1,12 @@
-# .githooks/pre-commit leg 2 (`loto check --held --staged`, loto-7oik): a
-# commit whose staged set includes a path this session does not hold a lock
-# on is refused, naming the path and handing back the `loto lock` line. This
-# is the case leg 1 passes — nobody else holds these files either, which is
-# exactly the shape of the cc-plugins 2026-08-10 sweep.
+# .githooks/pre-commit leg 2 (`loto check --held --staged`, loto-7oik): the
+# staged set must be locked by the committing session. This is the case leg 1
+# passes — nobody else holds these files either, which is exactly the shape of
+# the cc-plugins 2026-08-10 sweep.
 #
-# End-to-end through the real dispatcher and a real `git commit`, so the
-# hook, the chain runner and the CLI are all under test together.
+# ‡ It ships ADVISORY. With LOTO_GATE_MODE unset the commit proceeds and the
+# rows are a ⚠; LOTO_GATE_MODE=block is what refuses. Both directions are
+# exercised below, end-to-end through the real dispatcher and a real
+# `git commit`.
 
 exec git config core.hooksPath $REALHOOKS
 
@@ -15,36 +16,38 @@ env LOTO_AGENT_ID=$BOB
 loto lock mine.go -t 'bob: my own file'
 stdout '✓ locked count=1'
 
-# Held path alone: commits clean.
+# Held path alone: commits clean and says nothing.
 exec git add mine.go
 exec git commit -m 'bob: a file he holds'
 stdout 'a file he holds'
+! stderr 'unheld'
 
-# stray.go is locked by NOBODY — leg 1 has no opinion, leg 2 refuses.
+# THE SHIPPED DEFAULT. stray.go is locked by nobody — leg 1 has no opinion,
+# leg 2 warns and the commit goes through.
 exec git add stray.go
+exec git commit -m 'bob: warned, not refused'
+stdout 'warned, not refused'
+stderr '⚠ unheld count=1 unlocked=1 peer=0 staged=1'
+stderr '⚠ path=stray.go state=unlocked'
+stderr 'loto lock'
+
+# LOTO_GATE_MODE=block promotes the same rows to a refusal.
+touch second.go
+exec git add second.go
+env LOTO_GATE_MODE=block
 ! exec git commit -m 'bob: sweeps a file he never claimed'
 stderr '✗ unheld count=1 unlocked=1 peer=0 staged=1'
-stderr 'path=stray.go state=unlocked'
-stderr 'loto lock'
+stderr 'path=second.go state=unlocked'
 stderr 'staged paths this session does not hold a lock on'
 stderr 'LOTO_GUARD_OVERRIDE=1'
 
-# Advisory-first: LOTO_GATE_MODE=warn prints the same rows as ⚠ and lets the
-# commit through, so the firing counter can gather evidence without blocking
-# anyone. The rows still reach the committer.
-env LOTO_GATE_MODE=warn
-exec git commit -m 'bob: warned but allowed'
-stderr '⚠ unheld count=1 unlocked=1 peer=0 staged=1'
-stderr '⚠ path=stray.go state=unlocked'
+# Taking the lock is the way through a blocking gate.
+loto lock second.go -t 'bob: second'
+exec git commit -m 'bob: locked first, then committed'
+stdout 'locked first, then committed'
 env LOTO_GATE_MODE=
 
 exec git log --oneline
-stdout 'warned but allowed'
-stdout 'a file he holds'
-
-# Taking the lock is the other way through.
-touch third.go
-loto lock third.go -t 'bob: third'
-exec git add third.go
-exec git commit -m 'bob: locked first, then committed'
 stdout 'locked first, then committed'
+stdout 'warned, not refused'
+stdout 'a file he holds'

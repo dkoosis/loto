@@ -27,12 +27,17 @@ import (
 // in a shared checkout is the same shape. Requiring the committer's own lock
 // is the one addition that catches it.
 //
-// Advisory-first (survey D5): LOTO_GATE_MODE=warn renders the identical rows
-// as ⚠ and exits 0, and every firing — warn or block — appends one
+// ‡ It SHIPS ADVISORY (survey D5, epic loto-ea8y "New gates ship in warn mode
+// and promote to blocking on evidence"): with LOTO_GATE_MODE unset the rows
+// render as ⚠ and the exit is 0, so a commit is never refused by a default.
+// LOTO_GATE_MODE=block is what turns the same rows into ✗ and exit 1.
+//
+// The rows are identical either way — only the glyph and the exit differ — so
+// what the advisory period measures is exactly what the blocking period will
+// refuse. Every firing, warn or block, appends one
 // store.EventStagedGateFired row, so "how often would this have refused a
-// commit" is answerable from the events log before the default is
-// reconsidered. The promotion is a follow-up bead filed at merge, never a
-// timer in the code.
+// commit" is answerable from the events log. Promoting the default is a
+// follow-up bead read off that counter, never a timer in the code.
 
 // heldMovedArgs carries checkPreflight's parsed flags into the two surfaces
 // that branch out of it.
@@ -69,11 +74,16 @@ func routeHeldOrMoved(ctx context.Context, a heldMovedArgs, stdout, stderr io.Wr
 	}
 }
 
-// gateModeEnv names the advisory/blocking switch. Unset (or "block") blocks.
+// gateModeEnv names the advisory/blocking switch. Unset means warn.
 const gateModeEnv = "LOTO_GATE_MODE"
 
-// gateModeWarn is the one value that downgrades a refusal to an advisory.
-const gateModeWarn = "warn"
+// The two modes. Unset resolves to gateModeWarn: a gate ships advisory and
+// is promoted on counted evidence, so the blocking mode is the one an
+// operator has to ask for by name.
+const (
+	gateModeWarn  = "warn"
+	gateModeBlock = "block"
+)
 
 // held row states, in the vocabulary the report prints.
 const (
@@ -351,18 +361,24 @@ func printHeldFix(stdout io.Writer, rows []heldRow) {
 	fmt.Fprintln(stdout, "```")
 }
 
-// heldWarnMode reports whether LOTO_GATE_MODE downgrades a refusal to an
-// advisory, and warns on a value it does not understand. An unrecognized
-// value BLOCKS — a typo'd mode must not silently disarm the gate.
+// heldWarnMode resolves LOTO_GATE_MODE. Unset is warn — the advisory-first
+// default the epic's Rules and its own acceptance criteria call for
+// ("session staging an unlocked file gets a ⚠ warn row and the commit
+// proceeds"). Only LOTO_GATE_MODE=block refuses.
+//
+// ‡ An unrecognized value falls back to the DEFAULT and says so, rather than
+// to blocking. Blocking is the mode an operator opts into by name; a value
+// nobody meant must not be able to start refusing commits, and the ⚠ names
+// the string so a typo is visible rather than silently obeyed.
 func heldWarnMode(stderr io.Writer) bool {
 	switch v := strings.TrimSpace(os.Getenv(gateModeEnv)); v {
-	case "", "block":
-		return false
-	case gateModeWarn:
+	case "", gateModeWarn:
 		return true
-	default:
-		fmt.Fprintf(stderr, "⚠ %s=%q unrecognized gate=blocking\n", gateModeEnv, v)
+	case gateModeBlock:
 		return false
+	default:
+		fmt.Fprintf(stderr, "⚠ %s=%q unrecognized gate=%s\n", gateModeEnv, v, gateModeWarn)
+		return true
 	}
 }
 
@@ -380,7 +396,7 @@ func recordHeldFiring(rt *runtime, stderr io.Writer, rows []heldRow, warn bool) 
 			peer++
 		}
 	}
-	mode := "block"
+	mode := gateModeBlock
 	if warn {
 		mode = gateModeWarn
 	}
