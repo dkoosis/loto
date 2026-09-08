@@ -575,6 +575,15 @@ func checkGuardReachability(ctx context.Context, repoTop string) []guardStatus {
 // repo's tracked .githooks. Mirrors the comparison `make hooks` makes, but
 // resolves to an absolute path so a foreign value can be named in full
 // (make hooks compares the raw config string only).
+//
+// The `git config --get` call below carries no --local/--global flag, so git
+// itself resolves local > global > system and returns the EFFECTIVE value —
+// local unset falls through to a foreign global rather than reading as unset.
+// loto-p6zs measured this machine's actual shape (local unset, foreign
+// global, every repo) and TestDoctorGuard_InheritedGlobalHooksPath pins it: a
+// prior hypothesis that this check tested the local override rather than the
+// effective path was wrong — the blind spot dk saw was the installed loto
+// binary predating this feature (PR #322), not this predicate.
 func resolveGitHooksPath(ctx context.Context, repoTop string) (resolved string, ok bool, err error) {
 	want := filepath.Clean(filepath.Join(repoTop, ".githooks"))
 
