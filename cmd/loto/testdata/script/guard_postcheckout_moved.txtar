@@ -1,0 +1,46 @@
+# .githooks/hooks.d/post-checkout/10-loto-moved-locks (loto-ea8y.2): a branch
+# switch that rewrites a path a live peer holds still SUCCEEDS, and prints one
+# ⚠ row naming the path and the holder. git has no pre-checkout hook, so by
+# the time anything can run the tree is already rewritten; advisory is the
+# only honest shape.
+#
+# End-to-end through the real dispatcher and a real `git checkout`.
+
+exec git config core.hooksPath $REALHOOKS
+
+# Seed two branches that differ in shared.go. LOTO_GUARD_OVERRIDE keeps the
+# pre-commit guard out of the fixture — this script is about post-checkout.
+env LOTO_GUARD_OVERRIDE=1
+env LOTO_AGENT_ID=$BOB
+touch shared.go
+exec git add shared.go
+exec git commit -m 'seed'
+exec git checkout -b other
+cp v2.txt shared.go
+exec git add shared.go
+exec git commit -m 'other: rewrites shared.go'
+
+# No peer lock anywhere: the checkout says nothing at all.
+env LOTO_GUARD_OVERRIDE=
+exec git checkout -
+! stderr 'moved-peer-locks'
+
+# Alice takes a shared lock — a read declaration, so the write bit stays on
+# and git can still rewrite the file underneath her. That is the point.
+env LOTO_AGENT_ID=$ALICE
+loto lock shared.go --shared -t 'alice reading'
+stdout '✓ locked count=1'
+
+# Bob switches back. The checkout succeeds and Alice is named.
+env LOTO_AGENT_ID=$BOB
+exec git checkout other
+stderr '⚠ moved-peer-locks count=1'
+stderr 'path=shared.go'
+stderr $ALICE
+stderr 'alice reading'
+
+exec git rev-parse --abbrev-ref HEAD
+stdout 'other'
+
+-- v2.txt --
+changed on the other branch

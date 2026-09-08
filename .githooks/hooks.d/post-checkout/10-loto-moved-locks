@@ -1,0 +1,35 @@
+#!/usr/bin/env sh
+#
+# 10-loto-moved-locks — after a checkout or switch, name the peer-held paths
+# the move just rewrote (loto-ea8y.2).
+#
+# Advisory, always. git has no pre-checkout hook, so by the time this runs
+# the working tree is already rewritten; there is nothing left to refuse.
+# Exit is unconditionally 0 for a second reason too — a non-zero status here
+# stops the chain and would keep 50-beads from running, for a warning.
+#
+# git's argv: $1 previous HEAD, $2 new HEAD, $3 1=branch checkout 0=file
+# checkout. All three are forwarded verbatim; `loto check --moved` accepts
+# and ignores the third.
+#
+# Silence is the pass signal. The command prints `✓ moved-peer-locks count=0`
+# when no peer holds anything the move touched, and this drops that line:
+# every `git checkout` in the repo emitting a ✓ would train the eye past the
+# ⚠ that matters. Fail-open notices ride stderr and are NOT captured, so they
+# still reach the mover.
+#
+# Fail-open: no `loto` on PATH -> skip silently.
+
+command -v loto >/dev/null 2>&1 || exit 0
+
+if [ "${LOTO_GUARD_OVERRIDE:-}" = "1" ]; then
+	exit 0
+fi
+
+_loto_moved_out=$(loto check --moved "$1" "$2" "$3") || exit 0
+
+case "$_loto_moved_out" in
+"⚠ moved-peer-locks"*) echo "$_loto_moved_out" >&2 ;;
+esac
+
+exit 0

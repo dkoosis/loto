@@ -29,6 +29,14 @@ const (
 	// Target — a bypass is a session-scoped fact, not a per-path one — so
 	// TargetCanonical is written empty. ActorUUID names who bypassed.
 	EventGateBypass = "gate_bypass"
+	// EventStagedGateFired is the firing counter behind `loto check --held`
+	// (loto-7oik). One row per firing — not per path — so counting rows of
+	// this kind answers "how often would this gate have refused a commit",
+	// which is the evidence the advisory-first rollout is gathering before
+	// the gate's default is reconsidered. No Target, same reason
+	// EventGateBypass has none: a firing is a commit-scoped fact, and the
+	// per-path detail rides in Detail as JSON. ActorUUID names the committer.
+	EventStagedGateFired = "staged_lock_gate_fired"
 )
 
 var ErrNoLockAtTarget = errors.New("no lock at target")

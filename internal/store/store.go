@@ -388,6 +388,7 @@ var migrationEnsures = []struct {
 	{"add violations.worktree", ensureViolationsWorktree},
 	{"scope violations open index to worktree", ensureViolationsOpenIndexScoped},
 	{"add events.detail", ensureEventsDetail},
+	{"widen events check for staged_lock_gate_fired", ensureEventsCheckStagedGate},
 }
 
 // schemaCurrent reports whether a re-migrate would be a pure no-op — the gate
@@ -928,6 +929,56 @@ CREATE TABLE events_new (
 );
 INSERT INTO events_new (id, target_canonical, event_kind, actor_uuid, subject_uuid, reason, created_at)
 SELECT id, target_canonical, event_kind, actor_uuid, subject_uuid, reason, created_at FROM events;
+DROP TABLE events;
+ALTER TABLE events_new RENAME TO events;
+CREATE INDEX IF NOT EXISTS idx_events_target     ON events(target_canonical, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_kind       ON events(event_kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_created_id ON events(created_at, id);`
+	if apply {
+		if _, err := db.ExecContext(ctx, rebuild); err != nil {
+			return false, err
+		}
+		return false, nil // applied: no longer outstanding
+	}
+	return true, nil
+}
+
+// ensureEventsCheckStagedGate widens the events CHECK a second time, for
+// staged_lock_gate_fired (loto-7oik) — the firing counter behind
+// `loto check --held`.
+//
+// ‡ A SEPARATE step rather than another kind bolted into
+// ensureEventsCheckCurrent, and ordered AFTER "add events.detail", for the
+// hazard ensureEventsDetail's own comment names: that older rebuild copies a
+// column list with no `detail` in it, so widening there would silently drop
+// the column on every DB that has it. Rebuilding here, last, means `detail`
+// is guaranteed present and this DDL carries it on both sides of the
+// INSERT ... SELECT — the shape any future events rebuild must copy.
+//
+// Probe is the newest kind, so this is a no-op on a fresh DB (schema.sql
+// already names it) and on a re-Open. user_version not bumped.
+func ensureEventsCheckStagedGate(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	var ddl string
+	if err := db.QueryRowContext(ctx,
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&ddl); err != nil {
+		return false, err
+	}
+	if strings.Contains(ddl, "'staged_lock_gate_fired'") {
+		return false, nil // already current
+	}
+	const rebuild = `
+CREATE TABLE events_new (
+  id               TEXT PRIMARY KEY,
+  target_canonical TEXT NOT NULL,
+  event_kind       TEXT NOT NULL CHECK (event_kind IN ('lock_acquired','lock_released','lock_broken','lock_reclaimed_stale','mode_restore_failed','acquire_rollback_started','lock_downgraded','lock_refreshed','gate_bypass','candidate_accepted','candidate_rejected','staged_lock_gate_fired')),
+  actor_uuid       TEXT NOT NULL,
+  subject_uuid     TEXT,
+  reason           TEXT NOT NULL DEFAULT '',
+  detail           TEXT NOT NULL DEFAULT '',
+  created_at       INTEGER NOT NULL
+);
+INSERT INTO events_new (id, target_canonical, event_kind, actor_uuid, subject_uuid, reason, detail, created_at)
+SELECT id, target_canonical, event_kind, actor_uuid, subject_uuid, reason, detail, created_at FROM events;
 DROP TABLE events;
 ALTER TABLE events_new RENAME TO events;
 CREATE INDEX IF NOT EXISTS idx_events_target     ON events(target_canonical, created_at);

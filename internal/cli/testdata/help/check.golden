@@ -5,5 +5,9 @@ Usage of check:
     	the caller's working directory is not knowable here (e.g. mcp__trixi__agent_shell): refuse relative paths instead of resolving them against the wrong base
   -gate
     	read-only deny gate: exit 1 if a foreign live claim or lock/beacon covers any path; never acquires, refreshes, or writes
+  -held
+    	report every path NOT locked by this session (the commit gate's question, the inverse of --gate); ships advisory — ⚠ rows and exit 0 — and LOTO_GATE_MODE=block turns the same rows into ✗ and exit 1
+  -moved
+    	advisory only: given two HEADs, print a ⚠ row for each path the move changed that a live peer holds; always exits 0
   -staged
     	read paths from git diff --cached
