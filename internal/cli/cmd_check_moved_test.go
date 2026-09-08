@@ -84,6 +84,102 @@ func TestCheckMoved_PeerLockedPathWarnsAndNeverBlocks(t *testing.T) {
 	}
 }
 
+// renamedHeads seeds two commits where tcTargetA became tcTargetC, and
+// returns their shas. git detects this as a rename (R100) unless told not to.
+func renamedHeads(t *testing.T, repo string) (oldHead, newHead string) {
+	t.Helper()
+	writeT(t, repo, tcTargetA, "one\ntwo\nthree\n")
+	gitT(t, repo, "add", tcTargetA)
+	gitT(t, repo, "commit", "-q", "-m", "one")
+	oldHead = gitOutT(t, repo, "rev-parse", "HEAD")
+	gitT(t, repo, "mv", tcTargetA, tcTargetC)
+	gitT(t, repo, "commit", "-q", "-m", "renamed")
+	newHead = gitOutT(t, repo, "rev-parse", "HEAD")
+	return oldHead, newHead
+}
+
+// loto-l9ve AC 1: a peer holds the rename's SOURCE, and the move rewrote it —
+// the file was removed from the working tree. `--name-only` alone reports the
+// destination only, because diff.renames has defaulted to true since git 2.9;
+// the comment claiming that omitting -M disables detection was simply wrong.
+// --no-renames is the flag that reports both sides.
+func TestCheckMoved_RenameSourceIsNamedWithItsHolder(t *testing.T) {
+	repo := withTempProject(t)
+	alice, bob := twoAgents(t)
+	oldHead, newHead := renamedHeads(t, repo)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	// The source is gone from the working tree, so the lock is taken before
+	// the rename — which is what a peer editing a.go would have done.
+	writeT(t, repo, tcTargetA, "one\ntwo\nthree\n")
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("alice lock failed")
+	}
+	if err := os.Remove(repo + "/" + tcTargetA); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+
+	got, code := movedRun(t, oldHead, newHead, "1")
+	if code != 0 {
+		t.Fatalf("a tree move is never blocked; got exit %d: %q", code, got)
+	}
+	want := "⚠ moved-peer-locks count=1\n" +
+		"⚠ path=a.go kind=lock blocker=" + alice.UUID + " intent=\"test\" expires_at=<T>\n" +
+		"ℹ options=tell-the-holder|move-back|carry-on — the move already happened\n"
+	if got != want {
+		t.Errorf("output\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// Both sides of the rename are examined, not just the source: a peer holding
+// the DESTINATION is named too, which is what the destination-only behavior
+// happened to get right and must keep getting right.
+func TestCheckMoved_RenameDestinationIsStillNamed(t *testing.T) {
+	repo := withTempProject(t)
+	alice, bob := twoAgents(t)
+	oldHead, newHead := renamedHeads(t, repo)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	if code := Run([]string{tcCmdLock, tcTargetC, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("alice lock failed")
+	}
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+
+	got, code := movedRun(t, oldHead, newHead, "1")
+	if code != 0 {
+		t.Fatalf("got exit %d: %q", code, got)
+	}
+	if !strings.Contains(got, "path=c.go kind=lock blocker="+alice.UUID) {
+		t.Errorf("want the rename destination named: %q", got)
+	}
+}
+
+// Regression on the existing golden: with no rename between the two HEADs the
+// output is unchanged by --no-renames.
+func TestCheckMoved_NoRenamesOutputIsUnchanged(t *testing.T) {
+	repo := withTempProject(t)
+	alice, bob := twoAgents(t)
+	oldHead, newHead := twoHeads(t, repo)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("alice lock failed")
+	}
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+
+	got, code := movedRun(t, oldHead, newHead, "1")
+	want := "⚠ moved-peer-locks count=1\n" +
+		"⚠ path=a.go kind=lock blocker=" + alice.UUID + " intent=\"test\" expires_at=<T>\n" +
+		"ℹ options=tell-the-holder|move-back|carry-on — the move already happened\n"
+	if code != 0 || got != want {
+		t.Errorf("output\n got: %q (%d)\nwant: %q", got, code, want)
+	}
+}
+
 // AC 2: no peer locks → the ✓ line the hook drops, exit 0.
 func TestCheckMoved_NoPeerLocksIsAPlainPass(t *testing.T) {
 	repo := withTempProject(t)

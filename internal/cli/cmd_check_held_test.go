@@ -765,3 +765,64 @@ func TestDecideHeld_UnresolvableIsAVerdictRow(t *testing.T) {
 		t.Fatalf("want one unresolvable row: %+v", rows)
 	}
 }
+
+// ── loto-l9ve: --held honors --cwd-unknown ────────────────────────────────
+
+// The flag exists for callers whose working directory is not knowable (an MCP
+// shell). --held dropped it, so a relative token silently resolved against
+// loto's own cwd and could report a same-named file in another directory as
+// held. It is refused now, with the same reason and exit the ordinary check
+// route gives.
+func TestCheckHeld_CwdUnknownRefusesRelativePath(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	var heldOut, heldErr bytes.Buffer
+	heldCode := Run([]string{tcCmdCheck, tcFlagHeld, tcFlagCwdUnknown, "some/relative/path.go"}, &heldOut, &heldErr)
+
+	var plainOut, plainErr bytes.Buffer
+	plainCode := Run([]string{tcCmdCheck, tcFlagCwdUnknown, "some/relative/path.go"}, &plainOut, &plainErr)
+
+	if heldCode != plainCode {
+		t.Errorf("exit: --held gave %d, the ordinary route gives %d", heldCode, plainCode)
+	}
+	if heldOut.String() != plainOut.String() {
+		t.Errorf("refusal differs from the ordinary route\n held: %q\nplain: %q", heldOut.String(), plainOut.String())
+	}
+	if !strings.Contains(heldOut.String(), "reason=relative-path-caller-cwd-unknown") {
+		t.Errorf("want the caller-cwd-unknown reason: %q", heldOut.String())
+	}
+}
+
+// --staged paths come from git run with cmd.Dir=repoTop, so they are
+// repo-root-relative by construction: refusing them would make
+// `--cwd-unknown --staged` reject every nonempty commit.
+func TestCheckHeld_CwdUnknownWithStagedStillWorks(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeT(t, repo, tcTargetB, "b")
+	gitT(t, repo, "add", tcTargetB)
+
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcFlagHeld, tcFlagCwdUnknown, tcFlagStaged}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("want the advisory exit 0, got %d: %q", code, out.String())
+	}
+	if !strings.HasPrefix(out.String(), "⚠ unheld") {
+		t.Errorf("want the staged path judged: %q", out.String())
+	}
+}
+
+// An absolute path carries its own base, so --cwd-unknown has nothing to
+// refuse and the check runs.
+func TestCheckHeld_CwdUnknownAbsolutePathStillWorks(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdCheck, tcFlagHeld, tcFlagCwdUnknown, filepath.Join(repo, tcTargetA)}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("want the advisory exit 0, got %d: %q out=%q err=%q", code, out.String(), out.String(), errBuf.String())
+	}
+	if !strings.HasPrefix(out.String(), "⚠ unheld") {
+		t.Errorf("want the absolute path judged: %q", out.String())
+	}
+}

@@ -42,9 +42,14 @@ import (
 
 // heldMovedArgs carries checkPreflight's parsed flags into the two surfaces
 // that branch out of it.
+//
+// cwdUnknown rides along because --held takes PATHS: dropping the flag on this
+// route let a relative token resolve against loto's own cwd and report a
+// same-named file in another directory as held (loto-l9ve). --moved's operands
+// are two HEADs, so the flag has nothing to bind to there.
 type heldMovedArgs struct {
-	held, moved, gate, staged bool
-	args                      []string
+	held, moved, gate, staged, cwdUnknown bool
+	args                                  []string
 }
 
 // routeHeldOrMoved validates the flag combination and dispatches. --held and
@@ -66,7 +71,7 @@ func routeHeldOrMoved(ctx context.Context, a heldMovedArgs, stdout, stderr io.Wr
 		fmt.Fprintln(stderr, "✗ --held needs --staged or at least one path")
 		return 2
 	case a.held:
-		return runCheckHeld(ctx, a.staged, a.args, stdout, stderr)
+		return runCheckHeld(ctx, heldRunArgs{staged: a.staged, cwdUnknown: a.cwdUnknown, args: a.args}, stdout, stderr)
 	case a.gate || a.staged:
 		fmt.Fprintln(stderr, "✗ --moved takes two HEADs, no other check flag")
 		return 2
@@ -546,11 +551,23 @@ func recordHeldFiring(rt *runtime, stderr io.Writer, rows []heldRow, warn bool) 
 // would read as unheld and every commit in the repo would be refused. The
 // notice goes to stderr — a hook that exits 0 after writing to stdout leaves
 // the model blind to the fact the gate never ran (loto-tzmv.8).
-func runCheckHeld(ctx context.Context, staged bool, posArgs []string, stdout, stderr io.Writer) int {
+func runCheckHeld(ctx context.Context, a heldRunArgs, stdout, stderr io.Writer) int {
 	warnIfContractStale(stderr)
 	repoTop, _ := repoTopForCwd(ctx)
 
-	entries, unresolved, code := heldTargets(ctx, repoTop, staged, posArgs, stdout, stderr)
+	// loto-l9ve: --cwd-unknown binds here exactly as it does on the ordinary
+	// check route (cmd_check.go), and for the same reason — a relative token
+	// with no knowable base would silently resolve against loto's own cwd and
+	// report a same-named file in another directory as held. Scoped to typed
+	// paths: --staged tokens come from git run with cmd.Dir=repoTop, so they
+	// are repo-root-relative by construction and stay allowed.
+	if a.cwdUnknown && !a.staged {
+		if rc, refused := refuseUnresolvableRelative(stdout, a.args); refused {
+			return rc
+		}
+	}
+
+	entries, unresolved, code := heldTargets(ctx, repoTop, a.staged, a.args, stdout, stderr)
 	if code != 0 || (len(entries) == 0 && len(unresolved) == 0) {
 		return code
 	}
@@ -590,6 +607,12 @@ func runCheckHeld(ctx context.Context, staged bool, posArgs []string, stdout, st
 		return 0
 	}
 	return 1
+}
+
+// heldRunArgs is runCheckHeld's parsed input.
+type heldRunArgs struct {
+	staged, cwdUnknown bool
+	args               []string
 }
 
 // heldTargets loads and canonicalizes the paths --held will judge. Returns
