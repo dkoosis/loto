@@ -178,23 +178,42 @@ vet: ## Run go vet (fo-rendered)
 # break and is not one. Measured 2026-09-06 with two concurrent worktrees.
 ARCH_JSON := $(CACHE_DIR)/archcheck.json
 
+# go-arch-lint v1.15.0 (CI's pin, .github/workflows/check.yml) shells out to
+# `go list` via x/tools' packages loader, which errors ("internal error:
+# package \"fmt\" without types") when the `go` on PATH is newer than go.mod's
+# directive — true on a dev machine with a newer Go than CI's setup-go
+# installs (measured 2026-09-07: local go1.27.0 vs go.mod's go1.26.4; CI is
+# unaffected because setup-go installs exactly go.mod's version). Pinning
+# GOTOOLCHAIN to go.mod's own version for this one invocation makes the
+# child `go list` calls match CI's toolchain without touching the
+# go-arch-lint version pin at all (loto-scmj).
 arch: ## Enforce layering (.go-arch-lint.yml)
 	@if ! command -v go-arch-lint >/dev/null 2>&1; then \
 		echo "go-arch-lint not installed; 'go install github.com/fe3dback/go-arch-lint@v1.15.0'"; \
 		exit 1; \
 	fi
 	@mkdir -p $(CACHE_DIR)
-	@set -o pipefail; go-arch-lint check --json 2>/dev/null | tee $(ARCH_JSON) | fo wrap archlint | fo --format llm
+	@set -o pipefail; GOTOOLCHAIN=go$(GOMOD_VER) go-arch-lint check --json 2>/dev/null | tee $(ARCH_JSON) | fo wrap archlint | fo --format llm
 	@jq -e '.Payload.ArchHasWarnings == false' $(ARCH_JSON) >/dev/null || { \
 		echo "✗ go-arch-lint found warnings the fo summary above did not render (loto-lu52 — fo's archlint wrapper drops ArchWarningsNotMatched into an empty SARIF results array):"; \
 		jq '.Payload | {ArchWarningsNotMatched, ArchWarningsDeps, ArchWarningsDeepScan}' $(ARCH_JSON); \
 		exit 1; \
 	}
 
+# Single source of truth: .sandbox/project.conf:GOLANGCI_LINT_VERSION — CI
+# reads the same key (.github/workflows/check.yml). ✗ @latest below: that
+# installed whatever golangci-lint had just shipped against a pin the same
+# repo carries, which is the drift loto-scmj closes.
+GOLANGCI_LINT_PIN := $(shell sed -n 's/^GOLANGCI_LINT_VERSION=//p' .sandbox/project.conf)
+
 lint: ## Run golangci-lint (full)
 	@if ! command -v golangci-lint >/dev/null 2>&1; then \
-		echo "golangci-lint not installed; source .sandbox/activate.sh or 'go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest'"; \
+		echo "golangci-lint not installed; source .sandbox/activate.sh or 'go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_PIN)'"; \
 		exit 1; \
+	fi
+	@set -o pipefail; INSTALLED="v$$(golangci-lint --version 2>/dev/null | sed -n 's/.*has version \([0-9.]*\).*/\1/p')"; \
+	if [ "$$INSTALLED" != "$(GOLANGCI_LINT_PIN)" ]; then \
+		echo "⚠ golangci-lint version mismatch: installed $$INSTALLED, pinned $(GOLANGCI_LINT_PIN) — go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_PIN) to match"; \
 	fi
 	@$(GATE) lint sarif -- golangci-lint run --output.sarif.path=/dev/stdout $(PKG)
 
