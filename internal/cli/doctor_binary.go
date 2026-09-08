@@ -81,6 +81,13 @@ func checkBinaryStaleness(ctx context.Context, repoTop string, id buildIdentity)
 	if id.rev == "" || repoTop == "" {
 		return binaryStaleness{}
 	}
+	// A dirty build's rev names the commit it started from, not everything the
+	// binary contains — it may carry newer or divergent work that ancestry
+	// comparison can't see, so there's nothing honest to compare (loto-jhbm
+	// review).
+	if id.dirty {
+		return binaryStaleness{}
+	}
 	if _, err := gitCmd(ctx, repoTop, "cat-file", "-e", id.rev+"^{commit}"); err != nil {
 		return binaryStaleness{}
 	}
@@ -118,6 +125,6 @@ func renderBinaryIdentity(stdout io.Writer, repoTop string, id buildIdentity, st
 	}
 	fmt.Fprintf(stdout, "✗ binary_stale binary=%s repo=%s behind=%d\n", id.rev, st.repoHead, st.behind)
 	fmt.Fprintln(stdout, "```bash")
-	fmt.Fprintf(stdout, "cd %s && make install\n", repoTop)
+	fmt.Fprintf(stdout, "cd %s && make install\n", shellQuote(repoTop))
 	fmt.Fprintln(stdout, "```")
 }

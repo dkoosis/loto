@@ -26,7 +26,7 @@ func TestBinaryIdentity_StaleNamesBothSidesAndTheFix(t *testing.T) {
 	for _, want := range []string{
 		"binary:  rev=" + testRevOld + " built=2026-09-05T21:46:58Z\n",
 		"✗ binary_stale binary=" + testRevOld + " repo=" + testRevNew + " behind=30\n",
-		"```bash\ncd /repo/loto && make install\n```\n",
+		"```bash\ncd '/repo/loto' && make install\n```\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("stale report missing %q; got:\n%s", want, got)
@@ -109,6 +109,13 @@ func TestCheckBinaryStaleness_AncestryDecidesIt(t *testing.T) {
 
 	if got := checkBinaryStaleness(ctx, repo, buildIdentity{}); got.stale {
 		t.Errorf("an unstamped binary cannot be compared; got %+v", got)
+	}
+
+	// A dirty build's rev names its starting commit, not everything the
+	// binary contains, so ancestry comparison has nothing honest to report —
+	// even against a rev that is otherwise a clean ancestor (loto-jhbm review).
+	if got := checkBinaryStaleness(ctx, repo, buildIdentity{rev: first, dirty: true}); got.stale {
+		t.Errorf("a dirty build is not comparable by ancestry; got %+v", got)
 	}
 }
 
