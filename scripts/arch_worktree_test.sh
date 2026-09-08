@@ -28,6 +28,13 @@ cd "$(dirname "$0")/.."
 
 say() { printf '%s\n' "$*"; }
 
+# go-arch-lint v1.15.0 shells out to `go list` via x/tools' packages loader,
+# which errors ("internal error: package \"fmt\" without types") when the
+# `go` on PATH is newer than go.mod's directive. Pinning GOTOOLCHAIN to
+# go.mod's own version mirrors the Makefile's `arch:` target fix (loto-scmj)
+# for this script's own go-arch-lint invocation (loto-g5mk).
+gomod_ver="$(awk '/^go /{print $2}' go.mod)"
+
 if ! command -v go-arch-lint >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
   say "⚠ go-arch-lint or jq missing; skipping arch-worktree-scope checks"
   exit 0
@@ -74,7 +81,7 @@ arch_warns() {
   # treating that as a tool failure reported "error" for the very case the
   # check exists to detect. The JSON is the verdict; only unparseable or
   # missing JSON is a real failure.
-  out=$(cd "$probe" && go-arch-lint check --json 2>/dev/null)
+  out=$(cd "$probe" && GOTOOLCHAIN="go${gomod_ver}" go-arch-lint check --json 2>/dev/null)
   verdict=$(printf '%s' "$out" | jq -r '.Payload.ArchHasWarnings' 2>/dev/null)
   case "$verdict" in true|false) echo "$verdict" ;; *) echo error ;; esac
 }
