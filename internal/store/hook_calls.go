@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS path_seq (
   path_canonical TEXT NOT NULL,
   epoch          INTEGER NOT NULL,
   seq            INTEGER NOT NULL,
+  digest         TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (path_canonical, epoch)
 );`
 
@@ -206,6 +207,12 @@ type PostOutcome struct {
 	Recorded bool
 	// Changed is the paths that took a new seq across this call, sorted.
 	Changed []string
+	// Events is one entry per state change the post filed (§5 I4 step 5),
+	// each carrying its spanners and the rule its report was written under.
+	Events []TreeEvent
+	// Acted is every path this call put back to a digest a report had named,
+	// within TreeActedWindow — §10b row 2's numerator, sorted.
+	Acted []string
 }
 
 // pathSeqAt reads the current transition number of (path, epoch). Zero for a
@@ -223,14 +230,44 @@ func pathSeqAt(ctx context.Context, tx *sql.Tx, path string, epoch int64) (int64
 
 // nextPathSeq assigns the next transition number of (path, epoch) in the
 // caller's tx, so the assignment and the record that cites it commit together.
-// Same shape as nextPathEpoch, and for the same reason.
-func nextPathSeq(ctx context.Context, tx *sql.Tx, path string, epoch int64) (int64, error) {
+// Same shape as nextPathEpoch, and for the same reason. digest is what the
+// path is at the new number — see pathSeqStateTx for the one question it
+// answers.
+func nextPathSeq(ctx context.Context, tx *sql.Tx, path string, epoch int64, digest string) (int64, error) {
 	var seq int64
 	err := tx.QueryRowContext(ctx, `
-INSERT INTO path_seq(path_canonical, epoch, seq) VALUES (?, ?, 1)
-ON CONFLICT(path_canonical, epoch) DO UPDATE SET seq = seq + 1
-RETURNING seq`, path, epoch).Scan(&seq)
+INSERT INTO path_seq(path_canonical, epoch, seq, digest) VALUES (?, ?, 1, ?)
+ON CONFLICT(path_canonical, epoch) DO UPDATE SET seq = seq + 1, digest = excluded.digest
+RETURNING seq`, path, epoch, digest).Scan(&seq)
 	return seq, err
+}
+
+// pathSeqStateTx reads (path, epoch)'s current number and the digest it was
+// assigned at. known=false for a path that has never transitioned.
+//
+// ‡ The digest here answers exactly one question: "is the state I am looking
+// at ALREADY numbered?" Two hooks can observe one physical change — the peer
+// that wrote it posts, then the holder's own overlapping call posts and sees
+// the same new bytes — and giving that one change two transition numbers
+// breaks §10a test 1: the holder's event would be judged against a number no
+// peer's call can span, and the peer that actually overlapped disappears from
+// the report. Reusing the number when the current state is the numbered state
+// puts both events on one transition, where the seq interval names them both.
+//
+// It is NOT the contention test. Whether a call spans a transition is decided
+// by `seq_pre < n` and (`n <= seq_post` or unposted) and by nothing else; a
+// digest comparison there is the round-9 hole (§3, §10a test 12's Fail line).
+func pathSeqStateTx(ctx context.Context, tx *sql.Tx, path string, epoch int64) (seq int64, digest string, known bool, err error) {
+	err = tx.QueryRowContext(ctx,
+		`SELECT seq, digest FROM path_seq WHERE path_canonical = ? AND epoch = ?`,
+		path, epoch).Scan(&seq, &digest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", false, nil
+	}
+	if err != nil {
+		return 0, "", false, err
+	}
+	return seq, digest, true, nil
 }
 
 // PathSeq reads (f, E)'s transition number. The one read a caller outside this
@@ -322,13 +359,18 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 	defer cleanup()
 
 	var postNs sql.NullInt64
+	var ownerStr string
 	if err := tx.QueryRowContext(ctx,
-		`SELECT t_post FROM hook_calls WHERE call_id = ?`, callID).Scan(&postNs); err != nil {
+		`SELECT t_post, owner_uuid FROM hook_calls WHERE call_id = ?`, callID).Scan(&postNs, &ownerStr); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return PostOutcome{}, fmt.Errorf("%w: %s", ErrUnknownCall, callID)
 		}
 		return PostOutcome{}, err
 	}
+	// The observer is the call's OWN owner, read back rather than passed in:
+	// an event names who was watching, and the only sound source for that is
+	// the record the pre-hook wrote.
+	owner := domain.AgentUUID(ownerStr)
 	if postNs.Valid {
 		return PostOutcome{}, nil // already posted: no-op
 	}
@@ -338,14 +380,10 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 		return PostOutcome{}, err
 	}
 
-	var changed []string
+	var out PostOutcome
 	for i := range obs {
-		didChange, err := postOnePathTx(ctx, tx, callID, obs[i], recorded)
-		if err != nil {
+		if err := postOnePathWithEventTx(ctx, tx, callID, owner, obs[i], recorded, tPost, &out); err != nil {
 			return PostOutcome{}, err
-		}
-		if didChange {
-			changed = append(changed, obs[i].Path)
 		}
 	}
 
@@ -357,8 +395,82 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 	if err := commitTxFn(tx); err != nil {
 		return PostOutcome{}, err
 	}
-	sort.Strings(changed)
-	return PostOutcome{Recorded: true, Changed: changed}, nil
+	out.Recorded = true
+	sort.Strings(out.Changed)
+	sort.Strings(out.Acted)
+	return out, nil
+}
+
+// postOnePathWithEventTx is one observed path's whole post: its record half,
+// the acted counter, observed(f), and the event a state change files. Split
+// out of RecordCallPost so that function stays a transaction and a loop.
+func postOnePathWithEventTx(ctx context.Context, tx *sql.Tx, callID string, owner domain.AgentUUID,
+	o HookPathState, recorded map[string]HookCallPath, tPost time.Time, out *PostOutcome,
+) error {
+	res, err := postOnePathTx(ctx, tx, callID, o, recorded)
+	if err != nil {
+		return err
+	}
+	// Acted BEFORE the event this path is about to file: the question is
+	// whether the digest now on disk is one an EARLIER report named, and
+	// asking it first keeps the two passes independent of each other.
+	if err := markTreeChangeActedTx(ctx, tx, owner, o.Path, o.Digest, tPost); err != nil {
+		return err
+	}
+	if actedOn(ctx, tx, owner, o.Path, o.Digest, tPost) {
+		out.Acted = append(out.Acted, o.Path)
+	}
+	// observed(f) := the post state, for every locked path (§5 I4 step 5).
+	// Without this the next pre-hook would read the pre-call state as the last
+	// thing anyone saw and report this call's own write as drift.
+	if o.Locked {
+		if err := setObservedTx(ctx, tx, o, tPost); err != nil {
+			return err
+		}
+	}
+	if !res.changed {
+		return nil
+	}
+	out.Changed = append(out.Changed, o.Path)
+	ev, err := fileTreeEventTx(ctx, tx, treeEventInput{
+		Path: o.Path, EpochPre: res.epoch, HolderPre: res.holderPre,
+		EpochNow: o.Epoch, HolderNow: o.Holder,
+		Observer: owner, CallID: callID, Seq: res.seqPost,
+		DigestPre: res.digestPre, DigestPost: o.Digest, Declared: res.declared,
+	}, tPost)
+	if err != nil {
+		return err
+	}
+	out.Events = append(out.Events, ev)
+	return nil
+}
+
+// actedOn asks whether markTreeChangeActedTx had anything to write, without
+// writing it twice. Split out so the audit append stays the one writer and the
+// outcome field stays a read.
+func actedOn(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, path, digest string, now time.Time) bool {
+	if digest == "" || owner == "" {
+		return false
+	}
+	var n int
+	if err := tx.QueryRowContext(ctx, `
+SELECT count(*) FROM tree_reports r JOIN tree_events e ON e.event_id = r.event_id
+ WHERE r.addressee_uuid = ? AND e.path_canonical = ? AND e.digest_pre = ? AND r.created_at >= ?`,
+		string(owner), path, digest, now.Add(-TreeActedWindow).UnixNano()).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
+
+// postPathResult is what one path's post half assigned, so RecordCallPost can
+// file the event without re-reading the row it just wrote.
+type postPathResult struct {
+	changed   bool
+	epoch     int64
+	seqPost   int64
+	digestPre string
+	holderPre domain.AgentUUID
+	declared  bool
 }
 
 // postOnePathTx writes one path's post half and reports whether it changed.
@@ -368,38 +480,51 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 // Folding them would have to invent a pre-state for the second, which is the
 // one thing an observation cannot do — nothing looked at that path before the
 // tool ran.
-func postOnePathTx(ctx context.Context, tx *sql.Tx, callID string, o HookPathState, recorded map[string]HookCallPath) (bool, error) {
+func postOnePathTx(ctx context.Context, tx *sql.Tx, callID string, o HookPathState, recorded map[string]HookCallPath) (postPathResult, error) {
 	prev, wasRecorded := recorded[o.Path]
 	// A path first seen at post entered the status set inside the call — that
 	// IS the state change. A recorded path changed iff its content or its stat
 	// moved; the digest is the authority and stat is the corroborator.
-	didChange := !wasRecorded || prev.DigestPre != o.Digest || prev.StatPre != o.Stat
-	epoch := o.Epoch
-	if wasRecorded {
-		epoch = prev.Epoch
+	res := postPathResult{
+		changed:   !wasRecorded || prev.DigestPre != o.Digest || prev.StatPre != o.Stat,
+		epoch:     o.Epoch,
+		digestPre: prev.DigestPre,
+		holderPre: o.Holder,
+		declared:  o.Declared,
 	}
-	seqPost := prev.SeqPre
-	if didChange {
-		var err error
-		if seqPost, err = nextPathSeq(ctx, tx, o.Path, epoch); err != nil {
-			return false, err
+	if wasRecorded {
+		res.epoch = prev.Epoch
+		res.holderPre = prev.Holder
+		res.declared = prev.Declared
+	}
+	curSeq, curDigest, _, err := pathSeqStateTx(ctx, tx, o.Path, res.epoch)
+	if err != nil {
+		return postPathResult{}, err
+	}
+	seqPre := prev.SeqPre
+	if !wasRecorded {
+		seqPre = curSeq
+	}
+	seqPost := seqPre
+	switch {
+	case !res.changed:
+	// A change already numbered by whoever observed it first: this call files
+	// its own event against THAT transition rather than inventing a second
+	// number for one physical change. See pathSeqStateTx.
+	case curSeq > seqPre && curDigest == o.Digest:
+		seqPost = curSeq
+	default:
+		if seqPost, err = nextPathSeq(ctx, tx, o.Path, res.epoch, o.Digest); err != nil {
+			return postPathResult{}, err
 		}
 	}
+	res.seqPost = seqPost
 	if wasRecorded {
 		_, err := tx.ExecContext(ctx, `
 UPDATE hook_call_paths SET seq_post = ?, digest_post = ?, stat_post = ?
  WHERE call_id = ? AND path_canonical = ?`,
 			seqPost, o.Digest, o.Stat, callID, o.Path)
-		return didChange, err
-	}
-	seqPre, err := pathSeqAt(ctx, tx, o.Path, epoch)
-	if err != nil {
-		return false, err
-	}
-	// seqPre is read AFTER this path's own advance, so back it out: the number
-	// the call started from is the one before its own transition.
-	if seqPre > 0 {
-		seqPre--
+		return res, err
 	}
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO hook_call_paths(call_id, path_canonical, locked, declared, pre_observed,
@@ -407,8 +532,8 @@ INSERT INTO hook_call_paths(call_id, path_canonical, locked, declared, pre_obser
                             digest_pre, digest_post, stat_pre, stat_post)
 VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, '', ?, '', ?)`,
 		callID, o.Path, boolInt(o.Locked), boolInt(o.Declared),
-		epoch, string(o.Holder), seqPre, seqPost, o.Digest, o.Stat)
-	return didChange, err
+		res.epoch, string(o.Holder), seqPre, seqPost, o.Digest, o.Stat)
+	return res, err
 }
 
 // recordedPathsTx loads a call's pre-recorded paths, keyed by path.
@@ -704,4 +829,29 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// ensurePathSeqDigest adds path_seq.digest to a DB created before the column
+// existed. Same guarded, idempotent shape as ensureHookCallsDeadAt, and for
+// the same reason: path_seq has never shipped in a release, so the only DBs
+// this can find were built from an earlier commit of this branch, where the
+// alternative is every store command dying on "no such column".
+func ensurePathSeqDigest(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('path_seq') WHERE name = 'digest'`,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return false, nil
+	}
+	if apply {
+		if _, err := db.ExecContext(ctx,
+			`ALTER TABLE path_seq ADD COLUMN digest TEXT NOT NULL DEFAULT ''`); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	return true, nil
 }

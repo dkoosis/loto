@@ -88,6 +88,7 @@ func statusWholeRepo(stdout, stderr io.Writer, rt *runtime, mine bool) int {
 		emitForeignRowFixBlock(stdout)
 	}
 	printStatusTerritoryTags(stdout, rt, mine, now)
+	printStatusReports(stdout, stderr, rt, mine)
 	// Read-only resurfacing: status reports what the store already knows, it
 	// does not run the sensor. Recording is a whole-tree git diff, and making
 	// every `loto status` pay for one would put a scan on the path of the
@@ -419,4 +420,30 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 	}
 	violationNoticeForPath(rt, w, t.Canonical)
 	return 0
+}
+
+// printStatusReports lists every drift and change report nobody has been
+// handed yet (enforcement-design.md §3, "always visible in loto status").
+//
+// ‡ This is the half of delivery that does not depend on anyone running
+// another tool call. A report addressed to a session that died before its next
+// pre-hook has no other door — §6's "A is dead ... the report waits in
+// `loto status` for a human or A's successor" is this section, literally.
+//
+// --mine narrows to reports addressed to this agent, matching the flag's
+// meaning in the sections above. Suppressed at zero for the same reason
+// territory tags are: a repo where nothing has drifted is the common case, and
+// a permanent empty line would tax every status call to report the absence.
+// Reading it never delivers anything — delivery is a write, and status is not.
+func printStatusReports(stdout, stderr io.Writer, rt *runtime, mine bool) {
+	who := domain.AgentUUID("")
+	if mine {
+		who = domain.AgentUUID(rt.Agent.UUID)
+	}
+	reports, err := rt.Store.UndeliveredReports(rt.Ctx, who)
+	if err != nil {
+		fmt.Fprintf(stderr, "⚠ reports unreadable: %v\n", err)
+		return
+	}
+	render.EmitReports(stdout, "undelivered", reports, true)
 }

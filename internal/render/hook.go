@@ -3,7 +3,10 @@ package render
 import (
 	"fmt"
 	"io"
+	"strings"
 	"time"
+
+	"loto/internal/store"
 )
 
 // EmitHookRefusal renders the one refusal `loto hook pre` can produce: I2
@@ -69,4 +72,77 @@ func dashIfEmpty(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// EmitReports renders drift and change reports — the same line whether it is
+// delivered at the addressee's next pre-hook or listed as undelivered by
+// `loto status`. One rendering, because the field order IS the report's
+// contract: §5 rows 4-7 name the observer's CALL and the spanning calls, and
+// never say "X wrote f". Two renderings is how that drifts.
+//
+// header is the section's first line. showAddressee is set by `loto status`,
+// which lists every owner's undelivered reports; a delivery names no
+// addressee, since the reader is the addressee.
+func EmitReports(w io.Writer, header string, reports []store.TreeReport, showAddressee bool) {
+	if len(reports) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "⚠ %s count=%d\n", header, len(reports))
+	cwd := getCwd()
+	for i := range reports {
+		fmt.Fprintln(w, "⚠ "+reportLine(&reports[i], cwd, showAddressee))
+	}
+	fmt.Fprintln(w, "```bash")
+	fmt.Fprintln(w, "loto events --kind tree_change_reported")
+	fmt.Fprintln(w, "```")
+}
+
+// reportLine is one report as a single keyed line. Keyed rather than columnar
+// because the fields present depend on the rule — a drift event has no
+// observing call, and only row 1 has a second holder to name.
+func reportLine(r *store.TreeReport, cwd string, showAddressee bool) string {
+	var b strings.Builder
+	if showAddressee {
+		fmt.Fprintf(&b, "to=%s ", holderTag(string(r.Addressee)))
+	}
+	fmt.Fprintf(&b, "path=%s rule=%s seq=%d",
+		relToCwd(r.Event.Path, cwd), r.Event.Rule, r.Event.Seq)
+	if r.Event.HolderPre != "" {
+		fmt.Fprintf(&b, " holder=%s", holderTag(string(r.Event.HolderPre)))
+	}
+	if r.Event.Rule == store.TreeRuleRow1 && r.Event.HolderNow != "" {
+		fmt.Fprintf(&b, " holder_now=%s", holderTag(string(r.Event.HolderNow)))
+	}
+	if r.Event.CallID != "" {
+		fmt.Fprintf(&b, " observer=%s call=%s", holderTag(string(r.Event.Observer)), r.Event.CallID)
+	}
+	fmt.Fprintf(&b, " spanners=%s", dashIfEmpty(spannerList(r.Event.Spanners)))
+	fmt.Fprintf(&b, " digest=%s->%s note=%q",
+		dashIfEmpty(shortDigest(r.Event.DigestPre)), dashIfEmpty(shortDigest(r.Event.DigestPost)),
+		r.Event.Note)
+	return b.String()
+}
+
+// spannerList names each spanning call as owner:call_id — the owner because
+// the report is about whose windows overlapped, the call id because one owner
+// can have several open at once.
+func spannerList(sp []store.TreeSpanner) string {
+	if len(sp) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(sp))
+	for i := range sp {
+		names = append(names, holderTag(string(sp[i].Owner))+":"+sp[i].CallID)
+	}
+	return strings.Join(names, ",")
+}
+
+// shortDigest trims a blob hash to the prefix a reader compares by eye. The
+// full value is in the store; a report is read, not diffed.
+func shortDigest(d string) string {
+	const n = 12
+	if len(d) > n {
+		return d[:n]
+	}
+	return d
 }

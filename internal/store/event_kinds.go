@@ -67,6 +67,19 @@ const (
 	// out rather than argued out. No Target — a call is not a path — so
 	// TargetCanonical is written empty, same as EventGateBypass.
 	EventHookTiming = "hook_timing"
+	// EventTreeChangeReported and EventTreeChangeActed are §10b row 2's pair:
+	// acted/reported is the ratio that decides whether the accepted baseline
+	// and `loto restore` ever get built. One reported row per REPORT — an
+	// event addressed to three owners is three chances to act — and one acted
+	// row when an addressee's own next call puts the reported digest back
+	// within TreeActedWindow. Reason carries the verdict-table rule; Detail
+	// carries (path, holder, observer, call_id, spanners, rule, seq) as JSON.
+	//
+	// ‡ acted is deliberately weaker than "restored": `loto restore` does not
+	// exist yet, and this counter must exist BEFORE it to answer whether it is
+	// worth building. §10b calls that generalization out by name.
+	EventTreeChangeReported = "tree_change_reported"
+	EventTreeChangeActed    = "tree_change_acted"
 )
 
 // allEventKinds is every event kind currently admitted by events.event_kind's
@@ -87,6 +100,8 @@ var allEventKinds = []string{
 	EventCandidateRejected,
 	EventStagedGateFired,
 	EventHookTiming,
+	EventTreeChangeReported,
+	EventTreeChangeActed,
 }
 
 // eventKindCheckSQL renders allEventKinds as the comma-joined, single-quoted
