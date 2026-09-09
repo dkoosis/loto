@@ -21,6 +21,23 @@ const (
 
 // --- guard reachability (loto-jomg) -----------------------------------------
 
+// dispatcherProbeScript is writeHookFixture's dispatcher body: a trimmed copy
+// of .githooks/lib/run-chain.sh's own LOTO_HOOK_PROBE=1 contract (loto-ea8y.11)
+// — computed toplevel, not baked in, so the same bytes work at any repo path —
+// plus the old plain "exit 0" for every other invocation. Real enough that
+// checkForwardedGuard's exec-based probe (cmd_doctor.go) exercises the actual
+// subprocess path rather than a mock, for TestDoctorGuard_ForeignHooksPathForwards.
+const dispatcherProbeScript = `#!/usr/bin/env sh
+hook=$(basename "$0")
+githooks_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 2
+if [ "${LOTO_HOOK_PROBE:-}" = "1" ]; then
+	repo_top=$(git -C "$githooks_dir" rev-parse --show-toplevel 2>/dev/null) || exit 2
+	printf 'loto-hook-probe %s %s\n' "$hook" "$repo_top"
+	exit 0
+fi
+exit 0
+`
+
 // writeHookFixture lays out a minimal but structurally real .githooks tree:
 // an executable dispatcher plus an (always-present) hooks.d/<hook> chain dir
 // for every guard in guardSpecs, and — only for the hooks named in withLoto —
@@ -34,7 +51,8 @@ func writeHookFixture(t *testing.T, repo string, withLoto ...string) {
 	for _, h := range withLoto {
 		hasLoto[h] = true
 	}
-	script := []byte("#!/usr/bin/env sh\nexit 0\n")
+	script := []byte(dispatcherProbeScript)
+	entryScript := []byte("#!/usr/bin/env sh\nexit 0\n")
 	for _, spec := range guardSpecs {
 		dispatcher := filepath.Join(repo, ".githooks", spec.hook)
 		if err := os.MkdirAll(filepath.Dir(dispatcher), 0o755); err != nil {
@@ -49,7 +67,7 @@ func writeHookFixture(t *testing.T, repo string, withLoto ...string) {
 		}
 		if hasLoto[spec.hook] {
 			entry := filepath.Join(chainDir, "10-loto-"+spec.hook)
-			if err := os.WriteFile(entry, script, 0o755); err != nil {
+			if err := os.WriteFile(entry, entryScript, 0o755); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -64,10 +82,50 @@ func setHooksPath(t *testing.T, repo, value string) {
 	submitGitT(t, repo, "config", "--local", "core.hooksPath", value)
 }
 
-// TestDoctorGuard_ForeignHooksPath is AC1: a core.hooksPath pointing outside
-// the repo (dk's own clone, 2026-09-07: /Users/dkoosis/.config/git/hooks)
-// makes both guards unreachable — nothing routes to .githooks at all — and
-// `status` reports guard=inert.
+// writeForeignForwarder lays out, for every hook in guardSpecs, an executable
+// at foreignDir/<hook> that forwards straight to repo/.githooks/<hook> — a
+// minimal stand-in for the global sdlc doorman's forward-to-repo-hook.sh
+// (loto-ea8y.10 Givens: exec into the repo hook, fail open when it is
+// missing). Good enough to prove checkForwardedGuard's probe travels through
+// an indirection, without pulling in sdlc's own script.
+func writeForeignForwarder(t *testing.T, foreignDir, repo string) {
+	t.Helper()
+	if err := os.MkdirAll(foreignDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, spec := range guardSpecs {
+		target := filepath.Join(repo, ".githooks", spec.hook)
+		body := "#!/usr/bin/env sh\nexec " + shellQuote(target) + " \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(foreignDir, spec.hook), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// writeForeignNonForwarder lays out, for every hook in guardSpecs, an
+// executable at foreignDir/<hook> that ignores LOTO_HOOK_PROBE entirely —
+// some other tool's own hook script occupying the slot, never loto's.
+func writeForeignNonForwarder(t *testing.T, foreignDir string) {
+	t.Helper()
+	if err := os.MkdirAll(foreignDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("#!/usr/bin/env sh\nexit 0\n")
+	for _, spec := range guardSpecs {
+		if err := os.WriteFile(filepath.Join(foreignDir, spec.hook), body, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestDoctorGuard_ForeignHooksPath is AC1, updated for loto-ea8y.11: a
+// core.hooksPath pointing outside the repo (dk's own clone, 2026-09-07:
+// /Users/dkoosis/.config/git/hooks) with NOTHING at <dir>/<hook> — no doorman,
+// no foreign tool, nothing to probe — makes every guard unreachable, now
+// reason=absent rather than the old bare hooksPath-foreign (a probe with no
+// executable target to run is "no effective hook exists", the Rules' own
+// wording, not "ran it and got no answer"). `status` still reports
+// guard=inert either way.
 func TestDoctorGuard_ForeignHooksPath(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)
@@ -76,18 +134,18 @@ func TestDoctorGuard_ForeignHooksPath(t *testing.T) {
 	setHooksPath(t, repo, foreign)
 
 	out := runOK(t, tcCmdDoctor)
-	if !strings.Contains(out, "✗ guard=pre-commit-gate unreachable reason=hooksPath-foreign detail="+foreign) {
-		t.Errorf("expected foreign-hooksPath row naming the resolved path: %q", out)
+	if !strings.Contains(out, "✗ guard=pre-commit-gate unreachable reason=absent detail="+filepath.Join(foreign, "pre-commit")) {
+		t.Errorf("expected absent row naming the resolved hook path: %q", out)
 	}
-	if !strings.Contains(out, "✗ guard=tree-move-guard unreachable reason=hooksPath-foreign detail="+foreign) {
-		t.Errorf("expected foreign-hooksPath row for the other guard too: %q", out)
+	if !strings.Contains(out, "✗ guard=tree-move-guard unreachable reason=absent detail="+filepath.Join(foreign, "post-checkout")) {
+		t.Errorf("expected absent row for the other guard too: %q", out)
 	}
 	// Rule 1 (enforcement-design.md §10.3): global core.hooksPath not owned by
 	// loto's dispatcher. This row IS rule 1 — no separate leg reimplements it
 	// (bead Givens: "doctor already reports hooksPath-foreign; extend, do not
 	// fork").
-	if !strings.Contains(out, "✗ guard=ref-transaction-guard unreachable reason=hooksPath-foreign detail="+foreign) {
-		t.Errorf("expected foreign-hooksPath row for ref-transaction-guard too: %q", out)
+	if !strings.Contains(out, "✗ guard=ref-transaction-guard unreachable reason=absent detail="+filepath.Join(foreign, "reference-transaction")) {
+		t.Errorf("expected absent row for ref-transaction-guard too: %q", out)
 	}
 	if !strings.Contains(out, "```bash\nmake hooks\n```") {
 		t.Errorf("expected a bash fix block under the ✗ rows: %q", out)
@@ -96,6 +154,100 @@ func TestDoctorGuard_ForeignHooksPath(t *testing.T) {
 	status := runOK(t, tcCmdStatus)
 	if !strings.Contains(status, "guard:   inert\n") {
 		t.Errorf("expected guard: inert in status: %q", status)
+	}
+}
+
+// TestDoctorGuard_ForeignHooksPathNoAnswer is loto-ea8y.11's other foreign
+// case: <dir>/<hook> DOES exist and is executable — some tool occupies the
+// slot — but it does not answer LOTO_HOOK_PROBE=1 the way run-chain.sh's
+// dispatcher would (writeForeignNonForwarder: a plain "exit 0", nothing
+// printed). reason stays hooksPath-foreign (the Rules: "the old equality
+// check remains as the reason string when the probe fails"), with probe=
+// no-answer naming why.
+func TestDoctorGuard_ForeignHooksPathNoAnswer(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeHookFixture(t, repo, "pre-commit", "post-checkout", "reference-transaction")
+	foreign := filepath.Join(t.TempDir(), "global-hooks")
+	writeForeignNonForwarder(t, foreign)
+	setHooksPath(t, repo, foreign)
+
+	out := runOK(t, tcCmdDoctor)
+	for _, label := range []string{"pre-commit-gate", "tree-move-guard", "ref-transaction-guard"} {
+		want := "✗ guard=" + label + " unreachable reason=hooksPath-foreign probe=no-answer detail=" + foreign
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in: %q", want, out)
+		}
+	}
+
+	status := runOK(t, tcCmdStatus)
+	if !strings.Contains(status, "guard:   inert\n") {
+		t.Errorf("expected guard: inert in status: %q", status)
+	}
+}
+
+// TestDoctorGuard_ForeignHooksPathForwards is AC1's positive case and the
+// whole point of loto-ea8y.11: <dir>/<hook> forwards to the repo's own
+// .githooks/<hook> (writeForeignForwarder — the doorman shape option A
+// commits to) and every guard's dispatcher+entry is otherwise intact
+// (writeHookFixture withLoto). The probe travels through the indirection and
+// every row reads ✓, exactly as `loto doctor` must under the real global
+// sdlc doorman (this bead's verification comment pastes the live equivalent).
+func TestDoctorGuard_ForeignHooksPathForwards(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeHookFixture(t, repo, "pre-commit", "post-checkout", "reference-transaction")
+	foreign := filepath.Join(t.TempDir(), "global-hooks")
+	writeForeignForwarder(t, foreign, repo)
+	setHooksPath(t, repo, foreign)
+
+	out := runOK(t, tcCmdDoctor)
+	if !strings.Contains(out, "✓ guard=pre-commit-gate reachable entry=.githooks/hooks.d/pre-commit/10-loto-pre-commit") {
+		t.Errorf("expected pre-commit-gate reachable row through the forwarder: %q", out)
+	}
+	if !strings.Contains(out, "✓ guard=tree-move-guard reachable entry=.githooks/hooks.d/post-checkout/10-loto-post-checkout") {
+		t.Errorf("expected tree-move-guard reachable row through the forwarder: %q", out)
+	}
+	if !strings.Contains(out, "✓ guard=ref-transaction-guard reachable entry=.githooks/hooks.d/reference-transaction/10-loto-reference-transaction") {
+		t.Errorf("expected ref-transaction-guard reachable row through the forwarder: %q", out)
+	}
+	if strings.Contains(out, "✗ guard=") {
+		t.Errorf("no guard row should fail once the forwarder reaches an intact repo: %q", out)
+	}
+
+	status := runOK(t, tcCmdStatus)
+	if !strings.Contains(status, "guard:   ok\n") {
+		t.Errorf("expected guard: ok in status: %q", status)
+	}
+}
+
+// TestDoctorGuard_ForeignHooksPathForwardsMissingEntry proves the probe
+// succeeding does not shortcut the per-guard entry check: the forwarder
+// reaches a repo whose post-checkout hooks.d entry is missing, and that
+// guard alone still reads unreachable — checkOneGuard runs identically after
+// a successful probe as it does when hooksPath points straight at .githooks.
+func TestDoctorGuard_ForeignHooksPathForwardsMissingEntry(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeHookFixture(t, repo, "pre-commit", "reference-transaction") // post-checkout gets no loto entry
+	foreign := filepath.Join(t.TempDir(), "global-hooks")
+	writeForeignForwarder(t, foreign, repo)
+	setHooksPath(t, repo, foreign)
+
+	out := runOK(t, tcCmdDoctor)
+	if !strings.Contains(out, "✓ guard=pre-commit-gate reachable") {
+		t.Errorf("pre-commit row must stay ✓ through the forwarder: %q", out)
+	}
+	if !strings.Contains(out, "✓ guard=ref-transaction-guard reachable") {
+		t.Errorf("ref-transaction-guard row must stay ✓ through the forwarder: %q", out)
+	}
+	if !strings.Contains(out, "✗ guard=tree-move-guard unreachable reason=missing-entry detail=.githooks/hooks.d/post-checkout") {
+		t.Errorf("expected a missing-entry row for tree-move-guard even though the forwarder answered: %q", out)
+	}
+
+	status := runOK(t, tcCmdStatus)
+	if !strings.Contains(status, "guard:   inert\n") {
+		t.Errorf("one unreachable guard must still read guard=inert: %q", status)
 	}
 }
 
@@ -126,11 +278,11 @@ func TestDoctorGuard_InheritedGlobalHooksPath(t *testing.T) {
 	}
 
 	out := runOK(t, tcCmdDoctor)
-	if !strings.Contains(out, "✗ guard=pre-commit-gate unreachable reason=hooksPath-foreign detail="+foreign) {
-		t.Errorf("expected foreign-hooksPath row naming the resolved global path: %q", out)
+	if !strings.Contains(out, "✗ guard=pre-commit-gate unreachable reason=absent detail="+filepath.Join(foreign, "pre-commit")) {
+		t.Errorf("expected absent row naming the resolved global path: %q", out)
 	}
-	if !strings.Contains(out, "✗ guard=tree-move-guard unreachable reason=hooksPath-foreign detail="+foreign) {
-		t.Errorf("expected foreign-hooksPath row for the other guard too: %q", out)
+	if !strings.Contains(out, "✗ guard=tree-move-guard unreachable reason=absent detail="+filepath.Join(foreign, "post-checkout")) {
+		t.Errorf("expected absent row for the other guard too: %q", out)
 	}
 	if !strings.Contains(out, "```bash\nmake hooks\n```") {
 		t.Errorf("expected a bash fix block under the ✗ rows: %q", out)

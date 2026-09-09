@@ -1,0 +1,57 @@
+# loto-ea8y.11, spec test 13's global-dir variant: I1's refusal reached
+# through a GLOBAL core.hooksPath forwarder, not a local override pointing
+# straight at .githooks (guard_reftransaction.txtar's own shape). The stand-in
+# at $GLOBALHOOKS mimics sdlc's real forward-to-repo-hook.sh contract (loto-
+# ea8y.10 Givens): capture stdin once, replay it to the repo's own tracked
+# reference-transaction dispatcher, run it as an ordinary child (not exec),
+# exit with its status. core.hooksPath is set --global only here — local
+# stays unset, so git falls through to it exactly as it does on dk's real
+# machine under option A.
+#
+# Reduced to the one case that proves the point (two live sessions -> a
+# branch switch is refused): the full five-operation sweep is
+# guard_reftransaction.txtar's job, already exercised through the direct
+# path — this test is about the INDIRECTION reaching the same guard, not
+# re-proving I1 itself.
+
+env GLOBALHOOKS=$WORK/globalhooks
+mkdir $GLOBALHOOKS
+cp forwarder.sh $GLOBALHOOKS/reference-transaction
+chmod 0755 $GLOBALHOOKS/reference-transaction
+exec git config --global core.hooksPath $GLOBALHOOKS
+
+# No local core.hooksPath — the global forwarder is the only route in.
+! exec git config --local --get core.hooksPath
+
+exec git branch -m base
+touch a.txt
+exec git add a.txt
+exec git commit -m one
+exec git branch other
+
+env LOTO_AGENT_ID=$ALICE
+env CLAUDE_CODE_SESSION_ID=sess-alice
+loto whoami
+
+env LOTO_AGENT_ID=$BOB
+env CLAUDE_CODE_SESSION_ID=sess-bob
+loto whoami
+
+! exec git checkout other
+stderr 'ref-refused count=1 live=2'
+stderr 'shape=head-symref'
+stderr 'ref=HEAD'
+exec git rev-parse --abbrev-ref HEAD
+stdout '^base$'
+
+-- forwarder.sh --
+#!/usr/bin/env sh
+# Minimal stand-in for sdlc's lib/forward-to-repo-hook.sh (loto-ea8y.10):
+# capture stdin once, replay it to the repo's real tracked dispatcher, run as
+# an ordinary child so the EXIT trap that cleans up the temp file still fires,
+# exit with the child's status.
+stdin_file=$(mktemp "${TMPDIR:-/tmp}/loto-test-doorman-stdin.XXXXXX") || exit 2
+trap 'rm -f "$stdin_file"' EXIT HUP INT TERM
+cat >"$stdin_file"
+"$REALHOOKS/reference-transaction" "$@" <"$stdin_file"
+exit $?

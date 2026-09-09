@@ -576,19 +576,31 @@ var guardSpecs = []guardSpec{
 	{hook: "reference-transaction", label: "ref-transaction-guard"},
 }
 
-// guardStatus is one guard's reachability verdict. reason and detail are only
-// meaningful when !OK.
+// guardStatus is one guard's reachability verdict. reason, detail and probe
+// are only meaningful when !OK.
 type guardStatus struct {
 	spec   guardSpec
 	ok     bool
 	reason string // machine-stable token, e.g. "hooksPath-foreign", "missing-entry"
 	detail string // the value or path that names the specific problem
+	probe  string // set only for reason=hooksPath-foreign: "no-answer"
 }
 
 // checkGuardReachability evaluates every guard in guardSpecs against the one
 // definition above. The rows are independent by construction: a hooksPath
 // problem fails every guard (nothing can fire without it), but a per-guard
 // dispatcher/entry problem fails only that guard.
+//
+// core.hooksPath resolving straight to the repo's own .githooks (hooksPathOK)
+// keeps the file-existence check below — nothing forwards, so there is
+// nothing to probe. A foreign value (loto-ea8y.11: the global sdlc doorman,
+// option A) no longer reads as unreachable on sight — it is proven reachable
+// by running the EFFECTIVE hook at that path with LOTO_HOOK_PROBE=1 and
+// reading whether it answers as .githooks/lib/run-chain.sh's own dispatcher
+// would (a forwarder relays the probe through, byte-identical). Only once
+// that proof holds does the dispatcher/entry check below run, so a forwarder
+// pointed at a repo whose hooks.d entry is missing still reads unreachable
+// for that guard specifically, unchanged from before this bead.
 func checkGuardReachability(ctx context.Context, repoTop string) []guardStatus {
 	out := make([]guardStatus, len(guardSpecs))
 	if repoTop == "" {
@@ -602,13 +614,64 @@ func checkGuardReachability(ctx context.Context, repoTop string) []guardStatus {
 		switch {
 		case err != nil:
 			out[i] = guardStatus{spec: spec, reason: "hooksPath-unreadable", detail: err.Error()}
-		case !hooksPathOK:
-			out[i] = guardStatus{spec: spec, reason: "hooksPath-foreign", detail: resolved}
-		default:
+		case hooksPathOK:
 			out[i] = checkOneGuard(repoTop, spec)
+		default:
+			out[i] = checkForwardedGuard(ctx, resolved, repoTop, spec)
 		}
 	}
 	return out
+}
+
+// loto-ea8y.11: the exact line every .githooks/<hook> dispatcher (via
+// .githooks/lib/run-chain.sh) prints and exits 0 on LOTO_HOOK_PROBE=1,
+// before running any chain entry.
+const hookProbeEnvVar = "LOTO_HOOK_PROBE"
+
+// checkForwardedGuard is spec.hook's reachability when core.hooksPath does
+// NOT resolve to the repo's own .githooks — the doorman shape option A
+// commits to (a global hooks dir that forwards, never a per-repo override).
+// A missing or non-executable file at the effective path is reason=absent:
+// there is nothing there to route through. An executable file that does not
+// answer the probe correctly (a foreign tool's own hook, or the doorman's own
+// check refusing before it ever forwards — Givens: read the same as any
+// other non-answer, not a crash) is reason=hooksPath-foreign probe=no-answer,
+// preserving the old reason token as the Rules ask. A file that DOES answer
+// proves the chain reaches this repo's real dispatcher, so the guard's own
+// dispatcher/entry state is what checkOneGuard already checks for the direct
+// case — called here too, unchanged.
+func checkForwardedGuard(ctx context.Context, resolved, repoTop string, spec guardSpec) guardStatus {
+	target := filepath.Join(resolved, spec.hook)
+	fi, statErr := os.Stat(target)
+	if statErr != nil || fi.IsDir() || fi.Mode()&0o111 == 0 {
+		return guardStatus{spec: spec, reason: "absent", detail: target}
+	}
+	if probeHookAnswers(ctx, target, spec.hook, repoTop) {
+		return checkOneGuard(repoTop, spec)
+	}
+	return guardStatus{spec: spec, reason: "hooksPath-foreign", detail: resolved, probe: "no-answer"}
+}
+
+// probeHookAnswers runs target (the effective hook file for one guard,
+// resolved from core.hooksPath) with LOTO_HOOK_PROBE=1 and empty stdin, and
+// reports whether it printed exactly "loto-hook-probe <hook> <repoTop>" and
+// exited 0 — the contract .githooks/lib/run-chain.sh answers before touching
+// its chain. Bounded by gitTimeout so a wedged foreign hook cannot hang
+// doctor; any failure to start, a non-zero exit, or output that does not
+// match exactly all read as "did not answer" — one outcome, not a taxonomy of
+// why (Givens: a refusal upstream of the forward is not doctor's to explain).
+func probeHookAnswers(ctx context.Context, target, hook, repoTop string) bool {
+	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, target)
+	cmd.Stdin = bytes.NewReader(nil)
+	cmd.Env = append(os.Environ(), hookProbeEnvVar+"=1")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	want := "loto-hook-probe " + hook + " " + repoTop
+	return strings.TrimRight(string(out), "\n") == want
 }
 
 // resolveGitHooksPath resolves core.hooksPath (or git's unset-default,
@@ -735,6 +798,10 @@ func renderGuardReachability(stdout io.Writer, statuses []guardStatus) bool {
 			continue
 		}
 		anyFail = true
+		if s.probe != "" {
+			fmt.Fprintf(stdout, "✗ guard=%s unreachable reason=%s probe=%s detail=%s\n", s.spec.label, s.reason, s.probe, s.detail)
+			continue
+		}
 		fmt.Fprintf(stdout, "✗ guard=%s unreachable reason=%s detail=%s\n", s.spec.label, s.reason, s.detail)
 	}
 	if anyFail {
