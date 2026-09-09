@@ -315,6 +315,18 @@ missed; `loto doctor --repair` mops up the rest.
    SQL state must persist across two CC hook events that flock
    (process-bound) cannot bridge. TTL governs record-tier holds; flock
    governs (future) foreground holds.
+   **Working-tree bytes, decided 2026-09-09 (dk; bead loto-bq07):** no
+   loto code path writes to a coordinated file on the authority of rows.
+   The enforcement layer (`~/Projects/kg/Project/loto/specs/enforcement-design.md`)
+   *reports and retains*: hooks observe a locked file's before/after state,
+   file an event naming the calls in flight, and keep the holder's accepted
+   baseline; the one verb that writes a file, `loto restore <f>`, runs only
+   on the holder's explicit say-so and only for a lock the caller holds. The
+   rows describe; the holder decides. Automatic restore is not ruled out
+   forever - it is earned only if the restore-per-report count says holders
+   restore nearly every time, and that count exists before the verb does.
+   Bound of a wrong manual restore: one file's uncommitted delta, every
+   writer named in the report (invariant 8 holds: loud, never silent).
 2. **Single host.** Canonical paths on this machine. ✗ NFS, ✗ remote.
 3. **No daemon.** Every operation is a fresh process. State lives on disk.
 4. **Claude-optimized KV output.** Deterministic order, fixed glyphs per
