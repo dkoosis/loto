@@ -334,6 +334,17 @@ VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
 			return false, err
 		}
 	}
+
+	// loto-wkul: refresh the caller's own locks that have drifted under half
+	// TTL, in this same transaction — the automatic heartbeat DESIGN.md:223
+	// anticipated, wired to the one caller that costs the agent nothing.
+	// RecordCallPre already runs on every write-capable tool call and already
+	// holds this transaction, so folding the refresh in here is what keeps it
+	// to one UPDATE and no second round trip.
+	if err := refreshCallerLocksTx(ctx, tx, string(call.OwnerUUID), call.TPre); err != nil {
+		return false, err
+	}
+
 	if err := commitTxFn(tx); err != nil {
 		return false, err
 	}
