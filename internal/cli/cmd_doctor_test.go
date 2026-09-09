@@ -199,6 +199,39 @@ func TestDoctorGuard_PostCheckoutEntryRemoved(t *testing.T) {
 	}
 }
 
+// TestDoctorGuard_ReferenceTransactionEntryRemoved is rule 2's own isolation
+// case (enforcement-design.md §10.3, loto-ea8y.7 review): hooksPath correctly
+// owned by loto and both other guards' loto entries present, but
+// reference-transaction's own entry is missing. Exactly one ✗ row names it —
+// inducing rule 2 alone must not also flip pre-commit-gate or tree-move-guard,
+// which is the whole point of extending guardSpecs rather than forking a
+// second mechanism for I1's guard.
+func TestDoctorGuard_ReferenceTransactionEntryRemoved(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeHookFixture(t, repo, "pre-commit", "post-checkout") // reference-transaction gets no loto entry
+	setHooksPath(t, repo, ".githooks")
+
+	out := runOK(t, tcCmdDoctor)
+	if !strings.Contains(out, "✓ guard=pre-commit-gate reachable") {
+		t.Errorf("pre-commit row must stay ✓ when only reference-transaction's entry is missing: %q", out)
+	}
+	if !strings.Contains(out, "✓ guard=tree-move-guard reachable") {
+		t.Errorf("tree-move-guard row must stay ✓ when only reference-transaction's entry is missing: %q", out)
+	}
+	if !strings.Contains(out, "✗ guard=ref-transaction-guard unreachable reason=missing-entry detail=.githooks/hooks.d/reference-transaction") {
+		t.Errorf("expected exactly one missing-entry row naming ref-transaction-guard: %q", out)
+	}
+	if strings.Count(out, "✗ guard=") != 1 {
+		t.Errorf("exactly one guard row must fail when only reference-transaction's entry is missing: %q", out)
+	}
+
+	status := runOK(t, tcCmdStatus)
+	if !strings.Contains(status, "guard:   inert\n") {
+		t.Errorf("one unreachable guard must still read guard=inert: %q", status)
+	}
+}
+
 // TestDoctorGuard_ByteIdenticalAcrossRuns is the golden-test requirement
 // (design.md, bead AC4): unchanged state must produce byte-identical guard
 // rows across repeated reads. No wall-clock field is involved, so no

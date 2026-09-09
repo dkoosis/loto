@@ -104,16 +104,28 @@ var treeHookEvents = []treeHookEvent{
 	{name: eventPostToolUseFailure, verb: hookSubPost},
 }
 
-// treeHookMatcher is the exact matcher decided for the tree-hook shim: every
+// TreeHookMatcher is the exact matcher decided for the tree-hook shim: every
 // tool except the three the harness cannot use to write a file (§4's Rules,
 // "their matcher excludes anything beyond Read|Grep|Glob"). Decided
 // 2026-09-09, loto-ea8y.7, no prior art: this repo's own settings already run
 // hook matchers as regex ("Edit|Write" in .claude/settings.json), and a
 // negative lookahead reads as "not exactly Read, Grep or Glob" without an
 // exhaustive positive tool list a new harness tool would silently fall
-// outside of. The sdlc bead that registers the shim (loto-ea8y.9) is expected
-// to carry this exact string.
-const treeHookMatcher = `^(?!Read$|Grep$|Glob$).*$`
+// outside of. Exported so loto-ea8y.9 (the sdlc bead that registers the
+// shim) imports this constant rather than retyping the string.
+//
+// Researched at PR #344 review (dk asked whether a documented non-lookahead
+// negation form exists): Claude Code's matcher is evaluated as a JavaScript
+// regex (RegExp.prototype.test, code.claude.com/docs/en/hooks), which DOES
+// support negative lookahead — unlike Go's RE2, which is why this leg
+// compares the configured string verbatim rather than evaluating it as a
+// pattern. The docs describe only positive forms (exact-name alternation,
+// plain regex) and document no exclusion/negation operator, so there is no
+// alternative form to also accept — an exhaustive positive alternation of
+// every OTHER tool name is the only documented substitute, and it silently
+// misses any tool added after the string is written. Equality against this
+// one string stands.
+const TreeHookMatcher = `^(?!Read$|Grep$|Glob$).*$`
 
 type settingsFile struct {
 	Hooks map[string][]settingsMatcherGroup `json:"hooks"`
@@ -149,7 +161,7 @@ func settingsFilesToRead(repoTop string) []string {
 }
 
 // treeHookPresent reports whether any settings file registers event with the
-// exact treeHookMatcher and a command invoking `loto hook <verb>`. A missing
+// exact TreeHookMatcher and a command invoking `loto hook <verb>`. A missing
 // file, unreadable JSON, or an absent hooks key all read as "not present" —
 // diagnostic input, not an error this leg can act on.
 func treeHookPresent(files []string, event treeHookEvent) bool {
@@ -182,10 +194,10 @@ func readSettingsFile(path string) (settingsFile, bool) {
 }
 
 // groupsInvokeCommand reports whether any matcher group in groups carries the
-// exact treeHookMatcher and a command containing want.
+// exact TreeHookMatcher and a command containing want.
 func groupsInvokeCommand(groups []settingsMatcherGroup, want string) bool {
 	for _, group := range groups {
-		if group.Matcher != treeHookMatcher {
+		if group.Matcher != TreeHookMatcher {
 			continue
 		}
 		for _, cmd := range group.Hooks {
@@ -214,12 +226,37 @@ func checkTreeHookSettings(repoTop string) enforcementFinding {
 	return enforcementFinding{
 		label:  "tree_hooks",
 		detail: "missing=" + strings.Join(missing, ","),
-		fix: []string{
-			"# register in ~/.claude/settings.json (or the repo's .claude/settings.json):",
-			`#   PreToolUse                      -> matcher "` + treeHookMatcher + `", command "loto hook pre"`,
-			`#   PostToolUse, PostToolUseFailure  -> same matcher, command "loto hook post"`,
-		},
+		fix:    treeHookSettingsHunk(),
 	}
+}
+
+// treeHookSettingsHunk renders the exact "hooks" stanza this leg wants
+// registered, so the ✗ row hands the registering session (loto-ea8y.9)
+// something to copy verbatim rather than reconstruct from a prose summary
+// (PR #344 review). Built from treeHookEvents and TreeHookMatcher directly —
+// one source, so this hunk cannot drift from what treeHookPresent actually
+// checks. encoding/json sorts map keys, so the three events print in the
+// same order every run (design.md: byte-identical output).
+func treeHookSettingsHunk() []string {
+	groups := make(map[string][]settingsMatcherGroup, len(treeHookEvents))
+	for _, ev := range treeHookEvents {
+		groups[ev.name] = []settingsMatcherGroup{{
+			Matcher: TreeHookMatcher,
+			Hooks:   []settingsCommand{{Type: "command", Command: "loto hook " + ev.verb}},
+		}}
+	}
+	b, err := json.MarshalIndent(settingsFile{Hooks: groups}, "", "  ")
+	if err != nil {
+		// Unreachable for this fixed, always-marshalable shape; naming the
+		// matcher plainly beats a panic over a diagnostic leg.
+		return []string{"# matcher: " + TreeHookMatcher}
+	}
+	out := make([]string, 0, bytes.Count(b, []byte("\n"))+2)
+	out = append(out, `# merge this "hooks" stanza into ~/.claude/settings.json (or the repo's .claude/settings.json):`)
+	for line := range strings.SplitSeq(string(b), "\n") {
+		out = append(out, "# "+line)
+	}
+	return out
 }
 
 // --- rule 4: installed hook target's hash ----------------------------------
@@ -393,6 +430,15 @@ func resolveGlobalHooksPath(ctx context.Context, repoTop string) (resolved strin
 	}
 	if raw == "" {
 		return "", false, nil
+	}
+	// A relative core.hooksPath is resolved against the repo top the same way
+	// resolveGitHooksPath does for the effective value — git itself resolves
+	// a relative hooksPath (local or global) against the working repo, not
+	// against $HOME, so a global value given as a bare or relative path
+	// (rare, but valid config) must not read as absent here (Copilot review,
+	// PR #344).
+	if !filepath.IsAbs(raw) {
+		return filepath.Clean(filepath.Join(repoTop, raw)), true, nil
 	}
 	return filepath.Clean(raw), true, nil
 }

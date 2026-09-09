@@ -33,15 +33,15 @@ func writeTreeHookSettings(t *testing.T) {
 	const tcSettingsCmdType = "command"
 	sf := settingsFile{Hooks: map[string][]settingsMatcherGroup{
 		"PreToolUse": {{
-			Matcher: treeHookMatcher,
+			Matcher: TreeHookMatcher,
 			Hooks:   []settingsCommand{{Type: tcSettingsCmdType, Command: "loto hook pre"}},
 		}},
 		"PostToolUse": {{
-			Matcher: treeHookMatcher,
+			Matcher: TreeHookMatcher,
 			Hooks:   []settingsCommand{{Type: tcSettingsCmdType, Command: "loto hook post"}},
 		}},
 		eventPostToolUseFailure: {{
-			Matcher: treeHookMatcher,
+			Matcher: TreeHookMatcher,
 			Hooks:   []settingsCommand{{Type: tcSettingsCmdType, Command: "loto hook post"}},
 		}},
 	}}
@@ -109,6 +109,19 @@ func TestDoctorEnforcement_TreeHookSettingsMissing(t *testing.T) {
 	}
 	if !strings.Contains(out, "```bash") {
 		t.Errorf("expected a bash fix block under the ✗ row: %q", out)
+	}
+	// PR #344 review: the fix block must carry a copy-pasteable settings.json
+	// hunk, not just a prose summary — every event, the exact matcher, and
+	// the exact command each one invokes.
+	for _, want := range []string{
+		`"PreToolUse"`, `"PostToolUse"`, `"` + eventPostToolUseFailure + `"`,
+		`"matcher": "` + TreeHookMatcher + `"`,
+		`"command": "loto hook pre"`,
+		`"command": "loto hook post"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected the fix block to carry %q verbatim: %q", want, out)
+		}
 	}
 }
 
@@ -302,6 +315,40 @@ func TestDoctorEnforcement_SharedGuardReachable(t *testing.T) {
 	out := runOK(t, tcCmdDoctor)
 	if !strings.Contains(out, "✓ shared_guard reachable entry="+filepath.Join(dir, "pre-commit")) {
 		t.Errorf("expected the shared_guard ✓ row: %q", out)
+	}
+}
+
+// TestDoctorEnforcement_SharedGuardRelativeGlobalPath is PR #344 review
+// (Copilot): a relative GLOBAL core.hooksPath must resolve against the repo
+// top the same way resolveGitHooksPath already does for the effective value
+// — not read as absent. A relative core.hooksPath is unusual but valid git
+// config, and the prior implementation false-reasoned "" and mis-scored it.
+func TestDoctorEnforcement_SharedGuardRelativeGlobalPath(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+	rel := "relhooks"
+	// git rev-parse --show-toplevel resolves symlinks (macOS: /var is itself a
+	// symlink to /private/var), so the repo top the running code resolves
+	// this relative path against is EvalSymlinks(repo), not repo verbatim —
+	// same class of mismatch the nested-worktree test guards against above.
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.Join(resolvedRepo, rel)
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "#!/bin/sh\n# " + sharedGuardMarker + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(abs, "pre-commit"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	submitGitT(t, t.TempDir(), "config", "--global", "core.hooksPath", rel)
+
+	out := runOK(t, tcCmdDoctor)
+	if !strings.Contains(out, "✓ shared_guard reachable entry="+filepath.Join(abs, "pre-commit")) {
+		t.Errorf("expected a relative global core.hooksPath to resolve against the repo top: %q", out)
 	}
 }
 
