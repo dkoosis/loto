@@ -61,7 +61,7 @@ commands:
   violations  List, scan for, or resolve unauthorized writes to unleased paths
   ack      Dismiss a tag or territory tag by ID
   whoami   Print this session's owner id and record its liveness witnesses
-  hook     Git hook bodies; ref = reference-transaction guard (wired by make hooks)
+  events   Print the store's audit rows; --kind to filter, --limit to cap
   version  Print loto version
 
 lane choreography (engine verbs; used by the /team fleet harness):
@@ -71,5 +71,9 @@ lane choreography (engine verbs; used by the /team fleet harness):
   submit   Package held-lock edits into a git-gate candidate: commit, capture, admit
   gate     stats — admission verdicts per rejection class over a window
   promote  Drain accepted candidates onto refs/loto/integration; verify runs unlocked
-  pr       Bridge promoted integration commits to GitHub: one branch and one PR per bead`)
+  pr       Bridge promoted integration commits to GitHub: one branch and one PR per bead
+
+hooks (fed on stdin; wired by settings and make hooks, not run by hand):
+  hook     pre|post — record each locked and dirty path's state around one tool call
+           ref — refuse a protected ref transition while two sessions are live`)
 }

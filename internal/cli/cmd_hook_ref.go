@@ -17,9 +17,11 @@ import (
 	"loto/internal/store"
 )
 
-func init() { register("hook", cmdHook) } //nolint:gochecknoinits // command registry pattern
-
 // ── `loto hook ref` — I1, the tree-move refusal ───────────────────────────
+//
+// One `hook` verb, three bodies: `pre` and `post` are the tree-observation
+// halves in cmd_hook.go, and `ref` is this one. The router and the registry
+// entry live there, beside the usage text every body shares.
 //
 // git's `reference-transaction` hook is the one chokepoint every H1 member
 // crosses: a branch switch, a stash, a branch deletion and a worktree branch
@@ -65,56 +67,15 @@ const refOverrideWindow = 10 * time.Minute
 // documents itself as a takeover of the whole checkout.
 const refCheckoutWidePrefix = "."
 
-// hookUsageHead is the teaching surface for the hook router.
-const hookUsageHead = `usage: loto hook ref <phase>
-
-Git hook bodies. Not called by hand — each is wired as a chain entry under
-.githooks/hooks.d/<hook>/ and reaches git through core.hooksPath (make hooks).
-
-  ref <phase>   reference-transaction body (I1). Reads git's
-                "<old> <new> <ref>" lines on stdin and refuses, at the
-                'prepared' phase, a protected ref shape issued while two or
-                more sessions are live in this checkout:
-
-                  HEAD changing its symbolic target   (branch switch)
-                  any update to refs/stash            (stash, stash pop)
-                  a branch deletion under refs/heads/
-
-                Everything else passes: a branch tip moving, refs/remotes
-                pruning, pack-refs, reflog expiry.
-
-                Override: take the checkout-wide claim.
-
-exit: 0 pass · 1 refused (git aborts the transaction) · 2 usage · 3 fail-open
-
-examples:
-  loto hook ref prepared < transaction.txt
-`
-
-func cmdHook(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprint(stderr, hookUsageHead)
-		return 2
-	}
-	switch args[0] {
-	case subHelp, "-h", flagHelpLong:
-		fmt.Fprint(stderr, hookUsageHead)
-		return 0
-	case "ref":
-		return cmdHookRef(ctx, args[1:], stdout, stderr)
-	}
-	fmt.Fprintf(stderr, "✗ unknown hook body: %s\n", args[0])
-	fmt.Fprint(stderr, hookUsageHead)
-	return 2
-}
-
+// cmdHookRef is the `ref` arm of the hook router in cmd_hook.go. It takes
+// git's phase as its one operand; the transaction itself arrives on stdin.
 func cmdHookRef(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
 		fmt.Fprint(stderr, hookUsageHead)
 		return 2
 	}
 	if args[0] == subHelp || args[0] == "-h" || args[0] == flagHelpLong {
-		fmt.Fprint(stderr, hookUsageHead)
+		fmt.Fprint(stdout, hookUsageHead)
 		return 0
 	}
 	return runHookRef(ctx, args[0], os.Stdin, stdout, stderr)

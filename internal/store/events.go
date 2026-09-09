@@ -30,11 +30,47 @@ const (
 	EventsRetentionAge     = eventsRetentionAge
 )
 
-// rotateEventsTx trims the events table per retention policy, in the caller's tx.
+// HookTimingRetentionMax is hook_timing's own share of the events table.
+//
+// ‡ A per-kind cap exists because one kind can be written at a rate no other
+// kind approaches. The tree hook appends TWO rows per tool call; under the
+// shared 1000-row cap alone that evicts every lock, gate and admission event
+// after roughly 500 calls — minutes of one session — and starves the window
+// ReadGateStats reads. 200 rows answers §10b's cost question (a p50/p99 over
+// the last hundred calls) and leaves at least 800 of the global cap for every
+// other kind.
+//
+// Chosen over a separate hook_timing table: `loto events` and the retention
+// pass each stay one surface, and the next kind that turns out to be chatty is
+// one entry below rather than another table, another DDL and another migration.
+const HookTimingRetentionMax = 200
+
+// eventKindRetentionMax is the per-kind cap list, applied before the global
+// cap. A slice rather than a map so the DELETEs run in a fixed order — same
+// input, same effect. A kind absent here is bounded only by the global cap,
+// which is the right default for every low-rate kind.
+var eventKindRetentionMax = []struct { //nolint:gochecknoglobals // read-only retention policy table
+	kind string
+	max  int
+}{
+	{EventHookTiming, HookTimingRetentionMax},
+}
+
+// rotateEventsTx trims the events table per retention policy, in the caller's
+// tx: age first, then each capped kind's own share, then the global row cap.
 func rotateEventsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	cutoffNs := now.Add(-eventsRetentionAge).UnixNano()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE created_at < ?`, cutoffNs); err != nil {
 		return err
+	}
+	for _, k := range eventKindRetentionMax {
+		if _, err := tx.ExecContext(ctx, `
+DELETE FROM events WHERE id IN (
+  SELECT id FROM events WHERE event_kind = ?
+   ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
+)`, k.kind, k.max); err != nil {
+			return err
+		}
 	}
 	_, err := tx.ExecContext(ctx, `
 DELETE FROM events WHERE id IN (
