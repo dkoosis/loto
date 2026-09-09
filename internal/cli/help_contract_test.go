@@ -46,3 +46,27 @@ func TestLockHelpTeachesContract(t *testing.T) {
 		}
 	}
 }
+
+// TestHookHelpTeachesContract pins the hook -h teaching surface. `hook` prints
+// its help to stdout like `gate` does, so it is outside the golden suite
+// (which enrolls on a stderr usage surface) and needs its own contract.
+//
+// The exit codes are the load-bearing half: a caller wiring this into settings
+// has to know that 2 refuses the tool call and everything else lets it run.
+func TestHookHelpTeachesContract(t *testing.T) {
+	stdout, _, code := executeCommand(tcHookCmd, "-h")
+	if code != 0 {
+		t.Fatalf("hook -h exit %d", code)
+	}
+	for _, want := range []string{
+		"usage: loto hook <pre|post>",
+		"PostToolUseFailure",
+		"0 recorded",
+		"2 the write is refused",
+		"loto hook pre  < event.json",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("hook -h missing %q; got:\n%s", want, stdout)
+		}
+	}
+}

@@ -1,0 +1,17 @@
+usage: loto events [--kind <kind>] [--limit <n>]
+
+Print the store's audit rows, oldest first. The read side of every counter
+loto writes — lock acquire/release/break, admission verdicts, the staged-lock
+gate's firings, and the tree hook's per-call timing.
+
+The window is bounded by events retention (1000 rows / 7 days), so this shows
+what the trail still holds, not everything that ever happened.
+
+examples:
+  loto events
+  loto events --kind hook_timing
+  loto events --kind hook_timing --limit 20
+  -kind string
+    	show only this event kind
+  -limit int
+    	most recent rows to print; 0 for every retained row (default 50)

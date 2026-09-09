@@ -196,3 +196,49 @@ CREATE TABLE IF NOT EXISTS violations (
 -- it instead, after ensureViolationsWorktree has added the column, and drops
 -- the unscoped form wherever it is still standing (Codex #283 P1).
 CREATE INDEX IF NOT EXISTS idx_violations_open ON violations(resolved_at, path_canonical);
+
+-- hook_calls / hook_call_paths / path_seq: the tree hooks' call-record layer
+-- (enforcement-design.md §3 "call" and "seq", §5 I3 step 4, I4 step 5). One
+-- row per harness tool call, one row per path that call observed, and the
+-- per-path transition sequence keyed (f, E) that both cite. Added to existing
+-- DBs via ensureHookCallsTables in migrate() (no user_version bump); declared
+-- here so fresh DBs match. Shapes and rationale: hook_calls.go.
+CREATE TABLE IF NOT EXISTS hook_calls (
+  call_id      TEXT PRIMARY KEY,
+  owner_uuid   TEXT NOT NULL,
+  session_uuid TEXT NOT NULL DEFAULT '',
+  tool_name    TEXT NOT NULL DEFAULT '',
+  -- t_post NULL = in flight. post_missing is INDEPENDENT of it: a call past
+  -- T_report is flagged and stays in flight (§3, round 10).
+  t_pre        INTEGER NOT NULL,
+  t_post       INTEGER,
+  post_missing INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_hook_calls_inflight ON hook_calls(t_post, t_pre);
+
+CREATE TABLE IF NOT EXISTS hook_call_paths (
+  call_id        TEXT NOT NULL,
+  path_canonical TEXT NOT NULL,
+  locked         INTEGER NOT NULL DEFAULT 0,
+  declared       INTEGER NOT NULL DEFAULT 0,
+  -- pre_observed 0 = the path entered the observation set at post (it became
+  -- dirty, or left the status set, inside the call); its digest_pre is empty
+  -- because no hook saw it before the tool ran.
+  pre_observed   INTEGER NOT NULL DEFAULT 1,
+  epoch_pre      INTEGER NOT NULL DEFAULT 0,
+  holder_pre     TEXT NOT NULL DEFAULT '',
+  seq_pre        INTEGER NOT NULL DEFAULT 0,
+  seq_post       INTEGER,
+  digest_pre     TEXT NOT NULL DEFAULT '',
+  digest_post    TEXT,
+  stat_pre       TEXT NOT NULL DEFAULT '',
+  stat_post      TEXT,
+  PRIMARY KEY (call_id, path_canonical)
+);
+
+CREATE TABLE IF NOT EXISTS path_seq (
+  path_canonical TEXT NOT NULL,
+  epoch          INTEGER NOT NULL,
+  seq            INTEGER NOT NULL,
+  PRIMARY KEY (path_canonical, epoch)
+);

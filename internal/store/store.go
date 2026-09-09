@@ -389,6 +389,7 @@ var migrationEnsures = []struct {
 	{"scope violations open index to worktree", ensureViolationsOpenIndexScoped},
 	{"add events.detail", ensureEventsDetail},
 	{"widen events check to every declared kind", ensureEventsCheckAllKinds},
+	{"add hook call record tables", ensureHookCallsTables},
 }
 
 // eventsCheckAdmitsEveryKind reports whether the live events DDL's CHECK names
