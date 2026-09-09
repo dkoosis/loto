@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -97,7 +98,80 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 	render.EmitClaimSuccess(stdout, rec)
 	emitNotOnDiskAdvisory(stdout, repoTop, prefix.Canonical)
+	recordRefRefusalOverride(rt, prefix.Canonical, now, stderr)
 	return 0
+}
+
+// recordRefRefusalOverride writes the ref_refused_overridden counter when this
+// claim is the operator overriding I1 — a checkout-wide claim taken by the
+// same owner within refOverrideWindow of a ref_refused (§10b row 1).
+//
+// The counter lives here rather than in the hook because the OVERRIDE is the
+// claim, not the refusal: the hook exits before the operator has decided
+// anything. Reading refusals / overrides per week is what decides whether the
+// three-shape denylist is refusing the right things or whether `allow` itself
+// is wrong.
+//
+// Three things must line up before a claim counts as an override, and each
+// one was a way to inflate the ratio:
+//
+//   - the ACTOR matches — a peer's refusal says nothing about why this owner
+//     is claiming the checkout;
+//   - the CHECKOUT matches — loto's store is per project, so two worktrees of
+//     one repo share it and a refusal in the other one is not this claim's;
+//   - the refusal is UNCONSUMED — an override already written for it means a
+//     second `loto claim .` inside the same ten minutes would otherwise count
+//     the one refusal twice, which is exactly the direction that makes
+//     overrides look like refusals and condemns `allow` on a miscount.
+//
+// "Unconsumed" needs no new column: an override event newer than the refusal
+// IS the consumed marker, and both are already in the events table.
+//
+// Best-effort throughout: a claim is a coordination write, and losing a
+// telemetry row must never fail it.
+func recordRefRefusalOverride(rt *runtime, prefix string, now time.Time, stderr io.Writer) {
+	if prefix != refCheckoutWidePrefix {
+		return
+	}
+	since := now.Add(-refOverrideWindow)
+	refusal, ok, err := rt.Store.LatestEventByKindActor(
+		rt.Ctx, store.EventRefRefused, rt.Agent.UUID, since)
+	if err != nil || !ok {
+		return
+	}
+	if !refRefusalInCheckout(refusal.Detail, rt.RepoTop) {
+		return
+	}
+	prior, hadPrior, perr := rt.Store.LatestEventByKindActor(
+		rt.Ctx, store.EventRefRefusedOverridden, rt.Agent.UUID, since)
+	if perr != nil {
+		return
+	}
+	if hadPrior && !prior.CreatedAt.Before(refusal.CreatedAt) {
+		return // already consumed by an earlier claim
+	}
+	if _, err := rt.Store.AppendEventRotating(rt.Ctx, domain.Event{
+		Kind:      store.EventRefRefusedOverridden,
+		Target:    refusal.Target,
+		ActorUUID: rt.Agent.UUID,
+		Reason:    refusal.Reason,
+		Detail:    refusal.Detail,
+		CreatedAt: now,
+	}); err != nil {
+		fmt.Fprintf(stderr, "⚠ ref-override-counter=unrecorded err=%q\n", err)
+	}
+}
+
+// refRefusalInCheckout reports whether a ref_refused event's payload names
+// repoTop. A refusal written before the repo field existed carries none; it
+// is NOT paired, because pairing it would attribute an override to a checkout
+// nobody can show it happened in.
+func refRefusalInCheckout(detail, repoTop string) bool {
+	var d refRefusedDetail
+	if json.Unmarshal([]byte(detail), &d) != nil {
+		return false
+	}
+	return d.Repo != "" && d.Repo == repoTop
 }
 
 // resolveCLIPrefix normalizes a user-supplied prefix (absolute inside the

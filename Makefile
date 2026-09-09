@@ -44,7 +44,7 @@ LDFLAGS := -X main.Version=$(VERSION) -X main.GitCommit=$(COMMIT)
 # The git hooks this repo delivers. Each name is BOTH a dispatcher
 # (.githooks/<name>) and a chain dir (.githooks/hooks.d/<name>/); `make hooks`
 # refuses to install if either half is absent.
-GIT_HOOKS := pre-commit post-merge pre-push post-checkout prepare-commit-msg
+GIT_HOOKS := pre-commit post-merge pre-push post-checkout prepare-commit-msg reference-transaction
 
 # ── Per-checkout scratch (loto-4ivy) ──
 #
