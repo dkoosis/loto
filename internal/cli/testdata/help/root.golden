@@ -26,5 +26,6 @@ lane choreography (engine verbs; used by the /team fleet harness):
   promote  Drain accepted candidates onto refs/loto/integration; verify runs unlocked
   pr       Bridge promoted integration commits to GitHub: one branch and one PR per bead
 
-tree hooks (fed the harness event on stdin; wired in settings, not run by hand):
+hooks (fed on stdin; wired by settings and make hooks, not run by hand):
   hook     pre|post — record each locked and dirty path's state around one tool call
+           ref — refuse a protected ref transition while two sessions are live

@@ -56,6 +56,24 @@ const (
 	// EventGateBypass has none: a firing is a commit-scoped fact, and the
 	// per-path detail rides in Detail as JSON. ActorUUID names the committer.
 	EventStagedGateFired = "staged_lock_gate_fired"
+	// I1's two counters (loto-ea8y.4, enforcement-design §10b row 1). They
+	// answer one question — "is the three-shape denylist refusing the right
+	// things?" — and the answer is a RATIO, which is why both kinds exist
+	// rather than refusals alone.
+	//
+	// EventRefRefused is written by `loto hook ref` when the
+	// reference-transaction hook aborts a protected ref shape. Target is the
+	// ref name; ActorUUID the refused owner; Reason the shape
+	// (head-symref | stash | branch-delete); Detail the JSON (old, new, ref,
+	// live) §10b names.
+	//
+	// EventRefRefusedOverridden is written by `loto claim .` when the same
+	// owner takes the checkout-wide claim within refOverrideWindow of a
+	// refusal — the operator saying that refusal was wrong. Overrides
+	// approaching refusals is the signal to revisit `allow` itself, not to
+	// press the operator harder.
+	EventRefRefused           = "ref_refused"
+	EventRefRefusedOverridden = "ref_refused_overridden"
 	// EventHookTiming is what the tree hook costs: one row per pre and one per
 	// post (enforcement-design.md §10b row 3). Reason says which half wrote it
 	// ("pre" or "post"); the payload rides in Detail as JSON — call_id,
@@ -106,6 +124,8 @@ var allEventKinds = []string{
 	EventCandidateAccepted,
 	EventCandidateRejected,
 	EventStagedGateFired,
+	EventRefRefused,
+	EventRefRefusedOverridden,
 	EventHookTiming,
 	EventTreeChangeReported,
 	EventTreeChangeActed,

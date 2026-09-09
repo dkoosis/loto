@@ -1,0 +1,152 @@
+# I1, end to end through real git (loto-ea8y.4). .githooks/reference-transaction
+# wires `loto hook ref` as the chain's first entry: under two live sessions the
+# three protected ref shapes are refused at the `prepared` phase and git aborts
+# the transaction atomically, HEAD / refs/stash / the tree all unchanged.
+#
+# The five operations are §2.4's measured H1 set — checkout, stash, branch -D,
+# checkout -b, worktree add -b. `reset --hard` and `fetch --prune` are the two
+# §5 admits: a branch tip moving and refs/remotes pruning both pass.
+
+exec git config core.hooksPath $REALHOOKS
+
+# ── fixture, before any session exists (|S| = 0, everything passes) ────────
+exec git branch -m base
+touch a.txt
+exec git add a.txt
+exec git commit -m one
+exec git commit --allow-empty -m two
+exec git branch other
+exec git branch x
+exec git branch x2
+exec git branch x3
+
+# An upstream to fetch and prune from.
+mkdir up
+exec git -C $WORK/up init -q
+exec git -C $WORK/up config user.email t@example.com
+exec git -C $WORK/up config user.name T
+exec git -C $WORK/up commit -q --allow-empty -m up-one
+exec git -C $WORK/up branch doomed
+exec git remote set-url origin $WORK/up
+exec git fetch -q origin
+
+# ── one live session: all five operations succeed ─────────────────────────
+env LOTO_AGENT_ID=$ALICE
+env CLAUDE_CODE_SESSION_ID=sess-alice
+loto whoami
+
+exec git checkout other
+exec git checkout base
+cp dirt.txt a.txt
+exec git stash
+exec git stash pop
+exec git checkout -b y
+exec git checkout base
+exec git branch -D x
+exec git worktree add -b z $WORK/wt1
+exec git worktree remove $WORK/wt1
+
+# A topic branch diverged from base, for the rebase case at the bottom. Both
+# halves are built here, while one session is up, because building them later
+# would need the very branch switches the guard is about to refuse.
+exec git checkout -b rebase-topic
+cp topic.txt t.txt
+exec git add t.txt
+exec git commit -m topic-work
+exec git checkout base
+exec git commit --allow-empty -m base-ahead-1
+exec git commit --allow-empty -m base-ahead-2
+
+# ── two live sessions: every one of the five is refused ───────────────────
+env LOTO_AGENT_ID=$BOB
+env CLAUDE_CODE_SESSION_ID=sess-bob
+loto whoami
+
+# 1. branch switch — HEAD changing its symbolic target.
+! exec git checkout other
+stderr 'ref-refused count=1 live=2'
+stderr 'shape=head-symref'
+stderr 'ref=HEAD'
+stderr 'loto claim \. -t "<reason>"'
+exec git rev-parse --abbrev-ref HEAD
+stdout '^base$'
+
+# 2. stash — any update to refs/stash.
+cp dirt.txt a.txt
+! exec git stash
+stderr 'shape=stash'
+! exec git rev-parse --verify --quiet refs/stash
+exec git status --porcelain
+stdout 'a\.txt'
+
+# 3. branch deletion under refs/heads/.
+! exec git branch -D x2
+stderr 'shape=branch-delete'
+exec git branch --list x2
+stdout 'x2'
+
+# 4. checkout -b — the new branch's HEAD leg.
+! exec git checkout -b y2
+exec git rev-parse --abbrev-ref HEAD
+stdout '^base$'
+
+# 5. worktree add -b — same HEAD leg, in the new worktree.
+! exec git worktree add -b z2 $WORK/wt2
+! exists $WORK/wt2
+
+# ── the two admits, with two live sessions still up ───────────────────────
+# A branch tip moving is indistinguishable from a commit and passes I1 (the
+# working tree it rewrites is H2's problem, not this hook's).
+exec git checkout -- a.txt
+exec git reset --hard HEAD~1
+exec git rev-parse --abbrev-ref HEAD
+stdout '^base$'
+
+# Pruning refs/remotes/* matches none of the three shapes.
+exec git -C $WORK/up branch -D doomed
+exec git fetch -q --prune origin
+! exec git rev-parse --verify --quiet refs/remotes/origin/doomed
+
+# ── the override: a checkout-wide claim by the caller ─────────────────────
+loto claim . -t 'takeover: rebasing every lane'
+stdout '✓'
+
+exec git checkout other
+exec git checkout base
+cp dirt.txt a.txt
+exec git stash
+exec git stash pop
+exec git checkout -b y3
+exec git checkout base
+exec git branch -D x3
+exec git worktree add -b z3 $WORK/wt3
+exec git worktree remove $WORK/wt3
+
+# ── rebase completes with HEAD attached, and with no claim held ───────────
+# `git rebase` moves the branch tip (an ordinary admit) and then RE-ATTACHES
+# HEAD to it. Refusing that leaves HEAD detached on a rebased branch, and the
+# obvious recovery — `git checkout <branch>` — is refused too, so the operator
+# is stranded inside the guard. The re-attach is admitted because HEAD is
+# detached at exactly the tip it is about to point at: nothing moves.
+exec git checkout -- a.txt
+exec git checkout rebase-topic
+loto unclaim .
+stdout '✓'
+exec git rebase base
+exec git rev-parse --abbrev-ref HEAD
+stdout '^rebase-topic$'
+exec git status --porcelain --untracked-files=no
+! stdout .
+exec git log --oneline -n 2
+stdout 'topic-work'
+stdout 'base-ahead-1'
+
+# And the guard is still armed here: a branch switch off the rebased branch is
+# refused, so the rebase carve-out did not disarm I1.
+! exec git checkout base
+stderr 'ref-refused'
+
+-- dirt.txt --
+dirty
+-- topic.txt --
+topic work

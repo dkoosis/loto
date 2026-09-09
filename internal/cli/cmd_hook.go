@@ -22,18 +22,22 @@ import (
 
 func init() { register("hook", cmdHook) } //nolint:gochecknoinits // command registry pattern
 
-const hookUsageHead = `usage: loto hook <pre|post>
+const hookUsageHead = `usage: loto hook <pre|post|ref>
 
-Record what the tree looked like around one harness tool call: every locked
-path and every path 'git status --porcelain' lists, with its digest before and
-after, and a per-path transition sequence so a later reader can order changes
-without trusting a clock. The harness event JSON arrives on stdin;
-PostToolUse and PostToolUseFailure both feed 'post' — a command that writes and
-then exits nonzero is diffed like one that succeeded.
+Hook bodies. Not run by hand: pre|post are wired as harness hooks in settings
+and read the tool-call event JSON on stdin; ref is wired as a chain entry under
+.githooks/hooks.d/reference-transaction/ and reads git's transaction on stdin.
 
-Reads no tool input except the Edit-family file_path. The struct this decodes
-into has no field for a command string, so no decision procedure over command
-text can exist here (enforcement-design.md §10 tooth 1).
+pre|post record what the tree looked like around one harness tool call: every
+locked path and every path 'git status --porcelain' lists, with its digest
+before and after, and a per-path transition sequence so a later reader can
+order changes without trusting a clock. PostToolUse and PostToolUseFailure both
+feed 'post' — a command that writes and then exits nonzero is diffed like one
+that succeeded.
+
+Neither reads a command string. pre|post decode into a struct with no field for
+one; ref is handed no operation name by git and decides on (old, new, ref) and
+the live-session set alone (enforcement-design.md §10 tooth 1, §5 I1).
 
   pre   admits an Edit-family write — admitted iff the path is unlocked or
         already yours, and an unlocked path is taken — then records the
@@ -41,12 +45,24 @@ text can exist here (enforcement-design.md §10 tooth 1).
   post  records the after-state and closes the call, giving each path whose
         state changed the next number in its sequence. Repeating a post for
         one tool_use_id changes nothing.
+  ref <phase>
+        reference-transaction body (I1). At the 'prepared' phase, with two or
+        more sessions live in this checkout, refuses exactly three shapes:
+        HEAD changing its symbolic target (a branch switch), any update to
+        refs/stash, and a branch deletion under refs/heads/. A branch tip
+        moving, refs/remotes pruning, pack-refs and reflog expiry all pass, as
+        does re-attaching a detached HEAD where it already sits. Override by
+        taking the checkout-wide claim.
 
-exit: 0 recorded (or nothing this hook can act on), 2 the write is refused.
+exit: 0 recorded (or nothing this hook can act on, or the ref is allowed)
+      1 the ref transition is refused — git aborts the transaction
+      2 the write is refused, or usage
+      3 ref could not read what it needed and failed open
 
 examples:
   loto hook pre  < event.json
   loto hook post < event.json
+  loto hook ref prepared < transaction.txt
 `
 
 // hookTReportDefault is the window after which a call with no post is marked
@@ -118,6 +134,8 @@ func cmdHook(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runHook(ctx, true, stdout, stderr)
 	case "post":
 		return runHook(ctx, false, stdout, stderr)
+	case "ref":
+		return cmdHookRef(ctx, args[1:], stdout, stderr)
 	case "-h", flagHelpLong, subHelp:
 		fmt.Fprint(stdout, hookUsageHead)
 		return 0

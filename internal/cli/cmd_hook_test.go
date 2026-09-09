@@ -439,7 +439,7 @@ func TestHook_DeadOwnersCallIsEndedByTheNextPre(t *testing.T) {
 	// the session process removes its socket by dying (identity.Verdict).
 	dead := pinAgent(t)
 	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", filepath.Join(t.TempDir(), "gone.sock"))
-	if _, err := identity.RecordSession(dead); err != nil {
+	if _, err := identity.RecordSession(dead, ""); err != nil {
 		t.Fatalf("record the doomed session: %v", err)
 	}
 	if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "call-crashed", "", "")); code != 0 {

@@ -1,0 +1,52 @@
+#!/usr/bin/env sh
+#
+# 10-loto-ref-guard — I1: refuse a protected ref transition while two or more
+# sessions are live in this checkout (loto-ea8y.4).
+#
+# git's argv: $1 is the phase — preparing | prepared | committed | aborted.
+# stdin is the transaction: one "<old> <new> <ref>" line per update, replayed
+# to every chain entry by run-chain.sh. Only `prepared` can refuse; git aborts
+# the whole transaction atomically there, so nothing has been written yet.
+#
+# The three shapes refused, and nothing else (enforcement-design §5 I1):
+#   HEAD changing its symbolic target   — a branch switch
+#   any update to refs/stash            — stash, stash pop
+#   a branch deletion under refs/heads/ — branch -D
+# A branch tip moving, refs/remotes pruning, pack-refs and reflog expiry all
+# pass; `loto hook ref` decides on (old, new, ref) alone and is handed no
+# operation name by git.
+#
+# Override is `loto claim . -t "<reason>"` — the checkout-wide claim, printed
+# verbatim in the refusal. LOTO_GUARD_OVERRIDE=1 is honored too, matching the
+# other entries in this tree, but it leaves no durable trace the way the claim
+# does; prefer the claim.
+#
+# Fail-open: no `loto` on PATH -> skip silently.
+
+command -v loto >/dev/null 2>&1 || exit 0
+
+if [ "${LOTO_GUARD_OVERRIDE:-}" = "1" ]; then
+	exit 0
+fi
+
+# stdout is dropped: the pass line (`✓ ref-allowed …`) exists so the CLI has an
+# explicit empty-status header, but a ✓ printed on every ref update in the repo
+# would train the eye straight past the ✗ that matters. stderr is NOT captured
+# — a refusal and every fail-open notice go straight to whoever ran git.
+loto hook ref "$1" >/dev/null
+_loto_ref_exit=$?
+
+if [ "$_loto_ref_exit" -eq 1 ]; then
+	exit 1
+fi
+
+# 0 is a pass, 1 the refusal above, 3 the documented fail-open (loto already
+# said why on stderr). Anything else — 2 among them — is a guard that did NOT
+# COMPLETE, and the transaction proceeds because a gate must not become the
+# outage. What it may not do is proceed SILENTLY: an unseen exit 2 is how a
+# bypass hides (loto-pgio).
+if [ "$_loto_ref_exit" -ne 0 ] && [ "$_loto_ref_exit" -ne 3 ]; then
+	echo "⚠ reference-transaction: loto hook ref exited $_loto_ref_exit — ref guard did not complete; transaction proceeds unchecked" >&2
+fi
+
+exit 0
