@@ -101,6 +101,32 @@ func renderIdentityGC(stdout io.Writer, reaped, residual int) {
 	}
 }
 
+// printDoctorEnforcementStats prints §10b's triage line, so the build-order
+// bet it settles is seen without asking (loto-ea8y.8, Rules: "doctor's first
+// line repeats stats' first line"). Same read `loto stats` runs, same
+// default window; best-effort — a read failure here must not take the rest
+// of doctor down.
+func printDoctorEnforcementStats(rt *runtime, stdout, stderr io.Writer) {
+	st, err := rt.Store.ReadEnforcementStats(rt.Ctx, statsDefaultWindow)
+	if err != nil {
+		fmt.Fprintf(stderr, "⚠ doctor: read enforcement stats: %v\n", err)
+		return
+	}
+	render.EmitEnforcementStats(stdout, enforcementStatsToRender(st))
+}
+
+// printDoctorBinaryIdentity prints the identity line every doctor run
+// carries and returns repoTop, ahead of openRuntime/DoctorAudit and ahead of
+// both's failure returns (loto-jhbm review): a reader diagnosing a failed
+// doctor run needs to know whether an outdated binary caused it, which the
+// row can't say if it only prints after the calls that might fail.
+func printDoctorBinaryIdentity(ctx context.Context, stdout io.Writer) string {
+	repoTop, _ := repoTopForCwd(ctx)
+	id := readBuildIdentity()
+	renderBinaryIdentity(stdout, repoTop, id, checkBinaryStaleness(ctx, repoTop, id))
+	return repoTop
+}
+
 func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -112,13 +138,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 2
 	}
 
-	// Binary identity ahead of openRuntime/DoctorAudit below, and ahead of
-	// both's failure returns (loto-jhbm review): a reader diagnosing a failed
-	// doctor run needs to know whether an outdated binary caused it, which the
-	// row can't say if it only prints after the calls that might fail.
-	repoTop, _ := repoTopForCwd(ctx)
-	id := readBuildIdentity()
-	renderBinaryIdentity(stdout, repoTop, id, checkBinaryStaleness(ctx, repoTop, id))
+	repoTop := printDoctorBinaryIdentity(ctx, stdout)
 
 	rt, err := openRuntime(ctx)
 	if err != nil {
@@ -127,6 +147,8 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
+
+	printDoctorEnforcementStats(rt, stdout, stderr)
 
 	// Session-record hygiene. doctor forces an unconditional sweep, unlike
 	// write verbs' GCSessionsIfDue (openRuntimeGC, sd-kx5) which skips most
