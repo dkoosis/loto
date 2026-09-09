@@ -46,6 +46,17 @@ exec git branch -D x
 exec git worktree add -b z $WORK/wt1
 exec git worktree remove $WORK/wt1
 
+# A topic branch diverged from base, for the rebase case at the bottom. Both
+# halves are built here, while one session is up, because building them later
+# would need the very branch switches the guard is about to refuse.
+exec git checkout -b rebase-topic
+cp topic.txt t.txt
+exec git add t.txt
+exec git commit -m topic-work
+exec git checkout base
+exec git commit --allow-empty -m base-ahead-1
+exec git commit --allow-empty -m base-ahead-2
+
 # ── two live sessions: every one of the five is refused ───────────────────
 env LOTO_AGENT_ID=$BOB
 env CLAUDE_CODE_SESSION_ID=sess-bob
@@ -111,5 +122,31 @@ exec git branch -D x3
 exec git worktree add -b z3 $WORK/wt3
 exec git worktree remove $WORK/wt3
 
+# ── rebase completes with HEAD attached, and with no claim held ───────────
+# `git rebase` moves the branch tip (an ordinary admit) and then RE-ATTACHES
+# HEAD to it. Refusing that leaves HEAD detached on a rebased branch, and the
+# obvious recovery — `git checkout <branch>` — is refused too, so the operator
+# is stranded inside the guard. The re-attach is admitted because HEAD is
+# detached at exactly the tip it is about to point at: nothing moves.
+exec git checkout -- a.txt
+exec git checkout rebase-topic
+loto unclaim .
+stdout '✓'
+exec git rebase base
+exec git rev-parse --abbrev-ref HEAD
+stdout '^rebase-topic$'
+exec git status --porcelain --untracked-files=no
+! stdout .
+exec git log --oneline -n 2
+stdout 'topic-work'
+stdout 'base-ahead-1'
+
+# And the guard is still armed here: a branch switch off the rebased branch is
+# refused, so the rebase carve-out did not disarm I1.
+! exec git checkout base
+stderr 'ref-refused'
+
 -- dirt.txt --
 dirty
+-- topic.txt --
+topic work

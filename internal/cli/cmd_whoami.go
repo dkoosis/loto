@@ -59,8 +59,14 @@ func cmdWhoami(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	// probe through.
 	var rec *identity.SessionRecord
 	if pinned {
+		// The checkout this session belongs to. whoami is the one verb that
+		// must work from anywhere, so a resolution failure is not fatal: the
+		// record is written with an empty repo, which reads as "not provably
+		// in any checkout" — I1 then counts the session out rather than
+		// refusing a peer's branch switch on a guess (loto-ea8y.4).
+		repoTop, _ := repoTopForCwd(ctx)
 		var rerr error
-		rec, rerr = identity.RecordSession(a)
+		rec, rerr = identity.RecordSession(a, repoTop)
 		if rerr != nil {
 			fmt.Fprintf(stderr, "⚠ session not recorded: %v\n", rerr)
 		}

@@ -109,7 +109,7 @@ func TestProbeSessionReadsWhatRecordSessionWrote(t *testing.T) {
 	socket := existingSocket(t)
 	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", socket)
 
-	if _, err := RecordSession(&Agent{UUID: tcSessionA}); err != nil {
+	if _, err := RecordSession(&Agent{UUID: tcSessionA}, ""); err != nil {
 		t.Fatal(err)
 	}
 	if v := ProbeSession(tcSessionA); v.Liveness != SessionLive {

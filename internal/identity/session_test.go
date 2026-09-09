@@ -19,7 +19,7 @@ func TestRecordSessionWritesWitnesses(t *testing.T) {
 	socket := existingSocket(t)
 	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", socket)
 
-	rec, err := RecordSession(&Agent{UUID: tcSessionA, Host: "h"})
+	rec, err := RecordSession(&Agent{UUID: tcSessionA, Host: "h"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestRecordSessionWritesWitnesses(t *testing.T) {
 
 	// A second call from the same session replaces the record, never a
 	// second file.
-	if _, err := RecordSession(&Agent{UUID: tcSessionA}); err != nil {
+	if _, err := RecordSession(&Agent{UUID: tcSessionA}, ""); err != nil {
 		t.Fatal(err)
 	}
 	if entries, _ := os.ReadDir(sessionDir()); len(entries) != 1 {
@@ -61,7 +61,7 @@ func TestRecordSessionHonorsLOTOBase(t *testing.T) {
 	t.Setenv("LOTO_BASE", base)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", tcSessionA)
 
-	if _, err := RecordSession(&Agent{UUID: tcSessionA}); err != nil {
+	if _, err := RecordSession(&Agent{UUID: tcSessionA}, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(base, "session", tcSessionA+".json")); err != nil {
@@ -74,7 +74,7 @@ func TestRecordSessionHonorsLOTOBase(t *testing.T) {
 
 func TestRecordSessionOutsideASessionIsNoop(t *testing.T) {
 	clearIdentityEnv(t)
-	rec, err := RecordSession(Ephemeral())
+	rec, err := RecordSession(Ephemeral(), "")
 	if rec != nil || err != nil {
 		t.Errorf("no session id: got (%+v, %v), want (nil, nil)", rec, err)
 	}
@@ -92,7 +92,7 @@ func TestRecordSessionKeyedBySessionIDFromEnv(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_SESSION_ID", tcSessionA)
 	t.Setenv("LOTO_SESSION_ID", "override-1")
 
-	rec, err := RecordSession(&Agent{UUID: tcSessionA})
+	rec, err := RecordSession(&Agent{UUID: tcSessionA}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

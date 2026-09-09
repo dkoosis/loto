@@ -34,7 +34,17 @@ type SessionRecord struct {
 	// host-local (darwin: wall-clock µs; linux: ticks since boot) — only ever
 	// compared for EQUALITY against a value read on this host. 0 means
 	// unknown: the reader failed, the platform has none, or no pid was known.
-	ProcStart  int64     `json:"proc_start,omitempty"`
+	ProcStart int64 `json:"proc_start,omitempty"`
+	// Repo is the git toplevel the session started in, as the recording
+	// process resolved it. It exists so a liveness question can be asked
+	// about ONE checkout: without it, "which owners are live" is a
+	// machine-wide answer, and I1 refused a branch switch in this checkout
+	// because a session was up in an unrelated repo (loto-ea8y.4 review).
+	// Empty means unknown — a record written before this field existed, or a
+	// session started outside any repo. Unknown is never counted as "here":
+	// I1's failure direction is to pass, and a session re-records on its next
+	// `loto whoami`.
+	Repo       string    `json:"repo,omitempty"`
 	RecordedAt time.Time `json:"recorded_at"`
 }
 
@@ -43,7 +53,10 @@ type SessionRecord struct {
 // the environment — a bare shell has no session to record, which is normal,
 // not an error. Publish is by rename, so a concurrent reader never sees a
 // half-written record and a re-run from the same session simply refreshes it.
-func RecordSession(a *Agent) (*SessionRecord, error) {
+// repoTop is the checkout this session belongs to, resolved by the CALLER:
+// identity shells out to nothing, and the cli layer already has the git
+// toplevel in hand. "" is a legitimate value — a session outside any repo.
+func RecordSession(a *Agent, repoTop string) (*SessionRecord, error) {
 	sid := SessionIDFromEnv()
 	if sid == "" || a == nil {
 		return nil, nil //nolint:nilnil // "no session here" is a normal, non-error outcome
@@ -62,6 +75,7 @@ func RecordSession(a *Agent) (*SessionRecord, error) {
 		Socket:     socket,
 		PID:        pid,
 		ProcStart:  procStart,
+		Repo:       repoTop,
 		RecordedAt: time.Now().UTC(),
 	}
 	body, err := json.MarshalIndent(rec, "", "  ")
@@ -140,7 +154,35 @@ func readSession(sid string) (SessionRecord, bool) {
 // an error, mirroring GCSessions' own non-fatal treatment of the same
 // failure — a caller that unions this into another set gets an empty set to
 // union against, not a special case to handle.
-func LiveOwnerUUIDs() map[string]struct{} {
+func LiveOwnerUUIDs() map[string]struct{} { return liveOwnerUUIDs("") }
+
+// LiveOwnerUUIDsInRepo is LiveOwnerUUIDs narrowed to one checkout: only
+// records whose Repo is exactly repoTop count.
+//
+// This is the set I1 is defined over (enforcement-design §3, "live sessions
+// in ONE checkout"). The unscoped answer is wrong for that job in a concrete
+// way: a session live in any other repo on the machine made this checkout
+// refuse a branch switch, a stash and a branch delete with no peer here at
+// all (loto-ea8y.4 review). Callers asking the machine-wide question — "is
+// this owner doing anything anywhere", which is what doctor's stash triage
+// wants — keep LiveOwnerUUIDs.
+//
+// A record with an empty Repo (written before the field existed, or by a
+// session that started outside a repo) is NOT counted: it cannot be shown to
+// be here, and I1's failure direction is to pass. Such a session rejoins the
+// set on its next `loto whoami`. An empty repoTop returns an empty set for
+// the same reason — a caller with no checkout to name has no checkout to
+// scope to.
+func LiveOwnerUUIDsInRepo(repoTop string) map[string]struct{} {
+	if repoTop == "" {
+		return map[string]struct{}{}
+	}
+	return liveOwnerUUIDs(repoTop)
+}
+
+// liveOwnerUUIDs is the shared sweep. repoTop == "" means every record,
+// whatever checkout it names.
+func liveOwnerUUIDs(repoTop string) map[string]struct{} {
 	entries, err := os.ReadDir(sessionDir())
 	if err != nil {
 		return nil
@@ -152,6 +194,9 @@ func LiveOwnerUUIDs() map[string]struct{} {
 		}
 		rec, ok := readSession(strings.TrimSuffix(e.Name(), ".json"))
 		if !ok || rec.UUID == "" {
+			continue
+		}
+		if repoTop != "" && rec.Repo != repoTop {
 			continue
 		}
 		if rec.Verdict().Liveness == SessionLive {

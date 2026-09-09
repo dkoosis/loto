@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -169,6 +170,61 @@ func classifyRefUpdate(u refUpdate) string {
 	return ""
 }
 
+// headReattach reports whether a head-symref update is a DETACHED HEAD being
+// re-attached to the branch it is already sitting on — HEAD currently holds a
+// bare oid, and the ref it is about to point at resolves to that same oid.
+//
+// ‡ This carve-out exists because refusing it strands the tree. `git rebase`
+// ends by re-attaching HEAD after the branch tip has already moved (that tip
+// move is an ordinary admit), so a refusal there leaves HEAD detached on a
+// rebased branch — and the obvious recovery, `git checkout <branch>`, is a
+// symref change that gets refused too. The operator is then stuck inside a
+// guard meant to protect them.
+//
+// ‡ The discriminator is NOT the transaction's old oid. Measured on git
+// 2.55.0, EVERY head-symref update reports `old` as all zeros — a plain
+// `git checkout other`, `checkout -b`, `worktree add -b`, the detached
+// re-attach and rebase's final re-attach alike — so keying on a zero old oid
+// would admit every branch switch and I1 would guard nothing. The two facts
+// that do separate them are read from the repo at hook time: HEAD is detached
+// now, and the target resolves to what HEAD already holds. `checkout -b` fails
+// the first test (HEAD is attached), which is why it stays refused even
+// though it moves no file.
+//
+// Anything unreadable answers false — refuse — because this is the arm that
+// WEAKENS the guard, and a guard must not weaken itself on a failed git call.
+func headReattach(ctx context.Context, repoTop, newValue string) bool {
+	target := strings.TrimPrefix(newValue, refSymrefPrefix)
+	if target == "" {
+		return false
+	}
+	// `symbolic-ref -q HEAD` exits non-zero exactly when HEAD is detached.
+	if _, err := refGitOutput(ctx, repoTop, "symbolic-ref", "-q", refHEAD); err == nil {
+		return false
+	}
+	head, err := refGitOutput(ctx, repoTop, "rev-parse", "--verify", "--quiet", refHEAD)
+	if err != nil || head == "" {
+		return false
+	}
+	want, err := refGitOutput(ctx, repoTop, "rev-parse", "--verify", "--quiet", target)
+	if err != nil || want == "" {
+		return false
+	}
+	return head == want
+}
+
+// refGitOutput runs one short git query for the hook, in repoTop.
+func refGitOutput(ctx context.Context, repoTop string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if repoTop != "" {
+		cmd.Dir = repoTop
+	}
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
+}
+
 // parseRefTransaction reads git's "<old> <new> <ref>" lines. A ref name may
 // not contain a space (git's own check-ref-format rule), so cutting on the
 // first two spaces is exact rather than approximate — and it keeps a symref
@@ -212,13 +268,8 @@ func runHookRef(ctx context.Context, phase string, stdin io.Reader, stdout, stde
 		return 0
 	}
 
-	refusals := make([]refRefusal, 0, len(updates))
-	for _, u := range updates {
-		if shape := classifyRefUpdate(u); shape != "" {
-			refusals = append(refusals, refRefusal{Update: u, Shape: shape})
-		}
-	}
-	if len(refusals) == 0 {
+	shaped := refShapedUpdates(updates)
+	if len(shaped) == 0 {
 		fmt.Fprintf(stdout, "✓ ref-allowed count=%d\n", len(updates))
 		return 0
 	}
@@ -230,14 +281,58 @@ func runHookRef(ctx context.Context, phase string, stdin io.Reader, stdout, stde
 		return 0
 	}
 
-	// S — live sessions, from session records rather than call records, so
-	// two idle peers still protect each other (§3, spec test 13).
-	live := identity.LiveOwnerUUIDs()
+	// The checkout. It scopes S and answers the re-attach question; without it
+	// neither can be asked, so an unresolvable toplevel passes.
+	repoTop, err := repoTopForCwd(ctx)
+	if err != nil || repoTop == "" {
+		fmt.Fprintf(stderr, "⚠ repo=unreadable ref-guard=fail-open\n")
+		return 3
+	}
+
+	refusals := refDropReattach(ctx, repoTop, shaped)
+	if len(refusals) == 0 {
+		fmt.Fprintf(stdout, "✓ ref-allowed count=%d head=reattach\n", len(updates))
+		return 0
+	}
+
+	// S — live sessions in THIS checkout, from session records rather than
+	// call records, so two idle peers still protect each other (§3, spec test
+	// 13) and a session live in an unrelated repo protects nothing here.
+	live := identity.LiveOwnerUUIDsInRepo(repoTop)
 	if len(live) < 2 {
 		fmt.Fprintf(stdout, "✓ ref-allowed count=%d live=%d\n", len(updates), len(live))
 		return 0
 	}
+	return refVerdict(ctx, refusals, live, len(updates), stdout, stderr)
+}
 
+// refShapedUpdates keeps the updates matching a protected shape.
+func refShapedUpdates(updates []refUpdate) []refRefusal {
+	out := make([]refRefusal, 0, len(updates))
+	for _, u := range updates {
+		if shape := classifyRefUpdate(u); shape != "" {
+			out = append(out, refRefusal{Update: u, Shape: shape})
+		}
+	}
+	return out
+}
+
+// refDropReattach removes the one head-symref case I1 admits: a detached HEAD
+// being re-attached where it already sits (see headReattach).
+func refDropReattach(ctx context.Context, repoTop string, shaped []refRefusal) []refRefusal {
+	out := make([]refRefusal, 0, len(shaped))
+	for _, r := range shaped {
+		if r.Shape == refShapeHeadSymref && headReattach(ctx, repoTop, r.Update.New) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// refVerdict is the half that needs the store: the override claim, the
+// counter, and the refusal itself.
+func refVerdict(ctx context.Context, refusals []refRefusal, live map[string]struct{}, updates int, stdout, stderr io.Writer) int {
 	rt, err := openRuntime(ctx)
 	if err != nil {
 		// Fail-open, loudly. Without the store the override claim cannot be
@@ -248,9 +343,9 @@ func runHookRef(ctx context.Context, phase string, stdin io.Reader, stdout, stde
 	}
 	defer rt.Close()
 
-	if held, holder := refCheckoutWideClaim(rt); held {
+	if held, holder := refCheckoutWideClaim(rt, stderr); held {
 		fmt.Fprintf(stdout, "✓ ref-allowed count=%d live=%d override=claim holder=%s\n",
-			len(updates), len(live), holder)
+			updates, len(live), holder)
 		return 0
 	}
 
@@ -263,16 +358,27 @@ func runHookRef(ctx context.Context, phase string, stdin io.Reader, stdout, stde
 // checkout-wide claim. Kin counts: a subagent stamped by the dispatch hook
 // resolves to its parent's owner (§3), so a lane's fan-out is covered by the
 // claim the lane took.
-func refCheckoutWideClaim(rt *runtime) (bool, string) {
+//
+// ‡ Both reads fail OPEN — an unreadable claims table or an unresolvable
+// parent answers "the override is held", not "refuse". They are the same
+// question the store-unreachable path already answers that way, asked one
+// layer in: loto not being able to read its own state must not turn into a
+// refusal the operator cannot even override, since taking the override needs
+// the very table that just failed to read.
+func refCheckoutWideClaim(rt *runtime, stderr io.Writer) (bool, string) {
 	claims, err := rt.Store.ListClaims(rt.Ctx)
 	if err != nil {
-		return false, ""
+		fmt.Fprintf(stderr, "⚠ claims=unreadable ref-guard=fail-open err=%q\n", err)
+		return true, "unknown"
 	}
 	mine := map[string]struct{}{rt.Agent.UUID: {}}
-	if kin, kerr := parentKin(rt.Ctx); kerr == nil {
-		for _, k := range kin {
-			mine[string(k)] = struct{}{}
-		}
+	kin, kerr := parentKin(rt.Ctx)
+	if kerr != nil {
+		fmt.Fprintf(stderr, "⚠ kin=unresolved ref-guard=fail-open err=%q\n", kerr)
+		return true, "unknown"
+	}
+	for _, k := range kin {
+		mine[string(k)] = struct{}{}
 	}
 	now := time.Now()
 	for i := range claims {
@@ -289,11 +395,15 @@ func refCheckoutWideClaim(rt *runtime) (bool, string) {
 
 // refRefusedDetail is the §10b row-1 payload: the transaction git offered and
 // how many sessions were live when it was refused.
+// Repo is carried because loto's store is per PROJECT, not per checkout: two
+// worktrees of one repo share it, so the refusal has to say which checkout it
+// happened in for the override counter to pair the two honestly.
 type refRefusedDetail struct {
 	Old  string `json:"old"`
 	New  string `json:"new"`
 	Ref  string `json:"ref"`
 	Live int    `json:"live"`
+	Repo string `json:"repo,omitempty"`
 }
 
 // recordRefRefusals writes one ref_refused event per refused update. Failing
@@ -306,6 +416,7 @@ func recordRefRefusals(rt *runtime, refusals []refRefusal, live int, stderr io.W
 		r := refusals[i]
 		detail, err := json.Marshal(refRefusedDetail{
 			Old: r.Update.Old, New: r.Update.New, Ref: r.Update.Ref, Live: live,
+			Repo: rt.RepoTop,
 		})
 		if err != nil {
 			detail = nil
