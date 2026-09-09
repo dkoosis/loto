@@ -45,6 +45,15 @@ const (
 // one entry below rather than another table, another DDL and another migration.
 const HookTimingRetentionMax = 200
 
+// LockRefreshedRetentionMax is lock_refreshed's own share of the events
+// table (loto-wkul). refreshOwnLocksBelowHalfTTLTx writes one row per held
+// lock roughly every 15 minutes (half of domain.DegradedModeTTL) for as long
+// as a lane keeps calling `loto hook pre` — a long session holding several
+// locks reaches HookTimingRetentionMax's own cap in under an hour of hook
+// calls otherwise, the same crowding-out HookTimingRetentionMax exists to
+// stop (see its comment). 200 rows is the same headroom, for the same reason.
+const LockRefreshedRetentionMax = 200
+
 // eventKindRetentionMax is the per-kind cap list, applied before the global
 // cap. A slice rather than a map so the DELETEs run in a fixed order — same
 // input, same effect. A kind absent here is bounded only by the global cap,
@@ -54,6 +63,7 @@ var eventKindRetentionMax = []struct { //nolint:gochecknoglobals // read-only re
 	max  int
 }{
 	{EventHookTiming, HookTimingRetentionMax},
+	{EventLockRefreshed, LockRefreshedRetentionMax},
 }
 
 // rotateEventsTx trims the events table per retention policy, in the caller's

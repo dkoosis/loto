@@ -149,6 +149,13 @@ func refreshOwnLocksBelowHalfTTLTx(ctx context.Context, tx *sql.Tx, owner string
 	newExpiry := now.Add(ttl)
 	halfDeadline := now.Add(ttl / 2)
 
+	// No acquireOpFlock here, unlike RefreshLocks/commitRefreshes: this
+	// mutator only ever runs inside a caller-supplied tx (RecordCallPre's)
+	// that is already a single immediate-mode write and touches no
+	// filesystem — no chmod, no lock-file restore, nothing the flock exists
+	// to serialize against a concurrent mode change. SQLite's own tx
+	// isolation is what makes the owner_uuid-scoped UPDATE below safe without
+	// it.
 	rows, err := tx.QueryContext(ctx, `
 UPDATE locks SET expires_at = ?
 WHERE owner_uuid = ? AND expires_at > ? AND expires_at < ?

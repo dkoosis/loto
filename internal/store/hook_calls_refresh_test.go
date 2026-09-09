@@ -50,13 +50,18 @@ func TestRecordCallPre_RefreshesOwnLockUnderHalfTTL(t *testing.T) {
 		t.Errorf("refresh must not restart the hold: created_at moved to %v", after.CreatedAt)
 	}
 
-	// t0+31m: past the ORIGINAL expiry. The lock is still held, live, because
-	// the hook refreshed it at t0+16m without any manual `loto refresh`.
+	// A further pre at t0+31m — past the ORIGINAL 30m expiry — finds the lock
+	// already refreshed to t0+46m: still well above ITS half-TTL point, so
+	// this call writes no second refresh. This is the bead's first AC in
+	// full: the lane crosses its original deadline alive, with no manual
+	// `loto refresh` anywhere in the test.
+	preAt(t, s, tcOwnerA, "call-2", t0.Add(31*time.Minute))
+
 	stillHeld, err := s.LockForOwnerAt(ctx, rec.Target, tcOwnerA)
 	if err != nil || stillHeld == nil {
-		t.Fatalf("read back at original-expiry+1m: %v %v", stillHeld, err)
+		t.Fatalf("read back at t0+31m: %v %v", stillHeld, err)
 	}
-	if !stillHeld.ExpiresAt.After(t0.Add(31 * time.Minute)) {
+	if stillHeld.ExpiresAt.Before(t0.Add(31 * time.Minute)) {
 		t.Errorf("lock reads as expired past its original TTL: expires_at=%v", stillHeld.ExpiresAt)
 	}
 }
@@ -200,5 +205,49 @@ func TestRecordCallPre_NeverResurrectsAnAlreadyExpiredLease(t *testing.T) {
 	}
 	if after.ExpiresAt.After(t0) {
 		t.Errorf("expired lease was resurrected by the hook: expires_at=%v", after.ExpiresAt)
+	}
+}
+
+// TestRotateEvents_LockRefreshedHasItsOwnCap mirrors
+// TestRotateEvents_HookTimingHasItsOwnCap: lock_refreshed writes one row per
+// held lock roughly every half-TTL for as long as a lane keeps calling the
+// hook, and without its own cap a long session would evict every lock, gate
+// and admission event under the shared 1000-row ceiling the same way
+// hook_timing did before HookTimingRetentionMax existed.
+func TestRotateEvents_LockRefreshedHasItsOwnCap(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	// One low-rate row of another kind, written first so it is the OLDEST and
+	// therefore the first casualty of a global-cap-only rotation.
+	if _, err := s.AppendEvent(ctx, domain.Event{
+		Kind: EventGateBypass, ActorUUID: tcOwnerA, Reason: "seed", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	for i := range LockRefreshedRetentionMax + 50 {
+		if _, err := s.AppendEventRotating(ctx, domain.Event{
+			Kind: EventLockRefreshed, ActorUUID: tcOwnerA, Reason: "hook",
+			CreatedAt: now.Add(time.Duration(i+1) * time.Millisecond),
+		}); err != nil {
+			t.Fatalf("refreshed row %d: %v", i, err)
+		}
+	}
+
+	var refreshed, bypass int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM events WHERE event_kind = ?`, EventLockRefreshed).Scan(&refreshed); err != nil {
+		t.Fatalf("count refreshed: %v", err)
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM events WHERE event_kind = ?`, EventGateBypass).Scan(&bypass); err != nil {
+		t.Fatalf("count bypass: %v", err)
+	}
+	if refreshed != LockRefreshedRetentionMax {
+		t.Errorf("lock_refreshed rows = %d, want its cap of %d", refreshed, LockRefreshedRetentionMax)
+	}
+	if bypass != 1 {
+		t.Errorf("the hook evicted an unrelated kind: gate_bypass rows = %d, want 1", bypass)
 	}
 }
