@@ -201,7 +201,7 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 	if _, err := rt.Store.DropFinishedCalls(rt.Ctx, now, tReport); err != nil {
 		fmt.Fprintf(stderr, "⚠ hook: call-record retention: %v\n", err)
 	}
-	if _, err := rt.Store.DropOldTreeEvents(rt.Ctx); err != nil {
+	if _, err := rt.Store.DropOldTreeEvents(rt.Ctx, now); err != nil {
 		fmt.Fprintf(stderr, "⚠ hook: tree-event retention: %v\n", err)
 	}
 

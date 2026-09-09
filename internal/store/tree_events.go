@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS tree_reports (
   event_id       TEXT NOT NULL,
   addressee_uuid TEXT NOT NULL,
   created_at     INTEGER NOT NULL,
-  delivered_at   INTEGER
+  delivered_at   INTEGER,
+  acted_at       INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_tree_reports_undelivered ON tree_reports(delivered_at, addressee_uuid);`
 
@@ -126,10 +127,14 @@ var treeRuleNote = map[string]string{ //nolint:gochecknoglobals // read-only wor
 const TreeActedWindow = 10 * time.Minute
 
 // treeEventsRetentionMax bounds the drift tables the way eventsRetentionMax
-// bounds the audit trail. Undelivered reports are dropped with their event
-// like any other row: an unbounded table on the per-tool-call hot path is the
-// worse failure, and §3 already accepts that a report can outlive its reader.
-const treeEventsRetentionMax = 1000
+// bounds the audit trail — but only over events nothing is still waiting on.
+// treeReportUndeliveredAge is the separate, time-based bound on the ones that
+// are: an undelivered report survives any number of later events and expires
+// only by age, matching the audit trail's 7 days. See DropOldTreeEvents.
+const (
+	treeEventsRetentionMax   = 1000
+	treeReportUndeliveredAge = eventsRetentionAge
+)
 
 // TreeEvent is one observed change of one path: §3's
 // `(f, E_pre, h_pre, observer s, call, n: d0 -> d1, declared?)`, plus the rule
@@ -393,44 +398,47 @@ func appendTreeChangeReportedTx(ctx context.Context, tx *sql.Tx, ev TreeEvent, w
 	})
 }
 
-// markTreeChangeActedTx writes §10b row 2's numerator: this owner was told
-// `f` went `d0 -> d1`, and inside TreeActedWindow its own call put `d0` back.
+// markTreeChangeActedTx writes §10b row 2's numerator: this owner was HANDED a
+// report saying `f` went `d0 -> d1`, and inside TreeActedWindow of that
+// delivery its own call put `d0` back. Returns the paths it counted.
 //
-// ‡ "Acted" is deliberately weaker than "restored". `loto restore` does not
+// ‡ Three constraints, each one a way the ratio would otherwise be wrong.
+// (1) The window runs from delivered_at, not created_at: a report nobody has
+// read cannot have moved anyone, so a rewrite before delivery is a
+// coincidence, and an undelivered report is never acted on at all.
+// (2) A report is counted AT MOST ONCE — acted_at is stamped on the row in the
+// same statement that selects it — so a session that keeps working while the
+// file stays reverted does not add an acted row per tool call.
+// (3) "Acted" is deliberately weaker than "restored": `loto restore` does not
 // exist yet, and the counter has to exist BEFORE it to answer whether it is
-// worth building — so the observable is the one thing a holder can do today,
-// which is rewrite the file back itself. Digest equality is sound here and
-// nowhere else: this is not an attribution question, it is "is the content the
-// report named back on disk".
-func markTreeChangeActedTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, path, digest string, now time.Time) error {
+// worth building, so the observable is the one thing a holder can do today.
+// Digest equality is sound here and nowhere else — this is not an attribution
+// question, it is "is the content the report named back on disk".
+func markTreeChangeActedTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, path, digest string, now time.Time) ([]string, error) {
 	if digest == "" || owner == "" {
-		return nil
+		return nil, nil
 	}
-	acted, err := actedEventsTx(ctx, tx, owner, path, digest, now)
-	if err != nil {
-		return err
-	}
-	return appendEventsTx(ctx, tx, acted)
-}
-
-// actedEventsTx builds one audit row per report this rewrite answered. Split
-// from the append so the rows handle has a scope of its own to be closed in.
-func actedEventsTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, path, digest string, now time.Time) ([]domain.Event, error) {
-	rows, err := tx.QueryContext(ctx, actedReportsSQL,
-		string(owner), path, digest, now.Add(-TreeActedWindow).UnixNano())
-	if err != nil {
+	answered, err := answeredReportsTx(ctx, tx, owner, path, digest, now)
+	if err != nil || len(answered) == 0 {
 		return nil, err
 	}
-	defer rows.Close()
-	var acted []domain.Event
-	for rows.Next() {
-		var eventID, rule, holder string
-		var seq int64
-		if err := rows.Scan(&eventID, &rule, &seq, &holder); err != nil {
+	acted := make([]domain.Event, 0, len(answered))
+	for _, r := range answered {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE tree_reports SET acted_at = ? WHERE report_id = ? AND acted_at IS NULL`,
+			now.UnixNano(), r.reportID)
+		if err != nil {
 			return nil, err
 		}
+		// A concurrent post for the same owner may have claimed it first;
+		// whoever wins the UPDATE writes the one audit row.
+		if n, err := res.RowsAffected(); err != nil {
+			return nil, err
+		} else if n == 0 {
+			continue
+		}
 		payload, err := json.Marshal(treeChangeDetail{
-			Path: path, Holder: holder, Rule: rule, Seq: seq,
+			Path: path, Holder: r.holder, Rule: r.rule, Seq: r.seq,
 		})
 		if err != nil {
 			return nil, err
@@ -439,30 +447,67 @@ func actedEventsTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, path
 			Kind:      EventTreeChangeActed,
 			Target:    domain.Target{Canonical: path},
 			ActorUUID: string(owner),
-			Reason:    rule,
+			Reason:    r.rule,
 			Detail:    string(payload),
 			CreatedAt: now,
 		})
 	}
-	return acted, rows.Err()
+	if len(acted) == 0 {
+		return nil, nil
+	}
+	return []string{path}, appendEventsTx(ctx, tx, acted)
 }
 
-// actedReportsSQL finds every report that told this owner the path went from
-// the digest it is now back at, inside the window.
-const actedReportsSQL = `
-SELECT e.event_id, e.rule, e.seq, e.holder_pre
+// answeredReport is one delivered, not-yet-acted report whose pre-digest is
+// what the path now holds.
+type answeredReport struct {
+	reportID string
+	rule     string
+	holder   string
+	seq      int64
+}
+
+// answeredReportsTx reads them, so the UPDATE loop above has its own scope and
+// the rows handle is closed before any write on the same tx.
+func answeredReportsTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, path, digest string, now time.Time) ([]answeredReport, error) {
+	rows, err := tx.QueryContext(ctx, answeredReportsSQL,
+		string(owner), path, digest, now.Add(-TreeActedWindow).UnixNano())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []answeredReport
+	for rows.Next() {
+		var r answeredReport
+		if err := rows.Scan(&r.reportID, &r.rule, &r.seq, &r.holder); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// answeredReportsSQL finds every report this owner was HANDED inside the
+// window that said the path went from the digest it is now back at, and that
+// nothing has been counted against yet.
+const answeredReportsSQL = `
+SELECT r.report_id, e.rule, e.seq, e.holder_pre
   FROM tree_reports r JOIN tree_events e ON e.event_id = r.event_id
  WHERE r.addressee_uuid = ? AND e.path_canonical = ? AND e.digest_pre = ?
-   AND r.created_at >= ?
- ORDER BY e.seq DESC, e.event_id`
+   AND r.delivered_at IS NOT NULL AND r.delivered_at >= ? AND r.acted_at IS NULL
+ ORDER BY e.seq DESC, r.report_id`
 
-// DriftOutcome is what one drift pass found.
+// DriftOutcome is what one drift pass found. Each path appears in at most one
+// slice, and a path whose state matches what was last observed appears in none.
 type DriftOutcome struct {
-	// Drifted is every locked path whose state moved with no call covering
-	// it, sorted. Seeded is every locked path this pass observed for the
-	// first time — never a drift, because nothing was known to differ from.
+	// Drifted is every locked path whose state moved with no call covering it.
 	Drifted []string
-	Seeded  []string
+	// Seeded is every locked path this pass observed for the FIRST time —
+	// never a drift, because nothing was known to differ from.
+	Seeded []string
+	// Deferred is every changed path some in-flight call already recorded:
+	// its post will file the event, so filing one here too would double-count.
+	Deferred []string
 }
 
 // RecordDrift is I3 step 2. For each locked path whose stat or digest differs
@@ -487,21 +532,28 @@ func (s *Store) RecordDrift(ctx context.Context, observer domain.AgentUUID, now 
 		return out, err
 	}
 	defer cleanup()
+	wrote := false
 	for i := range obs {
 		if !obs[i].Locked {
 			continue
 		}
-		drifted, err := driftOnePathTx(ctx, tx, observer, obs[i], now)
+		verdict, err := driftOnePathTx(ctx, tx, observer, obs[i], now)
 		if err != nil {
 			return DriftOutcome{}, err
 		}
-		if drifted {
+		switch verdict {
+		case driftFiled:
 			out.Drifted = append(out.Drifted, obs[i].Path)
-		} else {
+			wrote = true
+		case driftSeeded:
 			out.Seeded = append(out.Seeded, obs[i].Path)
+			wrote = true
+		case driftDeferred:
+			out.Deferred = append(out.Deferred, obs[i].Path)
+		case driftUnchanged:
 		}
 	}
-	if len(out.Drifted) == 0 && len(out.Seeded) == 0 {
+	if !wrote {
 		return out, nil
 	}
 	if err := commitTxFn(tx); err != nil {
@@ -509,25 +561,56 @@ func (s *Store) RecordDrift(ctx context.Context, observer domain.AgentUUID, now 
 	}
 	sort.Strings(out.Drifted)
 	sort.Strings(out.Seeded)
+	sort.Strings(out.Deferred)
 	return out, nil
 }
 
-// driftOnePathTx handles one locked path. Reports whether it drifted; a path
-// that was seeded, or that matches what was observed last, did not.
-func driftOnePathTx(ctx context.Context, tx *sql.Tx, observer domain.AgentUUID, o HookPathState, now time.Time) (bool, error) {
+// driftVerdict is what one locked path's drift pass decided.
+type driftVerdict int
+
+const (
+	driftUnchanged driftVerdict = iota
+	driftSeeded
+	driftFiled
+	driftDeferred
+)
+
+// driftOnePathTx handles one locked path.
+//
+// ‡ A change some in-flight call already recorded the path for is DEFERRED,
+// not filed. Drift means "no call's window covered this"; a call that recorded
+// f and has not posted covers it by construction, and its post will file the
+// event with the spanning calls named. Filing here as well would give one
+// physical change two events — a drift whose own note says "no call covering
+// it" while naming that call as a spanner, plus the peer's — and two report
+// sets, which is a straight skew of §10b's reported count.
+//
+// Deferring writes NOTHING, `observed(f)` included, so the change is not lost:
+// if the peer posts, its post moves observed and the next pre sees nothing; if
+// its owner dies, the dead-owner sweep ends the call and the next pre files the
+// drift then. The observer's own in-flight calls count too — the property that
+// matters is that some post is still coming, not whose.
+func driftOnePathTx(ctx context.Context, tx *sql.Tx, observer domain.AgentUUID, o HookPathState, now time.Time) (driftVerdict, error) {
 	prevStat, prevDigest, known, err := observedAtTx(ctx, tx, o.Path, o.Epoch)
 	if err != nil {
-		return false, err
+		return driftUnchanged, err
 	}
 	if known && prevStat == o.Stat && prevDigest == o.Digest {
-		return false, nil
+		return driftUnchanged, nil
 	}
 	if !known {
-		return false, setObservedTx(ctx, tx, o, now)
+		return driftSeeded, setObservedTx(ctx, tx, o, now)
+	}
+	covered, err := inFlightCallRecordedTx(ctx, tx, o.Path, o.Epoch)
+	if err != nil {
+		return driftUnchanged, err
+	}
+	if covered {
+		return driftDeferred, nil
 	}
 	seq, err := nextPathSeq(ctx, tx, o.Path, o.Epoch, o.Digest)
 	if err != nil {
-		return false, err
+		return driftUnchanged, err
 	}
 	if _, err := fileTreeEventTx(ctx, tx, treeEventInput{
 		Path: o.Path, EpochPre: o.Epoch, HolderPre: o.Holder,
@@ -535,9 +618,21 @@ func driftOnePathTx(ctx context.Context, tx *sql.Tx, observer domain.AgentUUID, 
 		Observer: observer, Seq: seq,
 		DigestPre: prevDigest, DigestPost: o.Digest, Drift: true,
 	}, now); err != nil {
-		return false, err
+		return driftUnchanged, err
 	}
-	return true, setObservedTx(ctx, tx, o, now)
+	return driftFiled, setObservedTx(ctx, tx, o, now)
+}
+
+// inFlightCallRecordedTx reports whether some open call recorded this path at
+// this epoch — the call whose post will file the change drift would otherwise
+// file a second time.
+func inFlightCallRecordedTx(ctx context.Context, tx *sql.Tx, path string, epoch int64) (bool, error) {
+	var n int
+	err := tx.QueryRowContext(ctx, `
+SELECT count(*) FROM hook_call_paths p JOIN hook_calls c ON c.call_id = p.call_id
+ WHERE p.path_canonical = ? AND p.epoch_pre = ? AND c.t_post IS NULL AND c.dead_at IS NULL`,
+		path, epoch).Scan(&n)
+	return n > 0, err
 }
 
 func observedAtTx(ctx context.Context, tx *sql.Tx, path string, epoch int64) (stat, digest string, known bool, err error) {
@@ -758,23 +853,33 @@ SELECT event_id, path_canonical, epoch_pre, holder_pre, holder_now, epoch_now,
 	return out, nil
 }
 
-// DropOldTreeEvents bounds the drift tables at treeEventsRetentionMax events,
-// newest kept, dropping each dropped event's spanners and reports with it.
+// DropOldTreeEvents bounds the drift tables, in two passes with two different
+// rules, and returns how many events it dropped.
 //
-// ‡ An undelivered report is dropped like any other. The alternative — keeping
-// them forever — puts an unbounded table on the per-tool-call hot path, and §3
-// already accepts that a report can outlive the session it was addressed to.
-// The cap is ten times the number of paths a single call ever observes here,
-// so a report is only ever lost after a thousand later changes went unread.
-func (s *Store) DropOldTreeEvents(ctx context.Context) (int, error) {
+// ‡ An UNDELIVERED report is never evicted by the row cap. Three busy sessions
+// file a thousand events in under an hour, so a row cap alone silently deletes
+// the reports waiting for an idle session — while `tree_change_reported` still
+// counts them, which skews the one ratio this whole stage exists to measure,
+// in the direction that says holders ignore reports. Their event is exempt
+// from the cap and bounded by AGE instead (the same 7 days the audit trail
+// uses), and an aged-out undelivered report leaves a `tree_report_dropped`
+// row, so the loss is countable rather than invisible.
+func (s *Store) DropOldTreeEvents(ctx context.Context, now time.Time) (int, error) {
 	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer cleanup()
+	if err := dropAgedUndeliveredTx(ctx, tx, now); err != nil {
+		return 0, err
+	}
+	// The cap, over events nothing is still waiting on. An event with an
+	// undelivered report is not a candidate at any depth.
 	res, err := tx.ExecContext(ctx, `
 DELETE FROM tree_events WHERE event_id IN (
-  SELECT event_id FROM tree_events ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
+  SELECT event_id FROM tree_events
+   WHERE event_id NOT IN (SELECT event_id FROM tree_reports WHERE delivered_at IS NULL)
+   ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
 )`, treeEventsRetentionMax)
 	if err != nil {
 		return 0, err
@@ -783,19 +888,74 @@ DELETE FROM tree_events WHERE event_id IN (
 	if err != nil {
 		return 0, err
 	}
-	if n == 0 {
-		return 0, nil
-	}
-	for _, stmt := range []string{
-		`DELETE FROM tree_event_spanners WHERE event_id NOT IN (SELECT event_id FROM tree_events)`,
-		`DELETE FROM tree_reports WHERE event_id NOT IN (SELECT event_id FROM tree_events)`,
-	} {
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return 0, err
+	if n > 0 {
+		for _, stmt := range []string{
+			`DELETE FROM tree_event_spanners WHERE event_id NOT IN (SELECT event_id FROM tree_events)`,
+			`DELETE FROM tree_reports WHERE event_id NOT IN (SELECT event_id FROM tree_events)`,
+		} {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return 0, err
+			}
 		}
 	}
 	if err := commitTxFn(tx); err != nil {
 		return 0, err
 	}
 	return int(n), nil
+}
+
+// dropAgedUndeliveredTx deletes every undelivered report older than
+// treeReportUndeliveredAge and leaves one tree_report_dropped row per report,
+// so a report that expired unread is a number somebody can read rather than a
+// silent hole in the denominator.
+func dropAgedUndeliveredTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	ids, dropped, err := agedUndeliveredTx(ctx, tx, now)
+	if err != nil || len(ids) == 0 {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM tree_reports WHERE report_id = ?`, id); err != nil {
+			return err
+		}
+	}
+	return appendEventsTx(ctx, tx, dropped)
+}
+
+// agedUndeliveredTx reads them, so the rows handle is closed before any write
+// runs on the same transaction.
+func agedUndeliveredTx(ctx context.Context, tx *sql.Tx, now time.Time) ([]string, []domain.Event, error) {
+	rows, err := tx.QueryContext(ctx, `
+SELECT r.report_id, r.addressee_uuid, e.path_canonical, e.rule, e.seq, e.holder_pre
+  FROM tree_reports r JOIN tree_events e ON e.event_id = r.event_id
+ WHERE r.delivered_at IS NULL AND r.created_at < ?
+ ORDER BY r.report_id`, now.Add(-treeReportUndeliveredAge).UnixNano())
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var (
+		ids     []string
+		dropped []domain.Event
+	)
+	for rows.Next() {
+		var reportID, addressee, path, rule, holder string
+		var seq int64
+		if err := rows.Scan(&reportID, &addressee, &path, &rule, &seq, &holder); err != nil {
+			return nil, nil, err
+		}
+		payload, err := json.Marshal(treeChangeDetail{Path: path, Holder: holder, Rule: rule, Seq: seq})
+		if err != nil {
+			return nil, nil, err
+		}
+		ids = append(ids, reportID)
+		dropped = append(dropped, domain.Event{
+			Kind:      EventTreeReportDropped,
+			Target:    domain.Target{Canonical: path},
+			ActorUUID: addressee,
+			Reason:    rule,
+			Detail:    string(payload),
+			CreatedAt: now,
+		})
+	}
+	return ids, dropped, rows.Err()
 }

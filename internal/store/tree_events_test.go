@@ -397,10 +397,11 @@ func TestRecordDrift_SeedsThenReportsOnce(t *testing.T) {
 }
 
 // §10b row 2's pair. A report is one tree_change_reported row per addressee;
-// the addressee's own next call putting the reported digest back inside
-// TreeActedWindow is one tree_change_acted row.
+// the addressee's own next call putting the reported digest back, inside
+// TreeActedWindow OF THE DELIVERY, is one tree_change_acted row.
 func TestTreeChange_ReportedThenActedAreBothCounted(t *testing.T) {
 	s := mustOpen(t)
+	ctx := context.Background()
 	now := time.Now()
 
 	preAs(t, s, tcOwnerB, "b-write", now, obsFor(tcSHA1))
@@ -412,9 +413,12 @@ func TestTreeChange_ReportedThenActedAreBothCounted(t *testing.T) {
 		t.Errorf("row5 reports to two owners, so two reported rows; got %d", got)
 	}
 
-	// A, the holder, puts the reported digest back inside the window.
-	preAs(t, s, tcOwnerA, "a-fix", now.Add(2*time.Second), obsFor(tcSHA2))
-	fixed := postAt(t, s, "a-fix", now.Add(3*time.Second), obsFor(tcSHA1))
+	// A is handed the report, then puts the reported digest back.
+	if _, err := s.DeliverReports(ctx, tcOwnerA, now.Add(2*time.Second)); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	preAs(t, s, tcOwnerA, "a-fix", now.Add(3*time.Second), obsFor(tcSHA2))
+	fixed := postAt(t, s, "a-fix", now.Add(4*time.Second), obsFor(tcSHA1))
 	if !sameStrings(fixed.Acted, []string{tcHookPath}) {
 		t.Errorf("A rewrote f back to the reported digest; want it counted, got %v", fixed.Acted)
 	}
@@ -423,24 +427,323 @@ func TestTreeChange_ReportedThenActedAreBothCounted(t *testing.T) {
 	}
 }
 
-// A rewrite outside TreeActedWindow is not acting on the report: the counter
-// answers "did the report move anyone", and a coincidence hours later did not.
-func TestTreeChange_ActedIgnoresARewriteOutsideTheWindow(t *testing.T) {
+// The acted window's two edges, and its precondition. Undelivered is never
+// acted on — a report nobody read moved nobody — and the ten minutes run from
+// the DELIVERY, not from when the report was filed.
+func TestTreeChange_ActedKeysOffDeliveryNotFiling(t *testing.T) {
+	filed := time.Now()
+
+	t.Run("undelivered is never acted on", func(t *testing.T) {
+		s := mustOpen(t)
+		seedOneReport(t, s, filed)
+		out := rewriteBackAt(t, s, "a-fix", filed.Add(time.Minute))
+		if len(out.Acted) != 0 {
+			t.Errorf("the report was never handed over; want no acted, got %v", out.Acted)
+		}
+		if got := countEventKind(t, s, EventTreeChangeActed); got != 0 {
+			t.Errorf("want no acted row, got %d", got)
+		}
+	})
+
+	t.Run("delivered late, rewritten inside the window of the delivery", func(t *testing.T) {
+		s := mustOpen(t)
+		seedOneReport(t, s, filed)
+		// Delivery an hour after filing: keyed off created_at this would be
+		// outside the window and count nothing.
+		late := filed.Add(time.Hour)
+		if _, err := s.DeliverReports(context.Background(), tcOwnerA, late); err != nil {
+			t.Fatalf("deliver: %v", err)
+		}
+		out := rewriteBackAt(t, s, "a-fix", late.Add(time.Minute))
+		if !sameStrings(out.Acted, []string{tcHookPath}) {
+			t.Errorf("a rewrite one minute after delivery is acting on it, got %v", out.Acted)
+		}
+	})
+
+	t.Run("delivered, rewritten past the window", func(t *testing.T) {
+		s := mustOpen(t)
+		seedOneReport(t, s, filed)
+		if _, err := s.DeliverReports(context.Background(), tcOwnerA, filed.Add(time.Second)); err != nil {
+			t.Fatalf("deliver: %v", err)
+		}
+		out := rewriteBackAt(t, s, "a-fix", filed.Add(TreeActedWindow+time.Hour))
+		if len(out.Acted) != 0 {
+			t.Errorf("a rewrite past the window is a coincidence, not an act: %v", out.Acted)
+		}
+		if got := countEventKind(t, s, EventTreeChangeActed); got != 0 {
+			t.Errorf("want no acted row, got %d", got)
+		}
+	})
+}
+
+// §10b row 2's denominator has one row per report, so its numerator must too.
+// A session that keeps working while the file stays reverted files one acted
+// row, not one per tool call.
+func TestTreeChange_ActedIsCountedOncePerReport(t *testing.T) {
 	s := mustOpen(t)
 	now := time.Now()
-
-	preAs(t, s, tcOwnerB, "b-write", now, obsFor(tcSHA1))
-	postAt(t, s, "b-write", now.Add(time.Second), obsFor(tcSHA2))
-
-	late := now.Add(TreeActedWindow + time.Hour)
-	preAs(t, s, tcOwnerA, "a-late", late, obsFor(tcSHA2))
-	out := postAt(t, s, "a-late", late.Add(time.Second), obsFor(tcSHA1))
-	if len(out.Acted) != 0 {
-		t.Errorf("a rewrite past the window is not acting on the report, got %v", out.Acted)
+	seedOneReport(t, s, now)
+	if _, err := s.DeliverReports(context.Background(), tcOwnerA, now.Add(time.Second)); err != nil {
+		t.Fatalf("deliver: %v", err)
 	}
-	if got := countEventKind(t, s, EventTreeChangeActed); got != 0 {
-		t.Errorf("want no acted row, got %d", got)
+
+	first := rewriteBackAt(t, s, "a-fix-1", now.Add(2*time.Second))
+	if len(first.Acted) != 1 {
+		t.Fatalf("the first rewrite counts: %v", first.Acted)
 	}
+	for i, id := range []string{"a-still-1", "a-still-2"} {
+		out := rewriteBackAt(t, s, id, now.Add(time.Duration(3+i)*time.Second))
+		if len(out.Acted) != 0 {
+			t.Errorf("%s: the same report was counted a second time: %v", id, out.Acted)
+		}
+	}
+	if got := countEventKind(t, s, EventTreeChangeActed); got != 1 {
+		t.Errorf("want exactly one acted row per report, got %d", got)
+	}
+}
+
+// seedOneReport files one row5 event over tcHookPath by a peer's write, which
+// leaves A a report saying the path went tcSHA1 -> tcSHA2.
+func seedOneReport(t *testing.T, s *Store, at time.Time) {
+	t.Helper()
+	preAs(t, s, tcOwnerB, "b-write", at, obsFor(tcSHA1))
+	postAt(t, s, "b-write", at.Add(time.Millisecond), obsFor(tcSHA2))
+}
+
+// rewriteBackAt is one call by A that puts tcSHA1 back on disk.
+func rewriteBackAt(t *testing.T, s *Store, callID string, at time.Time) PostOutcome {
+	t.Helper()
+	preAs(t, s, tcOwnerA, callID, at, obsFor(tcSHA2))
+	return postAt(t, s, callID, at.Add(time.Millisecond), obsFor(tcSHA1))
+}
+
+// A change some in-flight call already recorded is DEFERRED, not filed: that
+// call's post files it, with the spanning calls named. Filing here as well
+// would give one physical change two events and two report sets, which is a
+// straight skew of §10b's reported count — and a drift event whose own note
+// says "no call covering it" while naming that very call as a spanner.
+func TestRecordDrift_DefersToAnInFlightCallThatRecordedThePath(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	// A's earlier call seeds observed(f) at d0.
+	if _, err := s.RecordDrift(ctx, tcOwnerA, now, []HookPathState{obsFor(tcSHA1)}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// B opens a call over the path, then writes.
+	preAs(t, s, tcOwnerB, "b-write", now.Add(time.Second), obsFor(tcSHA1))
+
+	// A's pre lands before B posts: the file already reads d1.
+	out, err := s.RecordDrift(ctx, tcOwnerA, now.Add(2*time.Second), []HookPathState{obsFor(tcSHA2)})
+	if err != nil {
+		t.Fatalf("drift: %v", err)
+	}
+	if len(out.Drifted) != 0 || !sameStrings(out.Deferred, []string{tcHookPath}) {
+		t.Fatalf("want the change deferred to B's post, got %+v", out)
+	}
+	if got := len(treeEventsOf(t, s, tcHookPath)); got != 0 {
+		t.Fatalf("drift filed an event B's post will file too: %d", got)
+	}
+
+	// B posts. One event, one report set, and B's own call is not its spanner.
+	postAt(t, s, "b-write", now.Add(3*time.Second), obsFor(tcSHA2))
+	evs := treeEventsOf(t, s, tcHookPath)
+	if len(evs) != 1 {
+		t.Fatalf("one physical change wants exactly one event, got %d: %+v", len(evs), evs)
+	}
+	if evs[0].Rule != TreeRuleRow5 {
+		t.Errorf("want B's post to file row5, got %s", evs[0].Rule)
+	}
+	if got := addresseesOf(t, s, evs[0].EventID); !sameStrings(got, []string{tcOwnerA, tcOwnerB}) {
+		t.Errorf("want exactly one report set, got %v", got)
+	}
+
+	// The change is not lost while deferred: B's post moved observed(f), so
+	// A's next pre is silent rather than filing the drift late.
+	out, err = s.RecordDrift(ctx, tcOwnerA, now.Add(4*time.Second), []HookPathState{obsFor(tcSHA2)})
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if len(out.Drifted) != 0 || len(out.Deferred) != 0 {
+		t.Errorf("B's post settled it; A's next pre has nothing to file: %+v", out)
+	}
+}
+
+// Deferring writes nothing, observed(f) included, so a change under a call
+// whose owner then DIES is filed as drift by the next pre rather than lost.
+func TestRecordDrift_FilesAfterTheDeferredCallsOwnerDies(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	if _, err := s.RecordDrift(ctx, tcOwnerA, now, []HookPathState{obsFor(tcSHA1)}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	preAs(t, s, tcOwnerB, "b-gone", now.Add(time.Second), obsFor(tcSHA1))
+	out, err := s.RecordDrift(ctx, tcOwnerA, now.Add(2*time.Second), []HookPathState{obsFor(tcSHA2)})
+	if err != nil || len(out.Deferred) != 1 {
+		t.Fatalf("want deferred: %+v err=%v", out, err)
+	}
+
+	if n, err := s.MarkDeadOwnerCalls(ctx, now, func(domain.SessionUUID) bool { return true }); err != nil || n != 1 {
+		t.Fatalf("dead-owner sweep: n=%d err=%v", n, err)
+	}
+	out, err = s.RecordDrift(ctx, tcOwnerA, now.Add(3*time.Second), []HookPathState{obsFor(tcSHA2)})
+	if err != nil {
+		t.Fatalf("after death: %v", err)
+	}
+	if !sameStrings(out.Drifted, []string{tcHookPath}) {
+		t.Fatalf("a change under a dead owner's call is drift, not lost: %+v", out)
+	}
+	if evs := treeEventsOf(t, s, tcHookPath); len(evs) != 1 || evs[0].Rule != TreeRuleDrift {
+		t.Errorf("want one drift event, got %+v", evs)
+	}
+}
+
+// An unchanged locked path is in NEITHER slice: Seeded means seeded.
+func TestRecordDrift_UnchangedPathIsNeitherSeededNorDrifted(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	out, err := s.RecordDrift(ctx, tcOwnerA, now, []HookPathState{obsFor(tcSHA1)})
+	if err != nil || !sameStrings(out.Seeded, []string{tcHookPath}) {
+		t.Fatalf("the first pass seeds: %+v err=%v", out, err)
+	}
+	out, err = s.RecordDrift(ctx, tcOwnerA, now.Add(time.Second), []HookPathState{obsFor(tcSHA1)})
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if len(out.Seeded) != 0 || len(out.Drifted) != 0 || len(out.Deferred) != 0 {
+		t.Errorf("an already-observed, unchanged path belongs in no slice: %+v", out)
+	}
+}
+
+func treeEventsOf(t *testing.T, s *Store, path string) []TreeEvent {
+	t.Helper()
+	evs, err := s.TreeEventsFor(context.Background(), path)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	return evs
+}
+
+// Retention must never silently swallow a report nobody has read. The row cap
+// is applied only to events nothing is waiting on, so an idle session's
+// reports survive any number of later changes — otherwise `reported` counts
+// them and `acted` never can, and §10b's ratio reads as "holders ignore
+// reports" when nobody was ever handed one.
+func TestDropOldTreeEvents_NeverEvictsAnUndeliveredReport(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	// Five reports addressed to A, left unread, filed FIRST — the oldest rows,
+	// and the first casualties of a cap that did not know about them.
+	for i := range 5 {
+		seedReportOn(t, s, "waiting-"+itoa(i), now.Add(time.Duration(i)*time.Millisecond))
+	}
+	if got := len(mustUndelivered(t, s, tcOwnerA)); got != 5 {
+		t.Fatalf("want 5 reports waiting for A, got %d", got)
+	}
+
+	// Then 1200 events on other paths, every one of them read.
+	busy := now.Add(time.Minute)
+	for i := range 1200 {
+		seedReportOn(t, s, "busy-"+itoa(i), busy.Add(time.Duration(i)*time.Millisecond))
+	}
+	// Every event so far addresses both the holder and the observer, so both
+	// have to read for the event to stop being exempt.
+	for _, who := range []domain.AgentUUID{tcOwnerA, tcOwnerB} {
+		if _, err := s.DeliverReports(ctx, who, busy.Add(time.Hour)); err != nil {
+			t.Fatalf("deliver to %s: %v", who, err)
+		}
+	}
+	// A's five are read now too, so re-file five fresh unread ones and only
+	// then let the cap run — the case is "unread rows beyond the cap".
+	for i := range 5 {
+		seedReportOn(t, s, "waiting-"+itoa(i), busy.Add(2*time.Hour+time.Duration(i)*time.Millisecond))
+	}
+	before := len(mustUndelivered(t, s, tcOwnerA))
+	if before != 5 {
+		t.Fatalf("want 5 unread reports before the sweep, got %d", before)
+	}
+
+	if _, err := s.DropOldTreeEvents(ctx, busy.Add(3*time.Hour)); err != nil {
+		t.Fatalf("retention: %v", err)
+	}
+	if got := len(mustUndelivered(t, s, tcOwnerA)); got != 5 {
+		t.Fatalf("the cap evicted an unread report: 5 -> %d", got)
+	}
+	if got := countEventKind(t, s, EventTreeReportDropped); got != 0 {
+		t.Errorf("nothing aged out; want no dropped rows, got %d", got)
+	}
+	// The cap did run: the read events are bounded.
+	var events int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM tree_events`).Scan(&events); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if events > treeEventsRetentionMax+before {
+		t.Errorf("the cap did not run: %d events left", events)
+	}
+}
+
+// An undelivered report expires by AGE, and leaves a countable row when it
+// does — a silent deletion is what skews the ratio.
+func TestDropOldTreeEvents_AgedOutUndeliveredLeavesADroppedRow(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	old := time.Now().Add(-treeReportUndeliveredAge - time.Hour)
+
+	seedReportOn(t, s, "stale", old)
+	if got := len(mustUndelivered(t, s, tcOwnerA)); got != 1 {
+		t.Fatalf("want one report waiting, got %d", got)
+	}
+	if _, err := s.DropOldTreeEvents(ctx, time.Now()); err != nil {
+		t.Fatalf("retention: %v", err)
+	}
+	if got := len(mustUndelivered(t, s, tcOwnerA)); got != 0 {
+		t.Errorf("an aged-out undelivered report is dropped, got %d left", got)
+	}
+	// Two addressees, so two rows aged out together.
+	if got := countEventKind(t, s, EventTreeReportDropped); got != 2 {
+		t.Errorf("want the loss counted, got %d dropped rows", got)
+	}
+}
+
+// seedReportOn files one row5 event over a named path, leaving A a report.
+func seedReportOn(t *testing.T, s *Store, path string, at time.Time) {
+	t.Helper()
+	obs := func(d string) HookPathState {
+		return HookPathState{Path: path, Locked: true, Epoch: 1, Holder: tcOwnerA, Digest: d, Stat: "stat-" + d}
+	}
+	callID := path + "@" + at.Format(time.RFC3339Nano)
+	preAs(t, s, tcOwnerB, callID, at, obs(tcSHA1))
+	postAt(t, s, callID, at.Add(time.Microsecond), obs(tcSHA2))
+}
+
+func mustUndelivered(t *testing.T, s *Store, who domain.AgentUUID) []TreeReport {
+	t.Helper()
+	out, err := s.UndeliveredReports(context.Background(), who)
+	if err != nil {
+		t.Fatalf("read undelivered: %v", err)
+	}
+	return out
+}
+
+// itoa keeps the fixture path names stdlib-plain without pulling strconv in
+// for one call site.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
 }
 
 func countEventKind(t *testing.T, s *Store, kind string) int {

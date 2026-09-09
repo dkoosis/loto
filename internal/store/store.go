@@ -393,6 +393,7 @@ var migrationEnsures = []struct {
 	{"add hook_calls.dead_at", ensureHookCallsDeadAt},
 	{"add path_seq.digest", ensurePathSeqDigest},
 	{"add tree event and report tables", ensureTreeEventsTables},
+	{"add tree_reports.acted_at", ensureTreeReportsActedAt},
 }
 
 // eventsCheckAdmitsEveryKind reports whether the live events DDL's CHECK names

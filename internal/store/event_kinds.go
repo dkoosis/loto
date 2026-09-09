@@ -80,6 +80,13 @@ const (
 	// worth building. §10b calls that generalization out by name.
 	EventTreeChangeReported = "tree_change_reported"
 	EventTreeChangeActed    = "tree_change_acted"
+	// EventTreeReportDropped is one report that expired without ever being
+	// delivered. It exists so the acted/reported ratio cannot be skewed by a
+	// silent deletion: every reported row has exactly one fate — delivered
+	// (and possibly acted), still waiting, or dropped, and this is the third.
+	// A ratio computed without it reads as "holders ignore reports" when the
+	// truth is that nobody was ever handed them.
+	EventTreeReportDropped = "tree_report_dropped"
 )
 
 // allEventKinds is every event kind currently admitted by events.event_kind's
@@ -102,6 +109,7 @@ var allEventKinds = []string{
 	EventHookTiming,
 	EventTreeChangeReported,
 	EventTreeChangeActed,
+	EventTreeReportDropped,
 }
 
 // eventKindCheckSQL renders allEventKinds as the comma-joined, single-quoted

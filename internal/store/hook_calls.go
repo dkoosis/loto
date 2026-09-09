@@ -412,14 +412,13 @@ func postOnePathWithEventTx(ctx context.Context, tx *sql.Tx, callID string, owne
 		return err
 	}
 	// Acted BEFORE the event this path is about to file: the question is
-	// whether the digest now on disk is one an EARLIER report named, and
-	// asking it first keeps the two passes independent of each other.
-	if err := markTreeChangeActedTx(ctx, tx, owner, o.Path, o.Digest, tPost); err != nil {
+	// whether the digest now on disk is one an EARLIER delivered report named,
+	// and asking it first keeps the two passes independent of each other.
+	acted, err := markTreeChangeActedTx(ctx, tx, owner, o.Path, o.Digest, tPost)
+	if err != nil {
 		return err
 	}
-	if actedOn(ctx, tx, owner, o.Path, o.Digest, tPost) {
-		out.Acted = append(out.Acted, o.Path)
-	}
+	out.Acted = append(out.Acted, acted...)
 	// observed(f) := the post state, for every locked path (§5 I4 step 5).
 	// Without this the next pre-hook would read the pre-call state as the last
 	// thing anyone saw and report this call's own write as drift.
@@ -443,23 +442,6 @@ func postOnePathWithEventTx(ctx context.Context, tx *sql.Tx, callID string, owne
 	}
 	out.Events = append(out.Events, ev)
 	return nil
-}
-
-// actedOn asks whether markTreeChangeActedTx had anything to write, without
-// writing it twice. Split out so the audit append stays the one writer and the
-// outcome field stays a read.
-func actedOn(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, path, digest string, now time.Time) bool {
-	if digest == "" || owner == "" {
-		return false
-	}
-	var n int
-	if err := tx.QueryRowContext(ctx, `
-SELECT count(*) FROM tree_reports r JOIN tree_events e ON e.event_id = r.event_id
- WHERE r.addressee_uuid = ? AND e.path_canonical = ? AND e.digest_pre = ? AND r.created_at >= ?`,
-		string(owner), path, digest, now.Add(-TreeActedWindow).UnixNano()).Scan(&n); err != nil {
-		return false
-	}
-	return n > 0
 }
 
 // postPathResult is what one path's post half assigned, so RecordCallPost can
@@ -829,6 +811,41 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// ensureTreeReportsActedAt adds tree_reports.acted_at to a DB created before
+// the column existed. Same guarded, idempotent shape as ensurePathSeqDigest,
+// and for the same reason: these tables have never shipped in a release.
+func ensureTreeReportsActedAt(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('tree_reports') WHERE name = 'acted_at'`,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	// Absent table: ensureTreeEventsTables creates it with the column, and it
+	// runs first. Nothing to add, and nothing pending.
+	if n > 0 || !tableExists(ctx, db, "tree_reports") {
+		return false, nil
+	}
+	if apply {
+		if _, err := db.ExecContext(ctx,
+			`ALTER TABLE tree_reports ADD COLUMN acted_at INTEGER`); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
+// tableExists is the sqlite_master probe the two ensure steps above share.
+func tableExists(ctx context.Context, db sqlExecQuerier, name string) bool {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
 }
 
 // ensurePathSeqDigest adds path_seq.digest to a DB created before the column

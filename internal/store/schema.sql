@@ -306,7 +306,12 @@ CREATE TABLE IF NOT EXISTS tree_reports (
   addressee_uuid TEXT NOT NULL,
   created_at     INTEGER NOT NULL,
   -- delivered_at NULL is what `loto status` lists and what the addressee's
-  -- next pre-hook hands over.
-  delivered_at   INTEGER
+  -- next pre-hook hands over. acted_at stamps the ONE time §10b row 2 counts
+  -- this report as acted on, so a session that keeps working while the file
+  -- stays reverted cannot add an acted row per tool call. The acted window
+  -- runs from delivered_at, never created_at: a report nobody read moved
+  -- nobody.
+  delivered_at   INTEGER,
+  acted_at       INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_tree_reports_undelivered ON tree_reports(delivered_at, addressee_uuid);
