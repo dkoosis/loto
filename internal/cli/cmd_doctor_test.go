@@ -71,7 +71,7 @@ func setHooksPath(t *testing.T, repo, value string) {
 func TestDoctorGuard_ForeignHooksPath(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)
-	writeHookFixture(t, repo, "pre-commit", "post-checkout")
+	writeHookFixture(t, repo, "pre-commit", "post-checkout", "reference-transaction")
 	foreign := filepath.Join(t.TempDir(), "global-hooks")
 	setHooksPath(t, repo, foreign)
 
@@ -81,6 +81,13 @@ func TestDoctorGuard_ForeignHooksPath(t *testing.T) {
 	}
 	if !strings.Contains(out, "✗ guard=tree-move-guard unreachable reason=hooksPath-foreign detail="+foreign) {
 		t.Errorf("expected foreign-hooksPath row for the other guard too: %q", out)
+	}
+	// Rule 1 (enforcement-design.md §10.3): global core.hooksPath not owned by
+	// loto's dispatcher. This row IS rule 1 — no separate leg reimplements it
+	// (bead Givens: "doctor already reports hooksPath-foreign; extend, do not
+	// fork").
+	if !strings.Contains(out, "✗ guard=ref-transaction-guard unreachable reason=hooksPath-foreign detail="+foreign) {
+		t.Errorf("expected foreign-hooksPath row for ref-transaction-guard too: %q", out)
 	}
 	if !strings.Contains(out, "```bash\nmake hooks\n```") {
 		t.Errorf("expected a bash fix block under the ✗ rows: %q", out)
@@ -103,7 +110,7 @@ func TestDoctorGuard_ForeignHooksPath(t *testing.T) {
 func TestDoctorGuard_InheritedGlobalHooksPath(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)
-	writeHookFixture(t, repo, "pre-commit", "post-checkout")
+	writeHookFixture(t, repo, "pre-commit", "post-checkout", "reference-transaction")
 	foreign := filepath.Join(t.TempDir(), "global-hooks")
 	// --global, never --local. Resetting HOME is NOT enough to aim it at a temp
 	// file: git resolves --global to $GIT_CONFIG_GLOBAL first when that is set,
@@ -141,7 +148,7 @@ func TestDoctorGuard_InheritedGlobalHooksPath(t *testing.T) {
 func TestDoctorGuard_AfterMakeHooks(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)
-	writeHookFixture(t, repo, "pre-commit", "post-checkout")
+	writeHookFixture(t, repo, "pre-commit", "post-checkout", "reference-transaction")
 	setHooksPath(t, repo, ".githooks")
 
 	out := runOK(t, tcCmdDoctor)
@@ -150,6 +157,9 @@ func TestDoctorGuard_AfterMakeHooks(t *testing.T) {
 	}
 	if !strings.Contains(out, "✓ guard=tree-move-guard reachable entry=.githooks/hooks.d/post-checkout/10-loto-post-checkout") {
 		t.Errorf("expected tree-move-guard reachable row: %q", out)
+	}
+	if !strings.Contains(out, "✓ guard=ref-transaction-guard reachable entry=.githooks/hooks.d/reference-transaction/10-loto-reference-transaction") {
+		t.Errorf("expected ref-transaction-guard reachable row: %q", out)
 	}
 	if strings.Contains(out, "✗ guard=") {
 		t.Errorf("no guard row should fail once make hooks has run: %q", out)
@@ -169,12 +179,15 @@ func TestDoctorGuard_AfterMakeHooks(t *testing.T) {
 func TestDoctorGuard_PostCheckoutEntryRemoved(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)
-	writeHookFixture(t, repo, "pre-commit") // post-checkout gets no loto entry
+	writeHookFixture(t, repo, "pre-commit", "reference-transaction") // post-checkout gets no loto entry
 	setHooksPath(t, repo, ".githooks")
 
 	out := runOK(t, tcCmdDoctor)
 	if !strings.Contains(out, "✓ guard=pre-commit-gate reachable") {
 		t.Errorf("pre-commit row must stay ✓ when only post-checkout's entry is missing: %q", out)
+	}
+	if !strings.Contains(out, "✓ guard=ref-transaction-guard reachable") {
+		t.Errorf("ref-transaction-guard row must stay ✓ when only post-checkout's entry is missing: %q", out)
 	}
 	if !strings.Contains(out, "✗ guard=tree-move-guard unreachable reason=missing-entry detail=.githooks/hooks.d/post-checkout") {
 		t.Errorf("expected a missing-entry row for tree-move-guard: %q", out)

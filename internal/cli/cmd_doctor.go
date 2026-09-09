@@ -145,7 +145,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 3
 	}
 
-	printDoctorHeader(ctx, stdout, repoTop, rt.StateDir)
+	printDoctorHeader(ctx, stdout, rt)
 	renderIdentityGC(stdout, sessionsReaped, sessionsResidual)
 
 	renderDoctorReport(stdout, report)
@@ -189,16 +189,18 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 }
 
 // printDoctorHeader writes doctor's environment-identity lines (project/repo/
-// state) plus the guard-reachability rows (loto-jomg): both answer "is my
+// state), the guard-reachability rows (loto-jomg), and the enforcement-layer
+// legs (enforcement-design.md §10.3, loto-ea8y.7): all three answer "is my
 // environment sound" ahead of the audit findings below, and folding them into
 // one call keeps cmdDoctor under funlen's statement budget. Binary identity
 // (loto-jhbm) prints earlier still, in cmdDoctor itself, ahead of the calls
 // that can fail before ever reaching this header.
-func printDoctorHeader(ctx context.Context, stdout io.Writer, repoTop, stateDir string) {
-	fmt.Fprintf(stdout, "project: %s\n", ResolveAndPinProjectSlug(repoTop))
-	fmt.Fprintf(stdout, "repo:    %s\n", repoTop)
-	fmt.Fprintf(stdout, "state:   %s\n", stateDir)
-	renderGuardReachability(stdout, checkGuardReachability(ctx, repoTop))
+func printDoctorHeader(ctx context.Context, stdout io.Writer, rt *runtime) {
+	fmt.Fprintf(stdout, "project: %s\n", ResolveAndPinProjectSlug(rt.RepoTop))
+	fmt.Fprintf(stdout, "repo:    %s\n", rt.RepoTop)
+	fmt.Fprintf(stdout, "state:   %s\n", rt.StateDir)
+	renderGuardReachability(stdout, checkGuardReachability(ctx, rt.RepoTop))
+	renderEnforcementLegs(ctx, rt, stdout)
 }
 
 // orphanFlags bundles the doctor flags that gate orphan-mode scanning.
@@ -543,6 +545,13 @@ type guardSpec struct {
 var guardSpecs = []guardSpec{
 	{hook: "pre-commit", label: "pre-commit-gate"},
 	{hook: "post-checkout", label: "tree-move-guard"},
+	// reference-transaction is I1's guard (loto-ea8y.4/.1), added here rather
+	// than forked: reachability is the same definition — dispatcher plus a
+	// loto-owned executable entry under hooks.d/<hook>/ — and "not reachable
+	// under the dispatcher" (enforcement-design.md §10.3 rule 2) is exactly
+	// what a foreign core.hooksPath already means for every guard in this
+	// table, ref-transaction included.
+	{hook: "reference-transaction", label: "ref-transaction-guard"},
 }
 
 // guardStatus is one guard's reachability verdict. reason and detail are only

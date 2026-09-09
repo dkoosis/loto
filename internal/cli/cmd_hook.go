@@ -124,15 +124,24 @@ func isHookEditFamily(tool string) bool {
 	return false
 }
 
+// hookSubPre and hookSubPost are the `loto hook <verb>` subcommand names —
+// named once so doctor's tree-hook-settings leg (doctor_enforcement.go,
+// enforcement-design.md §10.3 rule 3) can compose "loto hook pre"/"loto hook
+// post" without a second literal of the same string.
+const (
+	hookSubPre  = "pre"
+	hookSubPost = "post"
+)
+
 func cmdHook(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	sub := ""
 	if len(args) > 0 {
 		sub = args[0]
 	}
 	switch sub {
-	case "pre":
+	case hookSubPre:
 		return runHook(ctx, true, stdout, stderr)
-	case "post":
+	case hookSubPost:
 		return runHook(ctx, false, stdout, stderr)
 	case "ref":
 		return cmdHookRef(ctx, args[1:], stdout, stderr)

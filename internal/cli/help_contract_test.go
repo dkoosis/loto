@@ -60,7 +60,7 @@ func TestHookHelpTeachesContract(t *testing.T) {
 	}
 	for _, want := range []string{
 		"usage: loto hook <pre|post|ref>",
-		"PostToolUseFailure",
+		eventPostToolUseFailure,
 		"0 recorded",
 		"2 the write is refused",
 		"loto hook pre  < event.json",
