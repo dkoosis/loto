@@ -246,5 +246,72 @@ CREATE TABLE IF NOT EXISTS path_seq (
   path_canonical TEXT NOT NULL,
   epoch          INTEGER NOT NULL,
   seq            INTEGER NOT NULL,
+  -- digest: what the path was when this number was assigned. It answers ONE
+  -- question — "is the state I am looking at already numbered?" — so two hooks
+  -- observing the SAME physical change file two events against one transition
+  -- instead of inventing a second. It is never used to decide contention:
+  -- that is the seq interval and nothing else (§3, round 10).
+  digest         TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (path_canonical, epoch)
 );
+
+-- path_observed / tree_events / tree_event_spanners / tree_reports: the drift
+-- layer over the call records (enforcement-design.md §3 "observed", "event",
+-- "report", §5 I3 step 2 and I4 steps 5-6's report half). Added to existing
+-- DBs via ensureTreeEventsTables in migrate() (no user_version bump); declared
+-- here so fresh DBs match. Shapes and rationale: tree_events.go.
+CREATE TABLE IF NOT EXISTS path_observed (
+  path_canonical TEXT NOT NULL,
+  epoch          INTEGER NOT NULL,
+  stat           TEXT NOT NULL DEFAULT '',
+  digest         TEXT NOT NULL DEFAULT '',
+  observed_at    INTEGER NOT NULL,
+  PRIMARY KEY (path_canonical, epoch)
+);
+
+CREATE TABLE IF NOT EXISTS tree_events (
+  event_id       TEXT PRIMARY KEY,
+  path_canonical TEXT NOT NULL,
+  -- epoch_pre / holder_pre are `E_pre` and `h_pre`: the lock generation and
+  -- owner as the observing call recorded them. epoch_now / holder_now are the
+  -- same two now — a difference is verdict-table row 1.
+  epoch_pre      INTEGER NOT NULL DEFAULT 0,
+  holder_pre     TEXT NOT NULL DEFAULT '',
+  holder_now     TEXT NOT NULL DEFAULT '',
+  epoch_now      INTEGER NOT NULL DEFAULT 0,
+  -- observer_uuid / call_id are empty for a drift event: I3 step 2 files it
+  -- from a pre-hook, and no call's window covered the change.
+  observer_uuid  TEXT NOT NULL DEFAULT '',
+  call_id        TEXT NOT NULL DEFAULT '',
+  seq            INTEGER NOT NULL,
+  digest_pre     TEXT NOT NULL DEFAULT '',
+  digest_post    TEXT NOT NULL DEFAULT '',
+  declared       INTEGER NOT NULL DEFAULT 0,
+  rule           TEXT NOT NULL DEFAULT '',
+  note           TEXT NOT NULL DEFAULT '',
+  created_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tree_events_path ON tree_events(path_canonical, seq);
+
+CREATE TABLE IF NOT EXISTS tree_event_spanners (
+  event_id   TEXT NOT NULL,
+  call_id    TEXT NOT NULL,
+  owner_uuid TEXT NOT NULL,
+  PRIMARY KEY (event_id, call_id)
+);
+
+CREATE TABLE IF NOT EXISTS tree_reports (
+  report_id      TEXT PRIMARY KEY,
+  event_id       TEXT NOT NULL,
+  addressee_uuid TEXT NOT NULL,
+  created_at     INTEGER NOT NULL,
+  -- delivered_at NULL is what `loto status` lists and what the addressee's
+  -- next pre-hook hands over. acted_at stamps the ONE time §10b row 2 counts
+  -- this report as acted on, so a session that keeps working while the file
+  -- stays reverted cannot add an acted row per tool call. The acted window
+  -- runs from delivered_at, never created_at: a report nobody read moved
+  -- nobody.
+  delivered_at   INTEGER,
+  acted_at       INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_tree_reports_undelivered ON tree_reports(delivered_at, addressee_uuid);

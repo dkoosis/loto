@@ -199,11 +199,21 @@ func runHook(ctx context.Context, pre bool, stdout, stderr io.Writer) int {
 	return hookPost(ctx, rt, ev, started, stderr)
 }
 
-// hookPre is I3 steps 3 and 4. Step 1's verdicts and step 2's drift report are
-// the next bead (loto-ea8y.6); the sweep below is the slot they will occupy,
-// and it does the three things that must happen whether or not verdicts exist:
-// end the calls whose owner is gone, flag the calls past T_report, and drop the
-// finished records nothing can still contest.
+// hookPre is I3 steps 1 through 4.
+//
+// ‡ The order below is 3, 2, 1, 4 — admit, drift, deliver, record — not the
+// spec's 1, 2, 3, 4, and the two swaps are deliberate.
+//
+// Admission moves ahead of drift because ONE observation has to serve both
+// step 2 and step 4, or the pre reports a drift against a digest the record
+// does not carry and §10a test 11 double-reports. Admission can only ADD an
+// unlocked path to the locked set, and a path with no `observed` row is
+// seeded rather than reported, so nothing step 2 would have found is lost.
+//
+// Delivery moves after drift so a holder that detects its own file's drift is
+// handed the report in the same call rather than the next one. For every other
+// addressee the two orders are indistinguishable: their report was filed by
+// someone else's earlier hook.
 func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, stdout, stderr io.Writer) int {
 	now := time.Now()
 	tReport := hookTReport()
@@ -217,6 +227,9 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 	}
 	if _, err := rt.Store.DropFinishedCalls(rt.Ctx, now, tReport); err != nil {
 		fmt.Fprintf(stderr, "⚠ hook: call-record retention: %v\n", err)
+	}
+	if _, err := rt.Store.DropOldTreeEvents(rt.Ctx, now); err != nil {
+		fmt.Fprintf(stderr, "⚠ hook: tree-event retention: %v\n", err)
 	}
 
 	// Step 3 — admission, BEFORE the observation, so a path this call just
@@ -232,11 +245,22 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 		}
 	}
 
-	// Step 4 — record.
 	obs, statusPaths, lockedBytes, err := hookObserve(ctx, rt, declared, stderr)
 	if err != nil {
 		return hookSkip(stderr, "observe: %v", err)
 	}
+
+	// Step 2 — drift, over the observation step 4 is about to record.
+	me := domain.AgentUUID(rt.Agent.UUID)
+	if _, err := rt.Store.RecordDrift(rt.Ctx, me, now, obs); err != nil {
+		fmt.Fprintf(stderr, "⚠ hook: drift: %v\n", err)
+	}
+	// Step 1 — deliver. Reports addressed to this owner are handed over once
+	// and marked delivered; `loto status` carries the rest until their
+	// addressee's own next call.
+	hookDeliver(rt, me, now, stdout, stderr)
+
+	// Step 4 — record.
 	recorded, err := rt.Store.RecordCallPre(rt.Ctx, store.HookCall{
 		CallID:      ev.ToolUseID,
 		OwnerUUID:   domain.AgentUUID(rt.Agent.UUID),
@@ -255,7 +279,26 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 	return 0
 }
 
-// hookPost is I4 step 5's record half. Step 6's verdicts are the next bead.
+// hookDeliver is I3 step 1's delivery half: hand this owner every report
+// waiting for it and mark each delivered, so the next call does not repeat it.
+//
+// ‡ Best-effort, and on STDOUT. A report the harness never shows the agent is
+// a report that did not happen, and stdout is where the hook's other line
+// already goes; a delivery failure must never turn into a nonzero exit, which
+// would stop the tool call over a message (the exit-code rule in hookSkip).
+func hookDeliver(rt *runtime, me domain.AgentUUID, now time.Time, stdout, stderr io.Writer) {
+	delivered, err := rt.Store.DeliverReports(rt.Ctx, me, now)
+	if err != nil {
+		fmt.Fprintf(stderr, "⚠ hook: deliver reports: %v\n", err)
+		return
+	}
+	render.EmitReports(stdout, "reports", delivered, false)
+}
+
+// hookPost is I4 steps 5 and 6's report half: RecordCallPost files an event
+// for every state change, names the calls that span it, and writes the reports
+// those changes owe. The verdict table's `good`, `copy` and `L` columns are
+// deferred until §10b's acted/reported ratio says whether holders act at all.
 func hookPost(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, stderr io.Writer) int {
 	obs, statusPaths, lockedBytes, err := hookObserve(ctx, rt, "", stderr)
 	if err != nil {
