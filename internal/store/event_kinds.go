@@ -105,6 +105,21 @@ const (
 	// A ratio computed without it reads as "holders ignore reports" when the
 	// truth is that nobody was ever handed them.
 	EventTreeReportDropped = "tree_report_dropped"
+	// EventPostMissing and EventPostMissingResolved are §10b row 4's pair
+	// (loto-ea8y.8): how often a live session's post-hook goes missing, and
+	// how it resolves. EventPostMissing is written by MarkPostMissing when an
+	// in-flight call crosses T_report — the same sweep that already flips
+	// hook_calls.post_missing, now leaving an audit row behind it. Target is
+	// the call_id; Detail carries (call_id, session, age_ms) as JSON.
+	//
+	// EventPostMissingResolved is written the one time a post_missing call
+	// stops being post_missing: either its post lands late (RecordCallPost,
+	// Reason "posted") or the liveness probe finds its owner dead
+	// (MarkDeadOwnerCalls, Reason "session_died"). A call that never crossed
+	// T_report writes neither kind — the pair only exists for calls the first
+	// kind already flagged, so "resolved" always has a "missing" to resolve.
+	EventPostMissing         = "post_missing"
+	EventPostMissingResolved = "post_missing_resolved"
 )
 
 // allEventKinds is every event kind currently admitted by events.event_kind's
@@ -130,6 +145,8 @@ var allEventKinds = []string{
 	EventTreeChangeReported,
 	EventTreeChangeActed,
 	EventTreeReportDropped,
+	EventPostMissing,
+	EventPostMissingResolved,
 }
 
 // eventKindCheckSQL renders allEventKinds as the comma-joined, single-quoted

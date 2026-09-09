@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -359,9 +360,12 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 	defer cleanup()
 
 	var postNs sql.NullInt64
-	var ownerStr string
+	var ownerStr, sessionStr string
+	var postMissing int
+	var tPreNs int64
 	if err := tx.QueryRowContext(ctx,
-		`SELECT t_post, owner_uuid FROM hook_calls WHERE call_id = ?`, callID).Scan(&postNs, &ownerStr); err != nil {
+		`SELECT t_post, owner_uuid, session_uuid, post_missing, t_pre FROM hook_calls WHERE call_id = ?`, callID,
+	).Scan(&postNs, &ownerStr, &sessionStr, &postMissing, &tPreNs); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return PostOutcome{}, fmt.Errorf("%w: %s", ErrUnknownCall, callID)
 		}
@@ -373,6 +377,16 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 	owner := domain.AgentUUID(ownerStr)
 	if postNs.Valid {
 		return PostOutcome{}, nil // already posted: no-op
+	}
+	// §10b row 4's resolution half: this call was flagged post_missing by an
+	// earlier MarkPostMissing sweep, and its post has now landed — late, but
+	// it landed. Written in the same tx as the t_post update below, so the
+	// pair (missing, resolved) commits atomically with the state it reports.
+	if postMissing != 0 {
+		if err := appendPostMissingResolvedTx(ctx, tx, callID, owner, domain.SessionUUID(sessionStr),
+			"posted", tPost.Sub(time.Unix(0, tPreNs)), tPost); err != nil {
+			return PostOutcome{}, err
+		}
 	}
 
 	recorded, err := recordedPathsTx(ctx, tx, callID)
@@ -680,6 +694,12 @@ func (s *Store) MarkDeadOwnerCalls(ctx context.Context, now time.Time, dead func
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	// byID lets markOneDeadCallTx read each call's PostMissing flag without a
+	// second query — see its own doc comment for why that matters.
+	byID := make(map[string]HookCall, len(open))
+	for i := range open {
+		byID[open[i].CallID] = open[i]
+	}
 
 	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
@@ -688,22 +708,48 @@ func (s *Store) MarkDeadOwnerCalls(ctx context.Context, now time.Time, dead func
 	defer cleanup()
 	var marked int
 	for _, id := range ids {
-		res, err := tx.ExecContext(ctx,
-			`UPDATE hook_calls SET dead_at = ? WHERE call_id = ? AND `+hookCallInFlightSQL,
-			now.UnixNano(), id)
+		n, err := markOneDeadCallTx(ctx, tx, id, byID[id], now)
 		if err != nil {
 			return 0, err
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return 0, err
-		}
-		marked += int(n)
+		marked += n
 	}
 	if err := commitTxFn(tx); err != nil {
 		return 0, err
 	}
 	return marked, nil
+}
+
+// markOneDeadCallTx ends one in-flight call whose owner is dead, and if it
+// was post_missing, resolves that too. Split out of MarkDeadOwnerCalls's loop
+// so that function stays a plan (build the id list, then a tx) rather than
+// growing a nested branch per row.
+func markOneDeadCallTx(ctx context.Context, tx *sql.Tx, id string, c HookCall, now time.Time) (int, error) {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE hook_calls SET dead_at = ? WHERE call_id = ? AND `+hookCallInFlightSQL,
+		now.UnixNano(), id)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	if c.PostMissing {
+		// §10b row 4's other resolution: a call already flagged post_missing
+		// whose owner turned out to be dead rather than slow. c comes from the
+		// same InFlightCalls read the id list came from, not re-queried, so this
+		// reads the PostMissing flag as it stood the moment the sweep decided
+		// the owner was dead.
+		if err := appendPostMissingResolvedTx(ctx, tx, id, c.OwnerUUID, c.SessionUUID,
+			"session_died", now.Sub(c.TPre), now); err != nil {
+			return 0, err
+		}
+	}
+	return int(n), nil
 }
 
 // deadOwnerCallIDs picks the in-flight calls whose session the oracle calls
@@ -732,31 +778,121 @@ func deadOwnerCallIDs(open []HookCall, dead func(domain.SessionUUID) bool) []str
 	return ids
 }
 
+// postMissingDetail is the events.detail payload post_missing and
+// post_missing_resolved both carry (§10b row 4): the call, its session, and
+// an age in milliseconds — time since t_pre for post_missing, time from t_pre
+// to resolution for post_missing_resolved. Which of the two happened rides in
+// Event.Reason ("posted" or "session_died"), not in this struct.
+type postMissingDetail struct {
+	CallID  string `json:"call_id"`
+	Session string `json:"session,omitempty"`
+	AgeMS   int64  `json:"age_ms"`
+}
+
+// appendPostMissingResolvedTx writes one post_missing_resolved row: this
+// call_id was flagged post_missing by an earlier MarkPostMissing sweep, and
+// now either its post landed (reason "posted") or its owner was found dead
+// (reason "session_died"). age is measured from t_pre, matching the age
+// post_missing itself records, so a reader can compare when a call was first
+// flagged against how long it eventually took to resolve.
+func appendPostMissingResolvedTx(ctx context.Context, tx *sql.Tx, callID string, owner domain.AgentUUID,
+	session domain.SessionUUID, reason string, age time.Duration, now time.Time,
+) error {
+	payload, err := json.Marshal(postMissingDetail{CallID: callID, Session: string(session), AgeMS: age.Milliseconds()})
+	if err != nil {
+		return err
+	}
+	return appendEventTx(ctx, tx, domain.Event{
+		Kind:      EventPostMissingResolved,
+		Target:    domain.Target{Canonical: callID},
+		ActorUUID: string(owner),
+		Reason:    reason,
+		Detail:    string(payload),
+		CreatedAt: now,
+	})
+}
+
+// postMissingCandidate is one in-flight, not-yet-flagged call MarkPostMissing
+// is about to flag: enough of its row to write both the UPDATE and the
+// post_missing event without a second query per call.
+type postMissingCandidate struct {
+	callID, owner, session string
+	tPre                   time.Time
+}
+
+// postMissingCandidatesTx reads every in-flight call whose t_pre is before
+// cutoff and still has post_missing = 0 — MarkPostMissing's own WHERE clause,
+// pulled out so that function stays a plan (read the candidates, then flag
+// each) rather than a query and a branch inlined together.
+func postMissingCandidatesTx(ctx context.Context, tx *sql.Tx, cutoff time.Time) ([]postMissingCandidate, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT call_id, owner_uuid, session_uuid, t_pre FROM hook_calls
+		  WHERE `+hookCallInFlightSQL+` AND post_missing = 0 AND t_pre < ?
+		  ORDER BY call_id`, cutoff.UnixNano())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []postMissingCandidate
+	for rows.Next() {
+		var c postMissingCandidate
+		var tPreNs int64
+		if err := rows.Scan(&c.callID, &c.owner, &c.session, &tPreNs); err != nil {
+			return nil, err
+		}
+		c.tPre = time.Unix(0, tPreNs)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // MarkPostMissing flags every in-flight call older than tReport. It does NOT
 // close them: a post_missing call still spans every transition inside its open
 // interval, because a command that has not posted may still be running and may
 // write next (§3, round 10). Returns how many rows the sweep flagged.
+//
+// One post_missing audit row is written per call flagged, in the same tx as
+// the flag itself, so the counter §10b row 4 reads can never disagree with
+// hook_calls.post_missing about which calls crossed T_report.
 func (s *Store) MarkPostMissing(ctx context.Context, now time.Time, tReport time.Duration) (int, error) {
 	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer cleanup()
-	res, err := tx.ExecContext(ctx,
-		`UPDATE hook_calls SET post_missing = 1
-		  WHERE `+hookCallInFlightSQL+` AND post_missing = 0 AND t_pre < ?`,
-		now.Add(-tReport).UnixNano())
+
+	toFlag, err := postMissingCandidatesTx(ctx, tx, now.Add(-tReport))
 	if err != nil {
 		return 0, err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, err
+	if len(toFlag) == 0 {
+		return 0, commitTxFn(tx)
+	}
+
+	for _, f := range toFlag {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE hook_calls SET post_missing = 1 WHERE call_id = ?`, f.callID); err != nil {
+			return 0, err
+		}
+		payload, err := json.Marshal(postMissingDetail{CallID: f.callID, Session: f.session, AgeMS: now.Sub(f.tPre).Milliseconds()})
+		if err != nil {
+			return 0, err
+		}
+		if err := appendEventTx(ctx, tx, domain.Event{
+			Kind:      EventPostMissing,
+			Target:    domain.Target{Canonical: f.callID},
+			ActorUUID: f.owner,
+			Detail:    string(payload),
+			CreatedAt: now,
+		}); err != nil {
+			return 0, err
+		}
 	}
 	if err := commitTxFn(tx); err != nil {
 		return 0, err
 	}
-	return int(n), nil
+	return len(toFlag), nil
 }
 
 // DropFinishedCalls applies §3's retention: a finished call's record is kept
