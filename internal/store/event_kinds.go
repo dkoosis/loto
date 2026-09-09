@@ -56,6 +56,17 @@ const (
 	// EventGateBypass has none: a firing is a commit-scoped fact, and the
 	// per-path detail rides in Detail as JSON. ActorUUID names the committer.
 	EventStagedGateFired = "staged_lock_gate_fired"
+	// EventHookTiming is what the tree hook costs: one row per pre and one per
+	// post (enforcement-design.md §10b row 3). Reason says which half wrote it
+	// ("pre" or "post"); the payload rides in Detail as JSON — call_id,
+	// pre_ms or post_ms, status_paths, locked_bytes.
+	//
+	// ‡ The counter exists because a decision reads it, which is §10b's whole
+	// rule for writing one: p99 pre + post over 250 ms on this machine, or p50
+	// over 50 ms in any repo, and the digest-on-every-call design is measured
+	// out rather than argued out. No Target — a call is not a path — so
+	// TargetCanonical is written empty, same as EventGateBypass.
+	EventHookTiming = "hook_timing"
 )
 
 // allEventKinds is every event kind currently admitted by events.event_kind's
@@ -75,6 +86,7 @@ var allEventKinds = []string{
 	EventCandidateAccepted,
 	EventCandidateRejected,
 	EventStagedGateFired,
+	EventHookTiming,
 }
 
 // eventKindCheckSQL renders allEventKinds as the comma-joined, single-quoted

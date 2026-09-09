@@ -237,6 +237,20 @@ func parseNameOnlyZ(out string) []string {
 // empty fingerprint rather than an error: the path DID change, and losing
 // that reading to protect a fingerprint would be the outage the sensor is
 // forbidden to become.
+// HashPaths is hashWorktreePaths for a caller outside this package: the tree
+// hook, which needs the same worktree-content blob hash for every path it
+// observes (enforcement-design.md §5 I3 step 4, "clean paths carry git's blob
+// hash as their digest"). Exported rather than reimplemented so the symlink
+// and gitlink handling above is not written a second time and allowed to drift.
+//
+// Every path must exist: an absent path errors, exactly as it does for the
+// scanner. A caller observing a deleted path splits it out before calling —
+// "the file is gone" is a state the CALLER records, not a fingerprint this
+// function is entitled to invent.
+func HashPaths(ctx context.Context, repoTop string, paths []string) (map[string]string, error) {
+	return hashWorktreePaths(ctx, repoTop, paths)
+}
+
 func hashWorktreePaths(ctx context.Context, repoTop string, paths []string) (map[string]string, error) {
 	if len(paths) == 0 {
 		return map[string]string{}, nil
