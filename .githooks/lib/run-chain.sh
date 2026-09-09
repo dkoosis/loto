@@ -64,6 +64,27 @@ hook=$1
 shift
 
 githooks_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 2
+
+# LOTO_HOOK_PROBE=1 (loto-ea8y.11): answer before touching the chain at all —
+# no stdin capture, no chain_dir read, no entry runs. `loto doctor` execs the
+# EFFECTIVE hook (direct .githooks/<hook>, or a foreign forwarder that lands
+# here) with this set and empty stdin, and reads reachable iff this exact
+# line comes back. Every dispatcher only execs into this file, so answering
+# once here covers pre-commit/post-checkout/reference-transaction/etc. alike.
+#
+# repo_top is resolved via `git rev-parse --show-toplevel`, not a plain `cd
+# .. && pwd` off githooks_dir: git resolves PHYSICALLY (symlinks followed),
+# while a logical shell `cd`/`pwd` does not — on macOS $TMPDIR sits behind
+# /var -> /private/var, so the two diverge there and doctor's own toplevel
+# (also `git rev-parse --show-toplevel`, runtime.go) would never match a
+# logically-computed string. Using git on both sides makes them the same
+# computation by construction, not just usually equal.
+if [ "${LOTO_HOOK_PROBE:-}" = "1" ]; then
+	repo_top=$(git -C "$githooks_dir" rev-parse --show-toplevel 2>/dev/null) || exit 2
+	printf 'loto-hook-probe %s %s\n' "$hook" "$repo_top"
+	exit 0
+fi
+
 chain_dir="$githooks_dir/hooks.d/$hook"
 
 # No directory, or an empty one, is a legitimate "this hook does nothing".
