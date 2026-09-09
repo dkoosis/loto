@@ -177,7 +177,10 @@ func statIsDir(repoTop, rel string) bool {
 		probe = filepath.Join(repoTop, rel)
 	}
 	st, err := os.Stat(probe)
-	return err == nil && st.IsDir()
+	if err != nil {
+		return false
+	}
+	return st.IsDir()
 }
 
 // validateLockTargets canonicalizes and Lstat-validates each path before any
