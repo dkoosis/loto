@@ -344,16 +344,36 @@ var (
 // file_path is set, so this call never attempts I2 admission and never takes
 // a lock as a side effect of running doctor.
 //
-// The record this leaves behind is retained under the same rule any other
-// finished call is (store.DropFinishedCalls' own comment names "doctor's
-// self-test" as one of the readers a finished record must survive for) —
-// nothing here deletes it, and it ages out on the next sweep past T_report.
+// The record and its hook_timing events are deleted synchronously before
+// this leg returns (PR #344 review, CI run 34360434734): ReadEnforcementStats
+// (loto-ea8y.8) counts both, added after this leg first shipped, so a row left
+// for store.DropFinishedCalls' own retention window moved doctor's stats row
+// on the very next run and broke byte-identical output. store.DropFinishedCalls'
+// comment still names "doctor's self-test" as a reader a finished record must
+// survive FOR — this leg is that reader, and it has already read the pair via
+// CallRecord below by the time it deletes it.
 func checkHookSelfTest(ctx context.Context, rt *runtime) enforcementFinding {
 	const label = "hook_selftest"
 	callID := "loto-doctor-selftest-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	ev := hookEvent{ToolName: "DoctorSelfTest", ToolUseID: callID, CWD: rt.RepoTop}
 	fix := []string{"ls -la " + shellQuote(rt.StateDir) + "   # confirm the state dir is writable"}
 
+	finding := runHookSelfTestOnce(ctx, rt, ev, callID, label, fix)
+
+	// Cleanup runs for every outcome above — a pre-refusal writes no row, a
+	// post-refusal leaves a pre-only row, success leaves a full pair — so
+	// this leg is a no-op on the store on every return path, pass or fail.
+	if _, _, err := rt.Store.DeleteCallAndTiming(rt.Ctx, callID); err != nil && finding.ok {
+		return enforcementFinding{label: label, detail: "reason=cleanup-failed detail=" + err.Error(), fix: fix}
+	}
+	return finding
+}
+
+// runHookSelfTestOnce runs the synthetic pre-then-post pair and reports the
+// verdict, without touching what it wrote — checkHookSelfTest above owns
+// cleanup, so every return path here (including the early ones) still leaves
+// a full or partial record for it to delete.
+func runHookSelfTestOnce(ctx context.Context, rt *runtime, ev hookEvent, callID, label string, fix []string) enforcementFinding {
 	var discard bytes.Buffer
 	if code := selfTestPre(ctx, rt, ev, time.Now(), &discard, &discard); code != 0 {
 		return enforcementFinding{label: label, detail: fmt.Sprintf("reason=pre-refused exit=%d", code), fix: fix}

@@ -942,6 +942,61 @@ DELETE FROM hook_calls
 	return int(n), nil
 }
 
+// DeleteCallAndTiming removes one call's hook_calls/hook_call_paths rows and
+// any hook_timing events (§10b row 3) whose detail names callID, in one
+// transaction. Built for doctor's self-test leg (enforcement-design.md
+// §10.3 rule 5, loto-ea8y.7): that leg proves the tree-hook plumbing works
+// by actually recording a synthetic pre/post pair through the real hookPre/
+// hookPost path, and a doctor run must leave the store exactly as it found
+// it — ReadEnforcementStats (loto-ea8y.8) counts both tables, so a leftover
+// row moves the count on every later run and breaks the byte-identical-
+// output AC (PR #344 CI run 34360434734).
+//
+// The detail LIKE match is safe here specifically because callID is this
+// process's own generated token (alnum and hyphens only, never a LIKE
+// wildcard or quote) and hookEmitTiming always marshals CallID as the
+// detail JSON's first field — a targeted cleanup for one known caller, not
+// a general-purpose query.
+//
+// deletedCall reports whether a hook_calls row existed for callID at all —
+// false is not an error: a pre-refusal writes no row, and cleanup must still
+// run to be a no-op rather than fail.
+func (s *Store) DeleteCallAndTiming(ctx context.Context, callID string) (deletedCall bool, deletedEvents int, err error) {
+	tx, cleanup, err := s.beginTx(ctx)
+	if err != nil {
+		return false, 0, err
+	}
+	defer cleanup()
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM hook_calls WHERE call_id = ?`, callID)
+	if err != nil {
+		return false, 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM hook_call_paths WHERE call_id = ?`, callID); err != nil {
+		return false, 0, err
+	}
+
+	evRes, err := tx.ExecContext(ctx,
+		`DELETE FROM events WHERE event_kind = ? AND detail LIKE ?`,
+		EventHookTiming, `%"call_id":"`+callID+`"%`)
+	if err != nil {
+		return false, 0, err
+	}
+	evN, err := evRes.RowsAffected()
+	if err != nil {
+		return false, 0, err
+	}
+
+	if err := commitTxFn(tx); err != nil {
+		return false, 0, err
+	}
+	return n > 0, int(evN), nil
+}
+
 func boolInt(b bool) int {
 	if b {
 		return 1

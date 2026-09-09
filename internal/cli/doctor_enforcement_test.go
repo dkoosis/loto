@@ -235,6 +235,55 @@ func TestDoctorEnforcement_SelfTestRecordsPair(t *testing.T) {
 	}
 }
 
+// countCallsAndEvents reads the two counters PR #344 CI (run 34360434734)
+// found moving between doctor runs: ReadEnforcementStats' HookCalls (grouped
+// from hook_timing events, exactly what a leftover self-test record moves)
+// and the events table's raw row and hook_timing-kind counts.
+func countCallsAndEvents(t *testing.T) (statsHookCalls, totalEvents, timingEvents int) {
+	t.Helper()
+	rt, done := hookStoreRead(t)
+	defer done()
+	stats, err := rt.Store.ReadEnforcementStats(rt.Ctx, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("read enforcement stats: %v", err)
+	}
+	evs, err := rt.Store.ListEvents(rt.Ctx)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	for i := range evs {
+		if evs[i].Kind == store.EventHookTiming {
+			timingEvents++
+		}
+	}
+	return stats.HookCalls, len(evs), timingEvents
+}
+
+// TestDoctorEnforcement_SelfTestLeavesNoResidue is the PR #344 review fix
+// (CI run 34360434734): the self-test's own synthetic call record and
+// hook_timing events must not survive the leg that wrote them, or
+// ReadEnforcementStats' counters (loto-ea8y.8, merged after this bead first
+// shipped) move on every subsequent doctor run and the byte-identical-output
+// AC breaks. One doctor run must be a no-op on both counters.
+func TestDoctorEnforcement_SelfTestLeavesNoResidue(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+
+	hookCallsBefore, eventsBefore, timingBefore := countCallsAndEvents(t)
+	runOK(t, tcCmdDoctor)
+	hookCallsAfter, eventsAfter, timingAfter := countCallsAndEvents(t)
+
+	if hookCallsAfter != hookCallsBefore {
+		t.Errorf("enforcement-stats hook_calls must be unchanged by one doctor run: before=%d after=%d", hookCallsBefore, hookCallsAfter)
+	}
+	if timingAfter != timingBefore {
+		t.Errorf("hook_timing events must be unchanged by one doctor run: before=%d after=%d", timingBefore, timingAfter)
+	}
+	if eventsAfter != eventsBefore {
+		t.Errorf("events table row count must be unchanged by one doctor run: before=%d after=%d", eventsBefore, eventsAfter)
+	}
+}
+
 // --- rule 6: post_missing not kept current ----------------------------------
 
 func TestDoctorEnforcement_StalePostMissing(t *testing.T) {
