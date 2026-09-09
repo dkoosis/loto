@@ -194,6 +194,95 @@ func TestLiveOwnerUUIDsMissingDirIsEmptyNotError(t *testing.T) {
 	}
 }
 
+// --- LiveOwnerUUIDs as S (loto-ea8y.3, enforcement-design.md §3) ----------
+//
+// S ("live sessions in one checkout") is the set I1 (§5) refuses a protected
+// ref transition under whenever |S| >= 2. LiveOwnerUUIDs is that query:
+// membership comes from identity.SessionRecord + the PID/ProcStart probe
+// alone, never from a call record, so an idle session between calls stays a
+// member. No store table backs it (§3 Givens: reuse SessionRecord, add
+// nothing) — and internal/store cannot import internal/identity (arch-lint),
+// so this query lives here, not in package store; the ref hook (loto-ea8y.4)
+// and `loto doctor` (already wired, doctor_stash.go) both call it directly,
+// the same way runtime.go's liveProbe already crosses the identity/cli
+// boundary for lock liveness.
+
+// plantWitnessedSessionProcStart is plantWitnessedSession plus an explicit
+// ProcStart, for the mismatch case below (plantWitnessedSession always
+// leaves it at the zero value).
+func plantWitnessedSessionProcStart(t *testing.T, sid, owner string, pid int, procStart int64) {
+	t.Helper()
+	if err := os.MkdirAll(sessionDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(SessionRecord{SessionID: sid, UUID: owner, PID: pid, ProcStart: procStart, RecordedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir(), sid+".json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestS_TwoLiveSessionsNoCallRecords pins spec test 13's query half and this
+// bead's first AC: two session records with live pids, nothing about a call
+// record anywhere (LiveOwnerUUIDs never reads one), yield |S| = 2.
+func TestS_TwoLiveSessionsNoCallRecords(t *testing.T) {
+	clearIdentityEnv(t)
+	plantWitnessedSession(t, "s1", "owner-1", os.Getpid())
+	plantWitnessedSession(t, "s2", "owner-2", os.Getpid())
+
+	got := LiveOwnerUUIDs()
+	if len(got) != 2 {
+		t.Fatalf("|S| = %d (%v), want 2", len(got), got)
+	}
+	for _, owner := range []string{"owner-1", "owner-2"} {
+		if _, ok := got[owner]; !ok {
+			t.Errorf("%s missing from S = %v", owner, got)
+		}
+	}
+}
+
+// TestS_ExcludesDeadPidAndProcStartMismatch pins this bead's second AC: a
+// record whose pid is dead, or whose ProcStart no longer matches the pid's
+// current OS start-time, is excluded from S — while a live, matching record
+// stays in.
+func TestS_ExcludesDeadPidAndProcStartMismatch(t *testing.T) {
+	clearIdentityEnv(t)
+	stubProcStart(t, 500, true) // any pid probed in this test reads start-time 500
+
+	plantWitnessedSessionProcStart(t, "s-live", "owner-live", os.Getpid(), 500)         // matches -> live
+	plantWitnessedSession(t, "s-dead-pid", "owner-dead-pid", deadPID(t))                // pid gone -> dead
+	plantWitnessedSessionProcStart(t, "s-mismatch", "owner-mismatch", os.Getpid(), 999) // 999 != 500 -> dead (recycled pid)
+
+	got := LiveOwnerUUIDs()
+	if _, ok := got["owner-live"]; !ok {
+		t.Errorf("owner-live missing from S = %v, want present", got)
+	}
+	if _, ok := got["owner-dead-pid"]; ok {
+		t.Errorf("owner-dead-pid present in S = %v, want excluded (pid dead)", got)
+	}
+	if _, ok := got["owner-mismatch"]; ok {
+		t.Errorf("owner-mismatch present in S = %v, want excluded (ProcStart mismatch)", got)
+	}
+	if len(got) != 1 {
+		t.Errorf("|S| = %d (%v), want 1", len(got), got)
+	}
+}
+
+// TestS_ProcStartZeroWithLivePidIncluded pins this bead's third AC: 0 means
+// unknown, never dead (§3 Givens) — a record with ProcStart 0 and a live pid
+// is a member of S.
+func TestS_ProcStartZeroWithLivePidIncluded(t *testing.T) {
+	clearIdentityEnv(t)
+	plantWitnessedSessionProcStart(t, "s-zero", "owner-zero-procstart", os.Getpid(), 0)
+
+	got := LiveOwnerUUIDs()
+	if _, ok := got["owner-zero-procstart"]; !ok {
+		t.Errorf("owner-zero-procstart missing from S = %v, want present (ProcStart 0 is unknown, not dead)", got)
+	}
+}
+
 // --- GCSessions ---------------------------------------------------------------
 
 // plantSession writes a session record file for sid with the given owner and
