@@ -97,7 +97,41 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 	render.EmitClaimSuccess(stdout, rec)
 	emitNotOnDiskAdvisory(stdout, repoTop, prefix.Canonical)
+	recordRefRefusalOverride(rt, prefix.Canonical, now, stderr)
 	return 0
+}
+
+// recordRefRefusalOverride writes the ref_refused_overridden counter when this
+// claim is the operator overriding I1 — a checkout-wide claim taken by the
+// same owner within refOverrideWindow of a ref_refused (§10b row 1).
+//
+// The counter lives here rather than in the hook because the OVERRIDE is the
+// claim, not the refusal: the hook exits before the operator has decided
+// anything. Reading refusals / overrides per week is what decides whether the
+// three-shape denylist is refusing the right things or whether `allow` itself
+// is wrong.
+//
+// Best-effort throughout: a claim is a coordination write, and losing a
+// telemetry row must never fail it.
+func recordRefRefusalOverride(rt *runtime, prefix string, now time.Time, stderr io.Writer) {
+	if prefix != refCheckoutWidePrefix {
+		return
+	}
+	refusal, ok, err := rt.Store.LatestEventByKindActor(
+		rt.Ctx, store.EventRefRefused, rt.Agent.UUID, now.Add(-refOverrideWindow))
+	if err != nil || !ok {
+		return
+	}
+	if _, err := rt.Store.AppendEventRotating(rt.Ctx, domain.Event{
+		Kind:      store.EventRefRefusedOverridden,
+		Target:    refusal.Target,
+		ActorUUID: rt.Agent.UUID,
+		Reason:    refusal.Reason,
+		Detail:    refusal.Detail,
+		CreatedAt: now,
+	}); err != nil {
+		fmt.Fprintf(stderr, "⚠ ref-override-counter=unrecorded err=%q\n", err)
+	}
 }
 
 // resolveCLIPrefix normalizes a user-supplied prefix (absolute inside the

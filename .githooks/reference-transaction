@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+#
+# reference-transaction — dispatcher. Runs every executable in
+# .githooks/hooks.d/reference-transaction/ in name order and exits with the
+# first non-zero status.
+#
+# ‡ Add a guard by dropping a file in hooks.d/reference-transaction/ — never by
+#   editing this dispatcher. The full contract (naming, ordering bands, argv,
+#   stdin, exit, fail-open) is the header of .githooks/lib/run-chain.sh.
+exec "$(dirname -- "$0")/lib/run-chain.sh" reference-transaction "$@"

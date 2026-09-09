@@ -14,6 +14,7 @@ commands:
   violations  List, scan for, or resolve unauthorized writes to unleased paths
   ack      Dismiss a tag or territory tag by ID
   whoami   Print this session's owner id and record its liveness witnesses
+  hook     Git hook bodies; ref = reference-transaction guard (wired by make hooks)
   version  Print loto version
 
 lane choreography (engine verbs; used by the /team fleet harness):
