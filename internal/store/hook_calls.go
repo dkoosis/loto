@@ -31,9 +31,10 @@ CREATE TABLE IF NOT EXISTS hook_calls (
   tool_name    TEXT NOT NULL DEFAULT '',
   t_pre        INTEGER NOT NULL,
   t_post       INTEGER,
-  post_missing INTEGER NOT NULL DEFAULT 0
+  post_missing INTEGER NOT NULL DEFAULT 0,
+  dead_at      INTEGER
 );
-CREATE INDEX IF NOT EXISTS idx_hook_calls_inflight ON hook_calls(t_post, t_pre);
+CREATE INDEX IF NOT EXISTS idx_hook_calls_inflight ON hook_calls(t_post, dead_at, t_pre);
 
 CREATE TABLE IF NOT EXISTS hook_call_paths (
   call_id        TEXT NOT NULL,
@@ -81,6 +82,30 @@ func ensureHookCallsTables(ctx context.Context, db sqlExecQuerier, apply bool) (
 	return true, nil
 }
 
+// ensureHookCallsDeadAt adds hook_calls.dead_at to a DB created before the
+// column existed. hook_calls has never shipped in a release, so the only DBs
+// this can find are ones a developer built from an earlier commit of this
+// branch — and for those the alternative is every store command dying on
+// "no such column". Guarded and idempotent like every other ensure step.
+func ensureHookCallsDeadAt(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('hook_calls') WHERE name = 'dead_at'`,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return false, nil
+	}
+	if apply {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE hook_calls ADD COLUMN dead_at INTEGER`); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
 // ErrUnknownCall reports a post for a call_id no pre ever recorded. Distinct
 // from "already posted": one is a hook that never saw the call's opening, the
 // other is the idempotent repeat the design requires to be a no-op.
@@ -95,16 +120,33 @@ type HookCall struct {
 	ToolName    string
 	TPre        time.Time
 	TPost       time.Time
+	// DeadAt: when the liveness probe found this call's owner dead. §3 gives a
+	// call exactly two ends — "until either post event lands OR the liveness
+	// probe finds s dead" — and this is the second one. Kept distinct from
+	// TPost rather than folded into it: the call never posted, and a later
+	// reader judging what it spans has to be able to tell the difference.
+	DeadAt time.Time
 	// PostMissing: a live session's call whose post has not landed within
 	// T_report. It changes what is REPORTED and nothing about contention —
 	// a post_missing call is still in flight (§3, round 10).
 	PostMissing bool
 }
 
-// InFlight reports whether this call's post has not landed. post_missing does
-// not end a call: the two are independent, and reading them as alternatives is
-// exactly the round-10 defect.
-func (c HookCall) InFlight() bool { return c.TPost.IsZero() }
+// InFlight reports whether this call is still open: no post landed and its
+// owner is not known dead.
+//
+// ‡ post_missing does NOT appear here. Age never ends a call — reading
+// post_missing as an ending is exactly the round-10 defect. A dead owner does
+// end one, because a process that no longer exists cannot write next.
+func (c HookCall) InFlight() bool { return c.TPost.IsZero() && c.DeadAt.IsZero() }
+
+// Ended reports when this call stopped being in flight, zero while it is.
+func (c HookCall) Ended() time.Time {
+	if !c.TPost.IsZero() {
+		return c.TPost
+	}
+	return c.DeadAt
+}
 
 // HookPathState is one path as a hook observed it, at pre or at post. No
 // bytes: stat and digest only (§5 I3 step 4, "No bytes").
@@ -125,6 +167,20 @@ type HookPathState struct {
 	// the path does not exist. Stat is the cheap corroborator.
 	Digest string
 	Stat   string
+	// SeqAtObserve is seq(f, E) read at the START of the observation, before
+	// any stat or digest, and SeqAtObserveKnown says the caller set it.
+	//
+	// ‡ This closes a real exoneration hole. The digest is read OUTSIDE the
+	// record transaction and seq_pre INSIDE it. A peer posting in that gap
+	// assigns transition n; this call would then record seq_pre = n beside a
+	// digest taken BEFORE n, and the spanning test `seq_pre < n` would read
+	// false — the call is exonerated from a transition it actually spans.
+	// Recording min(SeqAtObserve, the in-tx value) pins seq_pre to the number
+	// that was true when the bytes were read. seq only ever rises, so the
+	// minimum is the earlier read, and the error can only be conservative:
+	// the call may span a transition it did not, never miss one it did.
+	SeqAtObserve      int64
+	SeqAtObserveKnown bool
 }
 
 // HookCallPath is one recorded path of a call, read back.
@@ -224,6 +280,12 @@ ON CONFLICT(call_id) DO NOTHING`,
 		seqPre, err := pathSeqAt(ctx, tx, o.Path, o.Epoch)
 		if err != nil {
 			return false, err
+		}
+		// The observation's own read wins when it is lower: seq_pre must name
+		// the number that held when the digest beside it was taken, not one a
+		// peer assigned in the gap. See HookPathState.SeqAtObserve.
+		if o.SeqAtObserveKnown && o.SeqAtObserve < seqPre {
+			seqPre = o.SeqAtObserve
 		}
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO hook_call_paths(call_id, path_canonical, locked, declared, pre_observed,
@@ -423,19 +485,29 @@ SELECT path_canonical, locked, declared, pre_observed, epoch_pre, holder_pre,
 	return call, paths, true, nil
 }
 
-const hookCallCols = `call_id,owner_uuid,session_uuid,tool_name,t_pre,t_post,post_missing`
+const hookCallCols = `call_id,owner_uuid,session_uuid,tool_name,t_pre,t_post,post_missing,dead_at`
 
-func (s *Store) scanCall(ctx context.Context, query string, args ...any) (HookCall, error) {
+// hookCallInFlightSQL is the one spelling of "still in flight", named once so
+// the sweep, the retention query and the in-flight read cannot drift apart.
+// Both endings are here: a post landed, or the probe found the owner dead.
+const hookCallInFlightSQL = `t_post IS NULL AND dead_at IS NULL`
+
+// rowScanner is the one method *sql.Row and *sql.Rows share, so one row
+// decoder serves the single-row read and the list.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// scanHookCall reads one hook_calls row in hookCallCols order.
+func scanHookCall(sc rowScanner) (HookCall, error) {
 	var (
 		c              HookCall
 		owner, session string
 		preNs          int64
-		postNs         sql.NullInt64
+		postNs, deadNs sql.NullInt64
 		missing        int
 	)
-	err := s.db.QueryRowContext(ctx, query, args...).
-		Scan(&c.CallID, &owner, &session, &c.ToolName, &preNs, &postNs, &missing)
-	if err != nil {
+	if err := sc.Scan(&c.CallID, &owner, &session, &c.ToolName, &preNs, &postNs, &missing, &deadNs); err != nil {
 		return HookCall{}, err
 	}
 	c.OwnerUUID = domain.AgentUUID(owner)
@@ -444,38 +516,113 @@ func (s *Store) scanCall(ctx context.Context, query string, args ...any) (HookCa
 	if postNs.Valid {
 		c.TPost = time.Unix(0, postNs.Int64)
 	}
+	if deadNs.Valid {
+		c.DeadAt = time.Unix(0, deadNs.Int64)
+	}
 	c.PostMissing = missing != 0
 	return c, nil
 }
 
-// InFlightCalls returns every call whose post has not landed, oldest first.
-// post_missing calls are included: age never ends a call (§3).
+func (s *Store) scanCall(ctx context.Context, query string, args ...any) (HookCall, error) {
+	return scanHookCall(s.db.QueryRowContext(ctx, query, args...))
+}
+
+// InFlightCalls returns every call that is still open, oldest first.
+// post_missing calls are included: age never ends a call (§3). A call whose
+// owner the probe found dead is NOT: that is §3's second ending.
 func (s *Store) InFlightCalls(ctx context.Context) ([]HookCall, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+hookCallCols+` FROM hook_calls WHERE t_post IS NULL ORDER BY t_pre, call_id`)
+		`SELECT `+hookCallCols+` FROM hook_calls WHERE `+hookCallInFlightSQL+` ORDER BY t_pre, call_id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []HookCall
 	for rows.Next() {
-		var (
-			c              HookCall
-			owner, session string
-			preNs          int64
-			postNs         sql.NullInt64
-			missing        int
-		)
-		if err := rows.Scan(&c.CallID, &owner, &session, &c.ToolName, &preNs, &postNs, &missing); err != nil {
+		c, err := scanHookCall(rows)
+		if err != nil {
 			return nil, err
 		}
-		c.OwnerUUID = domain.AgentUUID(owner)
-		c.SessionUUID = domain.SessionUUID(session)
-		c.TPre = time.Unix(0, preNs)
-		c.PostMissing = missing != 0
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// MarkDeadOwnerCalls ends every in-flight call whose owner the liveness probe
+// finds dead — §3's second ending, and the only thing that stops a crashed
+// session's call from spanning every transition forever and pinning
+// hook_calls against retention for good.
+//
+// dead is asked once per distinct session and must answer true ONLY for a
+// PROVABLY dead session. An unknown verdict leaves the call in flight, which
+// is loto's standing rule everywhere else: a false "gone" hands a live peer's
+// territory away, while a false "alive" only delays a reclaim.
+//
+// The probe reads the filesystem, so it runs BETWEEN a read and a write rather
+// than inside a write transaction. The UPDATE re-asserts the in-flight
+// predicate, so a call that posted while the probe was running is untouched.
+func (s *Store) MarkDeadOwnerCalls(ctx context.Context, now time.Time, dead func(domain.SessionUUID) bool) (int, error) {
+	if dead == nil {
+		return 0, nil
+	}
+	open, err := s.InFlightCalls(ctx)
+	if err != nil {
+		return 0, err
+	}
+	ids := deadOwnerCallIDs(open, dead)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	tx, cleanup, err := s.beginTx(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer cleanup()
+	var marked int
+	for _, id := range ids {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE hook_calls SET dead_at = ? WHERE call_id = ? AND `+hookCallInFlightSQL,
+			now.UnixNano(), id)
+		if err != nil {
+			return 0, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		marked += int(n)
+	}
+	if err := commitTxFn(tx); err != nil {
+		return 0, err
+	}
+	return marked, nil
+}
+
+// deadOwnerCallIDs picks the in-flight calls whose session the oracle calls
+// dead, sorted. The oracle is asked once per distinct session: it reads a
+// record off disk, and one crashed session usually owns several open calls.
+func deadOwnerCallIDs(open []HookCall, dead func(domain.SessionUUID) bool) []string {
+	verdict := map[domain.SessionUUID]bool{}
+	var ids []string
+	for i := range open {
+		// A call with no session id can never be judged, so it is never ended
+		// here; its owner may well be alive and about to post.
+		sess := open[i].SessionUUID
+		if sess == "" {
+			continue
+		}
+		v, seen := verdict[sess]
+		if !seen {
+			v = dead(sess)
+			verdict[sess] = v
+		}
+		if v {
+			ids = append(ids, open[i].CallID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // MarkPostMissing flags every in-flight call older than tReport. It does NOT
@@ -489,7 +636,8 @@ func (s *Store) MarkPostMissing(ctx context.Context, now time.Time, tReport time
 	}
 	defer cleanup()
 	res, err := tx.ExecContext(ctx,
-		`UPDATE hook_calls SET post_missing = 1 WHERE t_post IS NULL AND post_missing = 0 AND t_pre < ?`,
+		`UPDATE hook_calls SET post_missing = 1
+		  WHERE `+hookCallInFlightSQL+` AND post_missing = 0 AND t_pre < ?`,
 		now.Add(-tReport).UnixNano())
 	if err != nil {
 		return 0, err
@@ -505,9 +653,14 @@ func (s *Store) MarkPostMissing(ctx context.Context, now time.Time, tReport time
 }
 
 // DropFinishedCalls applies §3's retention: a finished call's record is kept
-// while any in-flight call has t_pre < its t_post, and dropped after.
+// while any in-flight call has t_pre < the moment it ended, and dropped after.
 //
-// ‡ floor is this implementation's one addition to that sentence, and it only
+// "Ended" is COALESCE(t_post, dead_at) — a call ends by posting or by its owner
+// being found dead, and retention has to honour both or a crashed session's
+// record makes the NOT EXISTS below true forever and the two tables grow
+// without bound.
+//
+// ‡ floor is this implementation's one addition to §3's sentence, and it only
 // ever keeps MORE. Read literally, a post landing with nothing else in flight
 // would delete its own record inside the same second it was written — before
 // any reader (a peer's next pre-hook, `doctor`'s self-test, this bead's own
@@ -522,11 +675,12 @@ func (s *Store) DropFinishedCalls(ctx context.Context, now time.Time, floor time
 	defer cleanup()
 	res, err := tx.ExecContext(ctx, `
 DELETE FROM hook_calls
- WHERE t_post IS NOT NULL
-   AND t_post < ?
+ WHERE COALESCE(t_post, dead_at) IS NOT NULL
+   AND COALESCE(t_post, dead_at) < ?
    AND NOT EXISTS (
      SELECT 1 FROM hook_calls peer
-      WHERE peer.t_post IS NULL AND peer.t_pre < hook_calls.t_post)`,
+      WHERE peer.t_post IS NULL AND peer.dead_at IS NULL
+        AND peer.t_pre < COALESCE(hook_calls.t_post, hook_calls.dead_at))`,
 		now.Add(-floor).UnixNano())
 	if err != nil {
 		return 0, err

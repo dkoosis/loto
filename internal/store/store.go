@@ -390,6 +390,7 @@ var migrationEnsures = []struct {
 	{"add events.detail", ensureEventsDetail},
 	{"widen events check to every declared kind", ensureEventsCheckAllKinds},
 	{"add hook call record tables", ensureHookCallsTables},
+	{"add hook_calls.dead_at", ensureHookCallsDeadAt},
 }
 
 // eventsCheckAdmitsEveryKind reports whether the live events DDL's CHECK names

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"loto/internal/domain"
 )
 
 const (
@@ -378,5 +380,223 @@ func TestPathSeq_IsKeyedToTheEpoch(t *testing.T) {
 	}
 	if seq1 != 1 || seq2 != 0 {
 		t.Errorf("want epoch 1 at seq 1 and epoch 2 at 0, got %d and %d", seq1, seq2)
+	}
+}
+
+// A call whose owner the probe finds dead is ENDED — §3's second ending. It
+// leaves the in-flight set and stops pinning finished records against
+// retention, which is what made these two tables grow without bound after any
+// session crash.
+func TestMarkDeadOwnerCalls_EndsTheCallAndUnblocksRetention(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	t0 := time.Now().Add(-time.Hour)
+
+	// A crashed session's call, opened first, never posted.
+	if _, err := s.RecordCallPre(ctx, HookCall{
+		CallID: "call-crashed", OwnerUUID: tcOwnerB, SessionUUID: "sess-dead", TPre: t0,
+	}, []HookPathState{hookObs(tcHookPath, tcSHA1)}); err != nil {
+		t.Fatalf("pre crashed: %v", err)
+	}
+	// A live session's call that opened later and posted.
+	mustPre(t, s, "call-live", t0.Add(time.Second), hookObs(tcHookPath2, tcSHA1))
+	if _, err := s.RecordCallPost(ctx, "call-live", t0.Add(2*time.Second),
+		[]HookPathState{hookObs(tcHookPath2, tcSHA1)}); err != nil {
+		t.Fatalf("post live: %v", err)
+	}
+
+	// Before the sweep the crashed call pins the finished one forever.
+	n, err := s.DropFinishedCalls(ctx, time.Now(), time.Minute)
+	if err != nil {
+		t.Fatalf("drop before sweep: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("dropped %d while a crashed call is in flight, want 0", n)
+	}
+
+	// A not-dead verdict must end nothing: only a provable death does.
+	if n, err = s.MarkDeadOwnerCalls(ctx, time.Now(), func(domain.SessionUUID) bool { return false }); err != nil {
+		t.Fatalf("sweep with a live verdict: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("ended %d calls on a not-dead verdict, want 0", n)
+	}
+
+	dead := func(sess domain.SessionUUID) bool { return sess == "sess-dead" }
+	if n, err = s.MarkDeadOwnerCalls(ctx, time.Now(), dead); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("ended %d calls, want 1", n)
+	}
+
+	inflight, err := s.InFlightCalls(ctx)
+	if err != nil {
+		t.Fatalf("in flight: %v", err)
+	}
+	if len(inflight) != 0 {
+		t.Fatalf("a dead owner's call is still in flight: %+v", inflight)
+	}
+	call, _, ok, err := s.CallRecord(ctx, "call-crashed")
+	if err != nil || !ok {
+		t.Fatalf("read back: ok=%v err=%v", ok, err)
+	}
+	if call.InFlight() || call.DeadAt.IsZero() {
+		t.Errorf("want ended with a dead_at, got inflight=%v dead_at=%v", call.InFlight(), call.DeadAt)
+	}
+	if !call.TPost.IsZero() {
+		t.Error("a dead-owner ending must not fake a post")
+	}
+
+	// Retention reaches the finished call it was holding down. The crashed
+	// call's own record is inside the floor — it ended a moment ago — so it
+	// survives this pass, exactly as a fresh post does.
+	if n, err = s.DropFinishedCalls(ctx, time.Now(), time.Minute); err != nil {
+		t.Fatalf("drop after sweep: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("dropped %d after the dead owner was swept, want the 1 it was pinning", n)
+	}
+	// Past the floor, the crashed call's own record goes too — the growth this
+	// whole sweep exists to stop.
+	if n, err = s.DropFinishedCalls(ctx, time.Now().Add(2*time.Minute), time.Minute); err != nil {
+		t.Fatalf("drop past the floor: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("dropped %d past the floor, want the crashed call's own record", n)
+	}
+	var left int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM hook_calls`).Scan(&left); err != nil {
+		t.Fatalf("count calls: %v", err)
+	}
+	if left != 0 {
+		t.Errorf("%d call records survived a crashed session plus retention", left)
+	}
+}
+
+// A call with no session id can never be probed, so it is never ended here —
+// its owner may well be alive and about to post.
+func TestMarkDeadOwnerCalls_LeavesAnUnjudgeableCallAlone(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	if _, err := s.RecordCallPre(ctx, HookCall{
+		CallID: "call-nosession", OwnerUUID: tcOwnerA, TPre: time.Now(),
+	}, nil); err != nil {
+		t.Fatalf("pre: %v", err)
+	}
+	n, err := s.MarkDeadOwnerCalls(ctx, time.Now(), func(domain.SessionUUID) bool { return true })
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("ended %d unjudgeable calls, want 0", n)
+	}
+}
+
+// A peer's transition landing between the observation and the record must not
+// exonerate this call from it. seq_pre is pinned to the number that held when
+// the digest beside it was read, so the spanning test still sees the span.
+func TestRecordCallPre_SeqPreIsPinnedToTheObservation(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	// The hook observes: seq is 0 here, and the bytes it reads are seq 0's.
+	observed, err := s.PathSeq(ctx, tcHookPath, 1)
+	if err != nil {
+		t.Fatalf("observe seq: %v", err)
+	}
+
+	// A peer posts in the gap, assigning transition 1.
+	mustPre(t, s, "call-peer", time.Now(), hookObs(tcHookPath, tcSHA1))
+	if _, err := s.RecordCallPost(ctx, "call-peer", time.Now(), []HookPathState{
+		{Path: tcHookPath, Locked: true, Epoch: 1, Holder: tcOwnerA, Digest: tcSHA2, Stat: "9:420:9"},
+	}); err != nil {
+		t.Fatalf("peer post: %v", err)
+	}
+	if n, serr := s.PathSeq(ctx, tcHookPath, 1); serr != nil || n != 1 {
+		t.Fatalf("want the peer's transition at seq 1, got %d err=%v", n, serr)
+	}
+
+	// Only now does our record transaction run.
+	if _, err := s.RecordCallPre(ctx, HookCall{
+		CallID: "call-slow", OwnerUUID: tcOwnerB, SessionUUID: "sess-b", TPre: time.Now(),
+	}, []HookPathState{{
+		Path: tcHookPath, Locked: true, Epoch: 1, Holder: tcOwnerA,
+		Digest: tcSHA1, Stat: "10:420:1",
+		SeqAtObserve: observed, SeqAtObserveKnown: true,
+	}}); err != nil {
+		t.Fatalf("slow pre: %v", err)
+	}
+	_, paths, _, err := s.CallRecord(ctx, "call-slow")
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if paths[0].SeqPre != 0 {
+		t.Fatalf("seq_pre = %d: the in-tx read won over the observation, so the call is wrongly exonerated from transition 1", paths[0].SeqPre)
+	}
+}
+
+// The contrast, pinned so a refactor that drops the observation's reading
+// fails loudly: without it, seq_pre is whatever the transaction happened to see.
+func TestRecordCallPre_WithoutTheObservationSeqPreFollowsTheTx(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	mustPre(t, s, "call-p", time.Now(), hookObs(tcHookPath, tcSHA1))
+	if _, err := s.RecordCallPost(ctx, "call-p", time.Now(), []HookPathState{
+		{Path: tcHookPath, Locked: true, Epoch: 1, Holder: tcOwnerA, Digest: tcSHA2, Stat: "9:420:9"},
+	}); err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	if _, err := s.RecordCallPre(ctx, HookCall{
+		CallID: "call-unpinned", OwnerUUID: tcOwnerB, TPre: time.Now(),
+	}, []HookPathState{hookObs(tcHookPath, tcSHA2)}); err != nil {
+		t.Fatalf("pre: %v", err)
+	}
+	_, paths, _, err := s.CallRecord(ctx, "call-unpinned")
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if paths[0].SeqPre != 1 {
+		t.Errorf("want the in-tx value 1 with no observation reading, got %d", paths[0].SeqPre)
+	}
+}
+
+// hook_timing cannot evict the rest of the audit trail. Its own cap holds it
+// to its share; every other kind keeps the room the global cap gives it.
+func TestRotateEvents_HookTimingHasItsOwnCap(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	// One low-rate row of another kind, written first so it is the OLDEST and
+	// therefore the first casualty of a global-cap-only rotation.
+	if _, err := s.AppendEvent(ctx, domain.Event{
+		Kind: EventGateBypass, ActorUUID: tcOwnerA, Reason: "seed", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	for i := range HookTimingRetentionMax + 50 {
+		if _, err := s.AppendEventRotating(ctx, domain.Event{
+			Kind: EventHookTiming, ActorUUID: tcOwnerA, Reason: "pre",
+			CreatedAt: now.Add(time.Duration(i+1) * time.Millisecond),
+		}); err != nil {
+			t.Fatalf("timing row %d: %v", i, err)
+		}
+	}
+
+	var timing, bypass int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM events WHERE event_kind = ?`, EventHookTiming).Scan(&timing); err != nil {
+		t.Fatalf("count timing: %v", err)
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM events WHERE event_kind = ?`, EventGateBypass).Scan(&bypass); err != nil {
+		t.Fatalf("count bypass: %v", err)
+	}
+	if timing != HookTimingRetentionMax {
+		t.Errorf("hook_timing rows = %d, want its cap of %d", timing, HookTimingRetentionMax)
+	}
+	if bypass != 1 {
+		t.Errorf("the hook evicted an unrelated kind: gate_bypass rows = %d, want 1", bypass)
 	}
 }

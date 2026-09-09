@@ -174,12 +174,17 @@ func runHook(ctx context.Context, pre bool, stdout, stderr io.Writer) int {
 
 // hookPre is I3 steps 3 and 4. Step 1's verdicts and step 2's drift report are
 // the next bead (loto-ea8y.6); the sweep below is the slot they will occupy,
-// and it does the two things that must happen whether or not verdicts exist:
-// flag the calls past T_report, and drop the finished records nothing can
-// still contest.
+// and it does the three things that must happen whether or not verdicts exist:
+// end the calls whose owner is gone, flag the calls past T_report, and drop the
+// finished records nothing can still contest.
 func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, stdout, stderr io.Writer) int {
 	now := time.Now()
 	tReport := hookTReport()
+	// Dead-owner first: it is what MOVES a call out of flight, and the two
+	// sweeps after it both read the in-flight set.
+	if _, err := rt.Store.MarkDeadOwnerCalls(rt.Ctx, now, hookSessionIsDead); err != nil {
+		fmt.Fprintf(stderr, "⚠ hook: dead-owner sweep: %v\n", err)
+	}
 	if _, err := rt.Store.MarkPostMissing(rt.Ctx, now, tReport); err != nil {
 		fmt.Fprintf(stderr, "⚠ hook: post_missing sweep: %v\n", err)
 	}
@@ -201,7 +206,7 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 	}
 
 	// Step 4 — record.
-	obs, statusPaths, lockedBytes, err := hookObserve(ctx, rt, declared)
+	obs, statusPaths, lockedBytes, err := hookObserve(ctx, rt, declared, stderr)
 	if err != nil {
 		return hookSkip(stderr, "observe: %v", err)
 	}
@@ -225,14 +230,14 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 
 // hookPost is I4 step 5's record half. Step 6's verdicts are the next bead.
 func hookPost(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, stderr io.Writer) int {
-	obs, statusPaths, lockedBytes, err := hookObserve(ctx, rt, "")
+	obs, statusPaths, lockedBytes, err := hookObserve(ctx, rt, "", stderr)
 	if err != nil {
 		return hookSkip(stderr, "observe: %v", err)
 	}
 	// The post observation set must cover every path the pre recorded, even
 	// one that is clean and unlocked now — that IS the state change §10a test
 	// 16 asks for, and a path missing from the set would read as unchanged.
-	obs, err = hookAddRecordedPaths(rt, ev.ToolUseID, obs)
+	obs, err = hookAddRecordedPaths(rt, ev.ToolUseID, obs, stderr)
 	if err != nil {
 		return hookSkip(stderr, "read call record: %v", err)
 	}
@@ -247,11 +252,26 @@ func hookPost(ctx context.Context, rt *runtime, ev hookEvent, started time.Time,
 	return 0
 }
 
+// hookSessionIsDead is the liveness oracle the dead-owner sweep asks. It is
+// the same session-record probe runtime.liveProbe consults, so a call and a
+// lock held by one session can never be judged by two different rules.
+//
+// ‡ Only SessionDead ends a call. SessionUnknown — no record on disk, a peer
+// on another host, a record this process cannot read — leaves it in flight.
+// That is loto's standing asymmetry: a false "gone" hands a live agent's
+// territory away, a false "alive" only delays a reclaim.
+func hookSessionIsDead(s domain.SessionUUID) bool {
+	if s == "" {
+		return false
+	}
+	return identity.ProbeSession(string(s)).Liveness == identity.SessionDead
+}
+
 // hookAddRecordedPaths widens the post observation set with every path the pre
 // recorded that the post did not re-observe — a locked file that went clean, a
 // dirty path restored to HEAD. Each is re-read here so the post carries its
 // real current state rather than inheriting the pre digest by omission.
-func hookAddRecordedPaths(rt *runtime, callID string, obs []store.HookPathState) ([]store.HookPathState, error) {
+func hookAddRecordedPaths(rt *runtime, callID string, obs []store.HookPathState, warn io.Writer) ([]store.HookPathState, error) {
 	_, recorded, ok, err := rt.Store.CallRecord(rt.Ctx, callID)
 	if err != nil || !ok {
 		return obs, err
@@ -272,10 +292,7 @@ func hookAddRecordedPaths(rt *runtime, callID string, obs []store.HookPathState)
 	if len(missing) == 0 {
 		return obs, nil
 	}
-	states, err := hookReadPaths(rt.Ctx, rt.RepoTop, missing)
-	if err != nil {
-		return obs, err
-	}
+	states := hookReadPaths(rt.Ctx, rt.RepoTop, missing, warn)
 	for i := range states {
 		p := byPath[states[i].Path]
 		states[i].Locked = p.Locked
@@ -377,7 +394,7 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, kin []domai
 // Returns the observations sorted by path (same input, byte-identical record),
 // how many paths git status listed, and the total bytes under lock — the two
 // numbers the timing counter reports.
-func hookObserve(ctx context.Context, rt *runtime, declared string) (obs []store.HookPathState, statusPaths int, lockedBytes int64, err error) {
+func hookObserve(ctx context.Context, rt *runtime, declared string, warn io.Writer) (obs []store.HookPathState, statusPaths int, lockedBytes int64, err error) {
 	locks, err := rt.Store.ListLocks(rt.Ctx)
 	if err != nil {
 		return nil, 0, 0, err
@@ -407,14 +424,23 @@ func hookObserve(ctx context.Context, rt *runtime, declared string) (obs []store
 	}
 	sort.Strings(paths)
 
-	obs, err = hookReadPaths(ctx, rt.RepoTop, paths)
+	// seq(f, E) is read HERE — before the first stat, before the first digest,
+	// and well before the record transaction that reads it again. The pair
+	// (seq, bytes) has to be taken at one moment or the spanning test can
+	// exonerate this call from a transition it really covers; RecordCallPre
+	// keeps whichever number is lower. See store.HookPathState.SeqAtObserve.
+	seqAt, err := hookSeqAtObserve(rt, paths, holders)
 	if err != nil {
 		return nil, 0, 0, err
 	}
+
+	obs = hookReadPaths(ctx, rt.RepoTop, paths, warn)
 	for i := range obs {
 		h, locked := holders[obs[i].Path]
 		obs[i].Locked = locked
 		obs[i].Declared = obs[i].Path == declared
+		obs[i].SeqAtObserve = seqAt[obs[i].Path]
+		obs[i].SeqAtObserveKnown = true
 		if locked {
 			obs[i].Holder = h.OwnerUUID
 			obs[i].Epoch = h.Epoch
@@ -424,6 +450,25 @@ func hookObserve(ctx context.Context, rt *runtime, declared string) (obs []store
 		}
 	}
 	return obs, statusPaths, lockedBytes, nil
+}
+
+// hookSeqAtObserve reads seq(f, E) for every path about to be observed, so the
+// number and the bytes beside it are taken at one moment. Split out of
+// hookObserve because it is the whole of the fix and reads as one idea.
+func hookSeqAtObserve(rt *runtime, paths []string, holders map[string]domain.LockRecord) (map[string]int64, error) {
+	seqAt := make(map[string]int64, len(paths))
+	for _, p := range paths {
+		var epoch int64
+		if h, ok := holders[p]; ok {
+			epoch = h.Epoch
+		}
+		n, err := rt.Store.PathSeq(rt.Ctx, p, epoch)
+		if err != nil {
+			return nil, err
+		}
+		seqAt[p] = n
+	}
+	return seqAt, nil
 }
 
 // hookLiveHolders reduces the live lock rows to one holder per path — the `L`
@@ -452,10 +497,13 @@ func hookLiveHolders(locks []domain.LockRecord, ec domain.EvalContext) map[strin
 	return holders
 }
 
-// hookReadPaths reads stat and digest for each path, sorted by path. A path
-// that does not exist gets an empty digest and the "absent" stat — a removal
-// is a state like any other and must not fail the whole observation.
-func hookReadPaths(ctx context.Context, repoTop string, paths []string) ([]store.HookPathState, error) {
+// hookReadPaths reads stat and digest for each path, sorted by path.
+//
+// It cannot fail. A path that does not exist gets an empty digest and the
+// "absent" stat, and a path that will not hash gets an empty digest and a
+// warning — a removal and an odd name are both states, and neither may cost
+// the observation of every other path.
+func hookReadPaths(ctx context.Context, repoTop string, paths []string, warn io.Writer) []store.HookPathState {
 	sorted := append([]string(nil), paths...)
 	sort.Strings(sorted)
 	present := make([]string, 0, len(sorted))
@@ -471,13 +519,34 @@ func hookReadPaths(ctx context.Context, repoTop string, paths []string) ([]store
 	}
 	digests, err := gate.HashPaths(ctx, repoTop, present)
 	if err != nil {
-		return nil, err
+		digests = hookHashEachPath(ctx, repoTop, present, warn)
 	}
 	out := make([]store.HookPathState, 0, len(sorted))
 	for _, p := range sorted {
 		out = append(out, store.HookPathState{Path: p, Stat: stats[p], Digest: digests[p]})
 	}
-	return out, nil
+	return out
+}
+
+// hookHashEachPath is the fallback when the batch hash fails: hash one path at
+// a time and skip the ones that will not hash, naming each.
+//
+// ‡ One unhashable path — a locked file that is now a directory, an unreadable
+// mode — used to lose the WHOLE observation, so a single odd path in the tree
+// silently stopped every call from being recorded. A path with no digest is
+// still recorded, carrying its stat and an empty digest; that reads as changed
+// at post, which is the conservative direction.
+func hookHashEachPath(ctx context.Context, repoTop string, paths []string, warn io.Writer) map[string]string {
+	digests := make(map[string]string, len(paths))
+	for _, p := range paths {
+		one, err := gate.HashPaths(ctx, repoTop, []string{p})
+		if err != nil {
+			fmt.Fprintf(warn, "⚠ hook: no digest for %s: %v\n", p, err)
+			continue
+		}
+		digests[p] = one[p]
+	}
+	return digests
 }
 
 // hookStatAbsent is the stat of a path that is not there. A distinct value

@@ -208,13 +208,19 @@ CREATE TABLE IF NOT EXISTS hook_calls (
   owner_uuid   TEXT NOT NULL,
   session_uuid TEXT NOT NULL DEFAULT '',
   tool_name    TEXT NOT NULL DEFAULT '',
-  -- t_post NULL = in flight. post_missing is INDEPENDENT of it: a call past
-  -- T_report is flagged and stays in flight (§3, round 10).
+  -- In flight = t_post NULL AND dead_at NULL. post_missing is INDEPENDENT of
+  -- both: a call past T_report is flagged and stays in flight (§3, round 10).
   t_pre        INTEGER NOT NULL,
   t_post       INTEGER,
-  post_missing INTEGER NOT NULL DEFAULT 0
+  post_missing INTEGER NOT NULL DEFAULT 0,
+  -- dead_at: when the liveness probe found this call's owner dead — §3's
+  -- second ending ("until either post event lands OR the probe finds s dead").
+  -- Kept apart from t_post because the call never posted; retention reads
+  -- COALESCE(t_post, dead_at), so a crashed session's record cannot pin these
+  -- two tables against the drop forever.
+  dead_at      INTEGER
 );
-CREATE INDEX IF NOT EXISTS idx_hook_calls_inflight ON hook_calls(t_post, t_pre);
+CREATE INDEX IF NOT EXISTS idx_hook_calls_inflight ON hook_calls(t_post, dead_at, t_pre);
 
 CREATE TABLE IF NOT EXISTS hook_call_paths (
   call_id        TEXT NOT NULL,

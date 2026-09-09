@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"loto/internal/identity"
 	"loto/internal/store"
 )
 
@@ -424,5 +425,83 @@ func TestEvents_EmptyPrintsAHeader(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "events=0 shown=0") {
 		t.Errorf("want an explicit empty header, got %q", out.String())
+	}
+}
+
+// §3's second ending, end to end: a call whose owner died is no longer in
+// flight after the next pre by ANYONE. Without this a crashed session's call
+// spans every later transition forever and pins both call tables against
+// retention.
+func TestHook_DeadOwnersCallIsEndedByTheNextPre(t *testing.T) {
+	withTempProject(t)
+
+	// A session whose record names a socket that does not exist reads as DEAD:
+	// the session process removes its socket by dying (identity.Verdict).
+	dead := pinAgent(t)
+	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", filepath.Join(t.TempDir(), "gone.sock"))
+	if _, err := identity.RecordSession(dead); err != nil {
+		t.Fatalf("record the doomed session: %v", err)
+	}
+	if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "call-crashed", "", "")); code != 0 {
+		t.Fatalf("pre: exit=%d err=%q", code, errOut)
+	}
+	if got := hookInFlight(t); len(got) != 1 || got[0].CallID != "call-crashed" {
+		t.Fatalf("want call-crashed in flight before the sweep, got %+v", got)
+	}
+
+	// A second owner arrives and runs one call. Its pre sweeps the dead one.
+	t.Setenv("LOTO_AGENT_ID", "")
+	os.Unsetenv("CLAUDE_CODE_MESSAGING_SOCKET")
+	pinAgent(t)
+	if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "call-next", "", "")); code != 0 {
+		t.Fatalf("peer pre: exit=%d err=%q", code, errOut)
+	}
+	for _, c := range hookInFlight(t) {
+		if c.CallID == "call-crashed" {
+			t.Fatalf("a dead owner's call is still in flight: %+v", c)
+		}
+	}
+	call, _, ok, err := func() (store.HookCall, []store.HookCallPath, bool, error) {
+		rt, done := hookStoreRead(t)
+		defer done()
+		return rt.Store.CallRecord(rt.Ctx, "call-crashed")
+	}()
+	if err != nil || !ok {
+		t.Fatalf("read back: ok=%v err=%v", ok, err)
+	}
+	if call.DeadAt.IsZero() || !call.TPost.IsZero() {
+		t.Errorf("want ended by a dead owner, not by a faked post: %+v", call)
+	}
+}
+
+// One unhashable path must not cost the whole observation. It is skipped with
+// a warning and every other path is still recorded — the pre used to return
+// nothing at all, so a single odd name in the tree silently switched
+// recording off.
+func TestHook_OneUnhashablePathDoesNotSinkTheObservation(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	// A newline in a filename is legal on this filesystem and cannot be fed
+	// through `hash-object --stdin-paths`, which reads newline-terminated
+	// paths — the deterministic stand-in for every unhashable path.
+	oddName := "od\nd.go"
+	if err := os.WriteFile(filepath.Join(repo, oddName), []byte("x\n"), 0o644); err != nil {
+		t.Skipf("this filesystem rejects a newline in a filename: %v", err)
+	}
+
+	_, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "call-odd", "", ""))
+	if code != 0 {
+		t.Fatalf("pre: exit=%d err=%q", code, errOut)
+	}
+	if !strings.Contains(errOut, "⚠ hook: no digest for") {
+		t.Errorf("the skipped path must be named: %q", errOut)
+	}
+	_, paths := hookCallPaths(t, "call-odd")
+	ordinary, ok := paths[tcTargetA]
+	if !ok {
+		t.Fatalf("the ordinary paths were lost with the odd one: %v", paths)
+	}
+	if ordinary.DigestPre == "" {
+		t.Error("an ordinary path lost its digest to the unhashable one")
 	}
 }
