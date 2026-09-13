@@ -216,15 +216,19 @@ func TestCheckMoved_SameHeadBothSides(t *testing.T) {
 	}
 }
 
-// An unreadable ref (the null sha git passes on a first checkout, a shallow
-// clone) fails OPEN: exit 0, nothing on stdout, the reason on stderr. A
-// non-zero here would stop the hook chain and keep 50-beads from running.
+// A ref git cannot read at all (a shallow clone missing the object, a
+// corrupt store) fails OPEN: exit 0, nothing on stdout, the reason on
+// stderr. A non-zero here would stop the hook chain and keep 50-beads from
+// running. loto-ay2k: this must stay distinct from the all-zero old-head a
+// worktree birth passes (TestCheckMoved_ZeroOIDOldHeadIsABirthNotAnError) —
+// this ref is the same length and shape as a real sha, just one git's store
+// has never heard of, which is what "unreadable" actually means.
 func TestCheckMoved_UnreadableRefFailsOpen(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)
 	_, newHead := twoHeads(t, repo)
 	var out, errBuf bytes.Buffer
-	code := Run([]string{tcCmdCheck, tcFlagMoved, "0000000000000000000000000000000000000000", newHead, "1"}, &out, &errBuf)
+	code := Run([]string{tcCmdCheck, tcFlagMoved, "1111111111111111111111111111111111111111", newHead, "1"}, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("want fail-open exit 0, got %d", code)
 	}
@@ -233,6 +237,38 @@ func TestCheckMoved_UnreadableRefFailsOpen(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), "moved=fail-open") {
 		t.Errorf("fail-open must be loud on stderr: %q", errBuf.String())
+	}
+}
+
+// loto-ay2k AC 1: git passes the all-zero old-head on a worktree's first
+// checkout — there is no previous HEAD to diff against, which is a birth,
+// not an unreadable diff. `git worktree add` must not print the fail-open
+// warning on every single invocation.
+func TestCheckMoved_ZeroOIDOldHeadIsABirthNotAnError(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	_, newHead := twoHeads(t, repo)
+	got, code := movedRun(t, "0000000000000000000000000000000000000000", newHead, "1")
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d", code)
+	}
+	if got != tcMovedClean {
+		t.Errorf("a birth is a clean pass, not a warning: %q", got)
+	}
+}
+
+// A sha256 repo's null OID is 64 zeros, not 40 — the birth check must not be
+// sha1-specific.
+func TestCheckMoved_ZeroOIDOldHeadSha256LengthIsAlsoABirth(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	_, newHead := twoHeads(t, repo)
+	got, code := movedRun(t, strings.Repeat("0", 64), newHead, "1")
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d", code)
+	}
+	if got != tcMovedClean {
+		t.Errorf("a birth is a clean pass, not a warning: %q", got)
 	}
 }
 
