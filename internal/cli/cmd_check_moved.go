@@ -157,14 +157,16 @@ func runCheckMoved(ctx context.Context, args []string, stdout, stderr io.Writer)
 		printMoved(stdout, nil)
 		return 0
 	}
-	if isZeroOID(oldHead) {
+	if isZeroOID(oldHead) || isZeroOID(newHead) {
 		// git's null-object sentinel: a worktree's first checkout, a fresh
-		// clone's initial checkout, an unborn branch (loto-ay2k). There is no
-		// previous HEAD to diff against — that is a birth, not an unreadable
-		// diff, and `git diff <zero-oid> <newHead>` fails with "fatal: bad
-		// object" (exit 128) for every single `git worktree add`. A genuine
-		// unreadable diff (a real-shaped ref git's store has never heard of)
-		// still falls through to the err != nil branch below and warns.
+		// clone's initial checkout, an unborn branch (loto-ay2k), or an orphan
+		// branch (loto-5q2m). There is no previous HEAD or no new HEAD to diff
+		// against — that is a birth, not an unreadable diff. `git diff
+		// <zero-oid> <newHead>` fails with "fatal: bad object" (exit 128) for
+		// every single `git worktree add`, and `git diff <oldHead> <zero-oid>`
+		// fails similarly for `git switch --orphan`. A genuine unreadable diff
+		// (a real-shaped ref git's store has never heard of) still falls through
+		// to the err != nil branch below and warns.
 		printMoved(stdout, nil)
 		return 0
 	}
