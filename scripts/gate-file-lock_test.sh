@@ -2,8 +2,14 @@
 # Tests for gate-file-lock.sh. Stubs `loto` on PATH so we can drive the gate's
 # decision without real cross-session locks. The stub treats any path whose
 # string contains a token listed in $LOCKED (newline-separated) as peer-held
-# (exit 1); everything else is unlocked (exit 0). It records every checked path
-# to $CHECKLOG so we can assert which paths the gate inspected.
+# by a foreign LOCK (exit 1, kind=lock); a token listed in $CLAIMED as covered
+# by a peer's directory CLAIM instead (exit 1, kind=claim, no kind=lock row —
+# the real render.EmitGateDeny shape, sd-cpbj); everything else is unlocked
+# (exit 0). `loto status` reports an overlap for any path containing a token
+# listed in $MYLOCK — the stand-in for "this session already holds a lock
+# here", since real check/check --gate never report the caller's own holdings
+# either way. It records every checked path to $CHECKLOG so we can assert
+# which paths the gate inspected.
 set -u
 
 HOOK="$(cd "$(dirname "$0")" && pwd)/gate-file-lock.sh"
@@ -38,8 +44,33 @@ case "$1" in
     fi
     while IFS= read -r tok; do
       [ -n "$tok" ] || continue
-      case "$p" in *"$tok"*) echo "✗ blocked $p held by peer"; exit 1 ;; esac
+      case "$p" in *"$tok"*)
+        echo "✗ blocked count=1"
+        echo "✗ path=$p kind=lock blocker=peer-lock intent=\"test\" expires_at=2099-01-01T00:00:00Z"
+        exit 1
+        ;;
+      esac
     done <<<"${LOCKED:-}"
+    while IFS= read -r tok; do
+      [ -n "$tok" ] || continue
+      case "$p" in *"$tok"*)
+        echo "✗ blocked count=1"
+        echo "✗ path=$p kind=claim blocker=peer-claim prefix=$tok intent=\"test\" expires_at=2099-01-01T00:00:00Z"
+        echo "ℹ options=wait|pick-other-work|message-holder"
+        exit 1
+        ;;
+      esac
+    done <<<"${CLAIMED:-}"
+    exit 0
+    ;;
+  status)
+    shift
+    p="${1:-}"
+    while IFS= read -r tok; do
+      [ -n "$tok" ] || continue
+      case "$p" in *"$tok"*) echo "✗ overlap count=1 target=$p"; exit 0 ;; esac
+    done <<<"${MYLOCK:-}"
+    echo "✓ free target=$p"
     exit 0
     ;;
   beacon)
@@ -488,6 +519,40 @@ beacon_run "a subagent Edit of a real path still mints its lock" \
 export LOCKED="internal/store/store.go"
 runc "Edit of a peer-held real path still blocks" 2 "$(edit_env 'internal/store/store.go')"
 export LOCKED=""
+cache_clear
+
+# --- a peer's claim never out-ranks this session's own lock (sd-cpbj) -------
+# loto's own contract: a directory claim is advisory and does not block a
+# lock or check beneath it ("advisory: claim does not block lock/check under
+# the prefix — still lock files before editing"). check/check --gate deny
+# with kind=claim regardless of who holds the file's own lock — that row is
+# invisible to --gate either way — so the gate has to ask a second question,
+# `loto status`, before it can tell "nobody holds it" from "I already do".
+export LOCKED="" CLAIMED="internal/cli" MYLOCK="internal/cli/cmd_status.go"
+runc "a session's own lock under a peer's claim is not refused" 0 \
+  "$(edit_env 'internal/cli/cmd_status.go')"
+
+export LOCKED="" CLAIMED="internal/cli" MYLOCK=""
+runc "no lock under a peer's claim is still refused" 2 \
+  "$(edit_env 'internal/cli/cmd_status.go')"
+stderr_run "the refusal names the lock to take, not the claim" \
+  "loto lock internal/cli/cmd_status.go" "$(edit_env 'internal/cli/cmd_status.go')"
+
+# A foreign LOCK still wins over this session's status either way — kind=lock
+# short-circuits handle_deny before lock_owned_by_me is ever consulted.
+export LOCKED="internal/cli/cmd_status.go" CLAIMED="" MYLOCK="internal/cli/cmd_status.go"
+runc "a foreign lock still blocks even if status also shows an overlap" 2 \
+  "$(edit_env 'internal/cli/cmd_status.go')"
+
+# The refusal path re-reads current state on every call — a conflict verdict
+# is never cached (only rc=0 is), so a claim released between two calls stops
+# refusing on the very next one, with no state carried over from call one.
+export LOCKED="" CLAIMED="internal/cli" MYLOCK=""
+runc "claim-blocked call one is refused" 2 "$(edit_env 'internal/cli/cmd_status.go')"
+export CLAIMED=""
+runc "the same path allows on the next call once the claim is released" 0 \
+  "$(edit_env 'internal/cli/cmd_status.go')"
+export LOCKED="" CLAIMED="" MYLOCK=""
 cache_clear
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
