@@ -235,6 +235,18 @@ loto_check() {
   fi
 }
 
+# loto_status ARGS… — same stamping rule as loto_check, for `loto status`.
+# Unlike check/check --gate, status reports EVERY overlapping holder of a
+# target, self included — the only read this hook has for "do I already hold
+# this" (sd-cpbj).
+loto_status() {
+  if [ -n "${agent_id:-}" ]; then
+    LOTO_SUBAGENT_ID="$agent_id" loto status "$@"
+  else
+    loto status "$@"
+  fi
+}
+
 check_path() {
   local path="${1:-}" dir groot rel out rc key cachefile now last age
   # hot path: pure-bash key + read builtin avoid tr/sed subshells (runs per tool call)
@@ -279,6 +291,42 @@ check_path() {
 
   printf '%s' "$out"
   return "$rc"
+}
+
+# lock_owned_by_me PATH — true (rc 0) when a live lock already covers PATH's
+# exact path. Called ONLY after loto_check has denied PATH with kind=claim
+# rows and no kind=lock row, which means no FOREIGN lock covers it (a
+# kind=lock row is how `check`/`check --gate` name one, and neither ever
+# reports the caller's own lock). So an overlap `loto status` finds here,
+# under that precondition, can only be this session's own lock, or a kin
+# subagent's (sd-cpbj) — the one read this hook has for "do I already hold
+# this", since check/check --gate are both silent about a caller's own
+# holdings by design.
+#
+# Never cached, unlike check_path's clean-verdict cache: this runs only on
+# the rare claim-only deny path, and a released or newly-taken lock has to be
+# seen on the very next call (AC: the refusal path re-reads current state).
+#
+# Resolution mirrors check_path's absolute-path handling (git-root-relative,
+# run from the git root) rather than sharing code with it, matching this
+# file's existing convention of mint_beacon resolving independently too.
+lock_owned_by_me() {
+  local path="${1:-}" dir groot rel out
+  if [ "${path#/}" != "$path" ]; then
+    dir="$(dirname "$path")"
+    if [ -d "$dir" ] && groot="$(cd "$dir" && git rev-parse --show-toplevel 2>/dev/null)"; then
+      rel="$(cd "$dir" && git rev-parse --show-prefix 2>/dev/null)$(basename "$path")"
+      out="$(cd "$groot" && loto_status "$rel" 2>&1)"
+    else
+      out="$(loto_status "$path" 2>&1)"
+    fi
+  else
+    out="$(loto_status "$path" 2>&1)"
+  fi
+  case "$out" in
+    *'✗ overlap'*) return 0 ;;
+  esac
+  return 1
 }
 
 # mint_beacon PATH — announce that THIS subagent is about to write PATH, so a
@@ -538,7 +586,7 @@ gate_one() {
   rc=$?
   if [ "$rc" = "1" ]; then
     set +f
-    block "$tok" "$out"
+    handle_deny "$tok" "$out"
   fi
   # Clean — this subagent is about to touch it, so say so before it does.
   [ "$rc" = "0" ] && mint_beacon "$tok"
@@ -554,6 +602,47 @@ block() {
     echo "Options: wait, work elsewhere, or 'loto unlock $1 --force -t \"why\"' to take over."
   } >&2
   exit 2
+}
+
+# block_claim_no_lock PATH — refuse an edit under a peer's directory claim,
+# for the session that holds no lock of its own on PATH. A claim has no
+# takeover verb (render.EmitGateDeny: "options=wait|pick-other-work|
+# message-holder") and does not block a lock beneath it (standard-tools.md,
+# and `loto claim`'s own "advisory: claim does not block lock/check under the
+# prefix" line) — so the remedy is to take the file's own lock, never to name
+# or fight the claim (sd-cpbj AC: "names the lock to take, not the claim").
+block_claim_no_lock() {
+  {
+    echo "✗ loto: blocked — a peer's directory claim covers this path, and this session holds no lock on it."
+    echo ""
+    echo "A claim never blocks a lock beneath it. Options: wait, work elsewhere, or take your own lock first:"
+    echo '```bash'
+    echo "loto lock $1 -t \"why\""
+    echo '```'
+  } >&2
+  exit 2
+}
+
+# handle_deny PATH OUT — called once loto_check has denied PATH (rc=1), with
+# its rendered deny rows in OUT. A kind=lock row (render.GateKindLock) is a
+# foreign live exclusive lock or beacon — always blocks, unchanged from
+# before this function existed. A deny made ONLY of kind=claim rows names a
+# peer's directory claim, which is documented as non-blocking for a lock or
+# check beneath it — so it must not out-rank a lock THIS session already
+# holds on the exact file (sd-cpbj). check/check --gate never report the
+# caller's own lock either way, so lock_owned_by_me's fresh `loto status`
+# read is what tells "nobody holds it" (still refused) from "I do" (allowed,
+# override the claim).
+handle_deny() {
+  local path="$1" out="$2"
+  case "$out" in
+    *'kind=lock'*) block "$path" "$out" ;;
+  esac
+  if lock_owned_by_me "$path"; then
+    mint_beacon "$path"
+    return 0
+  fi
+  block_claim_no_lock "$path"
 }
 
 tool="$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null)"
@@ -834,7 +923,7 @@ rc=$?
 #   0 = no conflict, 1 = advisory conflict, 2 = usage, 3 = IO/system.
 case "$rc" in
   0) mint_beacon "$path"; exit 0 ;;
-  1) block "$path" "$out" ;;
+  1) handle_deny "$path" "$out"; exit 0 ;;
   *)
     # Usage/IO/unknown — don't block on plumbing, but don't hide it either.
     # loto emits its own ⚠ for a store it cannot reach (loto-tzmv.8); this
