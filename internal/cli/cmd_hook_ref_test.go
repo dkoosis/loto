@@ -756,22 +756,48 @@ func TestRunHookRef_UnbornWorktreeAdmitsOnlyItsOwnRow(t *testing.T) {
 
 // TestRunHookRef_TwoUnbornWorktreesNamingOneBranchRefused: two claimants means
 // two HEAD writes to one branch are racing and the hook cannot say which HEAD
-// this row is. "Cannot say" is refuse.
+// this row is. "Cannot say" is refuse — and per PR #354 review finding M1, the
+// refusal must name the stale worktrees/<n> dir(s) and the command to clear
+// one, since without that a killed `worktree add` poisons its branch name for
+// every future ship until an operator finds the leftover dir by hand.
 func TestRunHookRef_TwoUnbornWorktreesNamingOneBranchRefused(t *testing.T) {
 	repo := withTempProject(t)
 	a := pinAgent(t)
 	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
 	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
-	plantUnbornWorktree(t, repo, "wt2", filepath.Join(t.TempDir(), "wt2"), "refs/heads/z2")
-	plantUnbornWorktree(t, repo, "wt3", filepath.Join(t.TempDir(), "wt3"), "refs/heads/z2")
+	wt2Path := filepath.Join(t.TempDir(), "wt2")
+	wt3Path := filepath.Join(t.TempDir(), "wt3")
+	plantUnbornWorktree(t, repo, "wt2", wt2Path, "refs/heads/z2")
+	plantUnbornWorktree(t, repo, "wt3", wt3Path, "refs/heads/z2")
 
-	if code, _, stderr := runRefHook(t, tcPhasePrepared, txnHeadTo("refs/heads/z2")); code != 1 {
+	code, _, stderr := runRefHook(t, tcPhasePrepared, txnHeadTo("refs/heads/z2"))
+	if code != 1 {
 		t.Fatalf("two claimants for one HEAD row is not a birth: exit %d, %s", code, stderr)
+	}
+	for _, want := range []string{
+		filepath.Join(refWorktreesDir, "wt2"),
+		filepath.Join(refWorktreesDir, "wt3"),
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("refusal must name the stale dir %q:\n%s", want, stderr)
+		}
+	}
+	for _, want := range []string{
+		"git worktree remove --force " + wt2Path,
+		"git worktree remove --force " + wt3Path,
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("refusal must carry the fix line %q:\n%s", want, stderr)
+		}
 	}
 }
 
 // TestRunHookRef_BirthAdmitsOnlyItsOwnShape: admitting the birth row must not
-// carry the rest of the transaction with it.
+// carry the rest of the transaction with it. Per PR #354 review finding L1,
+// ref_admitted is a per-TRANSACTION signal (§10b row 1 reads it as a ratio
+// against ref_refused), so a birth riding in a transaction that ultimately
+// refuses must write no ref_admitted row at all — else the counter claims a
+// weakening that never actually let anything through.
 func TestRunHookRef_BirthAdmitsOnlyItsOwnShape(t *testing.T) {
 	repo := withTempProject(t)
 	a := pinAgent(t)
@@ -786,6 +812,11 @@ func TestRunHookRef_BirthAdmitsOnlyItsOwnShape(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "shape="+refShapeStash) || strings.Contains(stderr, "shape="+refShapeHeadSymref) {
 		t.Errorf("only the stash may be refused here; got:\n%s", stderr)
+	}
+	for _, ev := range readAllEvents(t) {
+		if ev.Kind == store.EventRefAdmitted {
+			t.Errorf("a refused transaction must write no ref_admitted row; got: %+v", ev)
+		}
 	}
 }
 
