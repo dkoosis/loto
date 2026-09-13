@@ -756,7 +756,11 @@ func printRefRefusal(stderr io.Writer, refusals []refRefusal, self string, live 
 	for _, line := range collisionFix {
 		fmt.Fprintln(stderr, line)
 	}
-	fmt.Fprintln(stderr, `loto claim . -t "<reason>"`)
+	if len(collisionFix) > 0 {
+		fmt.Fprintln(stderr, `# or: loto claim . -t "<reason>"`)
+	} else {
+		fmt.Fprintln(stderr, `loto claim . -t "<reason>"`)
+	}
 	fmt.Fprintln(stderr, "```")
 }
 
@@ -769,14 +773,12 @@ func printRefRefusal(stderr io.Writer, refusals []refRefusal, self string, live 
 // the caller's single fix block. Silent, and returns nil, when no refusal
 // carries a collision at all, which is most of them.
 //
-// ‡ `unlock && remove`, never `--force` (PR #357 review, B2): `--force`
-// overrides git's "this working tree has local changes" check, not its
-// "locked" one — measured, git refuses a locked dir with "cannot remove a
-// locked working tree" regardless. `git worktree lock` writes the SAME
-// `locked` marker `worktree add` uses while building one, so unlocking first
-// is correct for both, and the plain `rm -rf .git/worktrees/<n>` this
-// replaces is offered back as a one-line fallback comment for a git too old
-// to have `worktree unlock`, or a dir git's own commands still refuse.
+// ‡ `rm -rf .git/worktrees/<n>` is the primary fix: the staleWorktreeClaimants
+// filter (line 301) guarantees the dir is unborn and unoccupied, so it is an
+// admin directory that git worktree remove cannot validate on a mid-birth
+// crash. `git worktree unlock && remove` (B2) is offered as a fallback for a
+// working tree that exists; unlocking first handles both a locked live tree
+// and a crashed one.
 func printRefCollisionRows(stderr io.Writer, refusals []refRefusal) []string {
 	type staleDir struct {
 		ref, name, target string
@@ -790,9 +792,9 @@ func printRefCollisionRows(stderr io.Writer, refusals []refRefusal) []string {
 				continue
 			}
 			seen[dir] = true
-			target := dir
-			if path := refWorktreePath(dir); path != "" {
-				target = path
+			target := refWorktreePath(dir)
+			if target == "" {
+				continue
 			}
 			rows = append(rows, staleDir{
 				ref:    r.Update.Ref,
@@ -815,8 +817,8 @@ func printRefCollisionRows(stderr io.Writer, refusals []refRefusal) []string {
 		fmt.Fprintf(stderr, "ℹ ref=%s stale-dir=%s\n", row.ref, row.name)
 		q := shellQuote(row.target)
 		fix = append(fix,
-			"git worktree unlock "+q+" && git worktree remove "+q,
-			"# or: rm -rf "+shellQuote(filepath.Join(".git", row.name)),
+			"rm -rf "+shellQuote(filepath.Join(".git", row.name)),
+			"# or: git worktree unlock "+q+" && git worktree remove "+q,
 		)
 	}
 	return fix
