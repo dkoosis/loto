@@ -803,6 +803,33 @@ func TestRunHookRef_TwoUnbornWorktreesNamingOneBranchRefused(t *testing.T) {
 			t.Errorf("refusal must name the stale dir %q:\n%s", want, stderr)
 		}
 	}
+	// Extract and validate the fix block order: rm -rf first, then # or: alternatives
+	bashStart := strings.Index(stderr, "```bash")
+	if bashStart == -1 {
+		t.Fatalf("no fix block found in stderr:\n%s", stderr)
+	}
+	bashEnd := strings.Index(stderr[bashStart+7:], "```")
+	if bashEnd == -1 {
+		t.Fatalf("bash block not closed in stderr:\n%s", stderr)
+	}
+	bashBlock := strings.TrimSpace(stderr[bashStart+7 : bashStart+7+bashEnd])
+	lines := strings.Split(bashBlock, "\n")
+	if len(lines) < 2 {
+		t.Errorf("fix block must have at least 2 lines, got %d:\n%s", len(lines), bashBlock)
+	}
+	// First line must be rm -rf of wt2 admin dir
+	rmrfWt2 := "rm -rf " + shellQuote(filepath.Join(".git", refWorktreesDir, "wt2"))
+	if !strings.Contains(lines[0], rmrfWt2) {
+		t.Errorf("first fix line must be %q, got %q", rmrfWt2, lines[0])
+	}
+	// Next line should be # or: git worktree unlock for wt2
+	if !strings.HasPrefix(lines[1], "# or:") || !strings.Contains(lines[1], "git worktree unlock") {
+		t.Errorf("second line must start with '# or: git worktree unlock', got %q", lines[1])
+	}
+	// loto claim override must have # or: marker
+	if !strings.Contains(stderr, "# or: loto claim . -t") {
+		t.Errorf("loto claim override must have '# or:' marker:\n%s", stderr)
+	}
 	for _, want := range []string{
 		"git worktree unlock " + shellQuote(wt2Path) + " && git worktree remove " + shellQuote(wt2Path),
 		"git worktree unlock " + shellQuote(wt3Path) + " && git worktree remove " + shellQuote(wt3Path),
