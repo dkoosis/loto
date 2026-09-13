@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -54,6 +57,22 @@ const (
 // it hands the hook: `0000… ref:refs/heads/other HEAD` for `git checkout
 // other`. Measured on git 2.55.0.
 const refSymrefPrefix = "ref:"
+
+// refAdmitWorktreeBirth names the second head-symref carve-out on the pass
+// line, beside `head=reattach` (loto-w0sx).
+const refAdmitWorktreeBirth = "worktree-birth"
+
+// The three names headWorktreeBirth reads off disk. `HEAD.lock` is git's own
+// lock file for a HEAD about to be rewritten; `worktrees/` is the common
+// dir's administrative directory, one subdirectory per linked worktree; and
+// `locked` is the marker `git worktree add` writes there (with the text
+// "initializing") for the span of the creation and then removes.
+const (
+	refHeadLockFile       = refHEAD + ".lock"
+	refWorktreesDir       = "worktrees"
+	refWorktreeLockedFile = "locked"
+	refWorktreeGitdirFile = "gitdir"
+)
 
 // refOverrideWindow is how long after a refusal a checkout-wide claim by the
 // same owner still counts as an override of it (§10b row 1). Ten minutes is
@@ -185,6 +204,157 @@ func headReattach(ctx context.Context, repoTop, newValue string) bool {
 	return head == want
 }
 
+// headWorktreeBirth reports whether u — a head-symref update — is the HEAD of
+// a worktree being CREATED rather than a HEAD some checkout is sitting in
+// (loto-w0sx).
+//
+// ‡ Neither the row nor the environment can answer this on its own. Measured
+// on git 2.55.0: `git worktree add <path> -b <branch>` from the shared
+// checkout emits `0000… ref:refs/heads/<branch> HEAD` with GIT_DIR UNSET and
+// cwd still the shared checkout — the same bytes and the same environment
+// `git checkout -b <branch>` emits for the shared checkout's OWN head.
+//
+// The fact that does separate them is on disk: by the `prepared` phase git has
+// already taken the lock on the exact HEAD it is about to write, AND WRITTEN
+// THE NEW VALUE INTO IT. So the question "whose HEAD is this row?" has a
+// direct answer — the git dir whose `HEAD.lock` holds this row's new value —
+// and the carve-out admits only when that dir is a worktree still being built.
+//
+// ‡ Matching the row is what makes this safe, and the first cut of this
+// carve-out did not (PR #354 review, F1). It asked only "does an unborn
+// worktree dir exist?", so ANY head-symref row was admitted while one did —
+// and `git branch -m <b> <b2>` on a branch a live peer has checked out
+// rewrites THAT PEER's HEAD, with the caller's own HEAD never locked. Measured:
+// the peer's git dir holds the matching `HEAD.lock`, the peer's dir is fully
+// born, and the guard must refuse. Requiring the claimant to be UNIQUE is the
+// other half: a stale unborn dir that happens to name the same branch cannot
+// then vote a live worktree's HEAD through.
+//
+// ‡ Why uniqueness rather than "the first unborn dir wins": a worktree add
+// killed mid-flight leaves HEAD.lock + `locked` + no HEAD behind FOREVER —
+// `git worktree prune` refuses to reap a locked entry, by design (F2). The
+// enabler is permanent, so the admission may not rest on its mere presence.
+//
+// ‡ There is deliberately no GIT_DIR-versus-common-dir test: `git worktree
+// add` run from INSIDE a linked worktree reports that worktree's git dir and
+// is still a birth (measured), and such a test would refuse it.
+//
+// Every failure direction answers false — refuse — because this is an arm that
+// WEAKENS the guard. A ref backend that takes no HEAD.lock (reftable) finds no
+// claimant and so keeps today's behavior rather than admitting everything.
+func headWorktreeBirth(ctx context.Context, repoTop string, u refUpdate) bool {
+	want := refSymrefTarget(u.New)
+	if want == "" {
+		return false
+	}
+	common, err := refGitOutput(ctx, repoTop, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil || common == "" {
+		return false
+	}
+	dirs, err := refGitDirs(common)
+	if err != nil {
+		return false
+	}
+	claimant, ok := refHeadLockClaimant(dirs, want)
+	if !ok {
+		return false
+	}
+	return worktreeUnborn(claimant) && !worktreeOccupied(claimant)
+}
+
+// refSymrefTarget reads the ref name out of a symbolic-ref value. git spells
+// it two ways and both arrive here: `ref:refs/heads/x` in a transaction row,
+// `ref: refs/heads/x` inside a HEAD lock file.
+func refSymrefTarget(v string) string {
+	if !strings.HasPrefix(v, refSymrefPrefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(v, refSymrefPrefix))
+}
+
+// refGitDirs lists every git dir in the checkout that owns a HEAD of its own:
+// the common dir — the main worktree's — and one per linked worktree. A
+// `worktrees/` directory that does not exist yet is not an error; a directory
+// that cannot be READ is, because a claimant might be hiding in it.
+func refGitDirs(common string) ([]string, error) {
+	dirs := []string{common}
+	entries, err := os.ReadDir(filepath.Join(common, refWorktreesDir))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return dirs, nil
+		}
+		return nil, err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			dirs = append(dirs, filepath.Join(common, refWorktreesDir, e.Name()))
+		}
+	}
+	return dirs, nil
+}
+
+// refHeadLockClaimant names the ONE git dir whose HEAD.lock is about to write
+// want. Zero claimants means the HEAD in flight cannot be located; more than
+// one means two HEAD writes to the same branch are racing. Both answer "not
+// found", and the caller refuses.
+func refHeadLockClaimant(dirs []string, want string) (string, bool) {
+	found := ""
+	for _, dir := range dirs {
+		raw, err := os.ReadFile(filepath.Join(dir, refHeadLockFile))
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return "", false
+		}
+		if refSymrefTarget(strings.TrimSpace(string(raw))) != want {
+			continue
+		}
+		if found != "" {
+			return "", false
+		}
+		found = dir
+	}
+	return found, found != ""
+}
+
+// worktreeUnborn reports whether an administrative worktree directory is one
+// `git worktree add` is still building: the HEAD file itself has not been
+// written, and git's creation marker is present.
+//
+// Both are required, and the caller has already established that the dir
+// holds the HEAD lock. A missing HEAD alone would also describe a worktree
+// whose HEAD file was lost, which is somebody's real tree; the marker alone
+// describes `git worktree lock`, which any finished worktree may carry. The
+// marker's TEXT is not matched: "initializing" is git's wording today, and
+// pinning it would turn a future rewording into a silent return of this bug
+// rather than into the other conditions doing their job.
+//
+// The common dir is never unborn — it has no `locked` file and always has a
+// HEAD — so the main worktree's own branch switch falls out here.
+func worktreeUnborn(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, refHEAD)); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, refWorktreeLockedFile))
+	return err == nil
+}
+
+// worktreeOccupied reports whether a live session sits in the worktree the
+// administrative directory names — I1's question, asked of that checkout
+// rather than of this one. A path that cannot be read counts as occupied.
+func worktreeOccupied(dir string) bool {
+	raw, err := os.ReadFile(filepath.Join(dir, refWorktreeGitdirFile))
+	if err != nil {
+		return true
+	}
+	inner := strings.TrimSpace(string(raw))
+	if inner == "" {
+		return true
+	}
+	return len(identity.LiveOwnerUUIDsInRepo(filepath.Dir(inner))) > 0
+}
+
 // refGitOutput runs one short git query for the hook, in repoTop.
 func refGitOutput(ctx context.Context, repoTop string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
@@ -275,7 +445,20 @@ func runHookRef(ctx context.Context, phase string, stdin io.Reader, stdout, stde
 		fmt.Fprintf(stdout, "✓ ref-allowed count=%d live=%d\n", len(updates), len(live))
 		return 0
 	}
-	return refVerdict(ctx, refusals, live, len(updates), stdout, stderr)
+
+	// The second head-symref carve-out: the HEAD of a worktree being created.
+	// It sits AFTER the live gate on purpose — it reads directories and a lock
+	// file, and a single-session checkout, which is most of them, must pay
+	// nothing for a refusal that was never going to fire.
+	kept, admitted := refDropWorktreeBirth(ctx, repoTop, refusals)
+	if len(admitted) > 0 {
+		recordRefBirthAdmits(ctx, admitted, len(live), stderr)
+	}
+	if len(kept) == 0 {
+		fmt.Fprintf(stdout, "✓ ref-allowed count=%d live=%d head=%s\n", len(updates), len(live), refAdmitWorktreeBirth)
+		return 0
+	}
+	return refVerdict(ctx, kept, live, len(updates), stdout, stderr)
 }
 
 // refShapedUpdates keeps the updates matching a protected shape.
@@ -300,6 +483,61 @@ func refDropReattach(ctx context.Context, repoTop string, shaped []refRefusal) [
 		out = append(out, r)
 	}
 	return out
+}
+
+// refDropWorktreeBirth splits refusals into the ones that stand and the
+// head-symref rows admitted as a worktree being born. Every OTHER row in the
+// same transaction — a stash, a branch delete, a second head-symref naming a
+// different branch — stays in `kept`: the carve-out is per row, and admitting
+// one row never admits its neighbours.
+func refDropWorktreeBirth(ctx context.Context, repoTop string, refusals []refRefusal) (kept, admitted []refRefusal) {
+	for i := range refusals {
+		r := refusals[i]
+		if r.Shape == refShapeHeadSymref && headWorktreeBirth(ctx, repoTop, r.Update) {
+			admitted = append(admitted, r)
+			continue
+		}
+		kept = append(kept, r)
+	}
+	return kept, admitted
+}
+
+// recordRefBirthAdmits writes one ref_admitted event per row the birth
+// carve-out let through. I1's counters are a RATIO, and a weakening nobody
+// counts cannot be read back: the staged-lock promotion read needs to see how
+// often this arm fires, and against what, to tell a carve-out doing its job
+// from one being leaned on (PR #354 review, F5).
+//
+// It opens its own runtime because the admit path otherwise never needs the
+// store. Failing to record is reported and never changes the verdict.
+func recordRefBirthAdmits(ctx context.Context, admitted []refRefusal, live int, stderr io.Writer) {
+	rt, err := openRuntime(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "⚠ ref-admitted-counter=unrecorded err=%q\n", err)
+		return
+	}
+	defer rt.Close()
+	now := time.Now()
+	for i := range admitted {
+		r := admitted[i]
+		detail, err := json.Marshal(refRefusedDetail{
+			Old: r.Update.Old, New: r.Update.New, Ref: r.Update.Ref, Live: live,
+			Repo: rt.RepoTop,
+		})
+		if err != nil {
+			detail = nil
+		}
+		if _, err := rt.Store.AppendEventRotating(rt.Ctx, domain.Event{
+			Kind:      store.EventRefAdmitted,
+			Target:    domain.Target{Canonical: r.Update.Ref},
+			ActorUUID: rt.Agent.UUID,
+			Reason:    refAdmitWorktreeBirth,
+			Detail:    string(detail),
+			CreatedAt: now,
+		}); err != nil {
+			fmt.Fprintf(stderr, "⚠ ref-admitted-counter=unrecorded err=%q\n", err)
+		}
+	}
 }
 
 // refVerdict is the half that needs the store: the override claim, the

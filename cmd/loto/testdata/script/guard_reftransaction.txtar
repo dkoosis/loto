@@ -100,9 +100,47 @@ stdout 'x2'
 exec git rev-parse --abbrev-ref HEAD
 stdout '^base$'
 
-# 5. worktree add -b — same HEAD leg, in the new worktree.
-! exec git worktree add -b z2 $WORK/wt2
-! exists $WORK/wt2
+# 5. worktree add -b — the HEAD leg here belongs to the worktree being BORN,
+# not to this checkout, and it passes (loto-w0sx). git emits the same row as
+# case 4 from the same cwd with GIT_DIR unset; what separates them is which
+# git dir holds HEAD.lock at the `prepared` phase. A worktree mid-creation has
+# no working tree, so no peer's files are at stake — and tool-ship.sh, whose
+# first move is exactly this, can ship from a shared checkout with a live peer.
+exec git worktree add -b z2 $WORK/wt2
+! stderr 'ref-refused'
+exists $WORK/wt2
+exec git -C $WORK/wt2 rev-parse --abbrev-ref HEAD
+stdout '^z2$'
+
+# The carve-out did not disarm case 4 beside it: a branch switch in THIS
+# checkout is still refused with the new worktree sitting there.
+! exec git checkout other
+stderr 'ref-refused'
+exec git rev-parse --abbrev-ref HEAD
+stdout '^base$'
+
+# 6. `git branch -m` on a branch a live peer worktree has checked out rewrites
+# THAT worktree's HEAD, and never locks the caller's own — the same row shape a
+# birth produces, from a caller the birth test would otherwise clear (PR #354
+# review, F1: the first cut of the carve-out admitted this and rewrote the
+# peer's HEAD). Refused, and the peer's HEAD symref is untouched afterwards.
+#
+# The stale-unborn-worktree enabler that made F1 reachable with no live birth
+# at all is planted in TestRunHookRef_BranchRenameOnAPeersBranchRefused
+# instead: a testscript archive file cannot carry the absolute path that a
+# worktrees/<n>/gitdir must hold, and without it the planted dir reads as
+# unreadable — which refuses for the wrong reason and would prove nothing.
+! exec git branch -m z2 z2-renamed
+stderr 'ref-refused'
+stderr 'shape=head-symref'
+exec git -C $WORK/wt2 symbolic-ref HEAD
+stdout '^refs/heads/z2$'
+
+# git renames the ref before it reaches the HEAD leg, so put the name back:
+# no worktree points at z2-renamed, so this one emits no HEAD symref at all.
+exec git branch -m z2-renamed z2
+exec git -C $WORK/wt2 rev-parse --abbrev-ref HEAD
+stdout '^z2$'
 
 # ── the two admits, with two live sessions still up ───────────────────────
 # A branch tip moving is indistinguishable from a commit and passes I1 (the
