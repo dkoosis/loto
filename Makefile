@@ -146,6 +146,7 @@ audit: check race vuln dupl nilcheck demo ## Exhaustive: +race +vuln +dupl +nilc
 	@echo "=== audit pass ==="
 
 demo: ## Run CLI primitive demos (fo-rendered: triage line, not the full transcript)
+	@echo "--- demo (CLI primitive demos) ---"
 	@set -o pipefail; go test -json -run Demo -count=1 ./internal/cli | fo --format llm
 
 demo-v: ## Run CLI primitive demos with the full narrated -v transcript
@@ -235,6 +236,7 @@ test: ## Run tests with coverage (fo-rendered; Go test cache live locally, cold 
 # -race the slowest package (internal/cli, ~175s alone) is CPU-starved and blew
 # the old 5m ceiling — a starved package, not a hang. 20m is headroom.
 race: ## Run tests with race detector (slow, fo-rendered)
+	@echo "--- race (go test -race, up to 20m, silent until done) ---"
 	@$(GATE) race testjson -- go test -race -json -timeout=20m -count=1 $(PKG)
 
 stress: ## Concurrent-agent conformance gauntlet (build-tag stress)
@@ -245,6 +247,7 @@ vuln: ## Scan for known vulnerabilities (fo-rendered)
 		echo "govulncheck not installed (install: go install golang.org/x/vuln/cmd/govulncheck@latest)"; \
 		exit 1; \
 	fi
+	@echo "--- vuln (govulncheck) ---"
 	@$(GATE) vuln sarif -- govulncheck -format sarif ./...
 
 # ‡ The skip and the run live in ONE recipe line. Make gives each line its own
@@ -252,6 +255,7 @@ vuln: ## Scan for known vulnerabilities (fo-rendered)
 # line then ran the missing tool anyway and died on "command not found". The
 # same shape is safe under `exit 1` (arch, lint, vuln): make stops there.
 dupl: ## Detect duplicate code (jscpd; fo-rendered; skips if not installed — dev-only)
+	@echo "--- dupl (jscpd) ---"
 	@set -o pipefail; if ! command -v jscpd >/dev/null 2>&1; then \
 		echo "+ dupl: jscpd not installed — skipped (npm i -g jscpd)"; \
 	else \
@@ -261,6 +265,7 @@ dupl: ## Detect duplicate code (jscpd; fo-rendered; skips if not installed — d
 	fi
 
 nilcheck: ## Run nilaway (fo-rendered; skips if not installed — dev-only)
+	@echo "--- nilcheck (nilaway) ---"
 	@if ! command -v nilaway >/dev/null 2>&1; then \
 		echo "+ nilcheck: nilaway not installed — skipped (go install go.uber.org/nilaway/cmd/nilaway@latest)"; \
 	else \
