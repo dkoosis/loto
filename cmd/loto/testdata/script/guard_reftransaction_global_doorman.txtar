@@ -31,10 +31,11 @@ exec git branch other
 
 # Alice records from ANOTHER process: since loto-2jgn one process is one peer
 # however many session ids it has answered to, so two sessions in the fixture
-# need two pids. pid 1 is always up and is never this process; bob keeps the
-# harness pid, which is the pid the guard sees as its own.
+# need two pids. spawnpid starts a real child and hands back its pid; bob
+# keeps the harness pid, which is the pid the guard sees as its own.
+spawnpid ALICEPID
 env SESSIONPID=$LOTO_PID
-env LOTO_PID=1
+env LOTO_PID=$ALICEPID
 env LOTO_AGENT_ID=$ALICE
 env CLAUDE_CODE_SESSION_ID=sess-alice
 loto whoami

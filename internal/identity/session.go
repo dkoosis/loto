@@ -67,7 +67,11 @@ func RecordSession(a *Agent, repoTop string) (*SessionRecord, error) {
 	}
 	socket := os.Getenv("CLAUDE_CODE_MESSAGING_SOCKET")
 	pid := sessionPID(socket)
-	procStart, _ := ProcStart(pid) // 0,false → 0 → unknown
+	// procStartFn, not ProcStart directly: the doc above promises the record
+	// is stamped by the same reader that re-reads it at verdict time, and the
+	// seam makes that literal — a test can put a platform with no readable
+	// start-time on both sides at once.
+	procStart, _ := procStartFn(pid) // 0,false → 0 → unknown
 	rec := &SessionRecord{
 		SessionID:  sid,
 		UUID:       a.UUID,
@@ -133,11 +137,17 @@ func callerProc() procIdent {
 }
 
 // sameProcess reports whether this record was written by process p. Both the
-// pid AND the start-time must match: pid equality alone is the loto-gj1z
-// false positive, where a recycled pid made an unrelated process read as the
-// recorded one.
+// pid AND the start-time must match, and BOTH start-times must be known:
+//
+//   - pid equality alone is the loto-gj1z false positive, where a recycled pid
+//     made an unrelated process read as the recorded one.
+//   - 0 is ProcStart's unknown sentinel, not a start-time, so two zeroes are
+//     two unknowns and never evidence of sameness (PR #351 review). A record
+//     written before the field existed, or on a platform whose reader failed,
+//     therefore stays a peer — which over-counts |S| and refuses a ref update,
+//     the direction that cannot cost anyone a working tree.
 func (r SessionRecord) sameProcess(p procIdent) bool {
-	if p.pid <= 0 || r.PID <= 0 {
+	if p.pid <= 0 || r.PID <= 0 || p.procStart == 0 || r.ProcStart == 0 {
 		return false
 	}
 	return r.PID == p.pid && r.ProcStart == p.procStart
