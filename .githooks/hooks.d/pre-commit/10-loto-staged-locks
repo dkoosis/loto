@@ -32,7 +32,11 @@
 
 command -v loto >/dev/null 2>&1 || exit 0
 
+# `loto hook override` leaves the row a promotion needs to count this bypass
+# (loto-mh07); it always exits 0 itself, so its own exit code is never
+# checked here.
 if [ "${LOTO_GUARD_OVERRIDE:-}" = "1" ]; then
+	loto hook override pre-commit
 	echo "pre-commit: LOTO_GUARD_OVERRIDE=1 — skipping loto staged-lock guard" >&2
 	exit 0
 fi

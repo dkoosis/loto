@@ -1,0 +1,36 @@
+# pre-commit's LOTO_GUARD_OVERRIDE=1 branch leaves an audit row naming the
+# guard it bypassed (loto-mh07): a warn-to-blocking promotion for the
+# staged-lock gate needs to read override spikes, and a bypass that calls
+# nothing in loto cannot be counted.
+
+exec git config core.hooksPath $REALHOOKS
+
+touch shared.go
+
+# Alice locks it; Bob stages it into his next commit — the same refusal
+# shape guard_precommit.txtar exercises.
+env LOTO_AGENT_ID=$ALICE
+loto lock shared.go -t 'alice mid-edit'
+stdout '✓ locked count=1'
+
+env LOTO_AGENT_ID=$BOB
+exec git add shared.go
+! exec git commit -m 'bob: sweeps alice file'
+stderr 'refused'
+
+# No override event yet — only the override branch writes one.
+loto events --kind guard_override
+stdout 'ℹ events=0 shown=0 kind=guard_override'
+
+env LOTO_GUARD_OVERRIDE=1
+exec git commit -m 'bob: overrides and commits anyway'
+env LOTO_GUARD_OVERRIDE=
+
+exec git log --oneline
+stdout 'overrides and commits anyway'
+
+loto events --kind guard_override
+stdout 'ℹ events=1 shown=1 kind=guard_override'
+stdout 'pre-commit'
+! stdout 'post-checkout'
+! stdout 'reference-transaction'

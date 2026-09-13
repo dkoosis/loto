@@ -1,0 +1,20 @@
+# The bead's third acceptance criterion (loto-mh07): if the store cannot be
+# written, an overridden commit still goes through. `loto hook override`
+# fails open the same way every other guard entry in this tree does — a lost
+# counter row must never become a new way to block.
+
+exec git config core.hooksPath $REALHOOKS
+
+touch f.go
+exec git add f.go
+
+# Plant loto.db as a DIRECTORY instead of a file: store.Open fails the same
+# way a disk-full or corrupt-file open would, before any event is written.
+mkdir .lotobase/loto.db
+
+env LOTO_GUARD_OVERRIDE=1
+exec git commit -m 'overrides through an unopenable store'
+env LOTO_GUARD_OVERRIDE=
+
+exec git log --oneline
+stdout 'overrides through an unopenable store'

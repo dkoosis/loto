@@ -124,6 +124,28 @@ func (s *Store) appendAuditDetached(evs []domain.Event) error {
 	return err
 }
 
+// RecordGuardOverride appends the audit event LOTO_GUARD_OVERRIDE=1 owes
+// every time it bypasses a git-hook guard (loto-mh07), mirroring
+// RecordGateBypass's shape for LOTO_GATE=off. guard names which guard was
+// bypassed ("pre-commit" | "post-checkout" | "reference-transaction") and
+// rides in Reason. No Target — an override is a session-scoped fact, not a
+// per-path one, same as EventGateBypass.
+//
+// ‡ appendAuditDetached is the fail-open primitive on purpose: it writes on
+// its own background context with its own short timeout, so a caller that
+// ignores the returned error (as every git-hook guard here does) lets the
+// override through even when the store cannot be opened or written at all —
+// the override's whole point is "let the git operation through no matter
+// what," and a lost counter row must never become a new way to block one.
+func (s *Store) RecordGuardOverride(ctx context.Context, actorUUID, guard string) error {
+	return s.appendAuditDetached([]domain.Event{{
+		Kind:      EventGuardOverride,
+		ActorUUID: actorUUID,
+		Reason:    guard,
+		CreatedAt: time.Now(),
+	}})
+}
+
 // AppendEvent inserts a single event. Thin wrapper around AppendEvents to keep
 // the 1-arg caller surface; new code should prefer AppendEvents.
 func (s *Store) AppendEvent(ctx context.Context, e domain.Event) (string, error) {
