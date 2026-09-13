@@ -28,6 +28,7 @@ const (
 	tcFlagAll        = "--all"
 	tcFlagShared     = "--shared"
 	tcCmdLane        = "lane"
+	tcCmdBeacon      = "beacon"
 	tcCmdVerify      = "verify"
 	tcShExit0        = "exit 0" // the no-op verify command, as `sh -c` takes it
 	tcFlagRef        = "--ref"
