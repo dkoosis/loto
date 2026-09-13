@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -29,6 +30,24 @@ func deadPID(t *testing.T) int {
 	pid := cmd.Process.Pid
 	_ = cmd.Wait()
 	return pid
+}
+
+// livePID starts a child that outlives the test and hands back its pid: a
+// process that is provably up and provably not this one. os.Getppid() cannot
+// do that job — under PID 1 (a container that runs the test binary as init)
+// the parent is 0, and a hard-coded number is either dead or recycled
+// (PR #351 review).
+func livePID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("sleep", "300")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot spawn a long-lived process: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	return cmd.Process.Pid
 }
 
 // existingSocket writes a plain file at a short path. The oracle's witness test
@@ -159,5 +178,56 @@ func TestPIDAlive(t *testing.T) {
 	}
 	if PIDAlive(0) || PIDAlive(-1) {
 		t.Error("non-positive pids are never alive")
+	}
+}
+
+// TestProbeSession_SameProcess is loto-2jgn's per-session leg: the oracle's
+// verdict on this process's PRE-/clear session id is still "live" — that
+// process really is up — but it now also says the record is this very
+// process, which is what lets a caller tell a rotated id of its own from a
+// peer.
+func TestProbeSession_SameProcess(t *testing.T) {
+	clearIdentityEnv(t)
+	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", existingSocket(t))
+
+	t.Setenv("LOTO_PID", strconv.Itoa(livePID(t)))
+	record(t, "sess-peer", "owner-peer", "/repos/a")
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	record(t, "sess-precleared", "owner-precleared", "/repos/a")
+
+	mine := ProbeSession("sess-precleared")
+	if mine.Liveness != SessionLive {
+		t.Fatalf("a rotated id of a running process is still live: %s", mine.Liveness)
+	}
+	if !mine.SameProcess {
+		t.Errorf("the caller's own process must be recognised as its own: %+v", mine.Record)
+	}
+	if peer := ProbeSession("sess-peer"); peer.SameProcess {
+		t.Errorf("a record from another process is a peer, not self: %+v", peer.Record)
+	}
+	if none := ProbeSession("sess-absent"); none.SameProcess {
+		t.Error("no record is no evidence of anything, same-process included")
+	}
+}
+
+// TestProbeSession_UnknownProcStartIsNotSameProcess: 0 is ProcStart's unknown
+// sentinel, so a record and a caller that BOTH failed to read a start-time
+// share an unknown, not a process — even on the same pid (PR #351 review).
+func TestProbeSession_UnknownProcStartIsNotSameProcess(t *testing.T) {
+	clearIdentityEnv(t)
+	stubProcStart(t, 0, false) // no readable start-time, at record and at probe
+	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", existingSocket(t))
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	record(t, "sess-startless", "owner-startless", "/repos/a")
+
+	v := ProbeSession("sess-startless")
+	if v.Liveness != SessionLive {
+		t.Fatalf("an unreadable start-time never escalates to dead: %s", v.Liveness)
+	}
+	if v.Record == nil || v.Record.ProcStart != 0 {
+		t.Fatalf("the fixture must have no start-time on either side: %+v", v.Record)
+	}
+	if v.SameProcess {
+		t.Error("two unknown start-times are not evidence of one process")
 	}
 }
