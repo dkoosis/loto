@@ -35,6 +35,27 @@ func hookEventJSON(tool, toolUseID, filePath, command string) string {
 		tool, toolUseID, fields)
 }
 
+// hookSubagentEventJSON is hookEventJSON with the harness's per-subagent
+// agent_id, the field a /team sibling's call carries and a root call does not.
+func hookSubagentEventJSON(tool, toolUseID, filePath, agentID string) string {
+	return fmt.Sprintf(
+		`{"session_id":"s-1","tool_name":%q,"tool_use_id":%q,"cwd":"/tmp","agent_id":%q,"tool_input":{"file_path":%q}}`,
+		tool, toolUseID, agentID, filePath)
+}
+
+// mintStampedBeacon runs `loto beacon` as the /team sibling `stamp` would:
+// under LOTO_SUBAGENT_ID, which the nested subtest scopes so the caller's own
+// hook run stays unstamped, as the harness-spawned hook is.
+func mintStampedBeacon(t *testing.T, stamp, target string) {
+	t.Helper()
+	t.Run("mint stamped beacon "+stamp, func(t *testing.T) {
+		t.Setenv("LOTO_SUBAGENT_ID", stamp)
+		if code := Run([]string{tcCmdBeacon, target}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+			t.Fatalf("stamped beacon: exit %d", code)
+		}
+	})
+}
+
 // runHookEvent feeds one synthetic event through `loto hook <phase>`.
 func runHookEvent(t *testing.T, phase, payload string) (stdout, stderr string, code int) {
 	t.Helper()
@@ -366,6 +387,85 @@ func TestHook_EditAdmission(t *testing.T) {
 		}
 		if !exclusive {
 			t.Errorf("admission over my own beacon left no exclusive lock: %+v", held)
+		}
+	})
+
+	// loto-0z24: under a /team subagent the gate script mints the beacon with
+	// LOTO_SUBAGENT_ID=<agent_id>, so it is owned by a derived sibling, while
+	// the hook runs unstamped as the parent. The event's agent_id names that
+	// sibling; its beacon is kin for this admission, and the lock the hook
+	// takes is still the parent's own.
+	t.Run("the current subagent's beacon is kin and is upgraded to the parent's exclusive lock", func(t *testing.T) {
+		withTempProject(t)
+		me := pinAgent(t)
+		mintStampedBeacon(t, tcSubagentA, tcTargetA)
+		sib, ok := identity.SubagentOwner(tcSubagentA)
+		if !ok || sib == me.UUID {
+			t.Fatalf("test premise: the stamp must derive a distinct sibling owner (ok=%v sib=%s me=%s)", ok, sib, me.UUID)
+		}
+		if _, errOut, code := runHookEvent(t, tcHookPre, hookSubagentEventJSON("Write", "call-sib-beacon", tcTargetA, tcSubagentA)); code != 0 {
+			t.Fatalf("pre over my subagent's beacon: exit=%d err=%q", code, errOut)
+		}
+		rt, done := hookStoreRead(t)
+		defer done()
+		held, err := rt.Store.ListLocks(rt.Ctx)
+		if err != nil {
+			t.Fatalf("list locks: %v", err)
+		}
+		var exclusive, beaconStands bool
+		for _, l := range held {
+			if l.Target.Canonical == tcTargetA && string(l.OwnerUUID) == me.UUID && !l.IsBeacon() && l.Mode == domain.ModeExclusive {
+				exclusive = true
+			}
+			if l.Target.Canonical == tcTargetA && string(l.OwnerUUID) == sib && l.IsBeacon() {
+				beaconStands = true
+			}
+		}
+		if !exclusive {
+			t.Errorf("admission over my subagent's beacon left no exclusive lock of mine: %+v", held)
+		}
+		// The beacon is what a later sibling's stamped `check --gate` refuses
+		// on (loto-xwod); admission must leave it standing.
+		if !beaconStands {
+			t.Errorf("admission retired my subagent's beacon, so siblings no longer serialize on the path: %+v", held)
+		}
+	})
+
+	t.Run("a sibling's non-beacon row is not authorization: the parent still takes its own lock", func(t *testing.T) {
+		withTempProject(t)
+		me := pinAgent(t)
+		t.Run("stamped shared lock", func(t *testing.T) {
+			t.Setenv("LOTO_SUBAGENT_ID", tcSubagentA)
+			if code := Run([]string{tcCmdLock, tcFlagShared, tcTargetA, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+				t.Fatalf("stamped shared lock: exit %d", code)
+			}
+		})
+		if _, errOut, code := runHookEvent(t, tcHookPre, hookSubagentEventJSON("Edit", "call-sib-shared", tcTargetA, tcSubagentA)); code != 0 {
+			t.Fatalf("pre over my subagent's shared lock: exit=%d err=%q", code, errOut)
+		}
+		rt, done := hookStoreRead(t)
+		defer done()
+		held, err := rt.Store.ListLocks(rt.Ctx)
+		if err != nil {
+			t.Fatalf("list locks: %v", err)
+		}
+		var exclusive bool
+		for _, l := range held {
+			if l.Target.Canonical == tcTargetA && string(l.OwnerUUID) == me.UUID && l.Mode == domain.ModeExclusive {
+				exclusive = true
+			}
+		}
+		if !exclusive {
+			t.Errorf("a sibling's shared row was taken as the parent's own authorization; no exclusive lock of mine: %+v", held)
+		}
+	})
+
+	t.Run("a different sibling's beacon still refuses", func(t *testing.T) {
+		withTempProject(t)
+		pinAgent(t)
+		mintStampedBeacon(t, tcSubagentB, tcTargetA)
+		if _, errOut, code := runHookEvent(t, tcHookPre, hookSubagentEventJSON("Write", "call-other-sib", tcTargetA, tcSubagentA)); code != 2 {
+			t.Fatalf("pre over a sibling's beacon: exit=%d want 2 err=%q", code, errOut)
 		}
 	})
 
