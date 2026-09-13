@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+
+	"loto/internal/identity"
 )
 
 // ── `loto hook override` — the row LOTO_GUARD_OVERRIDE=1 owes (loto-mh07) ──
@@ -51,6 +53,17 @@ func cmdHookOverride(ctx context.Context, args []string, stdout, stderr io.Write
 		fmt.Fprintf(stderr, "✗ unknown guard %q\n", guard)
 		fmt.Fprint(stderr, hookUsageHead)
 		return 2
+	}
+
+	// Checked before the runtime opens, same as runHook (cmd_hook.go): an
+	// unpinned caller — a human running git under the override, or any
+	// process with nothing in the environment naming an identity — gets a
+	// throwaway owner from identity.Ephemeral if this proceeds, and a
+	// guard_override row attributed to a UUID that exists for one process
+	// pollutes the exact signal this event kind exists to give a promotion
+	// (loto-mh07 review). Skip and say so instead.
+	if !identity.PinnedByEnv() {
+		return hookSkip(stderr, "%v", errIdentityUnpinned)
 	}
 
 	rt, err := openRuntime(ctx)

@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"loto/internal/store"
@@ -38,6 +39,32 @@ func TestHookOverride_RecordsEventNamingGuard(t *testing.T) {
 				t.Errorf("an override is session-scoped, want no target, got %q", ev.Target.Canonical)
 			}
 		})
+	}
+}
+
+// TestHookOverride_UnpinnedIdentitySkipsWithoutRecording is the coordinator
+// review's second finding on loto-mh07: an unpinned caller — a human running
+// git under the override, or any process with nothing in the environment
+// naming an agent identity — must not write a guard_override row under a
+// throwaway ephemeral UUID. That pollutes the exact signal this event kind
+// exists to give a promotion. Skip, exit 0, say so on stderr.
+func TestHookOverride_UnpinnedIdentitySkipsWithoutRecording(t *testing.T) {
+	withTempProject(t)
+	// No pinAgent(t) — withTempProject already unsets LOTO_AGENT_ID and
+	// CLAUDE_CODE_SESSION_ID, so this call is unpinned.
+
+	_, stderr, code := executeCommand("hook", "override", hookOverrideGuardPreCommit)
+	if code != 0 {
+		t.Fatalf("unpinned: exit %d, want 0; stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, "identity=unpinned") {
+		t.Errorf("stderr should say why it skipped, got %q", stderr)
+	}
+
+	for _, ev := range readAllEvents(t) {
+		if ev.Kind == store.EventGuardOverride {
+			t.Fatalf("unpinned caller must not write a row, got %+v", ev)
+		}
 	}
 }
 
