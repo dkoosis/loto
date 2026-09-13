@@ -73,6 +73,27 @@ func EnsureParent(ctx context.Context) (*Agent, bool, error) {
 	return a, true, nil
 }
 
+// SubagentOwner returns the owner a LOTO_SUBAGENT_ID stamp of `stamp` resolves
+// to in THIS process's environment, without the stamp being set: the same
+// derivation resolveSubagent performs, offered to a process that is not the
+// sibling but needs to recognise one. `loto hook pre` runs unstamped (the
+// harness spawns it, not the gate script), so the beacon the gate script
+// minted for the same write under `LOTO_SUBAGENT_ID=$agent_id` is owned by a
+// derived sibling the hook would otherwise read as foreign (loto-0z24). The
+// hook reads the event's agent_id and treats that one derived owner as kin for
+// that one admission. ok=false when the stamp would not pin (see
+// SubagentIDPins), in which case there is no sibling to recognise.
+func SubagentOwner(stamp string) (owner string, ok bool) {
+	if !SubagentIDPins(stamp) {
+		return "", false
+	}
+	parent, ok := subagentParentOwner()
+	if !ok {
+		return "", false
+	}
+	return deriveUUID(parent, stamp), true
+}
+
 // SubagentIDPins reports whether a LOTO_SUBAGENT_ID value would actually pin
 // an identity via resolveSubagent. A stamp pins whenever the UNSTAMPED
 // environment already pins a deterministic owner to derive from — either

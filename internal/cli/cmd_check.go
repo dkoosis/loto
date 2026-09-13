@@ -62,7 +62,7 @@ func checkAltSurface(ctx context.Context, fs *flag.FlagSet, a altSurfaceArgs, st
 // paths, and applies the pre-resolution refusals that must fire before any
 // store IO. done=true means the caller must return rc immediately — the
 // preflight already emitted whatever the user sees.
-func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) (paths []string, base string, repoTop string, gate bool, rc int, done bool) {
+func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) (paths []string, base string, repoTop string, gate, isStaged bool, rc int, done bool) {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	staged := fs.Bool("staged", false, "read paths from git diff --cached")
@@ -72,14 +72,14 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 	moved := fs.Bool("moved", false, "advisory only: given two HEADs, print a ⚠ row for each path the move changed that a live peer holds; always exits 0")
 	cwdUnknown := fs.Bool("cwd-unknown", false, "the caller's working directory is not knowable here (e.g. mcp__trixi__agent_shell): refuse relative paths instead of resolving them against the wrong base")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
-		return nil, "", "", false, 2, true
+		return nil, "", "", false, false, 2, true
 	}
 
 	if rc, handled := checkAltSurface(ctx, fs, altSurfaceArgs{
 		branchTyped: flagWasSet(fs, "branch"), branch: *branch,
 		held: *held, moved: *moved, gate: *gateFlag, staged: *staged, cwdUnknown: *cwdUnknown,
 	}, stdout, stderr); handled {
-		return nil, "", "", false, rc, true
+		return nil, "", "", false, false, rc, true
 	}
 
 	// Resolve repoTop before shelling out to git so `git diff --cached` runs
@@ -99,11 +99,11 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 
 	paths, code := loadCheckTargets(ctx, repoTop, *staged, fs.Args(), stderr)
 	if code != 0 {
-		return nil, base, repoTop, *gateFlag, code, true
+		return nil, base, repoTop, *gateFlag, *staged, code, true
 	}
 	if len(paths) == 0 {
 		fmt.Fprintln(stdout, "✓ no paths")
-		return nil, base, repoTop, *gateFlag, 0, true
+		return nil, base, repoTop, *gateFlag, *staged, 0, true
 	}
 
 	// loto-tzmv.10: refuse before resolving, never guess. Scoped to paths the
@@ -114,14 +114,14 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 	// See refuseUnresolvableRelative.
 	if *cwdUnknown && !*staged {
 		if rc, refused := refuseUnresolvableRelative(stdout, paths); refused {
-			return nil, base, repoTop, *gateFlag, rc, true
+			return nil, base, repoTop, *gateFlag, *staged, rc, true
 		}
 	}
-	return paths, base, repoTop, *gateFlag, 0, false
+	return paths, base, repoTop, *gateFlag, *staged, 0, false
 }
 
 func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	paths, base, repoTop, gate, rc, done := checkPreflight(ctx, args, stdout, stderr)
+	paths, base, repoTop, gate, staged, rc, done := checkPreflight(ctx, args, stdout, stderr)
 	if done {
 		return rc
 	}
@@ -135,7 +135,7 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// stays byte-identical (hard rule, plan "Plain loto check ... behavior
 	// must stay byte-identical").
 	if gate {
-		return runCheckGate(ctx, paths, base, repoTop, stdout, stderr)
+		return runCheckGate(ctx, paths, base, repoTop, staged, stdout, stderr)
 	}
 
 	rt, err := openRuntime(ctx)

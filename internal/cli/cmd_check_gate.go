@@ -37,10 +37,31 @@ import (
 // blocker-path tie-break matters: one owner can hold claims at two ancestor
 // prefixes of one target — same path/kind/holder, distinct rows.
 func gateDecide(targets []domain.Target, locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ec domain.EvalContext) []render.GateDenyRow {
+	return gateDecideWith(targets, locks, claims, myUUID, "", ec)
+}
+
+// gateDecideStaged is gateDecide for the commit-time leg (`check --gate
+// --staged`): the caller is the SESSION committing its tree, so a beacon a
+// sibling subagent of that same session minted does not deny it — the same
+// carve-out gateDecideAny makes for a tree-move (loto-xwod), for the same
+// reason: subagents of one session are distinct owners so that one's beacon
+// denies another's WRITE, but committing, like checking out, is an act of the
+// session on the tree it works in. Without it a parent's commit of the file
+// its own subagent just wrote is refused for the beacon's TTL (loto-0z24).
+// The per-path write gate keeps gateDecide: there the carve-out would let two
+// siblings write one file at once, the 2026-08-14 incident. A sibling's real
+// exclusive lock still denies the commit here, as it denies the tree-move.
+func gateDecideStaged(targets []domain.Target, locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, mySession domain.SessionUUID, ec domain.EvalContext) []render.GateDenyRow {
+	return gateDecideWith(targets, locks, claims, myUUID, mySession, ec)
+}
+
+// gateDecideWith is the shared body: ownSession == "" means no same-session
+// beacon carve-out, which is gateDecide's contract (TestGateDecide_SiblingBeaconDeniesWrite).
+func gateDecideWith(targets []domain.Target, locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ownSession domain.SessionUUID, ec domain.EvalContext) []render.GateDenyRow {
 	var rows []render.GateDenyRow
 	seen := map[string]bool{}
 	for _, t := range targets {
-		rows = appendGateDenyForTarget(rows, seen, t, locks, claims, myUUID, ec)
+		rows = appendGateDenyForTarget(rows, seen, t, locks, claims, myUUID, ownSession, ec)
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Path != rows[j].Path {
@@ -64,12 +85,18 @@ func gateDecide(targets []domain.Target, locks []domain.LockRecord, claims []dom
 // blocker path — it always equals t.Canonical (locks are per-file) — while
 // the claim key includes c.PathPrefix: two foreign claims at different
 // ancestor prefixes of one target are distinct blockers, each owed a row.
-func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t domain.Target, locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ec domain.EvalContext) []render.GateDenyRow {
+func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t domain.Target, locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ownSession domain.SessionUUID, ec domain.EvalContext) []render.GateDenyRow {
 	for i := range locks {
 		l := &locks[i]
 		// Kin rows (ec.Kin — the parent identity behind a subagent stamp) are
 		// this caller's own, same as myUUID (loto-wofb).
 		if !ec.SameTarget(t, l.Target) || string(l.OwnerUUID) == myUUID || ec.IsKin(l.OwnerUUID) || ec.IsStale(*l) {
+			continue
+		}
+		// Commit-time only (gateDecideStaged): a beacon of this same session's
+		// sibling does not deny the session's commit. An empty ownSession
+		// matches nothing rather than everything.
+		if l.IsBeacon() && ownSession != "" && l.SessionUUID == ownSession {
 			continue
 		}
 		key := "lock|" + t.Canonical + "|" + string(l.OwnerUUID)
@@ -188,7 +215,7 @@ func gateInfraUnreachable(stderr io.Writer, err error) int {
 // rows) go to stdout; FAIL-OPEN notices go to stderr (loto-tzmv.8), because a
 // hook that exits 0 after writing to stdout leaves the model blind to the fact
 // that the gate never ran.
-func runCheckGate(ctx context.Context, paths []string, base, repoTop string, stdout, stderr io.Writer) int {
+func runCheckGate(ctx context.Context, paths []string, base, repoTop string, staged bool, stdout, stderr io.Writer) int {
 	// Before any verdict: say so if this binary predates the hook that called
 	// it (loto-tzmv.7). A stale gate answers ✓ with the confidence of a current
 	// one, which is how the 2026-08-12 rot went unnoticed for 8 days.
@@ -238,7 +265,15 @@ func runCheckGate(ctx context.Context, paths []string, base, repoTop string, std
 		return gateInfraUnreachable(stderr, err)
 	}
 	ec.Kin = kin
-	rows := gateDecide(targets, locks, claims, rt.Agent.UUID, ec)
+	var rows []render.GateDenyRow
+	if staged && rt.SessionPinned {
+		// The commit leg: the session commits its tree, and its own siblings'
+		// beacons are not peers to that (gateDecideStaged). An unpinned session
+		// id is random per process and would match nothing anyway.
+		rows = gateDecideStaged(targets, locks, claims, rt.Agent.UUID, rt.SessionUUID, ec)
+	} else {
+		rows = gateDecide(targets, locks, claims, rt.Agent.UUID, ec)
+	}
 	// Resurfaced on BOTH verdicts, and never as one: an unresolved violation
 	// is not a reason to block this tool call — it is a reason the NEXT
 	// submit will be refused, and the agent is better told now than at the
