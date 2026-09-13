@@ -7,11 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/identity"
 	"loto/internal/store"
 )
 
@@ -528,5 +530,79 @@ func gitRun(t *testing.T, repo string, args ...string) {
 	full := append([]string{"-C", repo}, args...)
 	if out, err := exec.Command("git", full...).CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// plantSessionForPID plants a live-shaped session record owned by a NAMED
+// process, start-time included. plantLiveSessionHere always stamps the test
+// binary's own pid and no start-time, which cannot express loto-2jgn's two
+// cases: two ids sharing ONE process, and an id whose process is gone.
+func plantSessionForPID(t *testing.T, repoTop, sid, ownerUUID string, pid int) {
+	t.Helper()
+	if top, err := gitToplevel(repoTop); err == nil {
+		repoTop = top
+	}
+	dir := filepath.Join(os.Getenv("LOTO_BASE"), "session")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	procStart, _ := identity.ProcStart(pid)
+	body := fmt.Sprintf(`{"session_id":%q,"uuid":%q,"pid":%d,"proc_start":%d,"repo":%q,"recorded_at":%q}`,
+		sid, ownerUUID, pid, procStart, repoTop, time.Now().Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(dir, sid+".json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// reapedPID starts and reaps a trivial process, then hands back its pid — a
+// pid that provably no longer runs.
+func reapedPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot spawn a throwaway process: %v", err)
+	}
+	pid := cmd.Process.Pid
+	_ = cmd.Wait()
+	return pid
+}
+
+// TestRunHookRef_RotatedSelfIDIsNotAPeer is loto-2jgn end to end: after
+// /clear this process owns two session ids, both recorded, both live. |S|
+// read 2 and the guard refused every ref update in the checkout — naming the
+// caller's own previous id as the peer it was protecting.
+func TestRunHookRef_RotatedSelfIDIsNotAPeer(t *testing.T) {
+	repo := withTempProject(t)
+	a := pinAgent(t)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	plantSessionForPID(t, repo, a.UUID, a.UUID, os.Getpid())
+	plantSessionForPID(t, repo, "sess-precleared", "precleared-owner-01", os.Getpid())
+
+	code, stdout, stderr := runRefHook(t, tcPhasePrepared, txnCheckoutOther)
+	if code != 0 {
+		t.Fatalf("this process's own pre-/clear id is not a peer: exit %d, %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "live=1") {
+		t.Errorf("|S| must count one process once: %q", stdout)
+	}
+}
+
+// TestRunHookRef_StaleSessionDoesNotBlockBranchDelete is loto-2jgn's second
+// acceptance case: a prior session id whose process is gone leaves |S| = 1,
+// so the branch delete git refused under the guard now exits 0.
+func TestRunHookRef_StaleSessionDoesNotBlockBranchDelete(t *testing.T) {
+	repo := withTempProject(t)
+	a := pinAgent(t)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	plantSessionForPID(t, repo, a.UUID, a.UUID, os.Getpid())
+	plantSessionForPID(t, repo, "sess-stale", "stale-owner-0001", reapedPID(t))
+
+	txn := tcOIDZero + " " + tcOIDZero + " refs/heads/merged\n"
+	code, stdout, stderr := runRefHook(t, tcPhasePrepared, txn)
+	if code != 0 {
+		t.Fatalf("a dead session blocks nothing: exit %d, %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "live=1") {
+		t.Errorf("|S| must exclude a session whose process is gone: %q", stdout)
 	}
 }

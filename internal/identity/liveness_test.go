@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -159,5 +160,34 @@ func TestPIDAlive(t *testing.T) {
 	}
 	if PIDAlive(0) || PIDAlive(-1) {
 		t.Error("non-positive pids are never alive")
+	}
+}
+
+// TestProbeSession_SameProcess is loto-2jgn's per-session leg: the oracle's
+// verdict on this process's PRE-/clear session id is still "live" — that
+// process really is up — but it now also says the record is this very
+// process, which is what lets a caller tell a rotated id of its own from a
+// peer.
+func TestProbeSession_SameProcess(t *testing.T) {
+	clearIdentityEnv(t)
+	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", existingSocket(t))
+
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getppid()))
+	record(t, "sess-peer", "owner-peer", "/repos/a")
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	record(t, "sess-precleared", "owner-precleared", "/repos/a")
+
+	mine := ProbeSession("sess-precleared")
+	if mine.Liveness != SessionLive {
+		t.Fatalf("a rotated id of a running process is still live: %s", mine.Liveness)
+	}
+	if !mine.SameProcess {
+		t.Errorf("the caller's own process must be recognised as its own: %+v", mine.Record)
+	}
+	if peer := ProbeSession("sess-peer"); peer.SameProcess {
+		t.Errorf("a record from another process is a peer, not self: %+v", peer.Record)
+	}
+	if none := ProbeSession("sess-absent"); none.SameProcess {
+		t.Error("no record is no evidence of anything, same-process included")
 	}
 }

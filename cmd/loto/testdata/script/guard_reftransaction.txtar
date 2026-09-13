@@ -31,9 +31,18 @@ exec git remote set-url origin $WORK/up
 exec git fetch -q origin
 
 # ── one live session: all five operations succeed ─────────────────────────
+# Alice records from ANOTHER process. Since loto-2jgn one process contributes
+# one peer however many session ids it has answered to — /clear rotates the id
+# and leaves the process running — so alice and bob sharing the test binary's
+# pid would be one session, not two. pid 1 is the portable stand-in for a
+# process that is always up and is never this one; bob keeps the harness pid,
+# which is also the pid the guard sees as its own.
+env SESSIONPID=$LOTO_PID
+env LOTO_PID=1
 env LOTO_AGENT_ID=$ALICE
 env CLAUDE_CODE_SESSION_ID=sess-alice
 loto whoami
+env LOTO_PID=$SESSIONPID
 
 exec git checkout other
 exec git checkout base

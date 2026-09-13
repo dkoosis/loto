@@ -58,6 +58,15 @@ type LivenessVerdict struct {
 	Liveness SessionLiveness
 	Reason   string         // machine-stable token, e.g. "socket-missing", "pid-dead", "procstart-mismatch", "socket+procstart"
 	Record   *SessionRecord // the record consulted; nil when none exists
+	// SameProcess reports that the record was written by the process THIS
+	// call is running inside. It is orthogonal to Liveness, not a flavour of
+	// it: Claude Code's /clear rotates the session id and leaves the process
+	// running, so the previous id's record stays honestly live while naming
+	// nobody else (loto-2jgn). A caller counting PEERS subtracts these; a
+	// caller asking "may I reclaim what this session holds" must not, since
+	// the process behind it is up. False whenever either side's process
+	// identity is unknown — absence of evidence is not evidence of sameness.
+	SameProcess bool
 }
 
 // procStartFn is ProcStart, indirected as a test seam. Never nil in
@@ -72,7 +81,9 @@ func ProbeSession(sid string) LivenessVerdict {
 	if !ok {
 		return LivenessVerdict{Liveness: SessionUnknown, Reason: reasonNoRecord}
 	}
-	return rec.Verdict()
+	v := rec.Verdict()
+	v.SameProcess = rec.sameProcess(callerProc())
+	return v
 }
 
 // Verdict is the oracle's decision procedure over one session record:
