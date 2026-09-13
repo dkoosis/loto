@@ -119,9 +119,19 @@ type refUpdate struct {
 }
 
 // refRefusal binds a refused update to the shape that refused it.
+//
+// Collision carries the git dirs the birth carve-out could not tell apart
+// when it refused a head-symref row — narrowed to the ones actually safe to
+// name in a fix line: genuinely stale (mid-birth, unoccupied), never the
+// common dir and never a born dir some checkout is sitting in, live or not
+// (PR #354 review M1; PR #357 review B1/B3, which is why the narrowing
+// happens before this field is ever set, not at print time). It may be
+// empty even when the row was refused for exactly this reason — an ambiguous
+// row with nothing SAFE to name prints no collision rows at all.
 type refRefusal struct {
-	Update refUpdate
-	Shape  string
+	Update    refUpdate
+	Shape     string
+	Collision []string
 }
 
 // refZeroOID reports whether an object id is git's all-zeros null oid. Length
@@ -242,24 +252,57 @@ func headReattach(ctx context.Context, repoTop, newValue string) bool {
 // Every failure direction answers false — refuse — because this is an arm that
 // WEAKENS the guard. A ref backend that takes no HEAD.lock (reftable) finds no
 // claimant and so keeps today's behavior rather than admitting everything.
-func headWorktreeBirth(ctx context.Context, repoTop string, u refUpdate) bool {
+// The bool return is the verdict; the []string is populated only when the
+// verdict is false because two or more dirs claimed the same target (M1) —
+// every other false direction (unreadable, not found, born, occupied) has
+// nothing else to name and returns nil.
+//
+// ‡ The collision list is narrowed to SAFE claimants before it is ever
+// returned (PR #357 review, B1/B3): the common dir claims its own row on
+// every ordinary branch switch (git has already written its own new value
+// into its own HEAD.lock by `prepared`), and a BORN dir — live or not — is
+// somebody's real tree, not debris. Naming either in a remediation line reads
+// as "delete your own .git internals" or "run `git worktree remove` on your
+// peer's checkout": the exact destruction this guard exists to prevent.
+func headWorktreeBirth(ctx context.Context, repoTop string, u refUpdate) (bool, []string) {
 	want := refSymrefTarget(u.New)
 	if want == "" {
-		return false
+		return false, nil
 	}
 	common, err := refGitOutput(ctx, repoTop, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil || common == "" {
-		return false
+		return false, nil
 	}
 	dirs, err := refGitDirs(common)
 	if err != nil {
-		return false
+		return false, nil
 	}
-	claimant, ok := refHeadLockClaimant(dirs, want)
-	if !ok {
-		return false
+	claimants, err := refHeadLockClaimant(dirs, want)
+	if err != nil || len(claimants) == 0 {
+		return false, nil
 	}
-	return worktreeUnborn(claimant) && !worktreeOccupied(claimant)
+	if len(claimants) > 1 {
+		return false, staleWorktreeClaimants(claimants, common)
+	}
+	claimant := claimants[0]
+	return worktreeUnborn(claimant) && !worktreeOccupied(claimant), nil
+}
+
+// staleWorktreeClaimants narrows a HEAD.lock collision down to the dirs safe
+// to name in a refusal: genuinely stale, mid-birth and unoccupied, never the
+// common dir. It may return nil — a real ambiguity with nothing safe to
+// name — and that is printed as no collision rows at all rather than a guess.
+func staleWorktreeClaimants(claimants []string, common string) []string {
+	var out []string
+	for _, dir := range claimants {
+		if dir == common {
+			continue
+		}
+		if worktreeUnborn(dir) && !worktreeOccupied(dir) {
+			out = append(out, dir)
+		}
+	}
+	return out
 }
 
 // refSymrefTarget reads the ref name out of a symbolic-ref value. git spells
@@ -293,29 +336,29 @@ func refGitDirs(common string) ([]string, error) {
 	return dirs, nil
 }
 
-// refHeadLockClaimant names the ONE git dir whose HEAD.lock is about to write
-// want. Zero claimants means the HEAD in flight cannot be located; more than
-// one means two HEAD writes to the same branch are racing. Both answer "not
-// found", and the caller refuses.
-func refHeadLockClaimant(dirs []string, want string) (string, bool) {
-	found := ""
+// refHeadLockClaimant lists every git dir whose HEAD.lock is about to write
+// want. Zero means the HEAD in flight cannot be located; more than one means
+// two HEAD writes to the same branch are racing, and the caller names both so
+// the operator can tell which dir is the stale one. A HEAD.lock that cannot
+// be read for a reason other than absence aborts the whole scan — an error
+// here has nothing to say about who else claims want, so it is not folded
+// into a "zero claimants" verdict.
+func refHeadLockClaimant(dirs []string, want string) ([]string, error) {
+	var found []string
 	for _, dir := range dirs {
 		raw, err := os.ReadFile(filepath.Join(dir, refHeadLockFile))
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
-			return "", false
+			return nil, err
 		}
 		if refSymrefTarget(strings.TrimSpace(string(raw))) != want {
 			continue
 		}
-		if found != "" {
-			return "", false
-		}
-		found = dir
+		found = append(found, dir)
 	}
-	return found, found != ""
+	return found, nil
 }
 
 // worktreeUnborn reports whether an administrative worktree directory is one
@@ -344,15 +387,26 @@ func worktreeUnborn(dir string) bool {
 // administrative directory names — I1's question, asked of that checkout
 // rather than of this one. A path that cannot be read counts as occupied.
 func worktreeOccupied(dir string) bool {
+	path := refWorktreePath(dir)
+	if path == "" {
+		return true
+	}
+	return len(identity.LiveOwnerUUIDsInRepo(path)) > 0
+}
+
+// refWorktreePath reads the working-tree path an administrative dir's
+// `gitdir` file names — the path `git worktree remove` takes — or "" when it
+// cannot be read. Shared by worktreeOccupied and the M1 refusal message.
+func refWorktreePath(dir string) string {
 	raw, err := os.ReadFile(filepath.Join(dir, refWorktreeGitdirFile))
 	if err != nil {
-		return true
+		return ""
 	}
 	inner := strings.TrimSpace(string(raw))
 	if inner == "" {
-		return true
+		return ""
 	}
-	return len(identity.LiveOwnerUUIDsInRepo(filepath.Dir(inner))) > 0
+	return filepath.Dir(inner)
 }
 
 // refGitOutput runs one short git query for the hook, in repoTop.
@@ -450,11 +504,16 @@ func runHookRef(ctx context.Context, phase string, stdin io.Reader, stdout, stde
 	// It sits AFTER the live gate on purpose — it reads directories and a lock
 	// file, and a single-session checkout, which is most of them, must pay
 	// nothing for a refusal that was never going to fire.
+	// ref_admitted is a per-TRANSACTION signal (§10b row 1 reads it as a ratio
+	// against ref_refused), so it is written only once the rest of the
+	// transaction is known to pass too — a birth riding beside a row that
+	// stays refused writes no event, because the carve-out let nothing
+	// through in the end (PR #354 review, L1).
 	kept, admitted := refDropWorktreeBirth(ctx, repoTop, refusals)
-	if len(admitted) > 0 {
-		recordRefBirthAdmits(ctx, admitted, len(live), stderr)
-	}
 	if len(kept) == 0 {
+		if len(admitted) > 0 {
+			recordRefBirthAdmits(ctx, admitted, len(live), stderr)
+		}
 		fmt.Fprintf(stdout, "✓ ref-allowed count=%d live=%d head=%s\n", len(updates), len(live), refAdmitWorktreeBirth)
 		return 0
 	}
@@ -493,9 +552,13 @@ func refDropReattach(ctx context.Context, repoTop string, shaped []refRefusal) [
 func refDropWorktreeBirth(ctx context.Context, repoTop string, refusals []refRefusal) (kept, admitted []refRefusal) {
 	for i := range refusals {
 		r := refusals[i]
-		if r.Shape == refShapeHeadSymref && headWorktreeBirth(ctx, repoTop, r.Update) {
-			admitted = append(admitted, r)
-			continue
+		if r.Shape == refShapeHeadSymref {
+			admit, collision := headWorktreeBirth(ctx, repoTop, r.Update)
+			if admit {
+				admitted = append(admitted, r)
+				continue
+			}
+			r.Collision = collision
 		}
 		kept = append(kept, r)
 	}
@@ -662,6 +725,10 @@ func recordRefRefusals(rt *runtime, refusals []refRefusal, live int, stderr io.W
 // printRefRefusal renders the refusal. It goes to stderr because that is what
 // git relays to whoever ran the command, and it names three things the reader
 // needs: which shape was refused, who else is live, and the exact override.
+//
+// ‡ ONE fix block (PR #357 review, M2): a collision's remediation and the
+// checkout-wide-claim override are both things to run, and two separate
+// ```bash fences read as two unrelated fixes rather than "try this, or this."
 func printRefRefusal(stderr io.Writer, refusals []refRefusal, self string, live map[string]struct{}) {
 	fmt.Fprintf(stderr, "✗ ref-refused count=%d live=%d\n", len(refusals), len(live))
 	rows := make([]string, 0, len(refusals))
@@ -683,8 +750,74 @@ func printRefRefusal(stderr io.Writer, refusals []refRefusal, self string, live 
 	sort.Strings(peers)
 	fmt.Fprintf(stderr, "ℹ live-peers=%s\n", strings.Join(peers, ","))
 	fmt.Fprintln(stderr, "ℹ this move would rewrite their working tree; a stash or branch delete is not undoable for them")
+	collisionFix := printRefCollisionRows(stderr, refusals)
 	fmt.Fprintln(stderr, "ℹ override=checkout-wide-claim")
 	fmt.Fprintln(stderr, "```bash")
+	for _, line := range collisionFix {
+		fmt.Fprintln(stderr, line)
+	}
 	fmt.Fprintln(stderr, `loto claim . -t "<reason>"`)
 	fmt.Fprintln(stderr, "```")
+}
+
+// printRefCollisionRows renders the M1 case's ℹ rows — a head-symref row
+// refused because two or more HEAD.lock claimants named its target, so the
+// refusal is not an ordinary tree move to undo but a stale worktrees/<n> dir
+// sitting on a branch name (most often a `worktree add` killed mid-flight,
+// which `git worktree prune` will not reap because its `locked` marker is on
+// purpose) — and returns the commands to clear each one, to be folded into
+// the caller's single fix block. Silent, and returns nil, when no refusal
+// carries a collision at all, which is most of them.
+//
+// ‡ `unlock && remove`, never `--force` (PR #357 review, B2): `--force`
+// overrides git's "this working tree has local changes" check, not its
+// "locked" one — measured, git refuses a locked dir with "cannot remove a
+// locked working tree" regardless. `git worktree lock` writes the SAME
+// `locked` marker `worktree add` uses while building one, so unlocking first
+// is correct for both, and the plain `rm -rf .git/worktrees/<n>` this
+// replaces is offered back as a one-line fallback comment for a git too old
+// to have `worktree unlock`, or a dir git's own commands still refuse.
+func printRefCollisionRows(stderr io.Writer, refusals []refRefusal) []string {
+	type staleDir struct {
+		ref, name, target string
+	}
+	var rows []staleDir
+	seen := map[string]bool{}
+	for i := range refusals {
+		r := refusals[i]
+		for _, dir := range r.Collision {
+			if seen[dir] {
+				continue
+			}
+			seen[dir] = true
+			target := dir
+			if path := refWorktreePath(dir); path != "" {
+				target = path
+			}
+			rows = append(rows, staleDir{
+				ref:    r.Update.Ref,
+				name:   filepath.Join(refWorktreesDir, filepath.Base(dir)),
+				target: target,
+			})
+		}
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].ref != rows[j].ref {
+			return rows[i].ref < rows[j].ref
+		}
+		return rows[i].name < rows[j].name
+	})
+	fix := make([]string, 0, len(rows)*2)
+	for _, row := range rows {
+		fmt.Fprintf(stderr, "ℹ ref=%s stale-dir=%s\n", row.ref, row.name)
+		q := shellQuote(row.target)
+		fix = append(fix,
+			"git worktree unlock "+q+" && git worktree remove "+q,
+			"# or: rm -rf "+shellQuote(filepath.Join(".git", row.name)),
+		)
+	}
+	return fix
 }

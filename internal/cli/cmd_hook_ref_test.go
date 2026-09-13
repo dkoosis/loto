@@ -708,17 +708,33 @@ func TestRunHookRef_NewWorktreeHeadAdmitted(t *testing.T) {
 // unborn dir naming the same branch sits beside it, because a `worktree add`
 // killed mid-flight leaves one behind permanently (F2) and the admission must
 // not rest on its presence.
+//
+// PR #357 review finding B1: the born peer dir is a real, live tree — naming
+// it in the refusal's remediation would read as "run `git worktree remove` on
+// your peer's checkout", the exact destruction I1 exists to prevent. Only the
+// genuinely stale (unborn, unoccupied) dir may appear.
 func TestRunHookRef_BranchRenameOnAPeersBranchRefused(t *testing.T) {
 	repo := withTempProject(t)
 	a := pinAgent(t)
 	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
 	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
-	plantUnbornWorktree(t, repo, "crashed", filepath.Join(t.TempDir(), "crashed"), "refs/heads/peerbr-renamed")
-	plantBornWorktreeRewritingHead(t, repo, "peer", filepath.Join(t.TempDir(), "peer"), "refs/heads/peerbr-renamed")
+	crashedPath := filepath.Join(t.TempDir(), "crashed")
+	peerPath := filepath.Join(t.TempDir(), "peer")
+	plantUnbornWorktree(t, repo, "crashed", crashedPath, "refs/heads/peerbr-renamed")
+	plantBornWorktreeRewritingHead(t, repo, "peer", peerPath, "refs/heads/peerbr-renamed")
 
 	code, _, stderr := runRefHook(t, tcPhasePrepared, txnHeadTo("refs/heads/peerbr-renamed"))
 	if code != 1 {
 		t.Fatalf("renaming a branch a live peer has checked out rewrites THEIR HEAD: exit %d, %s", code, stderr)
+	}
+	if !strings.Contains(stderr, filepath.Join(refWorktreesDir, "crashed")) {
+		t.Errorf("the genuinely stale dir must still be named:\n%s", stderr)
+	}
+	if strings.Contains(stderr, peerPath) {
+		t.Errorf("the LIVE peer worktree's path must never appear in a refusal: got:\n%s", stderr)
+	}
+	if strings.Contains(stderr, filepath.Join(refWorktreesDir, "peer")) {
+		t.Errorf("the born peer dir must not be offered for removal: got:\n%s", stderr)
 	}
 }
 
@@ -756,22 +772,90 @@ func TestRunHookRef_UnbornWorktreeAdmitsOnlyItsOwnRow(t *testing.T) {
 
 // TestRunHookRef_TwoUnbornWorktreesNamingOneBranchRefused: two claimants means
 // two HEAD writes to one branch are racing and the hook cannot say which HEAD
-// this row is. "Cannot say" is refuse.
+// this row is. "Cannot say" is refuse — and per PR #354 review finding M1, the
+// refusal must name the stale worktrees/<n> dir(s) and the command to clear
+// one, since without that a killed `worktree add` poisons its branch name for
+// every future ship until an operator finds the leftover dir by hand.
+//
+// PR #357 review findings B2/M1/M2: `--force` does not clear a crash-left
+// dir (git refuses with "cannot remove a locked working tree"), the path
+// must be shell-quoted, and the whole refusal carries exactly one ```bash
+// block.
 func TestRunHookRef_TwoUnbornWorktreesNamingOneBranchRefused(t *testing.T) {
 	repo := withTempProject(t)
 	a := pinAgent(t)
 	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
 	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
-	plantUnbornWorktree(t, repo, "wt2", filepath.Join(t.TempDir(), "wt2"), "refs/heads/z2")
-	plantUnbornWorktree(t, repo, "wt3", filepath.Join(t.TempDir(), "wt3"), "refs/heads/z2")
+	wt2Path := filepath.Join(t.TempDir(), "wt2")
+	wt3Path := filepath.Join(t.TempDir(), "wt3")
+	plantUnbornWorktree(t, repo, "wt2", wt2Path, "refs/heads/z2")
+	plantUnbornWorktree(t, repo, "wt3", wt3Path, "refs/heads/z2")
 
-	if code, _, stderr := runRefHook(t, tcPhasePrepared, txnHeadTo("refs/heads/z2")); code != 1 {
+	code, _, stderr := runRefHook(t, tcPhasePrepared, txnHeadTo("refs/heads/z2"))
+	if code != 1 {
 		t.Fatalf("two claimants for one HEAD row is not a birth: exit %d, %s", code, stderr)
+	}
+	for _, want := range []string{
+		filepath.Join(refWorktreesDir, "wt2"),
+		filepath.Join(refWorktreesDir, "wt3"),
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("refusal must name the stale dir %q:\n%s", want, stderr)
+		}
+	}
+	for _, want := range []string{
+		"git worktree unlock " + shellQuote(wt2Path) + " && git worktree remove " + shellQuote(wt2Path),
+		"git worktree unlock " + shellQuote(wt3Path) + " && git worktree remove " + shellQuote(wt3Path),
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("refusal must carry the fix line %q:\n%s", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "--force") {
+		t.Errorf("`--force` does not clear a locked crash-left dir; must not be suggested: %s", stderr)
+	}
+	if n := strings.Count(stderr, "```bash"); n != 1 {
+		t.Errorf("a refusal must carry exactly one fix block, got %d:\n%s", n, stderr)
+	}
+}
+
+// TestRunHookRef_CommonDirClaimantExcludedFromCollisionMessage is PR #357
+// review finding B3: the checkout's own git dir is a claimant on every
+// ordinary branch switch (git has already written its own new value into its
+// own HEAD.lock by `prepared`), so when a genuine stale dir ALSO claims the
+// same target the collision list must drop the common dir rather than name it
+// "worktrees/.git" and offer `rm -rf .git/worktrees/.git`.
+func TestRunHookRef_CommonDirClaimantExcludedFromCollisionMessage(t *testing.T) {
+	repo := withTempProject(t)
+	a := pinAgent(t)
+	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
+	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
+	if err := os.WriteFile(filepath.Join(repo, ".git", refHeadLockFile), []byte("ref: refs/heads/other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plantUnbornWorktree(t, repo, "crashed", filepath.Join(t.TempDir(), "crashed"), "refs/heads/other")
+
+	code, _, stderr := runRefHook(t, tcPhasePrepared, txnHeadTo("refs/heads/other"))
+	if code != 1 {
+		t.Fatalf("two claimants for one row is not a birth: exit %d, %s", code, stderr)
+	}
+	if strings.Contains(stderr, "worktrees/.git") {
+		t.Errorf("the common dir must never be named as a stale worktree:\n%s", stderr)
+	}
+	if strings.Contains(stderr, ".git/worktrees/.git") {
+		t.Errorf("the common dir must never be offered for removal:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, filepath.Join(refWorktreesDir, "crashed")) {
+		t.Errorf("the genuine stale dir must still be named:\n%s", stderr)
 	}
 }
 
 // TestRunHookRef_BirthAdmitsOnlyItsOwnShape: admitting the birth row must not
-// carry the rest of the transaction with it.
+// carry the rest of the transaction with it. Per PR #354 review finding L1,
+// ref_admitted is a per-TRANSACTION signal (§10b row 1 reads it as a ratio
+// against ref_refused), so a birth riding in a transaction that ultimately
+// refuses must write no ref_admitted row at all — else the counter claims a
+// weakening that never actually let anything through.
 func TestRunHookRef_BirthAdmitsOnlyItsOwnShape(t *testing.T) {
 	repo := withTempProject(t)
 	a := pinAgent(t)
@@ -786,6 +870,11 @@ func TestRunHookRef_BirthAdmitsOnlyItsOwnShape(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "shape="+refShapeStash) || strings.Contains(stderr, "shape="+refShapeHeadSymref) {
 		t.Errorf("only the stash may be refused here; got:\n%s", stderr)
+	}
+	for _, ev := range readAllEvents(t) {
+		if ev.Kind == store.EventRefAdmitted {
+			t.Errorf("a refused transaction must write no ref_admitted row; got: %+v", ev)
+		}
 	}
 }
 
