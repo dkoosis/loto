@@ -113,6 +113,30 @@ func TestAppendEvents_AssignsIDs(t *testing.T) {
 	}
 }
 
+// TestRecordGuardOverride mirrors TestRecordGateBypass (admission_test.go)
+// for LOTO_GUARD_OVERRIDE=1's own counter (loto-mh07): one row, naming which
+// guard was bypassed in Reason, no Target.
+func TestRecordGuardOverride(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	if err := s.RecordGuardOverride(ctx, tcAlice, "pre-commit"); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	var target string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*), coalesce(max(target_canonical), '') FROM events WHERE event_kind = 'guard_override' AND actor_uuid = ? AND reason = 'pre-commit'`, tcAlice,
+	).Scan(&n, &target); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("want 1 guard_override event, got %d", n)
+	}
+	if target != "" {
+		t.Errorf("guard_override is session-scoped, want no target, got %q", target)
+	}
+}
+
 func TestEvents_ModeRestoreFailedAccepted(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()

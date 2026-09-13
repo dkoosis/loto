@@ -1,0 +1,60 @@
+# Coordinator review, finding 1 on loto-mh07: LOTO_GUARD_OVERRIDE=1 must let
+# a guarded ref update through even when the `loto` on PATH is stale or
+# broken — one that does not know to honor the env var at all (it predates
+# loto-mh07), or simply fails. The override is a SHELL-LEVEL backstop, not a
+# favor the Go binary can decline to do; this is the 2026-08-12 failure mode
+# (internal/cli/gate_contract.go — a hook depending on behavior the binary on
+# PATH predates) in the opposite direction: there, a stale binary silently
+# waved a write through it should have refused; here, a stale binary must
+# not silently refuse an operation the operator already said to let through.
+
+chmod 0755 fakeloto/loto
+
+exec git config core.hooksPath $REALHOOKS
+
+exec git branch -m base
+touch a.txt
+exec git add a.txt
+exec git commit -m one
+exec git branch other
+
+# Two live sessions with the REAL loto, so the branch switch below would
+# genuinely be refused without the override.
+env SESSIONPID=$LOTO_PID
+env LOTO_PID=1
+env LOTO_AGENT_ID=$ALICE
+env CLAUDE_CODE_SESSION_ID=sess-alice
+loto whoami
+env LOTO_PID=$SESSIONPID
+
+env LOTO_AGENT_ID=$BOB
+env CLAUDE_CODE_SESSION_ID=sess-bob
+loto whoami
+
+! exec git checkout other
+stderr 'ref-refused'
+exec git rev-parse --abbrev-ref HEAD
+stdout '^base$'
+
+# Swap in a stale/broken `loto`: this one exits 1 unconditionally, whatever
+# it is asked. The override still has to win — the shell branch never reads
+# its exit code.
+env REALPATH=$PATH
+env PATH=$WORK/fakeloto:$PATH
+
+env LOTO_GUARD_OVERRIDE=1
+exec git checkout other
+env LOTO_GUARD_OVERRIDE=
+exec git rev-parse --abbrev-ref HEAD
+stdout '^other$'
+
+# Restore the real loto and confirm nothing was recorded — a broken binary
+# cannot write a row, and that is fine: the backstop's whole job is letting
+# git through, not making the counter perfect.
+env PATH=$REALPATH
+loto events --kind guard_override
+stdout 'ℹ events=0 shown=0 kind=guard_override'
+
+-- fakeloto/loto --
+#!/bin/sh
+exit 1

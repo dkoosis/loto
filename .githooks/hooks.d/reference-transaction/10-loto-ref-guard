@@ -18,14 +18,32 @@
 #
 # Override is `loto claim . -t "<reason>"` — the checkout-wide claim, printed
 # verbatim in the refusal. LOTO_GUARD_OVERRIDE=1 is honored too, matching the
-# other entries in this tree, but it leaves no durable trace the way the claim
-# does; prefer the claim.
+# other entries in this tree; prefer the claim, since it also names the
+# reason in the refusal it overrides.
+#
+# ‡ LOTO_GUARD_OVERRIDE=1's ACCOUNTING lives inside `loto hook ref`, in
+# refVerdict (loto-mh07): git invokes this hook many times per operation —
+# once per phase, plus a run of harmless zero-to-zero AUTO_MERGE transactions
+# a checkout emits — and a shell-level skip has no way to tell which
+# invocation, if any, was actually about to refuse. refVerdict is reached
+# only at the one invocation that matches a protected shape at the 'prepared'
+# phase with two or more live sessions — the exact "guard bypassed" moment,
+# and the only one the durable trace (one guard_override row) should count.
+#
+# The branch below is a SHELL-LEVEL BACKSTOP and does not defer to loto's
+# exit code: `|| true` swallows whatever it says and the transaction always
+# proceeds. Without this, a `loto` on PATH that predates loto-mh07 — one
+# that does not know to honor the env var at all — would refuse same as
+# always, which is the 2026-08-12 failure mode (internal/cli/gate_contract.go)
+# in the opposite direction: a hook depending on behavior the binary on PATH
+# predates. The override must not depend on the binary being current.
 #
 # Fail-open: no `loto` on PATH -> skip silently.
 
 command -v loto >/dev/null 2>&1 || exit 0
 
 if [ "${LOTO_GUARD_OVERRIDE:-}" = "1" ]; then
+	loto hook ref "$1" >/dev/null || true
 	exit 0
 fi
 

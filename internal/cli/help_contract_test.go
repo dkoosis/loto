@@ -59,7 +59,7 @@ func TestHookHelpTeachesContract(t *testing.T) {
 		t.Fatalf("hook -h exit %d", code)
 	}
 	for _, want := range []string{
-		"usage: loto hook <pre|post|ref>",
+		"usage: loto hook <pre|post|ref|override>",
 		eventPostToolUseFailure,
 		"0 recorded",
 		"2 the write is refused",
@@ -70,6 +70,10 @@ func TestHookHelpTeachesContract(t *testing.T) {
 		"1 the ref transition is refused",
 		"checkout-wide claim",
 		"loto hook ref prepared < transaction.txt",
+		// The override arm (loto-mh07): a caller wiring it into a guard's own
+		// override branch has to know it never itself refuses.
+		"loto hook override pre-commit",
+		"Always exits 0",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("hook -h missing %q; got:\n%s", want, stdout)

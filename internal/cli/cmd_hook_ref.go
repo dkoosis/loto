@@ -67,6 +67,17 @@ const refOverrideWindow = 10 * time.Minute
 // documents itself as a takeover of the whole checkout.
 const refCheckoutWidePrefix = "."
 
+// refGuardOverrideEnv is the escape-hatch env var .githooks/hooks.d honors
+// throughout (loto-mh07). For this guard it is read HERE, inside refVerdict,
+// rather than by the shell dispatcher: git invokes the reference-transaction
+// hook many times per operation — one per phase, plus a run of harmless
+// zero-to-zero AUTO_MERGE transactions checkout emits (measured: 11 calls for
+// one `git checkout` under two live sessions) — and refVerdict is reached
+// only once, exactly when a refusal is about to fire. A shell-level check
+// records once per HOOK INVOCATION; this records once per REFUSAL AVOIDED,
+// which is the "guard bypassed" the events table is meant to count.
+const refGuardOverrideEnv = "LOTO_GUARD_OVERRIDE"
+
 // cmdHookRef is the `ref` arm of the hook router in cmd_hook.go. It takes
 // git's phase as its one operand; the transaction itself arrives on stdin.
 func cmdHookRef(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -307,6 +318,18 @@ func refVerdict(ctx context.Context, refusals []refRefusal, live map[string]stru
 	if held, holder := refCheckoutWideClaim(rt, stderr); held {
 		fmt.Fprintf(stdout, "✓ ref-allowed count=%d live=%d override=claim holder=%s\n",
 			updates, len(live), holder)
+		return 0
+	}
+
+	// The env-var override (loto-mh07): honored, but the claim above is still
+	// preferred (checked first) because it names its reason in the refusal it
+	// overrides and this does not. Fires once — refVerdict is reached only at
+	// the one invocation that was actually about to refuse.
+	if os.Getenv(refGuardOverrideEnv) == "1" {
+		if err := rt.Store.RecordGuardOverride(rt.Ctx, rt.Agent.UUID, hookOverrideGuardReferenceTransaction); err != nil {
+			fmt.Fprintf(stderr, "⚠ guard-override=unrecorded guard=%s err=%q\n", hookOverrideGuardReferenceTransaction, err)
+		}
+		fmt.Fprintf(stdout, "✓ ref-allowed count=%d live=%d override=env\n", updates, len(live))
 		return 0
 	}
 

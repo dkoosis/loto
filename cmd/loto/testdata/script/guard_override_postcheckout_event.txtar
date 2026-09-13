@@ -1,0 +1,43 @@
+# post-checkout's LOTO_GUARD_OVERRIDE=1 branch leaves an audit row naming
+# "post-checkout" (loto-mh07) — same fixture shape as
+# guard_postcheckout_moved.txtar, but this time the checkout itself runs
+# under the override instead of around it.
+
+exec git config core.hooksPath $REALHOOKS
+
+env LOTO_AGENT_ID=$BOB
+touch shared.go
+exec git add shared.go
+exec git commit -m 'seed'
+exec git checkout -b other
+cp v2.txt shared.go
+exec git add shared.go
+exec git commit -m 'other: rewrites shared.go'
+
+exec git checkout -
+
+# Alice takes a shared lock on the path the next checkout would move.
+env LOTO_AGENT_ID=$ALICE
+loto lock shared.go --shared -t 'alice reading'
+stdout '✓ locked count=1'
+
+env LOTO_AGENT_ID=$BOB
+loto events --kind guard_override
+stdout 'ℹ events=0 shown=0 kind=guard_override'
+
+# The checkout that would otherwise warn about Alice's lock now runs
+# overridden — silent (moved-peer-locks stays unprinted), and the guard
+# leaves its own row instead.
+env LOTO_GUARD_OVERRIDE=1
+exec git checkout other
+! stderr 'moved-peer-locks'
+env LOTO_GUARD_OVERRIDE=
+
+loto events --kind guard_override
+stdout 'ℹ events=1 shown=1 kind=guard_override'
+stdout 'post-checkout'
+! stdout '\bpre-commit\b'
+! stdout 'reference-transaction'
+
+-- v2.txt --
+changed on the other branch

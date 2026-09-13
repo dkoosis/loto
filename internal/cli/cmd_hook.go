@@ -22,7 +22,7 @@ import (
 
 func init() { register("hook", cmdHook) } //nolint:gochecknoinits // command registry pattern
 
-const hookUsageHead = `usage: loto hook <pre|post|ref>
+const hookUsageHead = `usage: loto hook <pre|post|ref|override>
 
 Hook bodies. Not run by hand: pre|post are wired as harness hooks in settings
 and read the tool-call event JSON on stdin; ref is wired as a chain entry under
@@ -52,9 +52,23 @@ the live-session set alone (enforcement-design.md §10 tooth 1, §5 I1).
         refs/stash, and a branch deletion under refs/heads/. A branch tip
         moving, refs/remotes pruning, pack-refs and reflog expiry all pass, as
         does re-attaching a detached HEAD where it already sits. Override by
-        taking the checkout-wide claim.
+        taking the checkout-wide claim, or LOTO_GUARD_OVERRIDE=1 — recorded
+        itself, once, right where the refusal would otherwise fire (loto-mh07).
+  override <guard>
+        records that LOTO_GUARD_OVERRIDE=1 bypassed <guard> — pre-commit or
+        post-checkout — so an override spike can be counted the way
+        staged_lock_gate_fired counts firings (loto-mh07). Called from the
+        shell dispatcher's own override branch, in place of skipping loto
+        entirely; reference-transaction's own override is recorded inside
+        'ref' instead, not through this subcommand, because git calls that
+        hook many times per operation and only 'ref' knows which invocation
+        was actually about to refuse. Always exits 0: the override's whole
+        point is letting the git operation through no matter what, and a
+        store that cannot be opened or written must not turn recording the
+        override into a new way to block it.
 
-exit: 0 recorded (or nothing this hook can act on, or the ref is allowed)
+exit: 0 recorded (or nothing this hook can act on, the ref is allowed, or an
+      override was noted — recording itself never refuses)
       1 the ref transition is refused — git aborts the transaction
       2 the write is refused, or usage
       3 ref could not read what it needed and failed open
@@ -63,6 +77,7 @@ examples:
   loto hook pre  < event.json
   loto hook post < event.json
   loto hook ref prepared < transaction.txt
+  loto hook override pre-commit
 `
 
 // hookTReportDefault is the window after which a call with no post is marked
@@ -150,6 +165,8 @@ func cmdHook(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runHook(ctx, false, stdout, stderr)
 	case "ref":
 		return cmdHookRef(ctx, args[1:], stdout, stderr)
+	case "override":
+		return cmdHookOverride(ctx, args[1:], stdout, stderr)
 	case "-h", flagHelpLong, subHelp:
 		fmt.Fprint(stdout, hookUsageHead)
 		return 0

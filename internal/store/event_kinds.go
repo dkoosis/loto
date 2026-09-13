@@ -120,6 +120,16 @@ const (
 	// kind already flagged, so "resolved" always has a "missing" to resolve.
 	EventPostMissing         = "post_missing"
 	EventPostMissingResolved = "post_missing_resolved"
+	// EventGuardOverride is written every time LOTO_GUARD_OVERRIDE=1 bypasses
+	// a git-hook guard (loto-mh07) — pre-commit's staged-lock legs,
+	// post-checkout's moved-lock notice, or the reference-transaction ref
+	// guard. Reason names which guard was bypassed ("pre-commit" |
+	// "post-checkout" | "reference-transaction"); no Target, same reason
+	// EventGateBypass has none — an override is a session-scoped fact, not a
+	// per-path one. It is the second signal promote-staged-lock-gate's
+	// Givens want counted alongside EventStagedGateFired: an override spike
+	// is the operator saying a firing gate was wrong.
+	EventGuardOverride = "guard_override"
 )
 
 // allEventKinds is every event kind currently admitted by events.event_kind's
@@ -147,6 +157,7 @@ var allEventKinds = []string{
 	EventTreeReportDropped,
 	EventPostMissing,
 	EventPostMissingResolved,
+	EventGuardOverride,
 }
 
 // eventKindCheckSQL renders allEventKinds as the comma-joined, single-quoted

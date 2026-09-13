@@ -1,0 +1,56 @@
+# reference-transaction's LOTO_GUARD_OVERRIDE=1 branch leaves an audit row
+# naming "reference-transaction" (loto-mh07). The ref guard's OTHER override
+# — `loto claim .` within the window — already writes ref_refused_overridden
+# (guard_reftransaction.txtar); this is the env-var path, which used to
+# leave no trace at all.
+
+exec git config core.hooksPath $REALHOOKS
+
+exec git branch -m base
+touch a.txt
+exec git add a.txt
+exec git commit -m one
+
+# Two live sessions, sharing this test binary's pid — the LOTO_PID swap is
+# loto-2jgn's fix: one process answering to two agent ids is one peer, not
+# two, unless one of them records under a pid that is never this process's
+# own.
+env SESSIONPID=$LOTO_PID
+env LOTO_PID=1
+env LOTO_AGENT_ID=$ALICE
+env CLAUDE_CODE_SESSION_ID=sess-alice
+loto whoami
+env LOTO_PID=$SESSIONPID
+
+env LOTO_AGENT_ID=$BOB
+env CLAUDE_CODE_SESSION_ID=sess-bob
+loto whoami
+
+loto events --kind guard_override
+stdout 'ℹ events=0 shown=0 kind=guard_override'
+
+# Two live sessions: a stash is refused. Stash rather than a branch switch —
+# a checkout also fires the post-checkout guard, and a branch switch would
+# leave this test unable to tell which guard's override left the row.
+cp dirt.txt a.txt
+! exec git stash
+stderr 'ref-refused'
+stderr 'shape=stash'
+exec git status --porcelain
+stdout 'a\.txt'
+
+# The same stash under the override succeeds, and leaves one row.
+env LOTO_GUARD_OVERRIDE=1
+exec git stash
+env LOTO_GUARD_OVERRIDE=
+exec git status --porcelain
+! stdout 'a\.txt'
+
+loto events --kind guard_override
+stdout 'ℹ events=1 shown=1 kind=guard_override'
+stdout 'reference-transaction'
+! stdout 'pre-commit'
+! stdout 'post-checkout'
+
+-- dirt.txt --
+dirty
