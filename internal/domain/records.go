@@ -77,6 +77,11 @@ type LockRecord struct {
 	// compares that against the CURRENT epoch here to tell "the same
 	// uninterrupted authorization" from "someone else has held this since."
 	Epoch int64
+	// MayCreate lets an acquire name a path that does not exist yet — the
+	// pre-hook admitting a Write that creates its file (loto-9zcq). Without it
+	// the store's target validation refused the missing path and the write was
+	// admitted holding nothing. Request-only: never persisted, never read back.
+	MayCreate bool
 }
 
 const (

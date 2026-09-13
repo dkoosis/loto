@@ -408,16 +408,29 @@ func hookAdmit(ctx context.Context, rt *runtime, filePath string) (declared stri
 	// subagent's Bash-side `loto lock` wrote — is authorization already held,
 	// and re-deciding it here would refuse a worker on territory it just took
 	// (the loto-fs84 hole, one layer up).
+	//
+	// ‡ A beacon of mine or my kin's is NOT that authorization (loto-9zcq):
+	// heldByMe does not credit beacons, so stopping on one left the path with
+	// no exclusive lock and the staged-lock gate flagged its author's commit.
+	// Fall through and take the lock; an exclusive row upgrades over the
+	// owner's beacon at the store.
+	//
+	// The beacon the gate script mints for this same write is a narrower
+	// case: it is stamped with the event's agent_id and this hook is not, so
+	// under a /team subagent that beacon is owned by a derived sibling id and
+	// reads as FOREIGN below (loto-0z24 holds the fix and the kin-direction
+	// question it opens). Here the own-beacon test covers the same-identity
+	// case the unit test drives.
 	for i := range rows {
-		if rows[i].OwnerUUID == me || ec.IsKin(rows[i].OwnerUUID) {
+		if (rows[i].OwnerUUID == me || ec.IsKin(rows[i].OwnerUUID)) && !rows[i].IsBeacon() {
 			return t.Canonical, nil
 		}
 	}
 	// L(f) = s' ≠ s. Any live foreign row refuses, beacon or lease alike: a
 	// beacon means an agent is writing here right now, which is the case I2
-	// exists to serialize.
+	// exists to serialize. My own and my kin's beacons are not foreign.
 	for i := range rows {
-		if ec.IsStale(rows[i]) {
+		if ec.IsStale(rows[i]) || rows[i].OwnerUUID == me || ec.IsKin(rows[i].OwnerUUID) {
 			continue
 		}
 		return "", &rows[i]
@@ -441,6 +454,9 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, kin []domai
 		ExpiresAt:   now.Add(domain.DegradedModeTTL),
 		Host:        rt.Host,
 		Mode:        domain.ModeExclusive,
+		// A Write that creates its file is the case I2 most needs to admit
+		// (statFileTargetReason above already allows it); the store must too.
+		MayCreate: true,
 	}
 	if _, err := rt.Store.AcquireLocks(rt.Ctx, []domain.LockRecord{rec}, memoLiveProbe(rt.liveProbe()), kin...); err != nil {
 		held, lerr := rt.Store.LocksAt(rt.Ctx, t)

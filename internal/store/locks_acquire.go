@@ -197,10 +197,11 @@ func (s *Store) validateAllFileTargets(sorted []domain.LockRecord) error {
 // store nothing and left two siblings racing to create the same path
 // completely unprotected.
 //
-// The carve-out is narrow: ENOENT only, and only for a beacon. A beacon whose
-// path DOES exist — or a plain `loto lock` on any missing path — still runs
-// every check below unchanged; a symlink or non-regular file is refused
-// whether or not the caller is beaconing.
+// The carve-out is narrow: ENOENT only, and only for a beacon or a record the
+// caller marked MayCreate (the pre-hook admitting a Write that creates its
+// file, loto-9zcq). A path that DOES exist — or a plain `loto lock` on any
+// missing path — still runs every check below unchanged; a symlink or
+// non-regular file is refused whether or not the caller is beaconing.
 //
 // ‡ The canonical is repo-relative, so it is joined to repoTop before it is
 // stat'd (loto-3tv3 D8). Probing it bare resolves against the process CWD,
@@ -216,7 +217,7 @@ func validateFileTarget(repoTop string, rec domain.LockRecord) error {
 	}
 	lst, err := os.Lstat(probe)
 	if err != nil {
-		if rec.IsBeacon() && errors.Is(err, fs.ErrNotExist) {
+		if (rec.IsBeacon() || rec.MayCreate) && errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return fmt.Errorf("validate %s: %w", p, err)

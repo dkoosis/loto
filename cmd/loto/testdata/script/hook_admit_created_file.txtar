@@ -1,0 +1,36 @@
+# loto-9zcq: a Write that CREATES its file must leave the writer holding an
+# exclusive lock, so the staged-lock gate lets that writer commit it.
+#
+# Before the fix the store's target validation refused a missing path for
+# anything but a beacon; the pre-hook read that error as "no foreign holder",
+# admitted the write holding nothing, and the gate flagged the commit of a file
+# the committer's own Write had created (the one firing of the gate's first
+# week, 2026-09-09). Driven here the way production drives it: the harness
+# event on stdin, then a real `git commit` with the gate blocking.
+
+exec git config core.hooksPath $REALHOOKS
+env LOTO_AGENT_ID=$BOB
+env LOTO_GATE_MODE=block
+
+# The pre-hook admits a Write whose file does not exist yet, and takes the lock.
+! exists created.go
+stdin write-created.json
+loto hook pre
+loto events --kind lock_acquired
+stdout 'created.go\thook: admitted Edit-family write'
+
+# The Write lands; its author commits it through the blocking gate.
+touch created.go
+exec git add created.go
+exec git commit -m 'bob: a file his own Write created'
+stdout 'his own Write created'
+! stderr 'unheld'
+
+# Contrast: a file no admission ever covered is still refused.
+touch stray.go
+exec git add stray.go
+! exec git commit -m 'bob: never admitted'
+stderr 'path=stray.go state=unlocked'
+
+-- write-created.json --
+{"session_id":"s-1","tool_name":"Write","tool_use_id":"call-create","cwd":"/tmp","tool_input":{"file_path":"created.go"}}
