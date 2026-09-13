@@ -412,14 +412,51 @@ func TestHook_EditAdmission(t *testing.T) {
 		if err != nil {
 			t.Fatalf("list locks: %v", err)
 		}
-		var exclusive bool
+		var exclusive, beaconStands bool
 		for _, l := range held {
 			if l.Target.Canonical == tcTargetA && string(l.OwnerUUID) == me.UUID && !l.IsBeacon() && l.Mode == domain.ModeExclusive {
 				exclusive = true
 			}
+			if l.Target.Canonical == tcTargetA && string(l.OwnerUUID) == sib && l.IsBeacon() {
+				beaconStands = true
+			}
 		}
 		if !exclusive {
 			t.Errorf("admission over my subagent's beacon left no exclusive lock of mine: %+v", held)
+		}
+		// The beacon is what a later sibling's stamped `check --gate` refuses
+		// on (loto-xwod); admission must leave it standing.
+		if !beaconStands {
+			t.Errorf("admission retired my subagent's beacon, so siblings no longer serialize on the path: %+v", held)
+		}
+	})
+
+	t.Run("a sibling's non-beacon row is not authorization: the parent still takes its own lock", func(t *testing.T) {
+		withTempProject(t)
+		me := pinAgent(t)
+		t.Run("stamped shared lock", func(t *testing.T) {
+			t.Setenv("LOTO_SUBAGENT_ID", tcSubagentA)
+			if code := Run([]string{tcCmdLock, tcFlagShared, tcTargetA, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+				t.Fatalf("stamped shared lock: exit %d", code)
+			}
+		})
+		if _, errOut, code := runHookEvent(t, tcHookPre, hookSubagentEventJSON("Edit", "call-sib-shared", tcTargetA, tcSubagentA)); code != 0 {
+			t.Fatalf("pre over my subagent's shared lock: exit=%d err=%q", code, errOut)
+		}
+		rt, done := hookStoreRead(t)
+		defer done()
+		held, err := rt.Store.ListLocks(rt.Ctx)
+		if err != nil {
+			t.Fatalf("list locks: %v", err)
+		}
+		var exclusive bool
+		for _, l := range held {
+			if l.Target.Canonical == tcTargetA && string(l.OwnerUUID) == me.UUID && l.Mode == domain.ModeExclusive {
+				exclusive = true
+			}
+		}
+		if !exclusive {
+			t.Errorf("a sibling's shared row was taken as the parent's own authorization; no exclusive lock of mine: %+v", held)
 		}
 	})
 

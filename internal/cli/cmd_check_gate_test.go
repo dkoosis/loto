@@ -138,6 +138,41 @@ func TestGateDecide_OwnBeaconAllowsWrite(t *testing.T) {
 	}
 }
 
+// The commit-time leg is the exception to the rule above, and only it: the
+// session committing its tree is not denied by a beacon its own subagent
+// minted (loto-0z24), exactly as gateDecideAny exempts one for a tree-move.
+func TestGateDecideStaged_SameSessionSiblingBeaconAllowsCommit(t *testing.T) {
+	now := time.Now()
+	target := domain.Target{Canonical: tcTargetA}
+	locks := []domain.LockRecord{
+		{Target: target, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession,
+			Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
+	}
+	if rows := gateDecideStaged([]domain.Target{target}, locks, nil, gateMyUUID, gateMySession, gateEC(now)); len(rows) != 0 {
+		t.Fatalf("own session's sibling beacon must not deny the session's commit, got %+v", rows)
+	}
+	// Narrow: another session's beacon still denies, and so does a sibling's
+	// real exclusive lock.
+	other := []domain.LockRecord{
+		{Target: target, OwnerUUID: gateFoeUUID, SessionUUID: "44444444-4444-4444-4444-444444444444",
+			Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
+	}
+	if rows := gateDecideStaged([]domain.Target{target}, other, nil, gateMyUUID, gateMySession, gateEC(now)); len(rows) != 1 {
+		t.Fatalf("another session's beacon must deny the commit, got %+v", rows)
+	}
+	excl := []domain.LockRecord{
+		{Target: target, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession,
+			Mode: domain.ModeExclusive, Intent: "sibling lock", ExpiresAt: now.Add(time.Hour)},
+	}
+	if rows := gateDecideStaged([]domain.Target{target}, excl, nil, gateMyUUID, gateMySession, gateEC(now)); len(rows) != 1 {
+		t.Fatalf("a sibling's exclusive lock must deny the commit, got %+v", rows)
+	}
+	// An empty session matches nothing.
+	if rows := gateDecideStaged([]domain.Target{target}, locks, nil, gateMyUUID, "", gateEC(now)); len(rows) != 1 {
+		t.Fatalf("empty ownSession must exempt nothing, got %+v", rows)
+	}
+}
+
 func TestGateDecide_ForeignStaleLockAllows(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcTargetA}
