@@ -67,7 +67,11 @@ func RecordSession(a *Agent, repoTop string) (*SessionRecord, error) {
 	}
 	socket := os.Getenv("CLAUDE_CODE_MESSAGING_SOCKET")
 	pid := sessionPID(socket)
-	procStart, _ := ProcStart(pid) // 0,false → 0 → unknown
+	// procStartFn, not ProcStart directly: the doc above promises the record
+	// is stamped by the same reader that re-reads it at verdict time, and the
+	// seam makes that literal — a test can put a platform with no readable
+	// start-time on both sides at once.
+	procStart, _ := procStartFn(pid) // 0,false → 0 → unknown
 	rec := &SessionRecord{
 		SessionID:  sid,
 		UUID:       a.UUID,
@@ -109,6 +113,44 @@ func sessionPID(socket string) int {
 		return n
 	}
 	return 0
+}
+
+// procIdent is one process's identity: the pid, plus the OS start-time that
+// keeps a pid unambiguous after the OS recycles it. A zero pid means unknown
+// and matches nothing.
+type procIdent struct {
+	pid       int
+	procStart int64
+}
+
+// callerProc resolves the session process this call is running inside, from
+// exactly the env sources RecordSession stamps a record with — so a record
+// this process wrote compares equal to it field for field, with no ps scrape
+// and no parent-chain walk. Unknown (zero) when no pid is derivable.
+func callerProc() procIdent {
+	pid := sessionPID(os.Getenv("CLAUDE_CODE_MESSAGING_SOCKET"))
+	if pid <= 0 {
+		return procIdent{}
+	}
+	procStart, _ := procStartFn(pid) // 0,false → 0 → unknown
+	return procIdent{pid: pid, procStart: procStart}
+}
+
+// sameProcess reports whether this record was written by process p. Both the
+// pid AND the start-time must match, and BOTH start-times must be known:
+//
+//   - pid equality alone is the loto-gj1z false positive, where a recycled pid
+//     made an unrelated process read as the recorded one.
+//   - 0 is ProcStart's unknown sentinel, not a start-time, so two zeroes are
+//     two unknowns and never evidence of sameness (PR #351 review). A record
+//     written before the field existed, or on a platform whose reader failed,
+//     therefore stays a peer — which over-counts |S| and refuses a ref update,
+//     the direction that cannot cost anyone a working tree.
+func (r SessionRecord) sameProcess(p procIdent) bool {
+	if p.pid <= 0 || r.PID <= 0 || p.procStart == 0 || r.ProcStart == 0 {
+		return false
+	}
+	return r.PID == p.pid && r.ProcStart == p.procStart
 }
 
 // readSession loads one session record raw — no pruning side effects. The
@@ -187,7 +229,7 @@ func liveOwnerUUIDs(repoTop string) map[string]struct{} {
 	if err != nil {
 		return nil
 	}
-	out := make(map[string]struct{})
+	live := make([]SessionRecord, 0, len(entries))
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".json") {
 			continue
@@ -200,8 +242,74 @@ func liveOwnerUUIDs(repoTop string) map[string]struct{} {
 			continue
 		}
 		if rec.Verdict().Liveness == SessionLive {
-			out[rec.UUID] = struct{}{}
+			live = append(live, rec)
 		}
+	}
+	if repoTop != "" {
+		live = dropRotatedSelfIDs(live)
+	}
+	out := make(map[string]struct{}, len(live))
+	for _, rec := range live {
+		out[rec.UUID] = struct{}{}
+	}
+	return out
+}
+
+// dropRotatedSelfIDs collapses the caller's own process onto ONE entry: its
+// current session id. Every other live record naming the same (pid,
+// proc_start) is an id this same process used to answer to.
+//
+// Claude Code's /clear rotates CLAUDE_CODE_SESSION_ID and re-runs the
+// SessionStart hook without ending the process, so `loto whoami` leaves a
+// second record for one process; nothing removes the first for 30 days
+// (sessionGCMaxAge). Every witness a record carries — socket, pid,
+// proc_start — belongs to the process, so the old id keeps verdicting live,
+// and a top-level session's owner uuid IS its session id, so the two records
+// contribute two owners. |S| read 2 in a checkout holding one session and
+// the ref guard refused every branch create, worktree add and branch delete
+// in it, naming the caller's own previous id as the peer it was protecting
+// (loto-2jgn).
+//
+// Two deliberate narrowings, both toward refusing rather than allowing:
+//
+//   - Only the CALLER's process collapses. A peer process that has /clear'd
+//     still contributes each of its live ids; over-counting a peer refuses a
+//     ref update, which is I1's safe direction, and no caller can tell which
+//     of another process's ids is its current one.
+//   - The caller's own record must be present and must be this process's,
+//     since it is the entry the collapse keeps. Without it (a session that
+//     never ran `loto whoami` in this checkout) nothing is dropped — the
+//     count can then only be too high, never too low, so the guard never
+//     hands a peer's working tree to a branch switch.
+//
+// |S| is a set of owner uuids, so this is also the only place that could
+// remove the caller itself; keeping the caller's record is what preserves
+// the guard's arithmetic, where |S| < 2 means "no peer to protect".
+func dropRotatedSelfIDs(live []SessionRecord) []SessionRecord {
+	self := SessionIDFromEnv()
+	if self == "" {
+		return live
+	}
+	me := callerProc()
+	if me.pid <= 0 {
+		return live
+	}
+	mine := -1
+	for i, rec := range live {
+		if rec.SessionID == self {
+			mine = i
+			break
+		}
+	}
+	if mine < 0 || !live[mine].sameProcess(me) {
+		return live
+	}
+	out := make([]SessionRecord, 0, len(live))
+	for i, rec := range live {
+		if i != mine && rec.sameProcess(me) {
+			continue
+		}
+		out = append(out, rec)
 	}
 	return out
 }

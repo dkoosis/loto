@@ -125,6 +125,30 @@ func TestScripts(t *testing.T) {
 					ts.Fatalf("touch unexpectedly succeeded")
 				}
 			},
+			// `spawnpid <ENVVAR>` — start a child that outlives the script and
+			// put its pid in <ENVVAR>. A script staging a PEER session needs a
+			// pid that is live and is not the test process (loto-2jgn: one
+			// process is one peer, so two sessions need two pids). No constant
+			// can be that: pid 1 is this process under a container that runs
+			// the test binary as init, and any other number is dead or
+			// recycled. The child is killed when the script ends.
+			"spawnpid": func(ts *testscript.TestScript, neg bool, args []string) {
+				if len(args) != 1 {
+					ts.Fatalf("usage: spawnpid <ENVVAR>")
+				}
+				cmd := exec.Command("sleep", "300")
+				if err := cmd.Start(); err != nil {
+					ts.Fatalf("spawnpid: %v", err)
+				}
+				ts.Defer(func() {
+					_ = cmd.Process.Kill()
+					_ = cmd.Wait()
+				})
+				ts.Setenv(args[0], strconv.Itoa(cmd.Process.Pid))
+				if neg {
+					ts.Fatalf("spawnpid unexpectedly succeeded")
+				}
+			},
 		},
 	})
 }
