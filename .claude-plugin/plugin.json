@@ -1,6 +1,6 @@
 {
   "name": "loto",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Cross-session file locks: a PreToolUse gate blocks a write another session holds, and a SessionEnd hook releases every lock the session took.",
   "author": {
     "name": "dkoosis"
