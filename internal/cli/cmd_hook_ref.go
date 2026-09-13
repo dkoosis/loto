@@ -756,7 +756,11 @@ func printRefRefusal(stderr io.Writer, refusals []refRefusal, self string, live 
 	for _, line := range collisionFix {
 		fmt.Fprintln(stderr, line)
 	}
-	fmt.Fprintln(stderr, `# or: loto claim . -t "<reason>"`)
+	if len(collisionFix) > 0 {
+		fmt.Fprintln(stderr, `# or: loto claim . -t "<reason>"`)
+	} else {
+		fmt.Fprintln(stderr, `loto claim . -t "<reason>"`)
+	}
 	fmt.Fprintln(stderr, "```")
 }
 

@@ -203,6 +203,11 @@ func TestRunHookRef_TwoLiveSessionsRefusesAndCounts(t *testing.T) {
 			t.Errorf("refusal stderr missing %q; got:\n%s", want, stderr)
 		}
 	}
+	// No collision rows in this refusal, so the claim line must be the first
+	// (only) command in the block and have no # or: prefix.
+	if strings.Contains(stderr, "# or: loto claim") {
+		t.Errorf("no-collision refusal must not have '# or:' prefix on the sole command:\n%s", stderr)
+	}
 
 	ev := latestRefEvent(t, store.EventRefRefused)
 	if ev.Reason != refShapeHeadSymref {
