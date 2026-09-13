@@ -10,7 +10,7 @@ created-file admission bug (#349), not the gate. Read the count no earlier
 than 2026-09-23 from `loto events` on a binary ≥ 6f18c82; guard overrides now
 leave `guard_override` rows too (#352), the second signal iytm's Givens name.
 
-✓ done 2026-09-13 (one night, four PRs, dk merged none by hand)
+✓ done 2026-09-13 (one night, ten loto PRs + two sdlc, dk merged none by hand)
 - #349 Write-creates-file admitted holding no lock (loto-9zcq).
 - #350 a /team subagent's stamped gate beacon is not foreign at admission;
   `check --gate --staged` exempts a same-session sibling beacon
@@ -21,10 +21,22 @@ leave `guard_override` rows too (#352), the second signal iytm's Givens name.
 - loto-u7c5 closed invalid: git sends old=0 new=0 for every `branch -D`; the
   classifier was right.
 
-‡ Codex review quota ran out mid-night; the second reviewer on #350–#352 was
-an independent sonnet grader, verdicts in each bead's comments.
-‡ Open elsewhere: loto-uxa0 (repo:sdlc) — tool-ship.sh strands its branch when
-worktree add fails.
+- #354 ref guard admits a worktree being born (its HEAD.lock is the sole
+  claimant of the row's target, unborn, unoccupied) so tool-ship works with a
+  live peer; #357/#359 the collision message names only the stale admin dir,
+  rm -rf of it first, unlock && remove as the alternative (loto-w0sx, y71g, tezw).
+- #355/#358 moved-locks check treats a zero old or new head as a birth, not a
+  fail-open diff (loto-ay2k, 5q2m). #356 `loto doctor` reports a worktree dir
+  stuck mid-birth; never reaps it (loto-rode).
+- sdlc #483 tool-ship deletes the branch it created when worktree add fails;
+  sdlc #484 a second ship onto an existing PR branch three-way merges into a
+  new commit (loto-uxa0, dbc8). Reach sessions on the next plugin release.
+
+‡ Codex review quota ran out at 03:58Z; every later PR got an independent
+grader (sonnet for routine, opus for the guard's admission path) before merge —
+verdicts and reproductions are in each bead's comments. Two graders reproduced
+real holes (#354 F1, #357 B1) that green tests did not cover.
+‡ Backlog at close: loto-iytm only, time-gated.
 
 ~ dk mode: one-word prompts ("continue", "narrower"), chose models by cost —
 routine work on sonnet, hard on opus; merged nothing himself.
