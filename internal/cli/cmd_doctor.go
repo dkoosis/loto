@@ -177,6 +177,11 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	// stash it did not create.
 	renderDanglingStashes(stdout, time.Now(), scanDanglingStashes(rt.Ctx, repoTop, lockOwnerUUIDs(ctx, rt.Store)))
 
+	// Stale worktree admin dirs stuck mid-birth (loto-rode): a SIGKILLed
+	// `git worktree add` leaves HEAD.lock + `locked` behind forever, and
+	// `git worktree prune` refuses to reap a locked entry by design.
+	renderStaleUnbornWorktrees(stdout, scanStaleUnbornWorktrees(rt.Ctx, repoTop, time.Now(), worktreeBirthStaleAfter))
+
 	residue := reportClaimResidue(rt, repoTop, stdout)
 
 	orphans, scanIncomplete := scanOrphansAndHint(rt, repoTop, live, orphanFlags{
