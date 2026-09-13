@@ -409,12 +409,18 @@ func hookAdmit(ctx context.Context, rt *runtime, filePath string) (declared stri
 	// and re-deciding it here would refuse a worker on territory it just took
 	// (the loto-fs84 hole, one layer up).
 	//
-	// ‡ A beacon of mine or my kin's is NOT that authorization (loto-9zcq). The
-	// gate script mints one for the same write this hook admits, in no fixed
-	// order, and decideHeld does not credit beacons — so stopping here left a
-	// created file with no exclusive lock, and the staged-lock gate flagged the
-	// parent's commit of its own subagent's work. Fall through and take the
-	// lock; an exclusive row upgrades over the owner's beacon at the store.
+	// ‡ A beacon of mine or my kin's is NOT that authorization (loto-9zcq):
+	// heldByMe does not credit beacons, so stopping on one left the path with
+	// no exclusive lock and the staged-lock gate flagged its author's commit.
+	// Fall through and take the lock; an exclusive row upgrades over the
+	// owner's beacon at the store.
+	//
+	// The beacon the gate script mints for this same write is a narrower
+	// case: it is stamped with the event's agent_id and this hook is not, so
+	// under a /team subagent that beacon is owned by a derived sibling id and
+	// reads as FOREIGN below (loto-0z24 holds the fix and the kin-direction
+	// question it opens). Here the own-beacon test covers the same-identity
+	// case the unit test drives.
 	for i := range rows {
 		if (rows[i].OwnerUUID == me || ec.IsKin(rows[i].OwnerUUID)) && !rows[i].IsBeacon() {
 			return t.Canonical, nil
