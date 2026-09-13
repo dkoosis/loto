@@ -272,6 +272,23 @@ func TestCheckMoved_ZeroOIDOldHeadSha256LengthIsAlsoABirth(t *testing.T) {
 	}
 }
 
+// loto-5q2m AC 1: git switch --orphan passes the all-zero new-head on an
+// orphan switch — there is no previous ref in that new branch, which is a
+// birth, not an unreadable diff. `git switch --orphan` must not print the
+// fail-open warning.
+func TestCheckMoved_ZeroOIDNewHeadIsABirthNotAnError(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	oldHead, _ := twoHeads(t, repo)
+	got, code := movedRun(t, oldHead, "0000000000000000000000000000000000000000", "1")
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d", code)
+	}
+	if got != tcMovedClean {
+		t.Errorf("a birth is a clean pass, not a warning: %q", got)
+	}
+}
+
 func TestCheckMoved_WrongArity(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
