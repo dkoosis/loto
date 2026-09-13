@@ -606,3 +606,139 @@ func TestRunHookRef_StaleSessionDoesNotBlockBranchDelete(t *testing.T) {
 		t.Errorf("|S| must exclude a session whose process is gone: %q", stdout)
 	}
 }
+
+// ── loto-w0sx: the HEAD of a worktree being created ───────────────────────
+//
+// Measured on git 2.55.0. `git worktree add <path> -b <branch>` run from the
+// shared checkout emits the new worktree's HEAD as
+// `0000… ref:refs/heads/<branch> HEAD` with GIT_DIR UNSET and cwd still the
+// shared checkout — byte-identical, row and environment alike, to the row
+// `git checkout -b <branch>` emits for the shared checkout's own HEAD. The
+// repo's state at the `prepared` phase is what separates them: git has
+// already locked the exact HEAD it is about to write.
+
+// plantUnbornWorktree stages the administrative directory `git worktree add`
+// leaves in the common dir while it is mid-flight — HEAD.lock taken, a
+// `locked` file reading "initializing", and no HEAD file yet. wtPath is where
+// the worktree itself will land; it deliberately need not exist, because at
+// this moment in git's own sequence it holds no checkout for anyone to be in.
+func plantUnbornWorktree(t *testing.T, repo, name, wtPath string) {
+	t.Helper()
+	plantWorktreeDir(t, repo, name, wtPath, map[string]string{
+		refWorktreeLockedFile: "initializing",
+		refHeadLockFile:       "ref: refs/heads/newborn\n",
+	})
+}
+
+// plantBornWorktree stages a worktree that finished being created: HEAD
+// written, no lock, no `locked` marker.
+func plantBornWorktree(t *testing.T, repo, name, wtPath string) {
+	t.Helper()
+	plantWorktreeDir(t, repo, name, wtPath, map[string]string{
+		refHEAD: "ref: refs/heads/born\n",
+	})
+}
+
+func plantWorktreeDir(t *testing.T, repo, name, wtPath string, files map[string]string) {
+	t.Helper()
+	dir := filepath.Join(repo, ".git", "worktrees", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files["commondir"] = "../..\n"
+	files["gitdir"] = filepath.Join(wtPath, ".git") + "\n"
+	for base, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, base), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestRunHookRef_NewWorktreeHeadAdmitted is the bead's first case: two live
+// sessions, and the HEAD leg of `git worktree add -b` passes. The worktree it
+// belongs to has no working tree yet, so the move rewrites nobody's files.
+func TestRunHookRef_NewWorktreeHeadAdmitted(t *testing.T) {
+	repo := withTempProject(t)
+	a := pinAgent(t)
+	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
+	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
+	plantUnbornWorktree(t, repo, "wt2", filepath.Join(t.TempDir(), "wt2"))
+
+	code, stdout, stderr := runRefHook(t, tcPhasePrepared, tcOIDZero+" ref:refs/heads/z2 "+tcHEAD+"\n")
+	if code != 0 {
+		t.Fatalf("the new worktree's HEAD must pass: exit %d, %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "head="+refAdmitWorktreeBirth) {
+		t.Errorf("the pass must name the carve-out it took: %q", stdout)
+	}
+}
+
+// TestRunHookRef_OwnHeadLockedIsNotAWorktreeBirth keeps the carve-out from
+// swallowing the case it is next to. `git checkout -b` in the shared checkout
+// emits the same row while holding the lock on the checkout's OWN HEAD — that
+// is a tree move and stays refused, even with a worktree mid-birth beside it.
+func TestRunHookRef_OwnHeadLockedIsNotAWorktreeBirth(t *testing.T) {
+	repo := withTempProject(t)
+	a := pinAgent(t)
+	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
+	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
+	plantUnbornWorktree(t, repo, "wt2", filepath.Join(t.TempDir(), "wt2"))
+	if err := os.WriteFile(filepath.Join(repo, ".git", refHeadLockFile), []byte("ref: refs/heads/y2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, stderr := runRefHook(t, tcPhasePrepared, tcOIDZero+" ref:refs/heads/y2 "+tcHEAD+"\n")
+	if code != 1 {
+		t.Fatalf("a HEAD write this checkout itself holds the lock on is a tree move: exit %d, %s", code, stderr)
+	}
+}
+
+// TestRunHookRef_BornWorktreeDoesNotAdmit: a worktree that finished being
+// created is somebody's tree. Its presence admits nothing.
+func TestRunHookRef_BornWorktreeDoesNotAdmit(t *testing.T) {
+	repo := withTempProject(t)
+	a := pinAgent(t)
+	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
+	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
+	plantBornWorktree(t, repo, "wt1", filepath.Join(t.TempDir(), "wt1"))
+
+	if code, _, stderr := runRefHook(t, tcPhasePrepared, txnCheckoutOther); code != 1 {
+		t.Fatalf("a finished worktree is no licence to move a tree: exit %d, %s", code, stderr)
+	}
+}
+
+// TestRunHookRef_UnbornWorktreeALivePeerOccupiesStillRefused is the bead's
+// first Rule read literally: the admit is "a worktree no live session has
+// checked out", not "a worktree dir that looks unfinished".
+func TestRunHookRef_UnbornWorktreeALivePeerOccupiesStillRefused(t *testing.T) {
+	repo := withTempProject(t)
+	a := pinAgent(t)
+	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
+	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
+	wtPath := filepath.Join(t.TempDir(), "wt2")
+	plantUnbornWorktree(t, repo, "wt2", wtPath)
+	plantLiveSessionHere(t, wtPath, "sess-in-wt", "wt-owner-00000001")
+
+	code, _, stderr := runRefHook(t, tcPhasePrepared, tcOIDZero+" ref:refs/heads/z2 "+tcHEAD+"\n")
+	if code != 1 {
+		t.Fatalf("a live session in that worktree makes the HEAD write a tree move: exit %d, %s", code, stderr)
+	}
+}
+
+// TestRunHookRef_UnreadableWorktreeGitdirRefuses: this is the arm that
+// WEAKENS the guard, so every unreadable answer is "refuse".
+func TestRunHookRef_UnreadableWorktreeGitdirRefuses(t *testing.T) {
+	repo := withTempProject(t)
+	a := pinAgent(t)
+	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
+	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
+	plantUnbornWorktree(t, repo, "wt2", filepath.Join(t.TempDir(), "wt2"))
+	if err := os.Remove(filepath.Join(repo, ".git", "worktrees", "wt2", "gitdir")); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, stderr := runRefHook(t, tcPhasePrepared, tcOIDZero+" ref:refs/heads/z2 "+tcHEAD+"\n")
+	if code != 1 {
+		t.Fatalf("a worktree whose path cannot be read cannot be shown to be empty: exit %d, %s", code, stderr)
+	}
+}
