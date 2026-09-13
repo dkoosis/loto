@@ -1,0 +1,42 @@
+# loto-0z24: under a /team subagent two PreToolUse hooks fire on one Write in
+# no fixed order. gate-file-lock.sh mints a beacon stamped with the event's
+# agent_id (LOTO_SUBAGENT_ID), so that beacon is owned by a derived sibling;
+# `loto hook pre` runs unstamped as the parent. The event's agent_id names the
+# sibling, its beacon is kin for this admission, and the lock the hook takes is
+# the parent's own — so the parent's commit through the blocking gate passes.
+
+exec git config core.hooksPath $REALHOOKS
+env LOTO_AGENT_ID=$BOB
+env LOTO_GATE_MODE=block
+
+# The gate script's beacon lands first, owned by the derived sibling.
+env LOTO_SUBAGENT_ID=agent-a1
+loto beacon created.go
+env LOTO_SUBAGENT_ID=
+
+# The pre-hook, carrying agent_id, admits the write and takes the parent's lock.
+! exists created.go
+stdin write-subagent.json
+loto hook pre
+loto events --kind lock_acquired
+stdout 'created.go\thook: admitted Edit-family write'
+
+# The Write lands; the parent commits it through the blocking gate.
+touch created.go
+exec git add created.go
+exec git commit -m 'bob: a file his subagent created'
+stdout 'his subagent created'
+! stderr 'unheld'
+
+# Contrast: a different sibling's beacon on another path still refuses.
+env LOTO_SUBAGENT_ID=agent-b2
+loto beacon other.go
+env LOTO_SUBAGENT_ID=
+stdin write-other.json
+! loto hook pre
+stderr 'other.go'
+
+-- write-subagent.json --
+{"session_id":"s-1","tool_name":"Write","tool_use_id":"call-sub","cwd":"/tmp","agent_id":"agent-a1","tool_input":{"file_path":"created.go"}}
+-- write-other.json --
+{"session_id":"s-1","tool_name":"Write","tool_use_id":"call-other","cwd":"/tmp","agent_id":"agent-a1","tool_input":{"file_path":"other.go"}}
