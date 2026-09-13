@@ -72,8 +72,16 @@ const (
 	// refusal — the operator saying that refusal was wrong. Overrides
 	// approaching refusals is the signal to revisit `allow` itself, not to
 	// press the operator harder.
+	//
+	// EventRefAdmitted is the third: `loto hook ref` writes it when a
+	// CARVE-OUT lets a protected shape through — today only the worktree-birth
+	// arm, named in Reason. A refusal the guard never made is invisible to the
+	// two kinds above, so without this row a carve-out being leaned on reads
+	// exactly like a guard with nothing to refuse (PR #354 review, F5). Same
+	// Target and Detail shape as EventRefRefused, so the two are comparable.
 	EventRefRefused           = "ref_refused"
 	EventRefRefusedOverridden = "ref_refused_overridden"
+	EventRefAdmitted          = "ref_admitted"
 	// EventHookTiming is what the tree hook costs: one row per pre and one per
 	// post (enforcement-design.md §10b row 3). Reason says which half wrote it
 	// ("pre" or "post"); the payload rides in Detail as JSON — call_id,
@@ -158,6 +166,7 @@ var allEventKinds = []string{
 	EventPostMissing,
 	EventPostMissingResolved,
 	EventGuardOverride,
+	EventRefAdmitted,
 }
 
 // eventKindCheckSQL renders allEventKinds as the comma-joined, single-quoted

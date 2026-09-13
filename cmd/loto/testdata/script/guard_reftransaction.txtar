@@ -119,6 +119,29 @@ stderr 'ref-refused'
 exec git rev-parse --abbrev-ref HEAD
 stdout '^base$'
 
+# 6. `git branch -m` on a branch a live peer worktree has checked out rewrites
+# THAT worktree's HEAD, and never locks the caller's own — the same row shape a
+# birth produces, from a caller the birth test would otherwise clear (PR #354
+# review, F1: the first cut of the carve-out admitted this and rewrote the
+# peer's HEAD). Refused, and the peer's HEAD symref is untouched afterwards.
+#
+# The stale-unborn-worktree enabler that made F1 reachable with no live birth
+# at all is planted in TestRunHookRef_BranchRenameOnAPeersBranchRefused
+# instead: a testscript archive file cannot carry the absolute path that a
+# worktrees/<n>/gitdir must hold, and without it the planted dir reads as
+# unreadable — which refuses for the wrong reason and would prove nothing.
+! exec git branch -m z2 z2-renamed
+stderr 'ref-refused'
+stderr 'shape=head-symref'
+exec git -C $WORK/wt2 symbolic-ref HEAD
+stdout '^refs/heads/z2$'
+
+# git renames the ref before it reaches the HEAD leg, so put the name back:
+# no worktree points at z2-renamed, so this one emits no HEAD symref at all.
+exec git branch -m z2-renamed z2
+exec git -C $WORK/wt2 rev-parse --abbrev-ref HEAD
+stdout '^z2$'
+
 # ── the two admits, with two live sessions still up ───────────────────────
 # A branch tip moving is indistinguishable from a commit and passes I1 (the
 # working tree it rewrites is H2's problem, not this hook's).

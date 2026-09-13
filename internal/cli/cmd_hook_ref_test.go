@@ -613,25 +613,27 @@ func TestRunHookRef_StaleSessionDoesNotBlockBranchDelete(t *testing.T) {
 // shared checkout emits the new worktree's HEAD as
 // `0000… ref:refs/heads/<branch> HEAD` with GIT_DIR UNSET and cwd still the
 // shared checkout — byte-identical, row and environment alike, to the row
-// `git checkout -b <branch>` emits for the shared checkout's own HEAD. The
-// repo's state at the `prepared` phase is what separates them: git has
-// already locked the exact HEAD it is about to write.
+// `git checkout -b <branch>` emits for the shared checkout's own HEAD. What
+// separates them is that by the `prepared` phase git has already written the
+// new value into the HEAD.lock of the git dir it is about to rewrite, so the
+// row can be matched to the HEAD it belongs to.
 
 // plantUnbornWorktree stages the administrative directory `git worktree add`
-// leaves in the common dir while it is mid-flight — HEAD.lock taken, a
-// `locked` file reading "initializing", and no HEAD file yet. wtPath is where
-// the worktree itself will land; it deliberately need not exist, because at
-// this moment in git's own sequence it holds no checkout for anyone to be in.
-func plantUnbornWorktree(t *testing.T, repo, name, wtPath string) {
+// leaves in the common dir while it is mid-flight: the HEAD lock taken and
+// already holding the target ref, git's "initializing" marker present, and no
+// HEAD file yet. wtPath is where the worktree itself will land; it
+// deliberately need not exist, because at this moment in git's own sequence
+// it holds no checkout for anyone to be in.
+func plantUnbornWorktree(t *testing.T, repo, name, wtPath, target string) {
 	t.Helper()
 	plantWorktreeDir(t, repo, name, wtPath, map[string]string{
 		refWorktreeLockedFile: "initializing",
-		refHeadLockFile:       "ref: refs/heads/newborn\n",
+		refHeadLockFile:       "ref: " + target + "\n",
 	})
 }
 
 // plantBornWorktree stages a worktree that finished being created: HEAD
-// written, no lock, no `locked` marker.
+// written, no lock, no marker.
 func plantBornWorktree(t *testing.T, repo, name, wtPath string) {
 	t.Helper()
 	plantWorktreeDir(t, repo, name, wtPath, map[string]string{
@@ -639,20 +641,35 @@ func plantBornWorktree(t *testing.T, repo, name, wtPath string) {
 	})
 }
 
+// plantBornWorktreeRewritingHead stages the state `git branch -m <b> <target>`
+// leaves when a LIVE worktree has <b> checked out: that worktree's HEAD is
+// written, it carries no creation marker, and its HEAD.lock already holds the
+// new name. This is the row shape the birth carve-out must never admit.
+func plantBornWorktreeRewritingHead(t *testing.T, repo, name, wtPath, target string) {
+	t.Helper()
+	plantWorktreeDir(t, repo, name, wtPath, map[string]string{
+		refHEAD:         "ref: refs/heads/peerbr\n",
+		refHeadLockFile: "ref: " + target + "\n",
+	})
+}
+
 func plantWorktreeDir(t *testing.T, repo, name, wtPath string, files map[string]string) {
 	t.Helper()
-	dir := filepath.Join(repo, ".git", "worktrees", name)
+	dir := filepath.Join(repo, ".git", refWorktreesDir, name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	files["commondir"] = "../..\n"
-	files["gitdir"] = filepath.Join(wtPath, ".git") + "\n"
+	files[refWorktreeGitdirFile] = filepath.Join(wtPath, ".git") + "\n"
 	for base, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, base), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 }
+
+// txnHeadTo is the transaction a HEAD symref move to ref emits.
+func txnHeadTo(ref string) string { return tcOIDZero + " ref:" + ref + " " + tcHEAD + "\n" }
 
 // TestRunHookRef_NewWorktreeHeadAdmitted is the bead's first case: two live
 // sessions, and the HEAD leg of `git worktree add -b` passes. The worktree it
@@ -662,33 +679,131 @@ func TestRunHookRef_NewWorktreeHeadAdmitted(t *testing.T) {
 	a := pinAgent(t)
 	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
 	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
-	plantUnbornWorktree(t, repo, "wt2", filepath.Join(t.TempDir(), "wt2"))
+	plantUnbornWorktree(t, repo, "wt2", filepath.Join(t.TempDir(), "wt2"), "refs/heads/z2")
 
-	code, stdout, stderr := runRefHook(t, tcPhasePrepared, tcOIDZero+" ref:refs/heads/z2 "+tcHEAD+"\n")
+	code, stdout, stderr := runRefHook(t, tcPhasePrepared, txnHeadTo("refs/heads/z2"))
 	if code != 0 {
 		t.Fatalf("the new worktree's HEAD must pass: exit %d, %s", code, stderr)
 	}
 	if !strings.Contains(stdout, "head="+refAdmitWorktreeBirth) {
 		t.Errorf("the pass must name the carve-out it took: %q", stdout)
 	}
+	// F5: a weakening nobody counts cannot be read back.
+	ev := latestRefEvent(t, store.EventRefAdmitted)
+	if ev.Reason != refAdmitWorktreeBirth {
+		t.Errorf("event reason = %q, want %q", ev.Reason, refAdmitWorktreeBirth)
+	}
+	if ev.Target.Canonical != tcHEAD || ev.ActorUUID != a.UUID {
+		t.Errorf("event must name the ref and the admitted owner: %+v", ev)
+	}
+	if !strings.Contains(ev.Detail, `"new":"ref:refs/heads/z2"`) || !strings.Contains(ev.Detail, `"live":2`) {
+		t.Errorf("event detail must carry the row and |S|: %s", ev.Detail)
+	}
+}
+
+// TestRunHookRef_BranchRenameOnAPeersBranchRefused is PR #354's review finding
+// F1, reproduced. `git branch -m <b> <b2>` where a LIVE peer worktree has <b>
+// checked out rewrites that peer's HEAD and never touches the caller's own —
+// the same row shape as a birth, with the caller's HEAD unlocked. A stale
+// unborn dir naming the same branch sits beside it, because a `worktree add`
+// killed mid-flight leaves one behind permanently (F2) and the admission must
+// not rest on its presence.
+func TestRunHookRef_BranchRenameOnAPeersBranchRefused(t *testing.T) {
+	repo := withTempProject(t)
+	a := pinAgent(t)
+	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
+	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
+	plantUnbornWorktree(t, repo, "crashed", filepath.Join(t.TempDir(), "crashed"), "refs/heads/peerbr-renamed")
+	plantBornWorktreeRewritingHead(t, repo, "peer", filepath.Join(t.TempDir(), "peer"), "refs/heads/peerbr-renamed")
+
+	code, _, stderr := runRefHook(t, tcPhasePrepared, txnHeadTo("refs/heads/peerbr-renamed"))
+	if code != 1 {
+		t.Fatalf("renaming a branch a live peer has checked out rewrites THEIR HEAD: exit %d, %s", code, stderr)
+	}
+}
+
+// TestRunHookRef_BranchRenameWithNoUnbornDirRefused is the same rename without
+// the stale dir: the claimant is a born worktree, so there is nothing to admit.
+func TestRunHookRef_BranchRenameWithNoUnbornDirRefused(t *testing.T) {
+	repo := withTempProject(t)
+	a := pinAgent(t)
+	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
+	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
+	plantBornWorktreeRewritingHead(t, repo, "peer", filepath.Join(t.TempDir(), "peer"), "refs/heads/peerbr-renamed")
+
+	if code, _, stderr := runRefHook(t, tcPhasePrepared, txnHeadTo("refs/heads/peerbr-renamed")); code != 1 {
+		t.Fatalf("exit %d, want 1: %s", code, stderr)
+	}
+}
+
+// TestRunHookRef_UnbornWorktreeAdmitsOnlyItsOwnRow is the binding itself: the
+// carve-out is licensed by the row the newborn's HEAD.lock names, and by no
+// other. Before PR #354's review this admitted every head-symref in the repo.
+func TestRunHookRef_UnbornWorktreeAdmitsOnlyItsOwnRow(t *testing.T) {
+	repo := withTempProject(t)
+	a := pinAgent(t)
+	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
+	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
+	plantUnbornWorktree(t, repo, "wt2", filepath.Join(t.TempDir(), "wt2"), "refs/heads/x")
+
+	if code, _, stderr := runRefHook(t, tcPhasePrepared, txnHeadTo("refs/heads/peerbr-renamed")); code != 1 {
+		t.Fatalf("a row the newborn does not name is not its birth: exit %d, %s", code, stderr)
+	}
+	if code, _, stderr := runRefHook(t, tcPhasePrepared, txnHeadTo("refs/heads/x")); code != 0 {
+		t.Fatalf("the row the newborn DOES name must pass: exit %d, %s", code, stderr)
+	}
+}
+
+// TestRunHookRef_TwoUnbornWorktreesNamingOneBranchRefused: two claimants means
+// two HEAD writes to one branch are racing and the hook cannot say which HEAD
+// this row is. "Cannot say" is refuse.
+func TestRunHookRef_TwoUnbornWorktreesNamingOneBranchRefused(t *testing.T) {
+	repo := withTempProject(t)
+	a := pinAgent(t)
+	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
+	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
+	plantUnbornWorktree(t, repo, "wt2", filepath.Join(t.TempDir(), "wt2"), "refs/heads/z2")
+	plantUnbornWorktree(t, repo, "wt3", filepath.Join(t.TempDir(), "wt3"), "refs/heads/z2")
+
+	if code, _, stderr := runRefHook(t, tcPhasePrepared, txnHeadTo("refs/heads/z2")); code != 1 {
+		t.Fatalf("two claimants for one HEAD row is not a birth: exit %d, %s", code, stderr)
+	}
+}
+
+// TestRunHookRef_BirthAdmitsOnlyItsOwnShape: admitting the birth row must not
+// carry the rest of the transaction with it.
+func TestRunHookRef_BirthAdmitsOnlyItsOwnShape(t *testing.T) {
+	repo := withTempProject(t)
+	a := pinAgent(t)
+	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
+	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
+	plantUnbornWorktree(t, repo, "wt2", filepath.Join(t.TempDir(), "wt2"), "refs/heads/z2")
+
+	txn := txnHeadTo("refs/heads/z2") + tcOIDZero + " " + tcOIDB + " refs/stash\n"
+	code, _, stderr := runRefHook(t, tcPhasePrepared, txn)
+	if code != 1 {
+		t.Fatalf("a stash riding along with a birth is still a stash: exit %d, %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "shape="+refShapeStash) || strings.Contains(stderr, "shape="+refShapeHeadSymref) {
+		t.Errorf("only the stash may be refused here; got:\n%s", stderr)
+	}
 }
 
 // TestRunHookRef_OwnHeadLockedIsNotAWorktreeBirth keeps the carve-out from
 // swallowing the case it is next to. `git checkout -b` in the shared checkout
-// emits the same row while holding the lock on the checkout's OWN HEAD — that
-// is a tree move and stays refused, even with a worktree mid-birth beside it.
+// emits the same row while the checkout's OWN git dir holds the lock — that is
+// a tree move and stays refused, with a worktree mid-birth beside it.
 func TestRunHookRef_OwnHeadLockedIsNotAWorktreeBirth(t *testing.T) {
 	repo := withTempProject(t)
 	a := pinAgent(t)
 	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
 	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
-	plantUnbornWorktree(t, repo, "wt2", filepath.Join(t.TempDir(), "wt2"))
+	plantUnbornWorktree(t, repo, "wt2", filepath.Join(t.TempDir(), "wt2"), "refs/heads/newborn")
 	if err := os.WriteFile(filepath.Join(repo, ".git", refHeadLockFile), []byte("ref: refs/heads/y2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	code, _, stderr := runRefHook(t, tcPhasePrepared, tcOIDZero+" ref:refs/heads/y2 "+tcHEAD+"\n")
-	if code != 1 {
+	if code, _, stderr := runRefHook(t, tcPhasePrepared, txnHeadTo("refs/heads/y2")); code != 1 {
 		t.Fatalf("a HEAD write this checkout itself holds the lock on is a tree move: exit %d, %s", code, stderr)
 	}
 }
@@ -716,11 +831,10 @@ func TestRunHookRef_UnbornWorktreeALivePeerOccupiesStillRefused(t *testing.T) {
 	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
 	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
 	wtPath := filepath.Join(t.TempDir(), "wt2")
-	plantUnbornWorktree(t, repo, "wt2", wtPath)
+	plantUnbornWorktree(t, repo, "wt2", wtPath, "refs/heads/z2")
 	plantLiveSessionHere(t, wtPath, "sess-in-wt", "wt-owner-00000001")
 
-	code, _, stderr := runRefHook(t, tcPhasePrepared, tcOIDZero+" ref:refs/heads/z2 "+tcHEAD+"\n")
-	if code != 1 {
+	if code, _, stderr := runRefHook(t, tcPhasePrepared, txnHeadTo("refs/heads/z2")); code != 1 {
 		t.Fatalf("a live session in that worktree makes the HEAD write a tree move: exit %d, %s", code, stderr)
 	}
 }
@@ -732,13 +846,25 @@ func TestRunHookRef_UnreadableWorktreeGitdirRefuses(t *testing.T) {
 	a := pinAgent(t)
 	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
 	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
-	plantUnbornWorktree(t, repo, "wt2", filepath.Join(t.TempDir(), "wt2"))
-	if err := os.Remove(filepath.Join(repo, ".git", "worktrees", "wt2", "gitdir")); err != nil {
+	plantUnbornWorktree(t, repo, "wt2", filepath.Join(t.TempDir(), "wt2"), "refs/heads/z2")
+	if err := os.Remove(filepath.Join(repo, ".git", refWorktreesDir, "wt2", refWorktreeGitdirFile)); err != nil {
 		t.Fatal(err)
 	}
 
-	code, _, stderr := runRefHook(t, tcPhasePrepared, tcOIDZero+" ref:refs/heads/z2 "+tcHEAD+"\n")
-	if code != 1 {
+	if code, _, stderr := runRefHook(t, tcPhasePrepared, txnHeadTo("refs/heads/z2")); code != 1 {
 		t.Fatalf("a worktree whose path cannot be read cannot be shown to be empty: exit %d, %s", code, stderr)
+	}
+}
+
+func TestRefSymrefTarget(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"ref:refs/heads/x", "refs/heads/x"},    // a transaction row
+		{"ref: refs/heads/x\n", "refs/heads/x"}, // a HEAD lock file
+		{tcOIDA, ""},
+		{"", ""},
+	} {
+		if got := refSymrefTarget(strings.TrimSpace(tc.in)); got != tc.want {
+			t.Errorf("refSymrefTarget(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
