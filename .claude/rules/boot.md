@@ -36,7 +36,7 @@ leave `guard_override` rows too (#352), the second signal iytm's Givens name.
 grader (sonnet for routine, opus for the guard's admission path) before merge —
 verdicts and reproductions are in each bead's comments. Two graders reproduced
 real holes (#354 F1, #357 B1) that green tests did not cover.
-‡ Backlog at close: loto-iytm only, time-gated.
+‡ Backlog at close: empty. loto-iytm is DEFERRED until 2026-09-23 (`bd undefer loto-iytm` to resume; `bd ready` hides it until then).
 
 ~ dk mode: one-word prompts ("continue", "narrower"), chose models by cost —
 routine work on sonnet, hard on opus; merged nothing himself.
