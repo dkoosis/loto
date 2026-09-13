@@ -4,9 +4,11 @@ updated: 2026-09-09
 ## lane: FullFalcon
 branch: main
 
-→ `bd ready` — queue near-empty. loto-iytm (promote staged-lock gate to
-blocking) is genuinely time-blocked: needs 14 days of firing counter data
-since loto-7oik merged (2026-09-08), so actionable ~2026-09-22, not before.
+→ `bd ready`. Staged-lock gate promotion (loto-iytm): its window opened
+2026-09-09T14:48Z (sdlc #456 wired the hook), so no promotion read before
+2026-09-23. Samples live in `bd comments loto-iytm`; the firing row rotates
+out of the 1000-row events table, so take the next sample before relying on
+the count. Its blocker is the beacon-only created-file bug: `bd dep list loto-iytm`.
 
 ✓ done
 - loto-ea8y (shared-checkout coordination epic) closed 2026-09-09: all 12
