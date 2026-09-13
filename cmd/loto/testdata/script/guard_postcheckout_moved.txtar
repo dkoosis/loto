@@ -42,5 +42,20 @@ stderr 'alice reading'
 exec git rev-parse --abbrev-ref HEAD
 stdout 'other'
 
+# loto-ay2k AC 1: `git worktree add` hands post-checkout the all-zero SHA as
+# the previous-HEAD arg — there is no previous HEAD in a brand-new worktree.
+# That is a birth, not an unreadable diff, and must print nothing at all.
+exec git worktree add $WORK/wt1 -b wtbranch
+! stderr 'moved=fail-open'
+! stderr 'moved-peer-locks'
+exec git worktree remove $WORK/wt1
+
+# loto-ay2k AC 2: a genuinely unreadable diff — a ref git's store has never
+# heard of, not the zero-SHA birth marker — still warns fail-open. git itself
+# never manufactures this shape from a real checkout, so it is called
+# directly the way the hook would invoke it.
+loto check --moved totally-bogus-ref HEAD 1
+stderr 'diff=unreadable moved=fail-open'
+
 -- v2.txt --
 changed on the other branch

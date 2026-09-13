@@ -48,6 +48,17 @@ type movedRow struct {
 // its reader. `--held` keeps -M for the opposite reason: there a rename's two
 // sides are one intent that both need locking, and the destination row has to
 // be able to name its source.
+// isZeroOID reports whether ref is git's null-object sentinel — all-zero hex
+// digits, 40 characters for a sha1 repo or 64 for sha256. post-checkout
+// passes this as $1 (the previous HEAD) when there is none: a worktree's
+// first checkout most commonly, also a fresh clone or an unborn branch.
+func isZeroOID(ref string) bool {
+	if len(ref) != 40 && len(ref) != 64 {
+		return false
+	}
+	return strings.Count(ref, "0") == len(ref)
+}
+
 func loadMovedPaths(ctx context.Context, repoTop, oldHead, newHead string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
@@ -143,6 +154,17 @@ func runCheckMoved(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	oldHead, newHead := args[0], args[1]
 	if oldHead == newHead {
+		printMoved(stdout, nil)
+		return 0
+	}
+	if isZeroOID(oldHead) {
+		// git's null-object sentinel: a worktree's first checkout, a fresh
+		// clone's initial checkout, an unborn branch (loto-ay2k). There is no
+		// previous HEAD to diff against — that is a birth, not an unreadable
+		// diff, and `git diff <zero-oid> <newHead>` fails with "fatal: bad
+		// object" (exit 128) for every single `git worktree add`. A genuine
+		// unreadable diff (a real-shaped ref git's store has never heard of)
+		// still falls through to the err != nil branch below and warns.
 		printMoved(stdout, nil)
 		return 0
 	}
