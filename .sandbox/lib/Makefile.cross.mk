@@ -12,6 +12,7 @@ GOFUMPT_VER       ?= v0.9.2
 GOIMPORTS_VER     ?= v0.39.0
 MAGE_VER          ?= v1.15.0
 BAT_VER           ?= v0.25.0
+HYPERFINE_VER     ?= v1.20.0
 SNIPE_SRC         ?= $(HOME)/Projects/snipe
 FO_SRC            ?= $(HOME)/Projects/fo
 GOMOD_VER         := $(shell awk '/^go /{print $$2}' go.mod)
@@ -42,7 +43,16 @@ _cross-build:
 	@mkdir -p $(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)
 	@# All tool installs go here; use shell var instead of $(eval) to avoid parse-time trap
 	@set -o pipefail; . .sandbox/project.conf; \
-	XBIN="$$(go env GOPATH)/bin/linux_$(CROSS_ARCH)"; \
+	xtool_build() { \
+		tmpmod=$$(mktemp -d) && \
+		( cd "$$tmpmod" && go mod init xtool >/dev/null 2>&1 && \
+		  go get "$$1@$$2" && \
+		  CGO_ENABLED=0 GOOS=linux GOARCH=$(CROSS_ARCH) go build -trimpath -ldflags='-s -w' \
+		    -o "$(CURDIR)/$(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)/$$3" "$$1" ); \
+		xtool_rc=$$?; \
+		rm -rf "$$tmpmod"; \
+		return $$xtool_rc; \
+	}; \
 	for entry in $$PROJECT_BINS; do \
 		name=$${entry%%:*}; path=$${entry#*:}; \
 		echo "-- $$name"; \
@@ -54,24 +64,16 @@ _cross-build:
 		case "$$tool" in \
 		golangci-lint) \
 			echo "-- golangci-lint $(GOLANGCI_LINT_VER)"; \
-			CGO_ENABLED=0 GOOS=linux GOARCH=$(CROSS_ARCH) go install -trimpath -ldflags='-s -w' \
-				github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VER); \
-			cp $$XBIN/golangci-lint $(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)/ ;; \
+			xtool_build github.com/golangci/golangci-lint/v2/cmd/golangci-lint $(GOLANGCI_LINT_VER) golangci-lint ;; \
 		govulncheck) \
 			echo "-- govulncheck $(GOVULNCHECK_VER)"; \
-			CGO_ENABLED=0 GOOS=linux GOARCH=$(CROSS_ARCH) go install -trimpath -ldflags='-s -w' \
-				golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VER); \
-			cp $$XBIN/govulncheck $(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)/ ;; \
+			xtool_build golang.org/x/vuln/cmd/govulncheck $(GOVULNCHECK_VER) govulncheck ;; \
 		gofumpt) \
 			echo "-- gofumpt $(GOFUMPT_VER)"; \
-			CGO_ENABLED=0 GOOS=linux GOARCH=$(CROSS_ARCH) go install -trimpath -ldflags='-s -w' \
-				mvdan.cc/gofumpt@$(GOFUMPT_VER); \
-			cp $$XBIN/gofumpt $(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)/ ;; \
+			xtool_build mvdan.cc/gofumpt $(GOFUMPT_VER) gofumpt ;; \
 		goimports) \
 			echo "-- goimports $(GOIMPORTS_VER)"; \
-			CGO_ENABLED=0 GOOS=linux GOARCH=$(CROSS_ARCH) go install -trimpath -ldflags='-s -w' \
-				golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VER); \
-			cp $$XBIN/goimports $(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)/ ;; \
+			xtool_build golang.org/x/tools/cmd/goimports $(GOIMPORTS_VER) goimports ;; \
 		snipe) \
 			echo "-- snipe"; \
 			rm -f $(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)/snipe; \
@@ -80,9 +82,7 @@ _cross-build:
 				(cd "$(SNIPE_SRC)" && CGO_ENABLED=0 GOOS=linux GOARCH=$(CROSS_ARCH) \
 					go build -trimpath -ldflags='-s -w' -o "$(CURDIR)/$(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)/snipe" .); \
 			else \
-				CGO_ENABLED=0 GOOS=linux GOARCH=$(CROSS_ARCH) go install -trimpath -ldflags='-s -w' \
-					github.com/dkoosis/snipe@latest && \
-					cp $$XBIN/snipe $(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)/; \
+				xtool_build github.com/dkoosis/snipe latest snipe; \
 			fi ;; \
 		fo) \
 			echo "-- fo"; \
@@ -92,9 +92,7 @@ _cross-build:
 				(cd "$(FO_SRC)" && CGO_ENABLED=0 GOOS=linux GOARCH=$(CROSS_ARCH) \
 					go build -trimpath -ldflags='-s -w' -o "$(CURDIR)/$(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)/fo" ./cmd/fo/); \
 			else \
-				CGO_ENABLED=0 GOOS=linux GOARCH=$(CROSS_ARCH) go install -trimpath -ldflags='-s -w' \
-					github.com/dkoosis/fo/cmd/fo@latest && \
-					cp $$XBIN/fo $(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)/; \
+				xtool_build github.com/dkoosis/fo/cmd/fo latest fo; \
 			fi ;; \
 		bat) \
 			echo "-- bat $(BAT_VER)"; \
@@ -111,16 +109,27 @@ _cross-build:
 				cp "$$TMP"/bat-*/bat $(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)/bat && \
 				rm -rf "$$TMP"; \
 			fi ;; \
+		hyperfine) \
+			echo "-- hyperfine $(HYPERFINE_VER)"; \
+			if [ -f "$(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)/hyperfine" ]; then \
+				echo "  (exists, skipping)"; \
+			else \
+				case "$(CROSS_ARCH)" in \
+					amd64) HF_TRIPLE="x86_64-unknown-linux-musl" ;; \
+					arm64) HF_TRIPLE="aarch64-unknown-linux-gnu" ;; \
+				esac; \
+				TMP=$$(mktemp -d); \
+				curl -fsSL "https://github.com/sharkdp/hyperfine/releases/download/$(HYPERFINE_VER)/hyperfine-$(HYPERFINE_VER)-$$HF_TRIPLE.tar.gz" \
+					| tar xz -C "$$TMP" && \
+				cp "$$TMP"/hyperfine-*/hyperfine $(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)/hyperfine && \
+				rm -rf "$$TMP"; \
+			fi ;; \
 		go-arch-lint) \
 			echo "-- go-arch-lint $(GO_ARCH_LINT_VER)"; \
-			CGO_ENABLED=0 GOOS=linux GOARCH=$(CROSS_ARCH) go install -trimpath -ldflags='-s -w' \
-				github.com/fe3dback/go-arch-lint@$(GO_ARCH_LINT_VER); \
-			cp $$XBIN/go-arch-lint $(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)/ ;; \
+			xtool_build github.com/fe3dback/go-arch-lint $(GO_ARCH_LINT_VER) go-arch-lint ;; \
 		mage) \
 			echo "-- mage $(MAGE_VER)"; \
-			CGO_ENABLED=0 GOOS=linux GOARCH=$(CROSS_ARCH) go install -trimpath -ldflags='-s -w' \
-				github.com/magefile/mage@$(MAGE_VER); \
-			cp $$XBIN/mage $(SANDBOX_BIN_DIR)/linux-$(CROSS_ARCH)/ ;; \
+			xtool_build github.com/magefile/mage $(MAGE_VER) mage ;; \
 		dtree) \
 			echo "-- dtree (manually-managed shell script — no version pin or build-from-source)"; \
 			if [ -f ".sandbox/codex/dtree" ]; then \

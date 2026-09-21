@@ -54,7 +54,7 @@
 # never a loop. The clean happens while we still hold the mutex, so it cannot
 # yank the cache out from under a concurrent peer.
 #
-# Ported from ferret's scripts/lint-locked (ferret#160), which conform, mnemd
+# Ported from ferret's scripts/lint-locked (ferret#160), which conform-to-sdlc, mnemd
 # and trixi also run as GOLANGCILINT — keeping the structure identical across
 # the five repos is deliberate; a fix in one belongs in all.
 #
