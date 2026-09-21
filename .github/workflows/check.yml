@@ -1,5 +1,10 @@
 name: CI
 
+# Always triggers — never paths/paths-ignore. A skipped workflow never reports
+# the required check context, so a docs-only PR could not merge under branch
+# protection. The detect job decides docs-only; test skips its steps and
+# still reports green. Any changed path outside the docs set runs the full gate.
+#
 # Cost shape (private repo — macOS bills at 10x Linux minutes):
 #   pull_request        : linux only           — fast, cheap gate on every PR
 #   push -> main        : linux only           — cheap gate on merge
@@ -24,9 +29,48 @@ on:
     - cron: '0 7 * * 1'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      run_check: ${{ steps.diff.outputs.run_check }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: diff
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          else
+            base="${{ github.event.before }}"
+            head="${{ github.sha }}"
+          fi
+          # Unknown base (new branch, all-zero SHA) → run the gate.
+          if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "run_check=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The docs-only set is conform-to-sdlc's (ci-docs-skip): drop entries to
+          # narrow it; adding one is a finding.
+          run_check="$(git diff --name-status --no-renames "$base" "$head" | awk -F'\t' '
+            NF < 2 { next }
+            $2 !~ /(\.md$|^docs\/|^\.beads\/|^\.claude\/|^\.gitignore$|^LICENSE$)/ { print "true"; exit }
+          ')"
+          echo "run_check=${run_check:-false}" >> "$GITHUB_OUTPUT"
+
   test:
     name: test (${{ matrix.name }})
+    needs: detect
     runs-on: ${{ matrix.runs-on }}
     # macOS is the 10x-billed leg, so it runs only where it earns its keep:
     #   - schedule / workflow_dispatch → macOS-ONLY (weekly darwin backstop;
@@ -47,15 +91,21 @@ jobs:
         include: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('[{"name":"macos","runs-on":"macos-latest"}]') || (contains(github.event.pull_request.labels.*.name, 'ci:macos') && fromJSON('[{"name":"linux","runs-on":"ubuntu-latest"},{"name":"macos","runs-on":"macos-latest"}]') || fromJSON('[{"name":"linux","runs-on":"ubuntu-latest"}]')) }}
 
     steps:
+      - name: docs-only — skip the gate
+        if: needs.detect.outputs.run_check != 'true'
+        run: echo "Only docs changed — reporting check without running the gate."
+
       - uses: actions/checkout@v4
+        if: needs.detect.outputs.run_check == 'true'
 
       - uses: actions/setup-go@v5
+        if: needs.detect.outputs.run_check == 'true'
         with:
           go-version-file: go.mod
           cache: true
 
       # Gate tooling — every pin read from one file (.sandbox/project.conf,
-      # conform lint-pin rule). make check pipes vet/lint/test through fo and
+      # conform-to-sdlc lint-pin rule). make check pipes vet/lint/test through fo and
       # runs go-arch-lint (make arch), so all three must be on PATH.
       #
       # golangci-lint arrives via `go install` against the pinned tag, not a
@@ -64,6 +114,7 @@ jobs:
       # (loto-bu8s). `go install` only ever runs code from the module proxy
       # at the exact tagged version, checksummed against GOSUMDB.
       - name: gate tools (pinned in .sandbox/project.conf)
+        if: needs.detect.outputs.run_check == 'true'
         run: |
           . ./.sandbox/project.conf
           go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VERSION"
@@ -72,13 +123,15 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       # CI = the same gate a developer runs; no verb re-implemented in YAML
-      # (conform ci-gate rule). check runs vet + lint + arch + test + build +
-      # conform (selfcheck, via the go.mod tool pin). This subsumes the old
+      # (conform-to-sdlc ci-gate rule). check runs vet + lint + arch + test + build +
+      # conform-to-sdlc (selfcheck, via the go.mod tool pin). This subsumes the old
       # per-step vet/test/build and the linux-only arch step (loto-vlid) —
       # arch now runs on every leg, harmless since it is OS-independent.
       - name: check
+        if: needs.detect.outputs.run_check == 'true'
         run: make check
 
       # The -race gate survives as a make verb, not YAML (was `go test -race`).
       - name: race
+        if: needs.detect.outputs.run_check == 'true'
         run: make race

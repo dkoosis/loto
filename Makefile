@@ -2,7 +2,7 @@
 #
 # Primary: scan check audit report deploy doctor cross
 #   scan   — changed pkgs only (fast inner loop)
-#   check  — full repo: vet + lint + arch + test + build + conform
+#   check  — full repo: vet + lint + arch + test + build + conform-to-sdlc
 #   audit  — everything: +race +vuln +dupl +nilcheck
 # Run `make help` for full target list.
 
@@ -101,13 +101,13 @@ help: ## Show this help
 		/^## [^-]/ { printf "\n%s\n", substr($$0, 4) } \
 		/^[a-zA-Z0-9_-]+:.*?## / { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-check: vet lint arch test build docscheck scriptcheck makefilecheck selfcheck ## Full repo: vet + lint + arch + test + build + docs + scripts + conform
+check: vet lint arch test build docscheck scriptcheck makefilecheck selfcheck ## Full repo: vet + lint + arch + test + build + docs + scripts + conform-to-sdlc
 	@echo "=== check pass ==="
 
-# Dogfood the fleet gate (sd-th5.15): conform is pinned as a go.mod tool
+# Dogfood the fleet gate (sd-th5.15): conform-to-sdlc is pinned as a go.mod tool
 # dependency (go.sum-verified); bumping the pin is a deliberate PR.
-selfcheck: ## Run conform (fleet SDLC checker) against this repo
-	go tool conform
+selfcheck: ## Run conform-to-sdlc (fleet SDLC checker) against this repo
+	go tool conform-to-sdlc
 
 # Catches README drift against the Makefile/CLI it describes (loto-qo0y):
 # a documented `make <target>` that no longer exists, a `# go ...` comment
@@ -207,7 +207,7 @@ arch: ## Enforce layering (.go-arch-lint.yml)
 # loto-46x1: a PATH/pin mismatch used to print a ⚠ naming the drift and then
 # run the unpinned binary anyway — findings silently drifted from CI's while
 # the gate reported clean. scripts/lint-locked (ported from ferret#160; also
-# GOLANGCILINT in conform/mnemd/trixi) closes that: on a mismatch it builds
+# GOLANGCILINT in conform-to-sdlc/mnemd/trixi) closes that: on a mismatch it builds
 # the PINNED version once (`go run …@vX.Y.Z`, cached under Go's module cache
 # outside this mutex) and execs that instead, so the binary that runs always
 # matches the pin — no separate install step, no manual chmod.
