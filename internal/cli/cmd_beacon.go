@@ -224,8 +224,7 @@ func acquireBeaconGroup(ctx context.Context, rg resolvedBeaconGroup, now time.Ti
 // already owns the path, which the gate should have caught one step earlier;
 // printing the holder beats printing "beacon failed".
 func emitBeaconErr(err error, stdout, stderr io.Writer) int {
-	var mce *store.MultiConflictError
-	if errors.As(err, &mce) {
+	if mce, ok := errors.AsType[*store.MultiConflictError](err); ok {
 		render.EmitConflictWithTags(stdout, mce, nil)
 		return 1
 	}

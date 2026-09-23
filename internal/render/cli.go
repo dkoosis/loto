@@ -381,8 +381,7 @@ func EmitBreakResults(outW, errW io.Writer, results []store.BreakResult) int {
 			// which half moved — a new owner means back off, a bumped epoch on
 			// the same owner means the holder cycled and a fresh read may
 			// authorize the break after all.
-			var hc *store.HolderChangedError
-			if errors.As(r.Err, &hc) {
+			if hc, ok := errors.AsType[*store.HolderChangedError](r.Err); ok {
 				fmt.Fprintf(errW, "✗ %s target=%s expected=%s actual=%s\n",
 					store.ReasonHolderChanged, path,
 					domain.FormatHoldRefs(hc.Expected), domain.FormatHoldRefs(hc.Actual))

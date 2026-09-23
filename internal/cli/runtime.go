@@ -78,8 +78,8 @@ func gitBranch(parent context.Context) string {
 // the prior code mapped every gitRevParseToplevel error to "not in a git
 // repo", misreporting real git/infra faults with a bogus `git init` remedy).
 func isNotAGitRepo(err error) bool {
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
+	exitErr, ok := errors.AsType[*exec.ExitError](err)
+	if !ok {
 		return false
 	}
 	return bytes.Contains(exitErr.Stderr, []byte("not a git repository"))
