@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -531,7 +532,7 @@ func selectCandidates(ctx context.Context, p PromoteParams, snapshot string, cla
 	for id := range refs {
 		ids = append(ids, id)
 	}
-	sort.Strings(ids)
+	slices.Sort(ids)
 
 	sel := selection{taken: map[string]bool{}}
 	for _, id := range ids {
@@ -668,7 +669,7 @@ func reclaimDeadPromotions(ctx context.Context, p PromoteParams) (reclaimVerdict
 	for batchID := range refs {
 		batchIDs = append(batchIDs, batchID)
 	}
-	sort.Strings(batchIDs) // deterministic warning order (design.md)
+	slices.Sort(batchIDs) // deterministic warning order (design.md)
 
 	v := reclaimVerdict{claimed: map[string]bool{}}
 	ec := domain.EvalContext{Now: time.Now(), Live: p.Live}

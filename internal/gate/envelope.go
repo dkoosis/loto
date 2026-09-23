@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -252,7 +253,7 @@ func Capture(ctx context.Context, p CaptureParams) (Envelope, error) {
 		return Envelope{}, err
 	}
 	writeSet := append([]string(nil), p.WriteSet...)
-	sort.Strings(writeSet)
+	slices.Sort(writeSet)
 	g := gitRunner{repoTop: p.RepoTop}
 
 	transitions, createdPaths, err := captureTransitions(ctx, g, p, writeSet)
