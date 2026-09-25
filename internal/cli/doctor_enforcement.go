@@ -442,8 +442,8 @@ func resolveGlobalHooksPath(ctx context.Context, repoTop string) (resolved strin
 	raw, cerr := gitCmd(ctx, repoTop, "config", "--global", "--get", "core.hooksPath")
 	raw = strings.TrimSpace(raw)
 	if cerr != nil {
-		var exitErr *exec.ExitError
-		if !errors.As(cerr, &exitErr) || exitErr.ExitCode() != 1 {
+		exitErr, ok := errors.AsType[*exec.ExitError](cerr)
+		if !ok || exitErr.ExitCode() != 1 {
 			return "", false, fmt.Errorf("git config --global --get core.hooksPath: %w", cerr)
 		}
 		return "", false, nil // exit 1: key unset at global scope, not an error

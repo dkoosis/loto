@@ -88,8 +88,7 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// memoLiveProbe: the partition evaluates the predicate once per overlapping
 	// row, and several rows commonly share one dead owner (Codex #246).
 	if err := rt.Store.ClaimPrefix(rt.Ctx, rec, memoLiveProbe(rt.liveProbe())); err != nil {
-		var cce *store.ClaimConflictError
-		if errors.As(err, &cce) {
+		if cce, ok := errors.AsType[*store.ClaimConflictError](err); ok {
 			render.EmitClaimConflict(stdout, cce)
 			return 1
 		}

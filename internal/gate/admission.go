@@ -3,7 +3,7 @@ package gate
 import (
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -230,9 +230,9 @@ func checkDiffMatchesWriteSet(ctx context.Context, repoTop string, env Envelope)
 		return Decision{}, fmt.Errorf("gate: diff-tree %s: %w", env.ProposalSHA, err)
 	}
 	actual := parseNameOnlyZ(out)
-	sort.Strings(actual)
+	slices.Sort(actual)
 	declared := append([]string(nil), env.WriteSet...)
-	sort.Strings(declared)
+	slices.Sort(declared)
 
 	// diffStringSets(declared, actual) returns (onlyDeclared, onlyActual):
 	// onlyDeclared = write-set paths the diff never touches; onlyActual = diff

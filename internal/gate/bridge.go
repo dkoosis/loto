@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -418,7 +419,7 @@ func planStaleBase(ctx context.Context, repoTop, parent string, pending []Bridge
 			paths = append(paths, tr.Path)
 		}
 	}
-	sort.Strings(paths)
+	slices.Sort(paths)
 
 	for _, path := range paths {
 		have, err := g.blobAt(ctx, parent, path)
@@ -668,7 +669,7 @@ func aggregateWriteSet(pending []BridgeCommit) []string {
 			}
 		}
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 

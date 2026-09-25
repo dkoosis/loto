@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"sort"
+	"slices"
 	"strings"
 	"syscall"
 )
@@ -205,7 +205,7 @@ func ListCandidateIDs(ctx context.Context, repoTop string) ([]string, error) {
 		}
 		ids = append(ids, strings.TrimPrefix(line, candidateRefPrefix))
 	}
-	sort.Strings(ids)
+	slices.Sort(ids)
 	return ids, nil
 }
 
