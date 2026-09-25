@@ -323,8 +323,8 @@ func isCorruptDB(err error) bool {
 	if err == nil {
 		return false
 	}
-	var sqErr *sqlite.Error
-	if !errors.As(err, &sqErr) {
+	sqErr, ok := errors.AsType[*sqlite.Error](err)
+	if !ok {
 		return false
 	}
 	primary := sqErr.Code() & 0xff

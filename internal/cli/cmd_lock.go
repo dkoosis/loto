@@ -304,8 +304,7 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 	recs := buildLockRecords(targets, rt, intent, now, ttl, mode)
 	acquired, err := rt.Store.AcquireLocks(rt.Ctx, recs, live)
 	if err != nil {
-		var mce *store.MultiConflictError
-		if errors.As(err, &mce) {
+		if mce, ok := errors.AsType[*store.MultiConflictError](err); ok {
 			render.EmitConflictWithTags(stdout, mce, fetchTagsForBlockers(rt, mce.Blockers))
 			return 1
 		}
@@ -314,8 +313,7 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 		// step on. Named separately so the refusal line carries the candidate
 		// id, its session, and its age rather than falling to the bare
 		// CandidateClaimConflictError.Error() string below.
-		var ccce *store.CandidateClaimConflictError
-		if errors.As(err, &ccce) {
+		if ccce, ok := errors.AsType[*store.CandidateClaimConflictError](err); ok {
 			render.EmitCandidateClaimConflict(stdout, ccce, now)
 			return 1
 		}

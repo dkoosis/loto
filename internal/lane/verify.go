@@ -207,8 +207,7 @@ func runVerifyCmd(ctx context.Context, dir string, cmd []string) (string, bool, 
 	if ctx.Err() != nil {
 		return buf.String(), false, fmt.Errorf("%w: %w", errVerifyAborted, ctx.Err())
 	}
-	exitErr := new(exec.ExitError)
-	if errors.As(err, &exitErr) {
+	if _, ok := errors.AsType[*exec.ExitError](err); ok {
 		return buf.String(), false, nil
 	}
 	return buf.String(), false, fmt.Errorf("lane: verify command %q: %w", cmd[0], err)

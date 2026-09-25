@@ -395,8 +395,7 @@ func submitAccept(rt *runtime, repoTop string, env gate.Envelope, owner domain.A
 		// took the op-flock, and the store refused it on the live state
 		// (loto-ovno.10). Same taxonomy class as an admission-time epoch
 		// mismatch — the proposer's remedy is identical, re-lock and resubmit.
-		var stale *store.LeaseRevalidationError
-		if errors.As(err, &stale) {
+		if stale, ok := errors.AsType[*store.LeaseRevalidationError](err); ok {
 			if judged {
 				recordVerdict(rt, candidateID, gate.ReasonStaleLeaseEpoch, env.CreatedPaths(), stderr)
 			}

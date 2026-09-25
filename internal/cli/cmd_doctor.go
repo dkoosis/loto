@@ -699,8 +699,8 @@ func resolveGitHooksPath(ctx context.Context, repoTop string) (resolved string, 
 	raw, cerr := gitCmd(ctx, repoTop, "config", "--get", "core.hooksPath")
 	raw = strings.TrimSpace(raw)
 	if cerr != nil {
-		var exitErr *exec.ExitError
-		if !errors.As(cerr, &exitErr) || exitErr.ExitCode() != 1 {
+		exitErr, ok := errors.AsType[*exec.ExitError](cerr)
+		if !ok || exitErr.ExitCode() != 1 {
 			return "", false, fmt.Errorf("git config --get core.hooksPath: %w", cerr)
 		}
 		raw = "" // exit 1: key unset, not an error
