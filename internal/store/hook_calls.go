@@ -353,7 +353,7 @@ VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
 	// RecordCallPre already runs on every write-capable tool call and already
 	// holds this transaction, so folding the refresh in here is what keeps it
 	// to one UPDATE and no second round trip.
-	if err := refreshCallerLocksTx(ctx, tx, string(call.OwnerUUID), call.TPre); err != nil {
+	if err := refreshCallerLocksTx(ctx, tx, string(call.OwnerUUID), call.Worktree, call.TPre); err != nil {
 		return false, err
 	}
 
@@ -454,7 +454,7 @@ func postOnePathWithEventTx(ctx context.Context, tx *sql.Tx, callID string, owne
 	// Acted BEFORE the event this path is about to file: the question is
 	// whether the digest now on disk is one an EARLIER delivered report named,
 	// and asking it first keeps the two passes independent of each other.
-	acted, err := markTreeChangeActedTx(ctx, tx, owner, o.Path, o.Digest, tPost)
+	acted, err := markTreeChangeActedTx(ctx, tx, owner, o.Path, worktree, o.Digest, tPost)
 	if err != nil {
 		return err
 	}
@@ -633,7 +633,7 @@ SELECT path_canonical, locked, declared, pre_observed, epoch_pre, holder_pre,
 	return call, paths, true, nil
 }
 
-const hookCallCols = `call_id,owner_uuid,session_uuid,tool_name,t_pre,t_post,post_missing,dead_at`
+const hookCallCols = `call_id,owner_uuid,session_uuid,tool_name,t_pre,t_post,post_missing,dead_at,worktree`
 
 // hookCallInFlightSQL is the one spelling of "still in flight", named once so
 // the sweep, the retention query and the in-flight read cannot drift apart.
@@ -655,7 +655,7 @@ func scanHookCall(sc rowScanner) (HookCall, error) {
 		postNs, deadNs sql.NullInt64
 		missing        int
 	)
-	if err := sc.Scan(&c.CallID, &owner, &session, &c.ToolName, &preNs, &postNs, &missing, &deadNs); err != nil {
+	if err := sc.Scan(&c.CallID, &owner, &session, &c.ToolName, &preNs, &postNs, &missing, &deadNs, &c.Worktree); err != nil {
 		return HookCall{}, err
 	}
 	c.OwnerUUID = domain.AgentUUID(owner)

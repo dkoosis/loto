@@ -141,6 +141,31 @@ func TestPathSeq_AdvancesIndependentlyPerWorktree(t *testing.T) {
 	if seqB != 1 {
 		t.Errorf("worktree B's seq: want 1 (independent of A), got %d", seqB)
 	}
+
+	// Each call's own record carries its worktree and its per-worktree
+	// bookkeeping: a pre-read mis-keyed to the sibling's line would leave the
+	// final PathSeq values right and these wrong (PR #374 review).
+	for callID, wt := range map[string]string{"call-wtA": "/repo/wtA", "call-wtB": "/repo/wtB"} {
+		call, paths, ok, err := s.CallRecord(ctx, callID)
+		if err != nil || !ok || len(paths) != 1 {
+			t.Fatalf("read %s: ok=%v paths=%d err=%v", callID, ok, len(paths), err)
+		}
+		if call.Worktree != wt {
+			t.Errorf("%s: Worktree want %q, got %q", callID, wt, call.Worktree)
+		}
+		p := paths[0]
+		if p.SeqPre != 0 || p.SeqPost != 1 || p.DigestPre != tcSHA1 || p.DigestPost != tcSHA2 {
+			t.Errorf("%s: want seq 0->1 digest %s->%s, got %d->%d %s->%s",
+				callID, tcSHA1, tcSHA2, p.SeqPre, p.SeqPost, p.DigestPre, p.DigestPost)
+		}
+	}
+	inflight, err := s.InFlightCalls(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inflight) != 0 {
+		t.Errorf("both calls posted; want none in flight, got %+v", inflight)
+	}
 }
 
 // A path whose digest and stat are identical across the call keeps its number;

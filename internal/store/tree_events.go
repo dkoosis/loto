@@ -431,11 +431,11 @@ func appendTreeChangeReportedTx(ctx context.Context, tx *sql.Tx, ev TreeEvent, w
 // worth building, so the observable is the one thing a holder can do today.
 // Digest equality is sound here and nowhere else — this is not an attribution
 // question, it is "is the content the report named back on disk".
-func markTreeChangeActedTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, path, digest string, now time.Time) ([]string, error) {
+func markTreeChangeActedTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, path, worktree, digest string, now time.Time) ([]string, error) {
 	if digest == "" || owner == "" {
 		return nil, nil
 	}
-	answered, err := answeredReportsTx(ctx, tx, owner, path, digest, now)
+	answered, err := answeredReportsTx(ctx, tx, owner, path, worktree, digest, now)
 	if err != nil || len(answered) == 0 {
 		return nil, err
 	}
@@ -486,9 +486,9 @@ type answeredReport struct {
 
 // answeredReportsTx reads them, so the UPDATE loop above has its own scope and
 // the rows handle is closed before any write on the same tx.
-func answeredReportsTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, path, digest string, now time.Time) ([]answeredReport, error) {
+func answeredReportsTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, path, worktree, digest string, now time.Time) ([]answeredReport, error) {
 	rows, err := tx.QueryContext(ctx, answeredReportsSQL,
-		string(owner), path, digest, now.Add(-TreeActedWindow).UnixNano())
+		string(owner), path, worktree, digest, now.Add(-TreeActedWindow).UnixNano())
 	if err != nil {
 		return nil, err
 	}
@@ -506,11 +506,14 @@ func answeredReportsTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, 
 
 // answeredReportsSQL finds every report this owner was HANDED inside the
 // window that said the path went from the digest it is now back at, and that
-// nothing has been counted against yet.
+// nothing has been counted against yet. e.worktree scopes it to the
+// checkout the answering call ran in (loto-v6xx, PR #374 review): a.go in a
+// sibling worktree is a different file, and putting the same bytes back on
+// this one answers nothing a report about that one said.
 const answeredReportsSQL = `
 SELECT r.report_id, e.rule, e.seq, e.holder_pre
   FROM tree_reports r JOIN tree_events e ON e.event_id = r.event_id
- WHERE r.addressee_uuid = ? AND e.path_canonical = ? AND e.digest_pre = ?
+ WHERE r.addressee_uuid = ? AND e.path_canonical = ? AND e.worktree = ? AND e.digest_pre = ?
    AND r.delivered_at IS NOT NULL AND r.delivered_at >= ? AND r.acted_at IS NULL
  ORDER BY e.seq DESC, r.report_id`
 

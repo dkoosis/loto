@@ -332,6 +332,25 @@ func beaconMaySupersede(l domain.LockRecord, all []domain.LockRecord, ec domain.
 	return true // no same-owner, same-worktree row to yield to
 }
 
+// adoptLegacyWorktreeRow stamps l's worktree onto the same owner's legacy
+// row at l's target — one written before locks.worktree existed, or by a store
+// with no repo frame, so its worktree is empty — when l names a worktree
+// (loto-8z87, PR #373 review). Under the old (target_canonical, owner_uuid)
+// key that re-acquire refreshed the legacy row, worktree included; under the
+// widened key it would INSERT a second row beside it, and worktreeFilter
+// matches both, so owner lookups and releases lose their one-row answer.
+// UPDATE OR IGNORE leaves the legacy row alone when this worktree already has
+// its own row: then the upsert below refreshes that one, as before.
+func adoptLegacyWorktreeRow(ctx context.Context, tx *sql.Tx, l domain.LockRecord) error {
+	if l.Worktree == "" {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx,
+		`UPDATE OR IGNORE locks SET worktree = ? WHERE target_canonical = ? AND owner_uuid = ? AND worktree = ''`,
+		l.Worktree, l.Target.Canonical, string(l.OwnerUUID))
+	return err
+}
+
 // insertOrRefreshLock upserts one lock row and reports whether the row was
 // actually written. false means the beacon yield below suppressed the update:
 // no error, nothing changed, and the caller must not log an acquisition.
@@ -351,6 +370,9 @@ func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, s
 	var procStart any
 	if l.ProcStart != 0 {
 		procStart = l.ProcStart
+	}
+	if err := adoptLegacyWorktreeRow(ctx, tx, l); err != nil {
+		return false, err
 	}
 	// ON CONFLICT targets the composite PK (target_canonical, owner_uuid,
 	// worktree) — owner_uuid added in loto-k5el.2, worktree added in loto-8z87

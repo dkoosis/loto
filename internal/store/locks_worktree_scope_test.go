@@ -200,3 +200,72 @@ func TestReleaseLocks_SameOwnerTwoWorktrees_ScopedToOwnWorktree(t *testing.T) {
 		t.Fatalf("wtB's row must survive the wtA release alone, got %+v", rows)
 	}
 }
+
+// TestAcquireLocks_AdoptsLegacyBlankWorktreeRow (PR #373 review): a row that
+// predates locks.worktree carries an empty worktree. The same owner re-acquiring it
+// from a known checkout must refresh that row — adopting the worktree stamp,
+// as the old two-column key did — not insert a second row beside it that
+// worktreeFilter then matches alongside the first.
+func TestAcquireLocks_AdoptsLegacyBlankWorktreeRow(t *testing.T) {
+	wtA := t.TempDir()
+	s := mustOpenWithRepoTop(t, wtA)
+	ctx := context.Background()
+	legacy := mkFileLock(t, tcAGo, tcAlice, time.Hour)
+	legacy.Worktree = ""
+	got, err := s.AcquireLocks(ctx, []domain.LockRecord{legacy}, liveProbe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyEpoch := got[0].Epoch
+
+	again := legacy
+	again.Worktree = wtA
+	got, err = s.AcquireLocks(ctx, []domain.LockRecord{again}, liveProbe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.LocksAt(ctx, legacy.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Worktree != wtA {
+		t.Fatalf("want the legacy row adopted into %q, got %+v", wtA, rows)
+	}
+	if got[0].Epoch != legacyEpoch {
+		t.Errorf("adopting a live legacy row is a renewal: epoch want %d, got %d", legacyEpoch, got[0].Epoch)
+	}
+}
+
+// TestAcquireLocks_SiblingWorktreeIsFreshEpochGrant (PR #373 review): the
+// same owner taking a path in worktree B while it holds that path live in
+// worktree A is a fresh authorization of a different file, so it must take a
+// new epoch — reusing A's would let an envelope minted under an earlier B
+// grant pass B's epoch fence.
+func TestAcquireLocks_SiblingWorktreeIsFreshEpochGrant(t *testing.T) {
+	wtA, wtB := t.TempDir(), t.TempDir()
+	s := mustOpenWithRepoTop(t, wtA)
+	ctx := context.Background()
+	a := mkFileLock(t, tcAGo, tcAlice, time.Hour)
+	a.Worktree = wtA
+	gotA, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := a
+	b.Worktree = wtB
+	gotB, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotB[0].Epoch <= gotA[0].Epoch {
+		t.Errorf("sibling-worktree acquire must bump the epoch: A=%d B=%d", gotA[0].Epoch, gotB[0].Epoch)
+	}
+	// A renewal in A still preserves A's own epoch.
+	renew, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renew[0].Epoch != gotA[0].Epoch {
+		t.Errorf("same-worktree renewal must keep its epoch: want %d, got %d", gotA[0].Epoch, renew[0].Epoch)
+	}
+}

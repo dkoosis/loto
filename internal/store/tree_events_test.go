@@ -27,9 +27,15 @@ func obsFor(digest string) HookPathState {
 // preAs opens a call for an arbitrary owner. mustPre is owner A only.
 func preAs(t *testing.T, s *Store, owner domain.AgentUUID, callID string, at time.Time, obs ...HookPathState) {
 	t.Helper()
+	preAsIn(t, s, owner, callID, "", at, obs...)
+}
+
+// preAsIn is preAs from a named worktree (loto-v6xx).
+func preAsIn(t *testing.T, s *Store, owner domain.AgentUUID, callID, worktree string, at time.Time, obs ...HookPathState) {
+	t.Helper()
 	ok, err := s.RecordCallPre(context.Background(), HookCall{
 		CallID: callID, OwnerUUID: owner, SessionUUID: domain.SessionUUID("sess-" + owner),
-		ToolName: tcToolBash, TPre: at,
+		ToolName: tcToolBash, TPre: at, Worktree: worktree,
 	}, obs)
 	if err != nil {
 		t.Fatalf("pre %s: %v", callID, err)
@@ -833,5 +839,66 @@ func TestDeliverReports_HandsEachReportOverExactlyOnce(t *testing.T) {
 	bs, err := s.UndeliveredReports(ctx, tcOwnerB)
 	if err != nil || len(bs) != 1 {
 		t.Fatalf("B's report must still be waiting: n=%d err=%v", len(bs), err)
+	}
+}
+
+// TestRecordDrift_SiblingWorktreeInFlightCallDoesNotDefer (PR #374 review):
+// a call in flight over a.go in worktree B covers nothing about a.go in
+// worktree A, so A's drift must file (not defer to B's post) and must not
+// name B's call as a spanner.
+func TestRecordDrift_SiblingWorktreeInFlightCallDoesNotDefer(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+	const wtA, wtB = "/repo/wtA", "/repo/wtB"
+
+	if _, err := s.RecordDrift(ctx, tcOwnerA, wtA, now, []HookPathState{obsFor(tcSHA1)}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	preAsIn(t, s, tcOwnerB, "b-open-in-B", wtB, now.Add(time.Second), obsFor(tcSHA1))
+
+	out, err := s.RecordDrift(ctx, tcOwnerA, wtA, now.Add(2*time.Second), []HookPathState{obsFor(tcSHA2)})
+	if err != nil {
+		t.Fatalf("drift: %v", err)
+	}
+	if len(out.Deferred) != 0 || !sameStrings(out.Drifted, []string{tcHookPath}) {
+		t.Fatalf("a sibling worktree's open call must not defer A's drift, got %+v", out)
+	}
+	ev := eventAtSeq(t, s, tcHookPath, 1, tcOwnerA)
+	if got := spannerOwners(ev); len(got) != 0 {
+		t.Errorf("A's drift must not name B's sibling-worktree call as a spanner, got %v", got)
+	}
+}
+
+// TestTreeChange_ActedScopedToWorktree (PR #374 review): a report about a.go
+// in worktree B is not answered by A putting the same digest back on its own
+// a.go in worktree A — a different physical file that happens to share the
+// repo-relative path and content.
+func TestTreeChange_ActedScopedToWorktree(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+	const wtA, wtB = "/repo/wtA", "/repo/wtB"
+
+	preAsIn(t, s, tcOwnerB, "b-write", wtB, now, obsFor(tcSHA1))
+	if out := postAt(t, s, "b-write", now.Add(time.Second), obsFor(tcSHA2)); len(out.Events) != 1 {
+		t.Fatalf("want one event in B, got %d", len(out.Events))
+	}
+	if _, err := s.DeliverReports(ctx, tcOwnerA, now.Add(2*time.Second)); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	preAsIn(t, s, tcOwnerA, "a-in-A", wtA, now.Add(3*time.Second), obsFor(tcSHA2))
+	out := postAt(t, s, "a-in-A", now.Add(4*time.Second), obsFor(tcSHA1))
+	if len(out.Acted) != 0 {
+		t.Errorf("a write in worktree A must not count as acting on worktree B's report, got %v", out.Acted)
+	}
+	if got := countEventKind(t, s, EventTreeChangeActed); got != 0 {
+		t.Errorf("want no acted row across worktrees, got %d", got)
+	}
+
+	// The same owner answering in B itself still counts.
+	preAsIn(t, s, tcOwnerA, "a-in-B", wtB, now.Add(5*time.Second), obsFor(tcSHA2))
+	if out := postAt(t, s, "a-in-B", now.Add(6*time.Second), obsFor(tcSHA1)); !sameStrings(out.Acted, []string{tcHookPath}) {
+		t.Errorf("a write in worktree B answers B's report, got %v", out.Acted)
 	}
 }

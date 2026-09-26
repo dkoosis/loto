@@ -251,3 +251,42 @@ func TestRotateEvents_LockRefreshedHasItsOwnCap(t *testing.T) {
 		t.Errorf("the hook evicted an unrelated kind: gate_bypass rows = %d, want 1", bypass)
 	}
 }
+
+// TestRecordCallPre_RefreshScopedToCallWorktree (PR #373 review): one owner
+// holding a.go in worktrees A and B, with hook activity only in A, must not
+// keep B's lease alive — otherwise a dead B session's lock never goes stale.
+func TestRecordCallPre_RefreshScopedToCallWorktree(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	t0 := time.Now()
+	const wtA, wtB = "/repo/wtA", "/repo/wtB"
+
+	rec := mkFileLock(t, "a.go", tcOwnerA, tcHookRefreshTTL)
+	rec.CreatedAt, rec.ExpiresAt = t0, t0.Add(tcHookRefreshTTL)
+	for _, wt := range []string{wtA, wtB} {
+		r := rec
+		r.Worktree = wt
+		if _, err := s.AcquireLocks(ctx, []domain.LockRecord{r}, liveProbe); err != nil {
+			t.Fatalf("acquire %s: %v", wt, err)
+		}
+	}
+
+	preAsIn(t, s, tcOwnerA, "call-in-A", wtA, t0.Add(16*time.Minute))
+
+	rows, err := s.LocksAt(ctx, rec.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want both worktrees' rows, got %+v", rows)
+	}
+	for _, r := range rows {
+		refreshed := r.ExpiresAt.After(t0.Add(tcHookRefreshTTL))
+		if r.Worktree == wtA && !refreshed {
+			t.Errorf("A's own lease must be refreshed, expires_at=%v", r.ExpiresAt)
+		}
+		if r.Worktree == wtB && refreshed {
+			t.Errorf("hook activity in A must not refresh B's lease, expires_at=%v", r.ExpiresAt)
+		}
+	}
+}

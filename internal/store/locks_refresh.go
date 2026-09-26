@@ -106,8 +106,8 @@ const hookRefreshReason = "hook"
 // sweep it earns only when it actually wrote something — split out of
 // RecordCallPre so that call stays a single decision point on the hot path
 // instead of two (loto-wkul; gocognit flagged the inlined form).
-func refreshCallerLocksTx(ctx context.Context, tx *sql.Tx, owner string, now time.Time) error {
-	refreshed, err := refreshOwnLocksBelowHalfTTLTx(ctx, tx, owner, now)
+func refreshCallerLocksTx(ctx context.Context, tx *sql.Tx, owner, worktree string, now time.Time) error {
+	refreshed, err := refreshOwnLocksBelowHalfTTLTx(ctx, tx, owner, worktree, now)
 	if err != nil {
 		return err
 	}
@@ -141,10 +141,16 @@ func refreshCallerLocksTx(ctx context.Context, tx *sql.Tx, owner string, now tim
 // (hookTakeLock) already takes locks under, so it is the one stable
 // reference a caller who never set a custom --ttl is actually living under.
 //
+// worktree is the calling hook's checkout (HookCall.Worktree), applied with
+// worktreeFilter (loto-8z87, PR #373 review): one owner may hold the same
+// canonical in two linked worktrees, and hook activity in A is no evidence
+// that B's session is alive — renewing B's row from here would keep a dead
+// B session's lock from ever going stale.
+//
 // Returns the refreshed targets (nil when none needed it) so the caller can
 // decide whether to pay for rotateEventsTx — most hook calls touch nothing
 // here and should not.
-func refreshOwnLocksBelowHalfTTLTx(ctx context.Context, tx *sql.Tx, owner string, now time.Time) ([]domain.Target, error) {
+func refreshOwnLocksBelowHalfTTLTx(ctx context.Context, tx *sql.Tx, owner, worktree string, now time.Time) ([]domain.Target, error) {
 	const ttl = domain.DegradedModeTTL
 	newExpiry := now.Add(ttl)
 	halfDeadline := now.Add(ttl / 2)
@@ -156,11 +162,10 @@ func refreshOwnLocksBelowHalfTTLTx(ctx context.Context, tx *sql.Tx, owner string
 	// to serialize against a concurrent mode change. SQLite's own tx
 	// isolation is what makes the owner_uuid-scoped UPDATE below safe without
 	// it.
-	rows, err := tx.QueryContext(ctx, `
-UPDATE locks SET expires_at = ?
-WHERE owner_uuid = ? AND expires_at > ? AND expires_at < ?
-RETURNING target_canonical`,
-		newExpiry.UnixNano(), owner, now.UnixNano(), halfDeadline.UnixNano())
+	wtCond, wtArgs := worktreeFilter(worktree)
+	args := append([]any{newExpiry.UnixNano(), owner, now.UnixNano(), halfDeadline.UnixNano()}, wtArgs...)
+	q := `UPDATE locks SET expires_at = ? WHERE owner_uuid = ? AND expires_at > ? AND expires_at < ? AND ` + wtCond + ` RETURNING target_canonical` //nolint:gosec // G202 wtCond is a fixed predicate, all data via args
+	rows, err := tx.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
