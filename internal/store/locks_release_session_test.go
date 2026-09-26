@@ -495,3 +495,62 @@ func TestReleaseBySession_UnknownWorktreeNeverEvidence(t *testing.T) {
 		t.Fatalf("unknown caller checkout must sweep both; ambiguous=%+v results=%d", rel.Ambiguous, len(rel.Results))
 	}
 }
+
+// expireAll pushes every lock and claim row's lease into the past, the shape
+// a TTL-lapsed row takes before anything reclaims it lazily.
+func expireAll(t *testing.T, s *Store) {
+	t.Helper()
+	past := time.Now().Add(-time.Minute).UnixNano()
+	for _, q := range []string{`UPDATE locks SET expires_at = ?`, `UPDATE claims SET expires_at = ?`} {
+		if _, err := s.db.ExecContext(context.Background(), q, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestReleaseBySession_ExpiredForeignRowsNeverWedgeSweep: a sibling
+// worktree's lock and claim whose TTL lapsed are dead, not ambiguous (Codex
+// #371 P1). They must not refuse this worktree's sweep, which still releases
+// its own live lock. The expired foreign claim is swept as cleanup; the
+// expired foreign lock is left for lazy reclaim, because releasing it from
+// here would restore the write bit on THIS worktree's copy of the path.
+func TestReleaseBySession_ExpiredForeignRowsNeverWedgeSweep(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	stale := mkFileLockSessionWorktree(t, "a.go", tcAlice, "shared-session", "", tcWorktreeA, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{stale}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	c := mkClaimSession(tcPkgStore, tcAlice, "shared-session", time.Hour)
+	c.Worktree = tcWorktreeA
+	if err := s.ClaimPrefix(ctx, c, nil); err != nil {
+		t.Fatal(err)
+	}
+	expireAll(t, s)
+	own := mkFileLockSessionWorktree(t, "b.go", tcAlice, "shared-session", "", tcWorktreeB, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{own}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", tcWorktreeB)
+	if err != nil {
+		t.Fatalf("ReleaseBySession: %v", err)
+	}
+	if len(rel.Ambiguous) != 0 {
+		t.Fatalf("expired foreign rows must not refuse the sweep, got %+v", rel.Ambiguous)
+	}
+	if len(rel.Results) != 1 || rel.Results[0].Target.Canonical != own.Target.Canonical {
+		t.Errorf("want only own b.go released, got %+v", rel.Results)
+	}
+	if len(rel.ClaimPrefixes) != 1 || rel.ClaimPrefixes[0] != tcPkgStore {
+		t.Errorf("want the expired foreign claim swept as cleanup, got %v", rel.ClaimPrefixes)
+	}
+	got, err := s.LockAt(ctx, stale.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Error("the expired foreign lock must be left for lazy reclaim, not released from another worktree")
+	}
+}

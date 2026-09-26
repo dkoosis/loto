@@ -1072,7 +1072,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created_id ON events(created_at, id);`
 }
 
 // ensureClaimsWorktree adds claims.worktree to an existing DB (loto-19bz),
-// the claims twin of ensureLocksWorktree: '' backfills every pre-existing
+// the claims twin of ensureLocksWorktree: ” backfills every pre-existing
 // row, which the unlock --all ambiguity check reads as "unknown", never as
 // foreign. Runs after ensureClaimsTable.
 func ensureClaimsWorktree(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {

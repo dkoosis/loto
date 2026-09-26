@@ -276,7 +276,7 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 	// sibling holding only a claim must refuse the sweep as surely as one
 	// holding a lock (Codex #371 P1). Nothing in this sweep is released when
 	// even one row cannot be told apart from a peer's.
-	foreign, err := sessionAmbiguityTx(ctx, tx, canonicals, byAgent, string(sessionUUID), onlyIntent, callerWorktree)
+	canonicals, foreign, err := sessionAmbiguityTx(ctx, tx, canonicals, byAgent, string(sessionUUID), onlyIntent, callerWorktree, time.Now())
 	if err != nil {
 		return SessionRelease{}, err
 	}
@@ -408,6 +408,7 @@ type sessionTarget struct {
 	Mode      string
 	Intent    string
 	Worktree  string
+	ExpiresNs int64 // expires_at, so a TTL-lapsed foreign row reads dead, not ambiguous
 }
 
 // loadSessionTargetsTx returns canonical paths + modes for all locks owned by
@@ -421,7 +422,7 @@ type sessionTarget struct {
 // a delete keyed on target and owner alone then takes the peer's lock — the
 // exact loss --only-intent exists to prevent (loto-lzap).
 func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID, onlyIntent string) ([]sessionTarget, error) {
-	q := `SELECT target_canonical, mode, intent, worktree FROM locks WHERE owner_uuid = ?`
+	q := `SELECT target_canonical, mode, intent, worktree, expires_at FROM locks WHERE owner_uuid = ?`
 	args := []any{byAgent}
 	if sessionUUID != "" {
 		q += andSessionClause
@@ -440,7 +441,7 @@ func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID,
 	var out []sessionTarget
 	for rows.Next() {
 		var c sessionTarget
-		if err := rows.Scan(&c.Canonical, &c.Mode, &c.Intent, &c.Worktree); err != nil {
+		if err := rows.Scan(&c.Canonical, &c.Mode, &c.Intent, &c.Worktree, &c.ExpiresNs); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -468,34 +469,46 @@ type AmbiguousHold struct {
 // stamped from a foreign worktree. Unknown on either side is never evidence
 // of a mismatch (domain.SameWorktree): a legacy row, or a caller whose git
 // lookup failed, must not turn every --all into a refusal.
-func sessionAmbiguityTx(ctx context.Context, tx *sql.Tx, canonicals []sessionTarget, byAgent, session, onlyIntent, callerWorktree string) ([]AmbiguousHold, error) {
+//
+// A foreign row whose TTL lapsed is dead, not ambiguous (Codex #371 P1):
+// stale rows are reclaimed lazily, and counting one would wedge every later
+// SessionEnd sweep of this worktree. Such a lock is dropped from the returned
+// canonicals — left for lazy reclaim, since releasing it from here would
+// restore the write bit on THIS worktree's copy of the path — while such a
+// claim (no filesystem effect) is left for deleteClaimsBySessionTx to sweep.
+func sessionAmbiguityTx(ctx context.Context, tx *sql.Tx, canonicals []sessionTarget, byAgent, session, onlyIntent, callerWorktree string, now time.Time) ([]sessionTarget, []AmbiguousHold, error) {
 	if callerWorktree == "" {
-		return nil, nil
+		return canonicals, nil, nil
 	}
 	var out []AmbiguousHold
+	kept := canonicals[:0]
 	for _, c := range canonicals {
-		if !domain.SameWorktree(callerWorktree, c.Worktree) {
+		switch {
+		case domain.SameWorktree(callerWorktree, c.Worktree):
+			kept = append(kept, c)
+		case now.UnixNano() < c.ExpiresNs:
 			out = append(out, AmbiguousHold{Kind: "lock", Canonical: c.Canonical, Worktree: c.Worktree})
 		}
 	}
 	if onlyIntent != "" {
-		return out, nil
+		return kept, out, nil
 	}
-	claims, err := foreignClaimsTx(ctx, tx, byAgent, session, callerWorktree)
+	claims, err := foreignClaimsTx(ctx, tx, byAgent, session, callerWorktree, now)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return append(out, claims...), nil
+	return kept, append(out, claims...), nil
 }
 
 // andSessionClause narrows an owner-scoped query to one pinned session.
 const andSessionClause = ` AND session_uuid = ?`
 
 // foreignClaimsTx returns the claims deleteClaimsBySessionTx would delete for
-// (byAgent, session) whose worktree is known and differs from callerWorktree.
-func foreignClaimsTx(ctx context.Context, tx *sql.Tx, byAgent, session, callerWorktree string) ([]AmbiguousHold, error) {
-	q := `SELECT path_prefix, worktree FROM claims WHERE owner_uuid = ? AND worktree != '' AND worktree != ?`
-	args := []any{byAgent, callerWorktree}
+// (byAgent, session) whose worktree is known and differs from callerWorktree
+// and whose lease has not lapsed (domain.ClaimRecord.Expired's boundary).
+func foreignClaimsTx(ctx context.Context, tx *sql.Tx, byAgent, session, callerWorktree string, now time.Time) ([]AmbiguousHold, error) {
+	q := `SELECT path_prefix, worktree FROM claims WHERE owner_uuid = ? AND worktree != '' AND worktree != ? AND expires_at > ?`
+	args := []any{byAgent, callerWorktree, now.UnixNano()}
 	if session != "" {
 		q += andSessionClause
 		args = append(args, session)
