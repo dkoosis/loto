@@ -240,7 +240,20 @@ func deleteOwnedTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals []str
 // need no post-commit filesystem restore and fold safely into this tx — making
 // the lock+claim release atomic (Codex #219 P1: a separate claim tx could leave
 // claims squatting after the lock tx already committed).
-func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, sessionUUID domain.SessionUUID, onlyIntent string) (SessionRelease, error) {
+//
+// callerWorktree is the absolute toplevel of the caller's own worktree. When a
+// matching lock OR claim row was stamped from a different, known worktree
+// (LockRecord.Worktree / ClaimRecord.Worktree, loto-3eq6), the
+// sweep refuses entirely — nothing is released — and reports the rows via
+// SessionRelease.Ambiguous (loto-19bz): owner and session ids can both
+// collapse onto one value across sibling subagents sharing a parent Claude
+// Code session's env, and a plain `unlock --all` from one sibling must not
+// read a peer's lock or claim as its own just because the shared ids matched.
+// The worktree, not the branch, is the discriminator (Codex #371): a branch
+// switch inside one worktree does not make its own locks foreign, and two
+// worktrees can share a branch name or a detached commit. Pass "" to skip the
+// check (git failed, or the caller has none to compare).
+func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, sessionUUID domain.SessionUUID, onlyIntent, callerWorktree string) (SessionRelease, error) {
 	byAgent := string(agent) // internal store helpers thread the owner as a plain string
 	flock, err := acquireOpFlock(ctx, s.opFlockPath(), s.stderr)
 	if err != nil {
@@ -254,7 +267,24 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 	}
 	defer cleanup()
 
-	// Claims first: pure DB, nothing to restore after commit.
+	// Find all targets matching agent (+session if pinned, +intent if filtered).
+	canonicals, err := loadSessionTargetsTx(ctx, tx, byAgent, string(sessionUUID), onlyIntent)
+	if err != nil {
+		return SessionRelease{}, err
+	}
+	// Ambiguity is judged over BOTH row kinds before anything is deleted: a
+	// sibling holding only a claim must refuse the sweep as surely as one
+	// holding a lock (Codex #371 P1). Nothing in this sweep is released when
+	// even one row cannot be told apart from a peer's.
+	canonicals, foreign, err := sessionAmbiguityTx(ctx, tx, canonicals, byAgent, string(sessionUUID), onlyIntent, callerWorktree, time.Now())
+	if err != nil {
+		return SessionRelease{}, err
+	}
+	if len(foreign) > 0 {
+		return SessionRelease{Ambiguous: foreign}, nil
+	}
+
+	// Claims: pure DB, nothing to restore after commit.
 	//
 	// ‡ Skipped under an intent filter (loto-lzap). A claim records territory a
 	// lane reserved, not the write-set it took, and carries no intent to match —
@@ -267,12 +297,6 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 			return SessionRelease{}, err
 		}
 	}
-
-	// Find all targets matching agent (+session if pinned, +intent if filtered).
-	canonicals, err := loadSessionTargetsTx(ctx, tx, byAgent, string(sessionUUID), onlyIntent)
-	if err != nil {
-		return SessionRelease{}, err
-	}
 	if len(canonicals) == 0 {
 		// No locks — still commit any claim deletes above.
 		if err := tx.Commit(); err != nil {
@@ -280,19 +304,7 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 		}
 		return SessionRelease{Results: []ReleaseResult{}, ClaimPrefixes: claimPrefixes}, nil
 	}
-	paths := make([]string, len(canonicals))
-	for i, c := range canonicals {
-		paths[i] = c.Canonical
-	}
-
-	// Ack tags before deleting host locks (same ordering as ReleaseLocks).
-	if err := ackTagsForReleaseTx(ctx, tx, s.keys(), paths, byAgent); err != nil {
-		return SessionRelease{}, err
-	}
-	if err := deleteOwnedTx(ctx, tx, s.keys(), paths, byAgent); err != nil {
-		return SessionRelease{}, err
-	}
-	if err := emitLockReleaseEventsTx(ctx, tx, canonicals, byAgent, time.Now()); err != nil {
+	if err := s.releaseSessionTargetsTx(ctx, tx, canonicals, byAgent); err != nil {
 		return SessionRelease{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -311,6 +323,23 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 	return SessionRelease{Results: results, ClaimPrefixes: claimPrefixes, Intents: distinctIntents(canonicals)}, nil
 }
 
+// releaseSessionTargetsTx acks tags, deletes the agent's host locks and emits
+// their release events for the matched rows, inside ReleaseBySession's tx.
+func (s *Store) releaseSessionTargetsTx(ctx context.Context, tx *sql.Tx, canonicals []sessionTarget, byAgent string) error {
+	paths := make([]string, len(canonicals))
+	for i, c := range canonicals {
+		paths[i] = c.Canonical
+	}
+	// Ack tags before deleting host locks (same ordering as ReleaseLocks).
+	if err := ackTagsForReleaseTx(ctx, tx, s.keys(), paths, byAgent); err != nil {
+		return err
+	}
+	if err := deleteOwnedTx(ctx, tx, s.keys(), paths, byAgent); err != nil {
+		return err
+	}
+	return emitLockReleaseEventsTx(ctx, tx, canonicals, byAgent, time.Now())
+}
+
 // SessionRelease is what one ReleaseBySession transaction actually did.
 //
 // ‡ Intents is the reason this is a struct rather than two return values
@@ -325,6 +354,11 @@ type SessionRelease struct {
 	// Intents are the distinct intents of the released rows, sorted. Empty
 	// when nothing was released.
 	Intents []string
+	// Ambiguous names the lock and claim rows the sweep found stamped from a
+	// worktree other than the caller's own (loto-19bz). Non-empty means the WHOLE sweep was refused —
+	// Results, ClaimPrefixes and Intents are all empty, and nothing changed in
+	// the store, whatever else this call might otherwise have released.
+	Ambiguous []AmbiguousHold
 }
 
 // distinctIntents collects the sorted, deduplicated intents of the rows a
@@ -363,13 +397,18 @@ func emitLockReleaseEventsTx(ctx context.Context, tx *sql.Tx, canonicals []sessi
 }
 
 // sessionTarget pairs a session-owned lock's canonical path with its mode so
-// the release restore guard can skip shared rows (loto-k5el.2 T4), and with the
+// the release restore guard can skip shared rows (loto-k5el.2 T4), with the
 // intent the row recorded AT DELETE TIME so the caller can report what it
-// actually swept rather than what it saw beforehand (loto-lzap).
+// actually swept rather than what it saw beforehand (loto-lzap), and with the
+// worktree it was acquired from so a sweep can tell a row minted by a
+// DIFFERENT worktree apart from its own, even when owner and session ids
+// collapse onto one value (loto-19bz).
 type sessionTarget struct {
 	Canonical string
 	Mode      string
 	Intent    string
+	Worktree  string
+	ExpiresNs int64 // expires_at, so a TTL-lapsed foreign row reads dead, not ambiguous
 }
 
 // loadSessionTargetsTx returns canonical paths + modes for all locks owned by
@@ -383,10 +422,10 @@ type sessionTarget struct {
 // a delete keyed on target and owner alone then takes the peer's lock — the
 // exact loss --only-intent exists to prevent (loto-lzap).
 func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID, onlyIntent string) ([]sessionTarget, error) {
-	q := `SELECT target_canonical, mode, intent FROM locks WHERE owner_uuid = ?`
+	q := `SELECT target_canonical, mode, intent, worktree, expires_at FROM locks WHERE owner_uuid = ?`
 	args := []any{byAgent}
 	if sessionUUID != "" {
-		q += ` AND session_uuid = ?`
+		q += andSessionClause
 		args = append(args, sessionUUID)
 	}
 	if onlyIntent != "" {
@@ -402,10 +441,90 @@ func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID,
 	var out []sessionTarget
 	for rows.Next() {
 		var c sessionTarget
-		if err := rows.Scan(&c.Canonical, &c.Mode, &c.Intent); err != nil {
+		if err := rows.Scan(&c.Canonical, &c.Mode, &c.Intent, &c.Worktree, &c.ExpiresNs); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// AmbiguousHold is one lock or claim ReleaseBySession refused to sweep
+// because the row was stamped from a worktree (checkout toplevel) other than
+// the caller's own. The owner (and, per loto-81n, sometimes the session) id
+// matched — that part of identity collapsed onto one value across sibling
+// subagents that inherit one Claude Code session's env — but the worktree a
+// row was taken from is read from the caller's cwd, independent of that
+// shared env: the one signal available, without a harness change, that the
+// row belongs to a sibling in another worktree (loto-19bz). Two siblings in
+// ONE worktree still collapse; that residual needs a per-subagent identity.
+type AmbiguousHold struct {
+	Kind      string // "lock" or "claim"
+	Canonical string // lock target or claim prefix
+	Worktree  string
+}
+
+// sessionAmbiguityTx collects every lock in canonicals and — on an unfiltered
+// sweep, the only one that deletes claims — every matching claim that was
+// stamped from a foreign worktree. Unknown on either side is never evidence
+// of a mismatch (domain.SameWorktree): a legacy row, or a caller whose git
+// lookup failed, must not turn every --all into a refusal.
+//
+// A foreign row whose TTL lapsed is dead, not ambiguous (Codex #371 P1):
+// stale rows are reclaimed lazily, and counting one would wedge every later
+// SessionEnd sweep of this worktree. Such a lock is dropped from the returned
+// canonicals — left for lazy reclaim, since releasing it from here would
+// restore the write bit on THIS worktree's copy of the path — while such a
+// claim (no filesystem effect) is left for deleteClaimsBySessionTx to sweep.
+func sessionAmbiguityTx(ctx context.Context, tx *sql.Tx, canonicals []sessionTarget, byAgent, session, onlyIntent, callerWorktree string, now time.Time) ([]sessionTarget, []AmbiguousHold, error) {
+	if callerWorktree == "" {
+		return canonicals, nil, nil
+	}
+	var out []AmbiguousHold
+	kept := canonicals[:0]
+	for _, c := range canonicals {
+		switch {
+		case domain.SameWorktree(callerWorktree, c.Worktree):
+			kept = append(kept, c)
+		case now.UnixNano() < c.ExpiresNs:
+			out = append(out, AmbiguousHold{Kind: "lock", Canonical: c.Canonical, Worktree: c.Worktree})
+		}
+	}
+	if onlyIntent != "" {
+		return kept, out, nil
+	}
+	claims, err := foreignClaimsTx(ctx, tx, byAgent, session, callerWorktree, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	return kept, append(out, claims...), nil
+}
+
+// andSessionClause narrows an owner-scoped query to one pinned session.
+const andSessionClause = ` AND session_uuid = ?`
+
+// foreignClaimsTx returns the claims deleteClaimsBySessionTx would delete for
+// (byAgent, session) whose worktree is known and differs from callerWorktree
+// and whose lease has not lapsed (domain.ClaimRecord.Expired's boundary).
+func foreignClaimsTx(ctx context.Context, tx *sql.Tx, byAgent, session, callerWorktree string, now time.Time) ([]AmbiguousHold, error) {
+	q := `SELECT path_prefix, worktree FROM claims WHERE owner_uuid = ? AND worktree != '' AND worktree != ? AND expires_at > ?`
+	args := []any{byAgent, callerWorktree, now.UnixNano()}
+	if session != "" {
+		q += andSessionClause
+		args = append(args, session)
+	}
+	rows, err := tx.QueryContext(ctx, q+` ORDER BY path_prefix`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AmbiguousHold
+	for rows.Next() {
+		h := AmbiguousHold{Kind: "claim"}
+		if err := rows.Scan(&h.Canonical, &h.Worktree); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
 	}
 	return out, rows.Err()
 }

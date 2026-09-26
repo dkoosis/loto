@@ -107,6 +107,9 @@ CREATE TABLE IF NOT EXISTS claims (
   created_at   INTEGER NOT NULL,
   expires_at   INTEGER NOT NULL,
   host         TEXT NOT NULL DEFAULT '',
+  -- worktree: same meaning as locks.worktree (loto-19bz). Added in-place via
+  -- ensureClaimsWorktree; declared here so fresh DBs match without it.
+  worktree     TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (path_prefix, owner_uuid)
 );
 CREATE INDEX IF NOT EXISTS idx_claims_expires ON claims(expires_at);

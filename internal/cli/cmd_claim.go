@@ -84,6 +84,7 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		CreatedAt:   now,
 		ExpiresAt:   now.Add(*ttl),
 		Host:        rt.Host,
+		Worktree:    rt.RepoTop,
 	}
 	// memoLiveProbe: the partition evaluates the predicate once per overlapping
 	// row, and several rows commonly share one dead owner (Codex #246).
