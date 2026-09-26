@@ -397,10 +397,6 @@ var migrationEnsures = []struct {
 	{"add locks.worktree", ensureLocksWorktree},
 	{"add claims.worktree", ensureClaimsWorktree},
 	{"key locks pk on worktree", ensureLocksWorktreeKeyed},
-	{"add hook_calls.worktree", ensureHookCallsWorktree},
-	{"scope path_seq to worktree", ensurePathSeqWorktree},
-	{"scope path_observed to worktree", ensurePathObservedWorktree},
-	{"add tree_events.worktree", ensureTreeEventsWorktree},
 }
 
 // eventsCheckAdmitsEveryKind reports whether the live events DDL's CHECK names
