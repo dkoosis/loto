@@ -54,6 +54,19 @@ type LockRecord struct {
 	// pid-alive-only (today's behavior).
 	ProcStart int64
 	Branch    string
+	// Worktree is the absolute checkout root (repo top-level) this row was
+	// acquired from — "the worktree root plus the path" the row keys on
+	// (loto-3eq6). The store is SHARED across every linked worktree of one
+	// repo (StateDir keys by origin-remote slug, store.Store.repoTop), so two
+	// worktrees editing the SAME repo-relative canonical are really editing
+	// two independent files on disk; without this a beacon minted in one
+	// worktree denied a peer's write to the same-named file in a sibling
+	// worktree that git will later merge cleanly. "" means unset — a legacy
+	// row predating this column, or an in-memory record a caller never
+	// stamped — and domain.SameWorktree treats an unset side as matching
+	// ANY worktree: an omission here can only WIDEN a conflict, never narrow
+	// one away, the same stance EvalContext.CaseFold's zero value takes.
+	Worktree string
 	// Mode is the lease mode: ModeShared (multi-reader, advisory only, write-bit
 	// NOT stripped) or ModeExclusive (sole-writer, write-bit stripped). Empty
 	// string reads as exclusive — preserves the pre-mode binary-lock semantics

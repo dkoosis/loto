@@ -375,6 +375,7 @@ func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now t
 			ProcStart:   procStartVal,
 			Branch:      branch,
 			Mode:        mode,
+			Worktree:    rt.RepoTop,
 		})
 	}
 	return recs

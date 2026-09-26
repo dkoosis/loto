@@ -88,15 +88,7 @@ func gateDecideWith(targets []domain.Target, locks []domain.LockRecord, claims [
 func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t domain.Target, locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ownSession domain.SessionUUID, ec domain.EvalContext) []render.GateDenyRow {
 	for i := range locks {
 		l := &locks[i]
-		// Kin rows (ec.Kin — the parent identity behind a subagent stamp) are
-		// this caller's own, same as myUUID (loto-wofb).
-		if !ec.SameTarget(t, l.Target) || string(l.OwnerUUID) == myUUID || ec.IsKin(l.OwnerUUID) || ec.IsStale(*l) {
-			continue
-		}
-		// Commit-time only (gateDecideStaged): a beacon of this same session's
-		// sibling does not deny the session's commit. An empty ownSession
-		// matches nothing rather than everything.
-		if l.IsBeacon() && ownSession != "" && l.SessionUUID == ownSession {
+		if !gateLockDenies(t, l, myUUID, ownSession, ec) {
 			continue
 		}
 		key := "lock|" + t.Canonical + "|" + string(l.OwnerUUID)
@@ -130,6 +122,20 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 	return rows
 }
 
+// gateLockDenies reports whether lock l is foreign live coverage of t.
+func gateLockDenies(t domain.Target, l *domain.LockRecord, myUUID string, ownSession domain.SessionUUID, ec domain.EvalContext) bool {
+	// Kin rows (ec.Kin — the parent identity behind a subagent stamp) are
+	// this caller's own, same as myUUID (loto-wofb).
+	if !ec.SameTarget(t, l.Target) || string(l.OwnerUUID) == myUUID || ec.IsKin(l.OwnerUUID) || ec.IsStale(*l) ||
+		!domain.SameWorktree(ec.MyWorktree, l.Worktree) {
+		return false
+	}
+	// Commit-time only (gateDecideStaged): a beacon of this same session's
+	// sibling does not deny the session's commit. An empty ownSession
+	// matches nothing rather than everything.
+	return !l.IsBeacon() || ownSession == "" || l.SessionUUID != ownSession
+}
+
 // gateDecideAny is gateDecide's path-free sibling (ccp-vx4w): "does any
 // foreign live lock or claim exist anywhere in this repo", for a guard whose
 // operation (a branch switch) has no meaningful path operand — unlike
@@ -144,7 +150,7 @@ func gateDecideAny(locks []domain.LockRecord, claims []domain.ClaimRecord, myUUI
 	var rows []render.GateDenyRow
 	for i := range locks {
 		l := &locks[i]
-		if string(l.OwnerUUID) == myUUID || ec.IsStale(*l) {
+		if string(l.OwnerUUID) == myUUID || ec.IsStale(*l) || !domain.SameWorktree(ec.MyWorktree, l.Worktree) {
 			continue
 		}
 		// A beacon minted by a SIBLING of this same Claude session does not
@@ -256,7 +262,7 @@ func runCheckGate(ctx context.Context, paths []string, base, repoTop string, sta
 
 	// memoized: gateDecide evaluates the predicate per (target × record), so a
 	// wide staged set would otherwise re-probe one holder hundreds of times.
-	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold}
+	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.RepoTop}
 	// A stamped sibling also owns its parent's rows — its Bash-side locks and
 	// claims were taken unstamped (loto-wofb). Resolution failure here is the
 	// same infra class as an unreachable store: say so, fail open.

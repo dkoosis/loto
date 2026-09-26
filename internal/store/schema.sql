@@ -41,6 +41,16 @@ CREATE TABLE IF NOT EXISTS locks (
   -- envelope against them). Added in-place via the guarded ALTER in migrate();
   -- declared here so fresh DBs match without it.
   epoch            INTEGER NOT NULL DEFAULT 0,
+  -- worktree: absolute checkout root (repo top-level) this row was acquired
+  -- from (loto-3eq6). The store is shared across every linked worktree of one
+  -- repo (StateDir keys by origin-remote slug), so a row must say WHICH
+  -- checkout it came from or two worktrees editing the same repo-relative
+  -- path — really two independent files — would block each other. ''
+  -- (legacy row, or one an older binary wrote) is read as "unknown" by
+  -- domain.SameWorktree, which stays on the conservative, blocking side.
+  -- Added in-place to existing DBs via the guarded ALTER in migrate();
+  -- declared here so fresh DBs match without it.
+  worktree         TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (target_canonical, owner_uuid)
 );
 -- No standalone target_canonical index: the composite PK's automatic index has

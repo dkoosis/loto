@@ -1,0 +1,44 @@
+# loto-3eq6: the store is shared across every linked worktree of one repo
+# (StateDir keys by origin-remote slug), but two worktrees hold two
+# independent copies of the tree. A beacon minted in one worktree must not
+# deny a write to the same repo-relative path in a sibling worktree — the two
+# are different files on disk that git merges cleanly at PR time. Five
+# builders dispatched one per worktree hit exactly this on 2026-09-22
+# (sd-k0gr.21): a builder stalled twice on a sibling's beacon held in another
+# worktree entirely, and the supervisor had to force-break it by hand.
+#
+# Two writers on the SAME path in the SAME worktree must still contend —
+# that part of the rule is unchanged.
+
+exec git config core.hooksPath $REALHOOKS
+exec git commit --allow-empty -m seed
+exec git worktree add $WORK/wt2 -b wt2branch
+
+# Alice beacons a.go from worktree A (the primary checkout).
+env LOTO_AGENT_ID=$ALICE
+loto beacon a.go
+env LOTO_AGENT_ID=
+
+# Bob's PreToolUse hook admits a write to a.go from worktree B — a different
+# file on disk despite sharing the store with worktree A.
+cd wt2
+env LOTO_AGENT_ID=$BOB
+stdin $WORK/write-a-wtb.json
+loto hook pre
+loto events --kind lock_acquired
+stdout 'a.go\thook: admitted Edit-family write'
+
+# Contrast: back in worktree A, Bob — who now also holds his OWN exclusive
+# lock on a.go, but in worktree B — is still refused writing a.go here. His
+# worktree-B lock must not leak across the worktree boundary and it is
+# Alice's live beacon IN THIS WORKTREE that still blocks him, exactly as it
+# did before any worktree ever entered the picture.
+cd $WORK
+stdin write-a-wta.json
+! loto hook pre
+stderr 'path=a.go kind=lock blocker='$ALICE
+
+-- write-a-wtb.json --
+{"session_id":"s-1","tool_name":"Write","tool_use_id":"call-wtb","cwd":"/tmp","tool_input":{"file_path":"a.go"}}
+-- write-a-wta.json --
+{"session_id":"s-1","tool_name":"Write","tool_use_id":"call-wta","cwd":"/tmp","tool_input":{"file_path":"a.go"}}

@@ -441,7 +441,7 @@ func hookAdmit(ctx context.Context, rt *runtime, filePath, agentID string) (decl
 	if owner, ok := identity.SubagentOwner(agentID); ok {
 		sib = domain.AgentUUID(owner)
 	}
-	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), Kin: kin, CaseFold: rt.CaseFold}
+	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), Kin: kin, CaseFold: rt.CaseFold, MyWorktree: rt.RepoTop}
 	me := domain.AgentUUID(rt.Agent.UUID)
 	if held, blocker := hookRowsDecide(rows, me, sib, ec); held {
 		return t.Canonical, nil
@@ -473,15 +473,23 @@ func hookAdmit(ctx context.Context, rt *runtime, filePath, agentID string) (decl
 // beacon means an agent is writing here right now, which is the case I2
 // exists to serialize. My own, my kin's and my current sibling's rows are
 // not foreign.
+//
+// ‡ A row from a DIFFERENT worktree is never held-by-me and never a blocker
+// (loto-3eq6, domain.SameWorktree): the store is shared across every linked
+// worktree of one repo, so a row at the same repo-relative canonical but a
+// different LockRecord.Worktree names a different file on disk — mine in
+// another checkout, or a peer's, either way not this write's concern.
 func hookRowsDecide(rows []domain.LockRecord, me, sib domain.AgentUUID, ec domain.EvalContext) (held bool, blocker *domain.LockRecord) {
 	for i := range rows {
-		if (rows[i].OwnerUUID == me || ec.IsKin(rows[i].OwnerUUID)) && !rows[i].IsBeacon() {
+		if (rows[i].OwnerUUID == me || ec.IsKin(rows[i].OwnerUUID)) && !rows[i].IsBeacon() &&
+			domain.SameWorktree(ec.MyWorktree, rows[i].Worktree) {
 			return true, nil
 		}
 	}
 	for i := range rows {
 		r := &rows[i]
-		if ec.IsStale(*r) || r.OwnerUUID == me || ec.IsKin(r.OwnerUUID) || (sib != "" && r.OwnerUUID == sib) {
+		if ec.IsStale(*r) || r.OwnerUUID == me || ec.IsKin(r.OwnerUUID) || (sib != "" && r.OwnerUUID == sib) ||
+			!domain.SameWorktree(ec.MyWorktree, r.Worktree) {
 			continue
 		}
 		return false, r
@@ -513,6 +521,7 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, kin []domai
 		// A Write that creates its file is the case I2 most needs to admit
 		// (statFileTargetReason above already allows it); the store must too.
 		MayCreate: true,
+		Worktree:  rt.RepoTop,
 	}
 	storeKin := kin
 	if sib != "" {
@@ -528,7 +537,8 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, kin []domai
 		// sibling's), or a refusal would blame the very beacon minted for this
 		// write.
 		for i := range held {
-			if held[i].OwnerUUID == me || ec.IsKin(held[i].OwnerUUID) || ec.IsStale(held[i]) || (sib != "" && held[i].OwnerUUID == sib) {
+			if held[i].OwnerUUID == me || ec.IsKin(held[i].OwnerUUID) || ec.IsStale(held[i]) || (sib != "" && held[i].OwnerUUID == sib) ||
+				!domain.SameWorktree(ec.MyWorktree, held[i].Worktree) {
 				continue
 			}
 			return "", &held[i]
@@ -550,7 +560,7 @@ func hookObserve(ctx context.Context, rt *runtime, declared string, warn io.Writ
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold}
+	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.RepoTop}
 	holders := hookLiveHolders(locks, ec)
 
 	status, err := gitStatusPaths(ctx, rt.RepoTop)
@@ -630,10 +640,13 @@ func hookSeqAtObserve(rt *runtime, paths []string, holders map[string]domain.Loc
 // the lowest owner uuid wins, so the record is deterministic rather than
 // whatever order the scan happened to return (.claude/rules/design.md: same
 // input, byte-identical output).
+//
+// A row from a sibling worktree (ec.MyWorktree, loto-3eq6) names a different
+// file than the one this checkout observes, so it holds nothing here.
 func hookLiveHolders(locks []domain.LockRecord, ec domain.EvalContext) map[string]domain.LockRecord {
 	holders := map[string]domain.LockRecord{}
 	for i := range locks {
-		if ec.IsStale(locks[i]) {
+		if ec.IsStale(locks[i]) || !domain.SameWorktree(ec.MyWorktree, locks[i].Worktree) {
 			continue
 		}
 		key := locks[i].Target.Canonical

@@ -53,6 +53,13 @@ type EvalContext struct {
 	// accident; it can only fail to widen one, which leaves a legacy row
 	// blocking rather than admitting a peer.
 	CaseFold bool
+	// MyWorktree is the caller's own checkout root (rt.RepoTop), for a
+	// decision surface that scans lock rows directly rather than building an
+	// incoming LockRecord to hand to Conflicts (gateDecide, gateDecideAny,
+	// hookRowsDecide — loto-3eq6). Compared against a row's LockRecord.Worktree
+	// via SameWorktree. Zero value "" widens rather than narrows, matching
+	// every other ambient field here.
+	MyWorktree string
 }
 
 // IsKin reports whether owner u counts as the caller's own for conflicts.
@@ -207,6 +214,9 @@ func (c EvalContext) Conflicts(incoming, existing LockRecord) bool {
 		return false
 	}
 	if !c.SameTarget(incoming.Target, existing.Target) {
+		return false
+	}
+	if !SameWorktree(incoming.Worktree, existing.Worktree) {
 		return false
 	}
 	if c.IsStale(existing) {

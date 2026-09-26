@@ -165,3 +165,30 @@ func TestEvalContextFoldWidensOnlyThePathLeg(t *testing.T) {
 		t.Error("an expired claim must not cover a target")
 	}
 }
+
+const (
+	tcWtA = "/wt/a"
+	tcWtB = "/wt/b"
+)
+
+// TestSameWorktree pins the three rules the loto-3eq6 scoping rests on:
+// equal roots contend, different roots never do, and an unset side (a legacy
+// row, an unstamped caller) matches anything so an omission only widens.
+func TestSameWorktree(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"equal", tcWtA, tcWtA, true},
+		{"different", tcWtA, tcWtB, false},
+		{"left unset", "", tcWtB, true},
+		{"right unset", tcWtA, "", true},
+		{"both unset", "", "", true},
+	}
+	for _, c := range cases {
+		if got := SameWorktree(c.a, c.b); got != c.want {
+			t.Errorf("%s: SameWorktree(%q, %q) = %v, want %v", c.name, c.a, c.b, got, c.want)
+		}
+	}
+}
