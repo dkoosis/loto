@@ -50,8 +50,21 @@ CREATE TABLE IF NOT EXISTS locks (
   -- domain.SameWorktree, which stays on the conservative, blocking side.
   -- Added in-place to existing DBs via the guarded ALTER in migrate();
   -- declared here so fresh DBs match without it.
+  -- worktree is part of the PRIMARY KEY, not just a column (loto-8z87). When
+  -- it was a plain column under (target_canonical, owner_uuid), one owner
+  -- acquiring the SAME repo-relative path in two linked worktrees (sibling
+  -- sessions sharing one LOTO_AGENT_ID, loto-81n) collided: the second
+  -- acquire's INSERT ... ON CONFLICT silently overwrote the first row's
+  -- worktree, lease and epoch, and the first worktree's lock vanished with no
+  -- error. Keying on worktree too lets both rows stand — they are two
+  -- independent files on disk. A legacy row with worktree '' still matches
+  -- ANY worktree for conflict/authorization purposes (domain.SameWorktree);
+  -- the PK only decides row IDENTITY, not who blocks whom. Added in-place to
+  -- existing DBs via the guarded table-rebuild ensureLocksWorktreeKeyed in
+  -- migrate() (ensureLocksModeAndPK precedent); declared here so fresh DBs
+  -- match without it.
   worktree         TEXT NOT NULL DEFAULT '',
-  PRIMARY KEY (target_canonical, owner_uuid)
+  PRIMARY KEY (target_canonical, owner_uuid, worktree)
 );
 -- No standalone target_canonical index: the composite PK's automatic index has
 -- target_canonical as its leftmost column, so target-only lookups (the conflict
@@ -231,7 +244,14 @@ CREATE TABLE IF NOT EXISTS hook_calls (
   -- Kept apart from t_post because the call never posted; retention reads
   -- COALESCE(t_post, dead_at), so a crashed session's record cannot pin these
   -- two tables against the drop forever.
-  dead_at      INTEGER
+  dead_at      INTEGER,
+  -- worktree: the checkout this call's hook ran in (loto-v6xx). Dirty
+  -- unlocked paths use epoch 0 in every checkout, so without this a call's
+  -- paths cannot be told apart from a sibling worktree's transitions to a
+  -- same-canonical path. '' is a legacy row (predates this column) or an
+  -- unknown checkout, and is never treated as a NEW distinct worktree — see
+  -- the spanner query in tree_events.go.
+  worktree     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_hook_calls_inflight ON hook_calls(t_post, dead_at, t_pre);
 
@@ -265,7 +285,13 @@ CREATE TABLE IF NOT EXISTS path_seq (
   -- instead of inventing a second. It is never used to decide contention:
   -- that is the seq interval and nothing else (§3, round 10).
   digest         TEXT NOT NULL DEFAULT '',
-  PRIMARY KEY (path_canonical, epoch)
+  -- worktree: the checkout the transition was numbered in (loto-v6xx). Keyed
+  -- into the PK so a.go in worktree A and a.go in worktree B — one canonical
+  -- path, two physical files sharing this store — advance independent
+  -- sequences instead of merging into one line. '' is the legacy line every
+  -- pre-existing row keeps.
+  worktree       TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (path_canonical, worktree, epoch)
 );
 
 -- path_observed / tree_events / tree_event_spanners / tree_reports: the drift
@@ -279,7 +305,10 @@ CREATE TABLE IF NOT EXISTS path_observed (
   stat           TEXT NOT NULL DEFAULT '',
   digest         TEXT NOT NULL DEFAULT '',
   observed_at    INTEGER NOT NULL,
-  PRIMARY KEY (path_canonical, epoch)
+  -- worktree: same rationale and PK placement as path_seq.worktree above —
+  -- one canonical path observed independently per checkout (loto-v6xx).
+  worktree       TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (path_canonical, worktree, epoch)
 );
 
 CREATE TABLE IF NOT EXISTS tree_events (
@@ -302,7 +331,12 @@ CREATE TABLE IF NOT EXISTS tree_events (
   declared       INTEGER NOT NULL DEFAULT 0,
   rule           TEXT NOT NULL DEFAULT '',
   note           TEXT NOT NULL DEFAULT '',
-  created_at     INTEGER NOT NULL
+  created_at     INTEGER NOT NULL,
+  -- worktree: the checkout that observed this transition (loto-v6xx),
+  -- carried for the record even though seq alone already disambiguates it
+  -- once path_seq is scoped — a reader of tree_events should not have to
+  -- rejoin path_seq to learn which checkout an event is about.
+  worktree       TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_tree_events_path ON tree_events(path_canonical, seq);
 

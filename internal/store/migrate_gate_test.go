@@ -93,3 +93,16 @@ func TestSchemaCurrentTreatsProbeFailureAsNotCurrent(t *testing.T) {
 		t.Error("schemaCurrent true on an empty DB with no schema")
 	}
 }
+
+// TestMigrationEnsures_EachRegisteredOnce (PR #373 review): a step appended by
+// a file's init must not also sit in store.go's literal, or every Open probes
+// it twice and an upgrade runs it twice.
+func TestMigrationEnsures_EachRegisteredOnce(t *testing.T) {
+	seen := map[string]bool{}
+	for _, m := range migrationEnsures {
+		if seen[m.name] {
+			t.Errorf("migration %q registered more than once", m.name)
+		}
+		seen[m.name] = true
+	}
+}

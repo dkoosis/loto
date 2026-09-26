@@ -306,7 +306,13 @@ func reclaimStaleTx(ctx context.Context, tx *sql.Tx, stale domain.LockRecord, by
 	}); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ?`, stale.Target.Canonical, string(stale.OwnerUUID)); err != nil {
+	// worktree is an EXACT match, not worktreeFilter's wider fallback
+	// (loto-8z87): stale already names the specific row callers identified
+	// (reclaimStaleAndCollectBlockers' own domain.SameWorktree scan, or
+	// classifyReleases' stale-reclaim branch over an already-scoped `existing`)
+	// — under the widened PK a same-owner SIBLING row on the same canonical
+	// from another worktree must not be swept up here too.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ? AND worktree = ?`, stale.Target.Canonical, string(stale.OwnerUUID), stale.Worktree); err != nil {
 		return err
 	}
 	return nil

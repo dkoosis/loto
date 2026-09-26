@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS hook_calls (
   t_pre        INTEGER NOT NULL,
   t_post       INTEGER,
   post_missing INTEGER NOT NULL DEFAULT 0,
-  dead_at      INTEGER
+  dead_at      INTEGER,
+  worktree     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_hook_calls_inflight ON hook_calls(t_post, dead_at, t_pre);
 
@@ -59,7 +60,8 @@ CREATE TABLE IF NOT EXISTS path_seq (
   epoch          INTEGER NOT NULL,
   seq            INTEGER NOT NULL,
   digest         TEXT NOT NULL DEFAULT '',
-  PRIMARY KEY (path_canonical, epoch)
+  worktree       TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (path_canonical, worktree, epoch)
 );`
 
 // ensureHookCallsTables creates the call-record layer in an existing DB that
@@ -132,6 +134,11 @@ type HookCall struct {
 	// T_report. It changes what is REPORTED and nothing about contention —
 	// a post_missing call is still in flight (§3, round 10).
 	PostMissing bool
+	// Worktree: the checkout this call's hook ran in (loto-v6xx). '' is a
+	// legacy call or an unknown checkout — see hook_calls.worktree in
+	// schema.sql for why a call's paths cannot be told apart from a sibling
+	// worktree's without this.
+	Worktree string
 }
 
 // InFlight reports whether this call is still open: no post landed and its
@@ -216,30 +223,33 @@ type PostOutcome struct {
 	Acted []string
 }
 
-// pathSeqAt reads the current transition number of (path, epoch). Zero for a
-// path that has never transitioned — a real value, not a sentinel: the first
-// recorded change takes 1.
-func pathSeqAt(ctx context.Context, tx *sql.Tx, path string, epoch int64) (int64, error) {
+// pathSeqAt reads the current transition number of (path, worktree, epoch).
+// Zero for a path that has never transitioned — a real value, not a
+// sentinel: the first recorded change takes 1. worktree scopes the counter to
+// one checkout (loto-v6xx): a.go in worktree A and a.go in worktree B are two
+// physical files sharing this store, and must advance independently.
+func pathSeqAt(ctx context.Context, tx *sql.Tx, path, worktree string, epoch int64) (int64, error) {
 	var seq int64
 	err := tx.QueryRowContext(ctx,
-		`SELECT seq FROM path_seq WHERE path_canonical = ? AND epoch = ?`, path, epoch).Scan(&seq)
+		`SELECT seq FROM path_seq WHERE path_canonical = ? AND worktree = ? AND epoch = ?`,
+		path, worktree, epoch).Scan(&seq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
 	return seq, err
 }
 
-// nextPathSeq assigns the next transition number of (path, epoch) in the
-// caller's tx, so the assignment and the record that cites it commit together.
-// Same shape as nextPathEpoch, and for the same reason. digest is what the
-// path is at the new number — see pathSeqStateTx for the one question it
-// answers.
-func nextPathSeq(ctx context.Context, tx *sql.Tx, path string, epoch int64, digest string) (int64, error) {
+// nextPathSeq assigns the next transition number of (path, worktree, epoch) in
+// the caller's tx, so the assignment and the record that cites it commit
+// together. Same shape as nextPathEpoch, and for the same reason. digest is
+// what the path is at the new number — see pathSeqStateTx for the one
+// question it answers.
+func nextPathSeq(ctx context.Context, tx *sql.Tx, path, worktree string, epoch int64, digest string) (int64, error) {
 	var seq int64
 	err := tx.QueryRowContext(ctx, `
-INSERT INTO path_seq(path_canonical, epoch, seq, digest) VALUES (?, ?, 1, ?)
-ON CONFLICT(path_canonical, epoch) DO UPDATE SET seq = seq + 1, digest = excluded.digest
-RETURNING seq`, path, epoch, digest).Scan(&seq)
+INSERT INTO path_seq(path_canonical, worktree, epoch, seq, digest) VALUES (?, ?, ?, 1, ?)
+ON CONFLICT(path_canonical, worktree, epoch) DO UPDATE SET seq = seq + 1, digest = excluded.digest
+RETURNING seq`, path, worktree, epoch, digest).Scan(&seq)
 	return seq, err
 }
 
@@ -258,10 +268,10 @@ RETURNING seq`, path, epoch, digest).Scan(&seq)
 // It is NOT the contention test. Whether a call spans a transition is decided
 // by `seq_pre < n` and (`n <= seq_post` or unposted) and by nothing else; a
 // digest comparison there is the round-9 hole (§3, §10a test 12's Fail line).
-func pathSeqStateTx(ctx context.Context, tx *sql.Tx, path string, epoch int64) (seq int64, digest string, known bool, err error) {
+func pathSeqStateTx(ctx context.Context, tx *sql.Tx, path, worktree string, epoch int64) (seq int64, digest string, known bool, err error) {
 	err = tx.QueryRowContext(ctx,
-		`SELECT seq, digest FROM path_seq WHERE path_canonical = ? AND epoch = ?`,
-		path, epoch).Scan(&seq, &digest)
+		`SELECT seq, digest FROM path_seq WHERE path_canonical = ? AND worktree = ? AND epoch = ?`,
+		path, worktree, epoch).Scan(&seq, &digest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, "", false, nil
 	}
@@ -271,12 +281,14 @@ func pathSeqStateTx(ctx context.Context, tx *sql.Tx, path string, epoch int64) (
 	return seq, digest, true, nil
 }
 
-// PathSeq reads (f, E)'s transition number. The one read a caller outside this
-// file needs; everything that ADVANCES it does so inside a write tx here.
-func (s *Store) PathSeq(ctx context.Context, path string, epoch int64) (int64, error) {
+// PathSeq reads (f, worktree, E)'s transition number. The one read a caller
+// outside this file needs; everything that ADVANCES it does so inside a write
+// tx here.
+func (s *Store) PathSeq(ctx context.Context, path, worktree string, epoch int64) (int64, error) {
 	var seq int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT seq FROM path_seq WHERE path_canonical = ? AND epoch = ?`, path, epoch).Scan(&seq)
+		`SELECT seq FROM path_seq WHERE path_canonical = ? AND worktree = ? AND epoch = ?`,
+		path, worktree, epoch).Scan(&seq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -299,10 +311,10 @@ func (s *Store) RecordCallPre(ctx context.Context, call HookCall, obs []HookPath
 	defer cleanup()
 
 	res, err := tx.ExecContext(ctx, `
-INSERT INTO hook_calls(call_id, owner_uuid, session_uuid, tool_name, t_pre, t_post, post_missing)
-VALUES (?, ?, ?, ?, ?, NULL, 0)
+INSERT INTO hook_calls(call_id, owner_uuid, session_uuid, tool_name, t_pre, t_post, post_missing, worktree)
+VALUES (?, ?, ?, ?, ?, NULL, 0, ?)
 ON CONFLICT(call_id) DO NOTHING`,
-		call.CallID, string(call.OwnerUUID), string(call.SessionUUID), call.ToolName, call.TPre.UnixNano())
+		call.CallID, string(call.OwnerUUID), string(call.SessionUUID), call.ToolName, call.TPre.UnixNano(), call.Worktree)
 	if err != nil {
 		return false, err
 	}
@@ -315,7 +327,7 @@ ON CONFLICT(call_id) DO NOTHING`,
 	}
 
 	for _, o := range obs {
-		seqPre, err := pathSeqAt(ctx, tx, o.Path, o.Epoch)
+		seqPre, err := pathSeqAt(ctx, tx, o.Path, call.Worktree, o.Epoch)
 		if err != nil {
 			return false, err
 		}
@@ -341,7 +353,7 @@ VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
 	// RecordCallPre already runs on every write-capable tool call and already
 	// holds this transaction, so folding the refresh in here is what keeps it
 	// to one UPDATE and no second round trip.
-	if err := refreshCallerLocksTx(ctx, tx, string(call.OwnerUUID), call.TPre); err != nil {
+	if err := refreshCallerLocksTx(ctx, tx, string(call.OwnerUUID), call.Worktree, call.TPre); err != nil {
 		return false, err
 	}
 
@@ -371,12 +383,12 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 	defer cleanup()
 
 	var postNs sql.NullInt64
-	var ownerStr, sessionStr string
+	var ownerStr, sessionStr, worktree string
 	var postMissing int
 	var tPreNs int64
 	if err := tx.QueryRowContext(ctx,
-		`SELECT t_post, owner_uuid, session_uuid, post_missing, t_pre FROM hook_calls WHERE call_id = ?`, callID,
-	).Scan(&postNs, &ownerStr, &sessionStr, &postMissing, &tPreNs); err != nil {
+		`SELECT t_post, owner_uuid, session_uuid, post_missing, t_pre, worktree FROM hook_calls WHERE call_id = ?`, callID,
+	).Scan(&postNs, &ownerStr, &sessionStr, &postMissing, &tPreNs, &worktree); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return PostOutcome{}, fmt.Errorf("%w: %s", ErrUnknownCall, callID)
 		}
@@ -384,7 +396,10 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 	}
 	// The observer is the call's OWN owner, read back rather than passed in:
 	// an event names who was watching, and the only sound source for that is
-	// the record the pre-hook wrote.
+	// the record the pre-hook wrote. Worktree is read back for the same reason
+	// (loto-v6xx): the post's own caller may run from a different cwd than the
+	// pre did in some hypothetical, and the pre's own record is what every
+	// path_seq / path_observed write for this call must stay scoped to.
 	owner := domain.AgentUUID(ownerStr)
 	if postNs.Valid {
 		return PostOutcome{}, nil // already posted: no-op
@@ -407,7 +422,7 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 
 	var out PostOutcome
 	for i := range obs {
-		if err := postOnePathWithEventTx(ctx, tx, callID, owner, obs[i], recorded, tPost, &out); err != nil {
+		if err := postOnePathWithEventTx(ctx, tx, callID, owner, worktree, obs[i], recorded, tPost, &out); err != nil {
 			return PostOutcome{}, err
 		}
 	}
@@ -429,17 +444,17 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 // postOnePathWithEventTx is one observed path's whole post: its record half,
 // the acted counter, observed(f), and the event a state change files. Split
 // out of RecordCallPost so that function stays a transaction and a loop.
-func postOnePathWithEventTx(ctx context.Context, tx *sql.Tx, callID string, owner domain.AgentUUID,
+func postOnePathWithEventTx(ctx context.Context, tx *sql.Tx, callID string, owner domain.AgentUUID, worktree string,
 	o HookPathState, recorded map[string]HookCallPath, tPost time.Time, out *PostOutcome,
 ) error {
-	res, err := postOnePathTx(ctx, tx, callID, o, recorded)
+	res, err := postOnePathTx(ctx, tx, callID, worktree, o, recorded)
 	if err != nil {
 		return err
 	}
 	// Acted BEFORE the event this path is about to file: the question is
 	// whether the digest now on disk is one an EARLIER delivered report named,
 	// and asking it first keeps the two passes independent of each other.
-	acted, err := markTreeChangeActedTx(ctx, tx, owner, o.Path, o.Digest, tPost)
+	acted, err := markTreeChangeActedTx(ctx, tx, owner, o.Path, worktree, o.Digest, tPost)
 	if err != nil {
 		return err
 	}
@@ -448,7 +463,7 @@ func postOnePathWithEventTx(ctx context.Context, tx *sql.Tx, callID string, owne
 	// Without this the next pre-hook would read the pre-call state as the last
 	// thing anyone saw and report this call's own write as drift.
 	if o.Locked {
-		if err := setObservedTx(ctx, tx, o, tPost); err != nil {
+		if err := setObservedTx(ctx, tx, o, worktree, tPost); err != nil {
 			return err
 		}
 	}
@@ -461,6 +476,7 @@ func postOnePathWithEventTx(ctx context.Context, tx *sql.Tx, callID string, owne
 		EpochNow: o.Epoch, HolderNow: o.Holder,
 		Observer: owner, CallID: callID, Seq: res.seqPost,
 		DigestPre: res.digestPre, DigestPost: o.Digest, Declared: res.declared,
+		Worktree: worktree,
 	}, tPost)
 	if err != nil {
 		return err
@@ -487,7 +503,7 @@ type postPathResult struct {
 // Folding them would have to invent a pre-state for the second, which is the
 // one thing an observation cannot do — nothing looked at that path before the
 // tool ran.
-func postOnePathTx(ctx context.Context, tx *sql.Tx, callID string, o HookPathState, recorded map[string]HookCallPath) (postPathResult, error) {
+func postOnePathTx(ctx context.Context, tx *sql.Tx, callID, worktree string, o HookPathState, recorded map[string]HookCallPath) (postPathResult, error) {
 	prev, wasRecorded := recorded[o.Path]
 	// A path first seen at post entered the status set inside the call — that
 	// IS the state change. A recorded path changed iff its content or its stat
@@ -504,7 +520,7 @@ func postOnePathTx(ctx context.Context, tx *sql.Tx, callID string, o HookPathSta
 		res.holderPre = prev.Holder
 		res.declared = prev.Declared
 	}
-	curSeq, curDigest, _, err := pathSeqStateTx(ctx, tx, o.Path, res.epoch)
+	curSeq, curDigest, _, err := pathSeqStateTx(ctx, tx, o.Path, worktree, res.epoch)
 	if err != nil {
 		return postPathResult{}, err
 	}
@@ -521,7 +537,7 @@ func postOnePathTx(ctx context.Context, tx *sql.Tx, callID string, o HookPathSta
 	case curSeq > seqPre && curDigest == o.Digest:
 		seqPost = curSeq
 	default:
-		if seqPost, err = nextPathSeq(ctx, tx, o.Path, res.epoch, o.Digest); err != nil {
+		if seqPost, err = nextPathSeq(ctx, tx, o.Path, worktree, res.epoch, o.Digest); err != nil {
 			return postPathResult{}, err
 		}
 	}
@@ -617,7 +633,7 @@ SELECT path_canonical, locked, declared, pre_observed, epoch_pre, holder_pre,
 	return call, paths, true, nil
 }
 
-const hookCallCols = `call_id,owner_uuid,session_uuid,tool_name,t_pre,t_post,post_missing,dead_at`
+const hookCallCols = `call_id,owner_uuid,session_uuid,tool_name,t_pre,t_post,post_missing,dead_at,worktree`
 
 // hookCallInFlightSQL is the one spelling of "still in flight", named once so
 // the sweep, the retention query and the in-flight read cannot drift apart.
@@ -639,7 +655,7 @@ func scanHookCall(sc rowScanner) (HookCall, error) {
 		postNs, deadNs sql.NullInt64
 		missing        int
 	)
-	if err := sc.Scan(&c.CallID, &owner, &session, &c.ToolName, &preNs, &postNs, &missing, &deadNs); err != nil {
+	if err := sc.Scan(&c.CallID, &owner, &session, &c.ToolName, &preNs, &postNs, &missing, &deadNs, &c.Worktree); err != nil {
 		return HookCall{}, err
 	}
 	c.OwnerUUID = domain.AgentUUID(owner)
@@ -1073,4 +1089,85 @@ func ensurePathSeqDigest(ctx context.Context, db sqlExecQuerier, apply bool) (bo
 		return false, nil
 	}
 	return true, nil
+}
+
+// ensureHookCallsWorktree adds hook_calls.worktree to an existing DB
+// (loto-v6xx): the checkout a call's hook ran in. Dirty unlocked paths use
+// epoch 0 in every checkout, so without this column an open call's paths
+// cannot be told apart from a sibling worktree's transitions to the same
+// repo-relative canonical. Same guarded ALTER shape as ensureHookCallsDeadAt;
+// ” is the legacy value, read by every query here the same way it always
+// has been — see the Rules on this bead's own bead body.
+func ensureHookCallsWorktree(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	return ensureColumn(ctx, db, apply, "hook_calls", "worktree",
+		`ALTER TABLE hook_calls ADD COLUMN worktree TEXT NOT NULL DEFAULT ''`)
+}
+
+// ensurePathSeqWorktree widens path_seq's PK from (path_canonical, epoch) to
+// (path_canonical, worktree, epoch) on an existing DB (loto-v6xx). Dirty
+// unlocked paths use epoch 0 in every checkout, so without worktree in the
+// key, a.go in worktree A and a.go in worktree B — one canonical path, two
+// unrelated physical files sharing this store — merge into one transition
+// line. SQLite cannot ALTER a primary key in place, so the table is rebuilt
+// (ensureLocksModeAndPK's 12-step idiom) inside the migrate tx; every
+// pre-existing row is given worktree = ”, the legacy line this bead's Rules
+// require unchanged behavior for. Guarded by a column probe — a no-op on a
+// fresh DB (schema.sql already declares the widened PK) and on every
+// re-Open. Ordered AFTER ensurePathSeqDigest in migrationEnsures: the SELECT
+// below names the digest column, which must already exist. user_version not
+// bumped (ensureLocksModeAndPK precedent — a bump trips MoveCorruptAside and
+// destroys live locks, loto-kwlp).
+func ensurePathSeqWorktree(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('path_seq') WHERE name = 'worktree'`,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return false, nil
+	}
+	if apply {
+		const rebuild = `
+CREATE TABLE path_seq_new (
+  path_canonical TEXT NOT NULL,
+  epoch          INTEGER NOT NULL,
+  seq            INTEGER NOT NULL,
+  digest         TEXT NOT NULL DEFAULT '',
+  worktree       TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (path_canonical, worktree, epoch)
+);
+INSERT INTO path_seq_new (path_canonical, epoch, seq, digest, worktree)
+SELECT path_canonical, epoch, seq, digest, '' FROM path_seq;
+DROP TABLE path_seq;
+ALTER TABLE path_seq_new RENAME TO path_seq;`
+		if _, err := db.ExecContext(ctx, rebuild); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
+// init registers this bead's four ensure steps onto store.go's
+// migrationEnsures list from here rather than editing that literal in place
+// (loto-v6xx). store.go is shared write-set with other in-flight lanes on
+// this checkout; appending in this file's own init avoids a same-line
+// collision with a concurrent lane's own append to the same slice literal.
+// Order is still correct: package-level var initializers (store.go's literal)
+// run before any init(), and this one runs after ensurePathSeqDigest is
+// already in the list — the SELECT in ensurePathSeqWorktree needs that
+// column to exist, exactly the ordering migrationEnsures' own doc comment
+// requires of a new step.
+func init() { //nolint:gochecknoinits // additive registration, same pattern as the command registry
+	migrationEnsures = append(migrationEnsures,
+		struct {
+			name string
+			fn   ensureFn
+		}{"add hook_calls.worktree", ensureHookCallsWorktree},
+		struct {
+			name string
+			fn   ensureFn
+		}{"scope path_seq to worktree", ensurePathSeqWorktree},
+	)
 }

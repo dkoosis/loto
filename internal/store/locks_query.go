@@ -15,15 +15,26 @@ func (s *Store) ListLocks(ctx context.Context) ([]domain.LockRecord, error) {
 	return scanLocksRows(rows)
 }
 
-// LockForOwnerAt returns the single lock at target held by owner, or (nil,nil)
-// if none. Replaces LockAt for the multi-holder world: under the composite PK
-// LockAt's bare WHERE target_canonical=? can match several rows (a shared
-// target with several holders) and returns an arbitrary one (loto-k5el.2).
+// LockForOwnerAt returns the single lock at target held by owner IN THIS
+// STORE'S OWN WORKTREE, or (nil,nil) if none. Replaces LockAt for the
+// multi-holder world: under the composite PK LockAt's bare WHERE
+// target_canonical=? can match several rows (a shared target with several
+// holders) and returns an arbitrary one (loto-k5el.2).
+//
+// ‡ Worktree-scoped (loto-8z87): since the PK widened to (target_canonical,
+// owner_uuid, worktree), one owner can hold a row per linked worktree of this
+// repo. A caller asking "do I hold this" means its OWN checkout — s.repoTop —
+// not a sibling's; a legacy row (worktree "") still matches any repoTop
+// (domain.SameWorktree). A store opened without a repo top (repoTop == "")
+// keeps today's reach: every worktree's row is visible, same as before this
+// bead.
 func (s *Store) LockForOwnerAt(ctx context.Context, t domain.Target, owner domain.AgentUUID) (*domain.LockRecord, error) {
 	k := s.keys()
+	wtCond, wtArgs := worktreeFilter(s.repoTop)
+	args := append([]any{k.key(t.Canonical), string(owner)}, wtArgs...)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+lockCols+` FROM locks WHERE `+k.col("target_canonical")+` = ? AND owner_uuid = ?`, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
-		k.key(t.Canonical), string(owner))
+		`SELECT `+lockCols+` FROM locks WHERE `+k.col("target_canonical")+` = ? AND owner_uuid = ? AND `+wtCond, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
+		args...)
 	if err != nil {
 		return nil, err
 	}
@@ -43,11 +54,9 @@ func (s *Store) LockForOwnerAt(ctx context.Context, t domain.Target, owner domai
 
 // LocksForOwnerAt is the batched LockForOwnerAt: one owner-scoped query over the
 // whole target set, returning owner's lock at each target keyed by canonical
-// path. A target the owner does not hold is absent from the map — the caller
-// reads a missing entry exactly as LockForOwnerAt's (nil,nil) "no row". Under the
-// composite PK (target_canonical, owner_uuid) each (target, owner) pair yields at
-// most one row, so the map is unambiguous; this collapses a lane assert's 2N
-// point queries to one (loto-89n3).
+// path. A target the owner does not hold in THIS STORE'S OWN WORKTREE
+// (s.repoTop, or a legacy "" row — loto-8z87) is absent from the map — the
+// caller reads a missing entry exactly as LockForOwnerAt's (nil,nil) "no row".
 func (s *Store) LocksForOwnerAt(ctx context.Context, targets []domain.Target, owner domain.AgentUUID) (map[string]domain.LockRecord, error) {
 	out := make(map[string]domain.LockRecord, len(targets))
 	if len(targets) == 0 {
@@ -55,9 +64,10 @@ func (s *Store) LocksForOwnerAt(ctx context.Context, targets []domain.Target, ow
 	}
 	k := s.keys()
 	placeholders, args := k.inTargets(targets)
-	args = append([]any{string(owner)}, args...)
+	wtCond, wtArgs := worktreeFilter(s.repoTop)
+	args = append(append([]any{string(owner)}, wtArgs...), args...)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+lockCols+` FROM locks WHERE owner_uuid = ? AND `+k.col("target_canonical")+` IN (`+placeholders+`)`, //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+		`SELECT `+lockCols+` FROM locks WHERE owner_uuid = ? AND `+wtCond+` AND `+k.col("target_canonical")+` IN (`+placeholders+`)`, //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 		args...)
 	if err != nil {
 		return nil, err

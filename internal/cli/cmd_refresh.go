@@ -105,11 +105,21 @@ func refreshTargets(rt *runtime, args []string, all bool, stderr io.Writer) ([]d
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return nil, 3
 	}
+	// Only this checkout's rows, once each (loto-8z87, PR #373 review): one
+	// owner may hold the same canonical in several linked worktrees, and
+	// RefreshLocks is scoped to rt.RepoTop — a sibling-only row would come
+	// back no-lock-held and a row held in both would be submitted twice.
 	var targets []domain.Target
+	seen := map[string]bool{}
 	for i := range locks {
-		if string(locks[i].OwnerUUID) == rt.Agent.UUID {
-			targets = append(targets, locks[i].Target)
+		if string(locks[i].OwnerUUID) != rt.Agent.UUID || !domain.SameWorktree(locks[i].Worktree, rt.RepoTop) {
+			continue
 		}
+		if seen[locks[i].Target.Canonical] {
+			continue
+		}
+		seen[locks[i].Target.Canonical] = true
+		targets = append(targets, locks[i].Target)
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Canonical < targets[j].Canonical })
 	return targets, 0

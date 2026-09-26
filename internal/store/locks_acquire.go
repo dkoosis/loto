@@ -131,7 +131,7 @@ func (s *Store) insertAllLocks(ctx context.Context, tx *sql.Tx, sorted, all []do
 		// was actually persisted under, not the zero value the caller built it
 		// with — a caller minting a candidate envelope's LeaseEpoch reads this.
 		sorted[i].Epoch = epoch
-		written, err := insertOrRefreshLock(ctx, tx, sorted[i], beaconMaySupersede(sorted[i], all, ec), epoch)
+		written, err := insertOrRefreshLock(ctx, tx, sorted[i], beaconMaySupersede(sorted[i], all, ec), epoch, keysFor(ec))
 		if err != nil {
 			return err
 		}
@@ -318,12 +318,43 @@ func beaconMaySupersede(l domain.LockRecord, all []domain.LockRecord, ec domain.
 	}
 	for i := range all {
 		ex := &all[i]
-		if ex.OwnerUUID != l.OwnerUUID || !ec.SameTarget(ex.Target, l.Target) {
+		// A row from a sibling worktree is a different file on disk
+		// (loto-3eq6, loto-8z87): never yielded to, never superseded from
+		// here. Without this, a beacon in worktree B for its own copy of a
+		// path was suppressed by an unrelated explicit lock the SAME owner
+		// holds in worktree A — the sibling-session-sharing-one-owner shape
+		// loto-81n supports.
+		if ex.OwnerUUID != l.OwnerUUID || !ec.SameTarget(ex.Target, l.Target) || !domain.SameWorktree(ex.Worktree, l.Worktree) {
 			continue
 		}
 		return ec.IsStale(*ex)
 	}
-	return true // no same-owner row to yield to
+	return true // no same-owner, same-worktree row to yield to
+}
+
+// adoptLegacyWorktreeRow stamps l's worktree onto the same owner's legacy
+// row at l's target — one written before locks.worktree existed, or by a store
+// with no repo frame, so its worktree is empty — when l names a worktree
+// (loto-8z87, PR #373 review). Under the old (target_canonical, owner_uuid)
+// key that re-acquire refreshed the legacy row, worktree included; under the
+// widened key it would INSERT a second row beside it, and worktreeFilter
+// matches both, so owner lookups and releases lose their one-row answer.
+// UPDATE OR IGNORE leaves the legacy row alone when this worktree already has
+// its own row: then the upsert below refreshes that one, as before.
+//
+// The target is the name the caller typed, so it matches under k's fold, the
+// same as resolveEpoch's SameTarget (PR #373 review): on a case-folding store
+// a legacy Foo.go row is the file the CLI now names foo.go. Adoption also
+// rewrites target_canonical to the caller's key, because the upsert's ON
+// CONFLICT is byte-exact and would otherwise insert beside the adopted row.
+func adoptLegacyWorktreeRow(ctx context.Context, tx *sql.Tx, l domain.LockRecord, k keyMatch) error {
+	if l.Worktree == "" {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx,
+		`UPDATE OR IGNORE locks SET worktree = ?, target_canonical = ? WHERE `+k.col("target_canonical")+` = ? AND owner_uuid = ? AND worktree = ''`, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
+		l.Worktree, l.Target.Canonical, k.key(l.Target.Canonical), string(l.OwnerUUID))
+	return err
 }
 
 // insertOrRefreshLock upserts one lock row and reports whether the row was
@@ -338,7 +369,7 @@ func beaconMaySupersede(l domain.LockRecord, all []domain.LockRecord, ec domain.
 // while the counter moved on, so a same-owner re-acquire after its OWN TTL
 // lapsed left row and counter permanently divergent and an epoch check read a
 // stale envelope as current.
-func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, supersede bool, epoch int64) (bool, error) {
+func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, supersede bool, epoch int64, k keyMatch) (bool, error) {
 	// Map 0 (UNKNOWN) → NULL at the store boundary so an absent start-time is a
 	// SQL null, matching legacy rows. A refresh re-stamps proc_start because the
 	// holder is the same process (same pid, same start-time).
@@ -346,12 +377,22 @@ func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, s
 	if l.ProcStart != 0 {
 		procStart = l.ProcStart
 	}
-	// ON CONFLICT targets the composite PK (target_canonical, owner_uuid) added in
-	// loto-k5el.2 — so a same-owner re-acquire upserts its single row while a
-	// different owner inserts a coexisting row (multi-holder). The old
-	// `WHERE locks.owner_uuid = excluded.owner_uuid` guard is now redundant (the
-	// conflict is keyed on owner) and dropped. Persist EffectiveMode() (not raw
-	// l.Mode) so the column never stores '' (loto-k5el.2 T3).
+	if err := adoptLegacyWorktreeRow(ctx, tx, l, k); err != nil {
+		return false, err
+	}
+	// ON CONFLICT targets the composite PK (target_canonical, owner_uuid,
+	// worktree) — owner_uuid added in loto-k5el.2, worktree added in loto-8z87
+	// — so a same-owner, same-worktree re-acquire upserts its single row while
+	// a different owner OR a different worktree under the same owner inserts a
+	// coexisting row (multi-holder, or one owner's independent copies of a
+	// path in two linked worktrees). Before loto-8z87, worktree was a plain
+	// column outside the conflict target: a same-owner acquire from a
+	// DIFFERENT worktree still matched the old two-column key and silently
+	// overwrote the first worktree's row instead of inserting beside it. The
+	// old `WHERE locks.owner_uuid = excluded.owner_uuid` guard is now
+	// redundant (the conflict is keyed on owner) and dropped. Persist
+	// EffectiveMode() (not raw l.Mode) so the column never stores ''
+	// (loto-k5el.2 T3).
 	//
 	// ‡ The DO UPDATE WHERE is the beacon yield (loto-xl4g, Codex #249): an
 	// incoming BEACON never overwrites an existing LIVE NON-beacon row of the
@@ -374,7 +415,7 @@ func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, s
 	res, err := tx.ExecContext(ctx, `
 INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, mode, beacon, epoch, worktree)
 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
+ON CONFLICT(target_canonical, owner_uuid, worktree) DO UPDATE SET
   intent=excluded.intent,
   expires_at=excluded.expires_at,
   session_uuid=excluded.session_uuid,
@@ -384,8 +425,7 @@ ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
   branch=excluded.branch,
   mode=excluded.mode,
   beacon=excluded.beacon,
-  epoch=excluded.epoch,
-  worktree=excluded.worktree
+  epoch=excluded.epoch
 WHERE ? = 1
    OR excluded.beacon = 0
    OR locks.beacon = 1`,

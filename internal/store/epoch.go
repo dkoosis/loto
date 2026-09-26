@@ -53,11 +53,39 @@ RETURNING epoch`, path).Scan(&epoch)
 // still a reclaim. Only a row that is both present AND live is a genuine
 // renewal; present-but-stale takes the same fresh-grant path a stranger's
 // reclaim would.
+//
+// ‡ The row must be the one the upsert will actually touch (loto-8z87, PR #373
+// review): the same owner's LIVE row in a SIBLING worktree is a different
+// file's grant, and reusing its epoch for this worktree's fresh acquire would
+// let an envelope minted under an earlier grant here pass the epoch fence.
+// renewedRow mirrors insertOrRefreshLock: this worktree's own row, else a
+// legacy blank-worktree row that adoptLegacyWorktreeRow is about to stamp.
 func resolveEpoch(ctx context.Context, tx *sql.Tx, l domain.LockRecord, all []domain.LockRecord, ec domain.EvalContext) (int64, error) {
-	for i := range all {
-		if all[i].OwnerUUID == l.OwnerUUID && ec.SameTarget(all[i].Target, l.Target) && !ec.IsStale(all[i]) {
-			return all[i].Epoch, nil // renewal: preserve
-		}
+	if ex := renewedRow(l, all, ec); ex != nil && !ec.IsStale(*ex) {
+		return ex.Epoch, nil // renewal: preserve
 	}
 	return nextPathEpoch(ctx, tx, l.Target.Canonical) // fresh grant: bump
+}
+
+// renewedRow finds the row in all that l's upsert will land on: same owner,
+// same target, and exactly l's worktree — or, when l names a worktree and no
+// such row exists, a legacy row with none (adopted in place, loto-8z87).
+func renewedRow(l domain.LockRecord, all []domain.LockRecord, ec domain.EvalContext) *domain.LockRecord {
+	var legacy *domain.LockRecord
+	for i := range all {
+		ex := &all[i]
+		if ex.OwnerUUID != l.OwnerUUID || !ec.SameTarget(ex.Target, l.Target) {
+			continue
+		}
+		switch {
+		case ex.Worktree == l.Worktree:
+			return ex
+		case ex.Worktree == "" && legacy == nil:
+			legacy = ex
+		}
+	}
+	if l.Worktree == "" {
+		return nil
+	}
+	return legacy
 }

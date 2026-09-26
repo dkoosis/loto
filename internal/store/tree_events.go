@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS path_observed (
   stat           TEXT NOT NULL DEFAULT '',
   digest         TEXT NOT NULL DEFAULT '',
   observed_at    INTEGER NOT NULL,
-  PRIMARY KEY (path_canonical, epoch)
+  worktree       TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (path_canonical, worktree, epoch)
 );
 
 CREATE TABLE IF NOT EXISTS tree_events (
@@ -48,7 +49,8 @@ CREATE TABLE IF NOT EXISTS tree_events (
   declared       INTEGER NOT NULL DEFAULT 0,
   rule           TEXT NOT NULL DEFAULT '',
   note           TEXT NOT NULL DEFAULT '',
-  created_at     INTEGER NOT NULL
+  created_at     INTEGER NOT NULL,
+  worktree       TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_tree_events_path ON tree_events(path_canonical, seq);
 
@@ -157,6 +159,9 @@ type TreeEvent struct {
 	CreatedAt  time.Time
 	// Spanners is every OTHER owner's call that spans this transition, sorted.
 	Spanners []TreeSpanner
+	// Worktree: the checkout that observed this transition (loto-v6xx). ''
+	// for a legacy event or a drift with no worktree context.
+	Worktree string
 }
 
 // TreeSpanner is one call that spans a transition: `seq_pre < n` and
@@ -199,6 +204,10 @@ type treeEventInput struct {
 	// Drift: filed by I3 step 2, not by a call's post. There is no observer
 	// call, so the classification skips the verdict table entirely.
 	Drift bool
+	// Worktree: the checkout that observed this transition (loto-v6xx),
+	// threaded into spannersTx so a sibling worktree's call at the same
+	// canonical path is never read as spanning it.
+	Worktree string
 }
 
 // spannersTx is §3's contested test, and the only place it is written.
@@ -214,15 +223,22 @@ type treeEventInput struct {
 // may write next. A call whose owner the probe found dead has ENDED (§3's
 // second ending) and spans nothing: §6's "A is dead. Not in flight, so nothing
 // spans."
-func spannersTx(ctx context.Context, tx *sql.Tx, path string, epoch, seq int64, observer domain.AgentUUID) ([]TreeSpanner, error) {
+//
+// ‡ worktree scopes the join to c.worktree = worktree (loto-v6xx): dirty
+// unlocked paths use epoch 0 in every checkout, so without this an open call
+// on a.go in worktree A would be read as spanning a transition to a.go
+// observed in worktree B — two unrelated physical files sharing this store
+// and one repo-relative canonical.
+func spannersTx(ctx context.Context, tx *sql.Tx, path, worktree string, epoch, seq int64, observer domain.AgentUUID) ([]TreeSpanner, error) {
 	rows, err := tx.QueryContext(ctx, `
 SELECT p.call_id, c.owner_uuid
   FROM hook_call_paths p JOIN hook_calls c ON c.call_id = p.call_id
  WHERE p.path_canonical = ? AND p.epoch_pre = ?
+   AND c.worktree = ?
    AND c.owner_uuid <> ?
    AND p.seq_pre < ?
    AND (p.seq_post >= ? OR (c.t_post IS NULL AND c.dead_at IS NULL))
- ORDER BY c.owner_uuid, p.call_id`, path, epoch, string(observer), seq, seq)
+ ORDER BY c.owner_uuid, p.call_id`, path, epoch, worktree, string(observer), seq, seq)
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +332,7 @@ func treeAddressees(in treeEventInput, spanners []TreeSpanner) []domain.AgentUUI
 // that cites it and the report that carries it commit together or not at all,
 // so no reader can see a seq with no event or an event with no report.
 func fileTreeEventTx(ctx context.Context, tx *sql.Tx, in treeEventInput, now time.Time) (TreeEvent, error) {
-	spanners, err := spannersTx(ctx, tx, in.Path, in.EpochPre, in.Seq, in.Observer)
+	spanners, err := spannersTx(ctx, tx, in.Path, in.Worktree, in.EpochPre, in.Seq, in.Observer)
 	if err != nil {
 		return TreeEvent{}, err
 	}
@@ -328,15 +344,16 @@ func fileTreeEventTx(ctx context.Context, tx *sql.Tx, in treeEventInput, now tim
 		Observer: in.Observer, CallID: in.CallID, Seq: in.Seq,
 		DigestPre: in.DigestPre, DigestPost: in.DigestPost, Declared: in.Declared,
 		Rule: rule, Note: treeRuleNote[rule], CreatedAt: now, Spanners: spanners,
+		Worktree: in.Worktree,
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO tree_events(event_id, path_canonical, epoch_pre, holder_pre, holder_now, epoch_now,
                         observer_uuid, call_id, seq, digest_pre, digest_post, declared,
-                        rule, note, created_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+                        rule, note, created_at, worktree)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ev.EventID, ev.Path, ev.EpochPre, string(ev.HolderPre), string(ev.HolderNow), ev.EpochNow,
 		string(ev.Observer), ev.CallID, ev.Seq, ev.DigestPre, ev.DigestPost, boolInt(ev.Declared),
-		ev.Rule, ev.Note, now.UnixNano()); err != nil {
+		ev.Rule, ev.Note, now.UnixNano(), ev.Worktree); err != nil {
 		return TreeEvent{}, err
 	}
 	for i := range spanners {
@@ -414,11 +431,11 @@ func appendTreeChangeReportedTx(ctx context.Context, tx *sql.Tx, ev TreeEvent, w
 // worth building, so the observable is the one thing a holder can do today.
 // Digest equality is sound here and nowhere else — this is not an attribution
 // question, it is "is the content the report named back on disk".
-func markTreeChangeActedTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, path, digest string, now time.Time) ([]string, error) {
+func markTreeChangeActedTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, path, worktree, digest string, now time.Time) ([]string, error) {
 	if digest == "" || owner == "" {
 		return nil, nil
 	}
-	answered, err := answeredReportsTx(ctx, tx, owner, path, digest, now)
+	answered, err := answeredReportsTx(ctx, tx, owner, path, worktree, digest, now)
 	if err != nil || len(answered) == 0 {
 		return nil, err
 	}
@@ -469,9 +486,9 @@ type answeredReport struct {
 
 // answeredReportsTx reads them, so the UPDATE loop above has its own scope and
 // the rows handle is closed before any write on the same tx.
-func answeredReportsTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, path, digest string, now time.Time) ([]answeredReport, error) {
+func answeredReportsTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, path, worktree, digest string, now time.Time) ([]answeredReport, error) {
 	rows, err := tx.QueryContext(ctx, answeredReportsSQL,
-		string(owner), path, digest, now.Add(-TreeActedWindow).UnixNano())
+		string(owner), path, worktree, digest, now.Add(-TreeActedWindow).UnixNano())
 	if err != nil {
 		return nil, err
 	}
@@ -489,11 +506,14 @@ func answeredReportsTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, 
 
 // answeredReportsSQL finds every report this owner was HANDED inside the
 // window that said the path went from the digest it is now back at, and that
-// nothing has been counted against yet.
+// nothing has been counted against yet. e.worktree scopes it to the
+// checkout the answering call ran in (loto-v6xx, PR #374 review): a.go in a
+// sibling worktree is a different file, and putting the same bytes back on
+// this one answers nothing a report about that one said.
 const answeredReportsSQL = `
 SELECT r.report_id, e.rule, e.seq, e.holder_pre
   FROM tree_reports r JOIN tree_events e ON e.event_id = r.event_id
- WHERE r.addressee_uuid = ? AND e.path_canonical = ? AND e.digest_pre = ?
+ WHERE r.addressee_uuid = ? AND e.path_canonical = ? AND e.worktree = ? AND e.digest_pre = ?
    AND r.delivered_at IS NOT NULL AND r.delivered_at >= ? AND r.acted_at IS NULL
  ORDER BY e.seq DESC, r.report_id`
 
@@ -525,7 +545,7 @@ type DriftOutcome struct {
 // keyed (f, E), so the first pre after a lock is taken — or after the lock
 // changes hands — has nothing to compare against, and inventing a drift there
 // would report every lock acquisition as a mutation.
-func (s *Store) RecordDrift(ctx context.Context, observer domain.AgentUUID, now time.Time, obs []HookPathState) (DriftOutcome, error) {
+func (s *Store) RecordDrift(ctx context.Context, observer domain.AgentUUID, worktree string, now time.Time, obs []HookPathState) (DriftOutcome, error) {
 	var out DriftOutcome
 	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
@@ -537,7 +557,7 @@ func (s *Store) RecordDrift(ctx context.Context, observer domain.AgentUUID, now 
 		if !obs[i].Locked {
 			continue
 		}
-		verdict, err := driftOnePathTx(ctx, tx, observer, obs[i], now)
+		verdict, err := driftOnePathTx(ctx, tx, observer, worktree, obs[i], now)
 		if err != nil {
 			return DriftOutcome{}, err
 		}
@@ -590,8 +610,8 @@ const (
 // its owner dies, the dead-owner sweep ends the call and the next pre files the
 // drift then. The observer's own in-flight calls count too — the property that
 // matters is that some post is still coming, not whose.
-func driftOnePathTx(ctx context.Context, tx *sql.Tx, observer domain.AgentUUID, o HookPathState, now time.Time) (driftVerdict, error) {
-	prevStat, prevDigest, known, err := observedAtTx(ctx, tx, o.Path, o.Epoch)
+func driftOnePathTx(ctx context.Context, tx *sql.Tx, observer domain.AgentUUID, worktree string, o HookPathState, now time.Time) (driftVerdict, error) {
+	prevStat, prevDigest, known, err := observedAtTx(ctx, tx, o.Path, worktree, o.Epoch)
 	if err != nil {
 		return driftUnchanged, err
 	}
@@ -599,16 +619,16 @@ func driftOnePathTx(ctx context.Context, tx *sql.Tx, observer domain.AgentUUID, 
 		return driftUnchanged, nil
 	}
 	if !known {
-		return driftSeeded, setObservedTx(ctx, tx, o, now)
+		return driftSeeded, setObservedTx(ctx, tx, o, worktree, now)
 	}
-	covered, err := inFlightCallRecordedTx(ctx, tx, o.Path, o.Epoch)
+	covered, err := inFlightCallRecordedTx(ctx, tx, o.Path, worktree, o.Epoch)
 	if err != nil {
 		return driftUnchanged, err
 	}
 	if covered {
 		return driftDeferred, nil
 	}
-	seq, err := nextPathSeq(ctx, tx, o.Path, o.Epoch, o.Digest)
+	seq, err := nextPathSeq(ctx, tx, o.Path, worktree, o.Epoch, o.Digest)
 	if err != nil {
 		return driftUnchanged, err
 	}
@@ -617,28 +637,31 @@ func driftOnePathTx(ctx context.Context, tx *sql.Tx, observer domain.AgentUUID, 
 		EpochNow: o.Epoch, HolderNow: o.Holder,
 		Observer: observer, Seq: seq,
 		DigestPre: prevDigest, DigestPost: o.Digest, Drift: true,
+		Worktree: worktree,
 	}, now); err != nil {
 		return driftUnchanged, err
 	}
-	return driftFiled, setObservedTx(ctx, tx, o, now)
+	return driftFiled, setObservedTx(ctx, tx, o, worktree, now)
 }
 
 // inFlightCallRecordedTx reports whether some open call recorded this path at
-// this epoch — the call whose post will file the change drift would otherwise
-// file a second time.
-func inFlightCallRecordedTx(ctx context.Context, tx *sql.Tx, path string, epoch int64) (bool, error) {
+// this epoch in this worktree — the call whose post will file the change
+// drift would otherwise file a second time. Scoped to worktree (loto-v6xx)
+// for the same reason spannersTx is: a sibling worktree's in-flight call at
+// this canonical path covers nothing here.
+func inFlightCallRecordedTx(ctx context.Context, tx *sql.Tx, path, worktree string, epoch int64) (bool, error) {
 	var n int
 	err := tx.QueryRowContext(ctx, `
 SELECT count(*) FROM hook_call_paths p JOIN hook_calls c ON c.call_id = p.call_id
- WHERE p.path_canonical = ? AND p.epoch_pre = ? AND c.t_post IS NULL AND c.dead_at IS NULL`,
-		path, epoch).Scan(&n)
+ WHERE p.path_canonical = ? AND p.epoch_pre = ? AND c.worktree = ? AND c.t_post IS NULL AND c.dead_at IS NULL`,
+		path, epoch, worktree).Scan(&n)
 	return n > 0, err
 }
 
-func observedAtTx(ctx context.Context, tx *sql.Tx, path string, epoch int64) (stat, digest string, known bool, err error) {
+func observedAtTx(ctx context.Context, tx *sql.Tx, path, worktree string, epoch int64) (stat, digest string, known bool, err error) {
 	err = tx.QueryRowContext(ctx,
-		`SELECT stat, digest FROM path_observed WHERE path_canonical = ? AND epoch = ?`,
-		path, epoch).Scan(&stat, &digest)
+		`SELECT stat, digest FROM path_observed WHERE path_canonical = ? AND worktree = ? AND epoch = ?`,
+		path, worktree, epoch).Scan(&stat, &digest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", false, nil
 	}
@@ -648,13 +671,13 @@ func observedAtTx(ctx context.Context, tx *sql.Tx, path string, epoch int64) (st
 	return stat, digest, true, nil
 }
 
-func setObservedTx(ctx context.Context, tx *sql.Tx, o HookPathState, now time.Time) error {
+func setObservedTx(ctx context.Context, tx *sql.Tx, o HookPathState, worktree string, now time.Time) error {
 	_, err := tx.ExecContext(ctx, `
-INSERT INTO path_observed(path_canonical, epoch, stat, digest, observed_at) VALUES (?,?,?,?,?)
-ON CONFLICT(path_canonical, epoch) DO UPDATE SET stat = excluded.stat,
+INSERT INTO path_observed(path_canonical, epoch, stat, digest, observed_at, worktree) VALUES (?,?,?,?,?,?)
+ON CONFLICT(path_canonical, worktree, epoch) DO UPDATE SET stat = excluded.stat,
                                                  digest = excluded.digest,
                                                  observed_at = excluded.observed_at`,
-		o.Path, o.Epoch, o.Stat, o.Digest, now.UnixNano())
+		o.Path, o.Epoch, o.Stat, o.Digest, now.UnixNano(), worktree)
 	return err
 }
 
@@ -713,7 +736,7 @@ func (s *Store) DeliverReports(ctx context.Context, addressee domain.AgentUUID, 
 const treeReportSelect = `SELECT r.report_id, r.addressee_uuid, r.created_at, r.delivered_at,
        e.event_id, e.path_canonical, e.epoch_pre, e.holder_pre, e.holder_now, e.epoch_now,
        e.observer_uuid, e.call_id, e.seq, e.digest_pre, e.digest_post, e.declared,
-       e.rule, e.note, e.created_at
+       e.rule, e.note, e.created_at, e.worktree
   FROM tree_reports r JOIN tree_events e ON e.event_id = r.event_id
  WHERE r.delivered_at IS NULL`
 
@@ -773,7 +796,7 @@ func scanTreeReport(rows *sql.Rows) (TreeReport, error) {
 	if err := rows.Scan(&r.ReportID, &addressee, &createdNs, &deliveredNs,
 		&r.Event.EventID, &r.Event.Path, &r.Event.EpochPre, &holderPre, &holderNow, &r.Event.EpochNow,
 		&observerStr, &r.Event.CallID, &r.Event.Seq, &r.Event.DigestPre, &r.Event.DigestPost, &declared,
-		&r.Event.Rule, &r.Event.Note, &evCreatedNs); err != nil {
+		&r.Event.Rule, &r.Event.Note, &evCreatedNs, &r.Event.Worktree); err != nil {
 		return TreeReport{}, err
 	}
 	r.Addressee = domain.AgentUUID(addressee)
@@ -814,7 +837,7 @@ func (s *Store) spannersOf(ctx context.Context, eventID string) ([]TreeSpanner, 
 func (s *Store) TreeEventsFor(ctx context.Context, path string) ([]TreeEvent, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT event_id, path_canonical, epoch_pre, holder_pre, holder_now, epoch_now,
-       observer_uuid, call_id, seq, digest_pre, digest_post, declared, rule, note, created_at
+       observer_uuid, call_id, seq, digest_pre, digest_post, declared, rule, note, created_at, worktree
   FROM tree_events WHERE path_canonical = ? ORDER BY seq, event_id`, path)
 	if err != nil {
 		return nil, err
@@ -830,7 +853,7 @@ SELECT event_id, path_canonical, epoch_pre, holder_pre, holder_now, epoch_now,
 		)
 		if err := rows.Scan(&e.EventID, &e.Path, &e.EpochPre, &holderPre, &holderNow, &e.EpochNow,
 			&observerStr, &e.CallID, &e.Seq, &e.DigestPre, &e.DigestPost, &declared,
-			&e.Rule, &e.Note, &createdNs); err != nil {
+			&e.Rule, &e.Note, &createdNs, &e.Worktree); err != nil {
 			return nil, err
 		}
 		e.HolderPre = domain.AgentUUID(holderPre)
@@ -958,4 +981,72 @@ SELECT r.report_id, r.addressee_uuid, e.path_canonical, e.rule, e.seq, e.holder_
 		})
 	}
 	return ids, dropped, rows.Err()
+}
+
+// ensurePathObservedWorktree widens path_observed's PK from (path_canonical,
+// epoch) to (path_canonical, worktree, epoch) on an existing DB (loto-v6xx).
+// Same rationale, rebuild shape and legacy-row handling as
+// ensurePathSeqWorktree in hook_calls.go: a.go in worktree A and a.go in
+// worktree B must be observed independently, and SQLite cannot ALTER a
+// primary key in place. user_version not bumped.
+func ensurePathObservedWorktree(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('path_observed') WHERE name = 'worktree'`,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return false, nil
+	}
+	if apply {
+		const rebuild = `
+CREATE TABLE path_observed_new (
+  path_canonical TEXT NOT NULL,
+  epoch          INTEGER NOT NULL,
+  stat           TEXT NOT NULL DEFAULT '',
+  digest         TEXT NOT NULL DEFAULT '',
+  observed_at    INTEGER NOT NULL,
+  worktree       TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (path_canonical, worktree, epoch)
+);
+INSERT INTO path_observed_new (path_canonical, epoch, stat, digest, observed_at, worktree)
+SELECT path_canonical, epoch, stat, digest, observed_at, '' FROM path_observed;
+DROP TABLE path_observed;
+ALTER TABLE path_observed_new RENAME TO path_observed;`
+		if _, err := db.ExecContext(ctx, rebuild); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
+// ensureTreeEventsWorktree adds tree_events.worktree to an existing DB
+// (loto-v6xx): the checkout that observed the transition, carried on the
+// event record itself. Same guarded ALTER shape as ensureTreeReportsActedAt;
+// ” is the legacy value.
+func ensureTreeEventsWorktree(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	return ensureColumn(ctx, db, apply, "tree_events", "worktree",
+		`ALTER TABLE tree_events ADD COLUMN worktree TEXT NOT NULL DEFAULT ''`)
+}
+
+// init registers this file's two ensure steps the same way hook_calls.go's
+// init does (loto-v6xx) — appended here rather than edited into store.go's
+// migrationEnsures literal, to avoid a same-line collision with a concurrent
+// lane's own append to that shared slice. Go runs init funcs in file order
+// (hook_calls.go before tree_events.go), so this lands after that file's two
+// entries — after ensurePathSeqDigest either way, which is all correctness
+// requires here.
+func init() { //nolint:gochecknoinits // additive registration, same pattern as hook_calls.go's init
+	migrationEnsures = append(migrationEnsures,
+		struct {
+			name string
+			fn   ensureFn
+		}{"scope path_observed to worktree", ensurePathObservedWorktree},
+		struct {
+			name string
+			fn   ensureFn
+		}{"add tree_events.worktree", ensureTreeEventsWorktree},
+	)
 }

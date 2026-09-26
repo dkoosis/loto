@@ -3,6 +3,9 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,5 +120,190 @@ func TestAcquireLocks_DoesNotReclaimStaleSiblingWorktreeRow(t *testing.T) {
 	}
 	if owners := ownersAt(t, s, bob.Target); len(owners) != 2 {
 		t.Errorf("both worktrees' rows must stand, holders now %v", owners)
+	}
+}
+
+// loto-8z87: the locks PK was (target_canonical, owner_uuid) only, so ONE
+// owner taking the SAME repo-relative path in two linked worktrees (sibling
+// sessions sharing one LOTO_AGENT_ID, loto-81n) collided on acquire — the
+// second INSERT ... ON CONFLICT silently overwrote the first row's worktree,
+// lease and epoch, and the first worktree's lock vanished with no error. The
+// worktree is now part of the key: (target_canonical, owner_uuid, worktree).
+
+// TestAcquireLocks_SameOwnerTwoWorktrees_TwoRows: one owner acquiring a.go
+// stamped wtA then wtB must end up with two coexisting rows, one per
+// worktree — not one row whose worktree flips to the latest acquire.
+func TestAcquireLocks_SameOwnerTwoWorktrees_TwoRows(t *testing.T) {
+	wtA, wtB := t.TempDir(), t.TempDir()
+	s := mustOpenWithRepoTop(t, wtA)
+	ctx := context.Background()
+	a := mkFileLock(t, tcAGo, tcAlice, time.Hour)
+	a.Worktree = wtA
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	b := a
+	b.Worktree = wtB
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := s.LocksAt(ctx, a.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows (one per worktree), got %d: %+v", len(rows), rows)
+	}
+	seen := map[string]bool{}
+	for _, r := range rows {
+		if r.OwnerUUID != domain.AgentUUID(tcAlice) {
+			t.Errorf("row owner = %s, want %s", r.OwnerUUID, tcAlice)
+		}
+		seen[r.Worktree] = true
+	}
+	if !seen[wtA] || !seen[wtB] {
+		t.Errorf("want rows stamped %q and %q, got %+v", wtA, wtB, rows)
+	}
+}
+
+// TestReleaseLocks_SameOwnerTwoWorktrees_ScopedToOwnWorktree: releasing a.go
+// from a store opened on wtA must delete only wtA's row — the wtB row, held
+// by the SAME owner, must survive. Before loto-8z87 this could not even be
+// expressed (the two acquires above collapsed onto one row); it now exercises
+// the owner-scoped DELETE, which must not reach past its own worktree either.
+func TestReleaseLocks_SameOwnerTwoWorktrees_ScopedToOwnWorktree(t *testing.T) {
+	wtA, wtB := t.TempDir(), t.TempDir()
+	s := mustOpenWithRepoTop(t, wtA)
+	ctx := context.Background()
+	a := mkFileLock(t, tcAGo, tcAlice, time.Hour)
+	a.Worktree = wtA
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	b := a
+	b.Worktree = wtB
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, tcAlice, liveProbe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res[0].State != StateUnlocked {
+		t.Fatalf("release from wtA must report unlocked, got %+v", res[0])
+	}
+
+	rows, err := s.LocksAt(ctx, a.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Worktree != wtB {
+		t.Fatalf("wtB's row must survive the wtA release alone, got %+v", rows)
+	}
+}
+
+// TestAcquireLocks_AdoptsLegacyBlankWorktreeRow (PR #373 review): a row that
+// predates locks.worktree carries an empty worktree. The same owner re-acquiring it
+// from a known checkout must refresh that row — adopting the worktree stamp,
+// as the old two-column key did — not insert a second row beside it that
+// worktreeFilter then matches alongside the first.
+func TestAcquireLocks_AdoptsLegacyBlankWorktreeRow(t *testing.T) {
+	wtA := t.TempDir()
+	s := mustOpenWithRepoTop(t, wtA)
+	ctx := context.Background()
+	legacy := mkFileLock(t, tcAGo, tcAlice, time.Hour)
+	legacy.Worktree = ""
+	got, err := s.AcquireLocks(ctx, []domain.LockRecord{legacy}, liveProbe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyEpoch := got[0].Epoch
+
+	again := legacy
+	again.Worktree = wtA
+	got, err = s.AcquireLocks(ctx, []domain.LockRecord{again}, liveProbe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.LocksAt(ctx, legacy.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Worktree != wtA {
+		t.Fatalf("want the legacy row adopted into %q, got %+v", wtA, rows)
+	}
+	if got[0].Epoch != legacyEpoch {
+		t.Errorf("adopting a live legacy row is a renewal: epoch want %d, got %d", legacyEpoch, got[0].Epoch)
+	}
+}
+
+// TestAcquireLocks_SiblingWorktreeIsFreshEpochGrant (PR #373 review): the
+// same owner taking a path in worktree B while it holds that path live in
+// worktree A is a fresh authorization of a different file, so it must take a
+// new epoch — reusing A's would let an envelope minted under an earlier B
+// grant pass B's epoch fence.
+func TestAcquireLocks_SiblingWorktreeIsFreshEpochGrant(t *testing.T) {
+	wtA, wtB := t.TempDir(), t.TempDir()
+	s := mustOpenWithRepoTop(t, wtA)
+	ctx := context.Background()
+	a := mkFileLock(t, tcAGo, tcAlice, time.Hour)
+	a.Worktree = wtA
+	gotA, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := a
+	b.Worktree = wtB
+	gotB, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotB[0].Epoch <= gotA[0].Epoch {
+		t.Errorf("sibling-worktree acquire must bump the epoch: A=%d B=%d", gotA[0].Epoch, gotB[0].Epoch)
+	}
+	// A renewal in A still preserves A's own epoch.
+	renew, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renew[0].Epoch != gotA[0].Epoch {
+		t.Errorf("same-worktree renewal must keep its epoch: want %d, got %d", gotA[0].Epoch, renew[0].Epoch)
+	}
+}
+
+// TestAcquireLocks_AdoptsLegacyBlankWorktreeRowAcrossKeyFold (PR #373 review):
+// on a case-folding store a legacy blank-worktree row written in its on-disk
+// spelling (Foo.go) is the same file the CLI now names foo.go. Adoption must
+// find it under the fold and take the caller's key, or the upsert inserts a
+// second row beside it.
+func TestAcquireLocks_AdoptsLegacyBlankWorktreeRowAcrossKeyFold(t *testing.T) {
+	wtA := t.TempDir()
+	legacy := mkFileLock(t, "Foo.go", tcAlice, time.Hour)
+	legacy.Worktree = ""
+	s := reopen(t, seedLegacyLock(t, legacy), true)
+	ctx := context.Background()
+
+	again := legacy
+	again.Target = domain.Target{Canonical: strings.ToLower(legacy.Target.Canonical)}
+	again.Worktree = wtA
+	// The folded spelling must exist for acquire's validate step: on a
+	// case-sensitive filesystem (linux CI) it is a separate path from Foo.go.
+	if err := os.MkdirAll(filepath.Dir(again.Target.Canonical), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(again.Target.Canonical, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{again}, aliveOn(tcHost)); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListLocks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Worktree != wtA {
+		t.Fatalf("want the legacy Foo.go row adopted into %q as one row, got %+v", wtA, rows)
 	}
 }

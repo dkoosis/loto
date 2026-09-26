@@ -209,3 +209,41 @@ func TestRefresh_RejectsNonPositiveTTL(t *testing.T) {
 		t.Errorf("expected positive-TTL rejection, got: %s", errBuf.String())
 	}
 }
+
+// TestRefresh_AllSkipsSiblingWorktreeRows (PR #373 review): one owner can hold
+// rows in several linked worktrees of this repo. `refresh --all` in this
+// checkout must discover only this checkout's rows — a sibling-only row would
+// come back no-lock-held (exit 1), and a canonical held in both would be
+// submitted twice.
+func TestRefresh_AllSkipsSiblingWorktreeRows(t *testing.T) {
+	withTempProject(t)
+	a := pinAgent(t)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, tcIntentWrite, tcFlagTTL, "5m"}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("lock failed")
+	}
+	db, err := sql.Open("sqlite", filepath.Join(os.Getenv("LOTO_BASE"), "loto.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const cols = `session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, mode, beacon, epoch`
+	for _, target := range []string{"", "sibling_only.go"} {
+		// "" copies the held row's own canonical into the sibling worktree.
+		if _, err := db.Exec(`INSERT INTO locks (target_canonical, owner_uuid, worktree, `+cols+`)
+SELECT CASE WHEN ? = '' THEN target_canonical ELSE ? END, owner_uuid, '/elsewhere/sibling-wt', `+cols+`
+  FROM locks WHERE owner_uuid = ? AND worktree <> '/elsewhere/sibling-wt'`, target, target, a.UUID); err != nil {
+			t.Fatalf("seed sibling row: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdRefresh, tcFlagAll, tcFlagTTL, "2h"}, &out, io.Discard); code != 0 {
+		t.Fatalf("refresh --all must ignore sibling-worktree rows, got %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "✓ refreshed count=1") || strings.Contains(out.String(), "no-lock-held") {
+		t.Errorf("want exactly this checkout's one lock refreshed, got: %s", out.String())
+	}
+}
