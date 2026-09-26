@@ -58,6 +58,20 @@ func ClaimCoversTarget(c ClaimRecord, t string, myUUID string, now time.Time) bo
 // case-sensitive filesystem and in every zero-value EvalContext, where a.go
 // and A.go are two files and must stay independently lockable.
 
+// SameWorktree reports whether two LockRecord.Worktree values name the same
+// checkout for conflict purposes: equal, or either side unset (loto-3eq6).
+// Unset is read as "unknown," which stays on the conservative, blocking side
+// of the rule rather than being read as "the primary worktree" — the same
+// widen-only stance EvalContext.CaseFold's zero value takes for SameTarget
+// above: an omission can only fail to narrow a decision, never narrow one by
+// accident.
+func SameWorktree(a, b string) bool {
+	if a == "" || b == "" {
+		return true
+	}
+	return a == b
+}
+
 // SameTarget reports whether a and b name the same file under this context's
 // filesystem case class.
 func (c EvalContext) SameTarget(a, b Target) bool {

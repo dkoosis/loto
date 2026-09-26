@@ -369,8 +369,8 @@ func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, s
 	// refreshed, and peers read it as free — `loto beacon` would report success
 	// over a row announcing the file is available while the agent is mid-edit.
 	res, err := tx.ExecContext(ctx, `
-INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, mode, beacon, epoch)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, mode, beacon, epoch, worktree)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
   intent=excluded.intent,
   expires_at=excluded.expires_at,
@@ -381,13 +381,14 @@ ON CONFLICT(target_canonical, owner_uuid) DO UPDATE SET
   branch=excluded.branch,
   mode=excluded.mode,
   beacon=excluded.beacon,
-  epoch=excluded.epoch
+  epoch=excluded.epoch,
+  worktree=excluded.worktree
 WHERE ? = 1
    OR excluded.beacon = 0
    OR locks.beacon = 1`,
 		l.Target.Canonical, string(l.OwnerUUID), string(l.SessionUUID),
 		l.Intent, l.CreatedAt.UnixNano(), l.ExpiresAt.UnixNano(),
-		l.Host, l.PID, procStart, l.Branch, l.EffectiveMode(), l.Beacon, epoch,
+		l.Host, l.PID, procStart, l.Branch, l.EffectiveMode(), l.Beacon, epoch, l.Worktree,
 		supersede,
 	)
 	if err != nil {

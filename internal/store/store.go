@@ -394,6 +394,7 @@ var migrationEnsures = []struct {
 	{"add path_seq.digest", ensurePathSeqDigest},
 	{"add tree event and report tables", ensureTreeEventsTables},
 	{"add tree_reports.acted_at", ensureTreeReportsActedAt},
+	{"add locks.worktree", ensureLocksWorktree},
 }
 
 // eventsCheckAdmitsEveryKind reports whether the live events DDL's CHECK names
@@ -666,6 +667,32 @@ func ensureLocksEpoch(ctx context.Context, db sqlExecQuerier, apply bool) (bool,
 	}
 	if apply {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE locks ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return false, err
+		}
+		return false, nil // applied: no longer outstanding
+	}
+	return true, nil
+}
+
+// ensureLocksWorktree adds locks.worktree to an existing DB (loto-3eq6): the
+// absolute checkout root a row was acquired from, so the conflict predicate
+// can tell two linked worktrees' independent files — sharing a store and a
+// repo-relative canonical — apart. ” backfills every pre-existing row, which
+// domain.SameWorktree reads as "unknown" and keeps on the conservative,
+// blocking side rather than misreading it as "the primary worktree." Same
+// probe-then-ALTER shape as ensureLocksEpoch; user_version not bumped.
+func ensureLocksWorktree(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('locks') WHERE name = 'worktree'`,
+	).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return false, nil
+	}
+	if apply {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE locks ADD COLUMN worktree TEXT NOT NULL DEFAULT ''`); err != nil {
 			return false, err
 		}
 		return false, nil // applied: no longer outstanding
