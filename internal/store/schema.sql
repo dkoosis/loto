@@ -362,3 +362,26 @@ CREATE TABLE IF NOT EXISTS tree_reports (
   acted_at       INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_tree_reports_undelivered ON tree_reports(delivered_at, addressee_uuid);
+
+-- worktree_paths: last-known absolute checkout path for each worktree of this
+-- repo, by (worktree_id, host) (loto-in0v). `git worktree move`, or a bare
+-- rename of the checkout directory, changes repoTop while every existing
+-- locks/claims row keeps the OLD path in its worktree column — from then on
+-- this checkout's own rows read as another worktree's. SyncWorktreePath
+-- compares the CURRENT path against this table on every runtime open; a
+-- mismatch means the worktree moved since it was last seen, and every row
+-- still stamped with the old path is rewritten to match — correcting the
+-- stamp, not changing what it means, so every existing worktree comparison
+-- (SameWorktree against repoTop) keeps working once the stamp is current
+-- again. worktree_id is gate.WorktreeID's answer for the checkout: '' for
+-- the primary worktree (unique per repo — this table is store-internal and
+-- never reaches domain.SameWorktree's own '' = unknown convention),
+-- otherwise git's own (move-stable) admin-dir name for a linked one. Added
+-- in-place via ensureWorktreePathsTable; declared here so fresh DBs match.
+CREATE TABLE IF NOT EXISTS worktree_paths (
+  worktree_id TEXT NOT NULL,
+  host        TEXT NOT NULL,
+  path        TEXT NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  PRIMARY KEY (worktree_id, host)
+);

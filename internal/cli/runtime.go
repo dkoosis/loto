@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/gate"
 	"loto/internal/identity"
 	"loto/internal/render"
 	"loto/internal/store"
@@ -204,6 +205,24 @@ func openRuntimeForRepoTop(ctx context.Context, top string) (*runtime, error) {
 		// under a real hostname reads UNKNOWN, so crashed holders wait for the
 		// TTL backstop instead of being reclaimed on sight (loto-u7e).
 		fmt.Fprintf(os.Stderr, "⚠ loto: hostname unavailable; stale-lock reclaim degraded to TTL only\n  fix: export LOTO_HOST=<stable-name-unique-to-this-machine>\n")
+	}
+	// Correct a moved worktree's stamp BEFORE anything reads locks/claims
+	// (loto-in0v): `git worktree move`, or a bare rename of the checkout
+	// directory, changes `top` while every existing row keeps the OLD
+	// LockRecord.Worktree/ClaimRecord.Worktree value it was stamped with, so
+	// this checkout's own rows start reading as another worktree's — unlock
+	// --all refuses (ambiguous) and conflict scoping stops treating a peer's
+	// same-worktree lock as same-worktree at all. gate.WorktreeID's answer
+	// ("" for the primary checkout, otherwise git's own move-stable admin-dir
+	// name) is a stable key for "this worktree" even though `top` itself just
+	// moved; SyncWorktreePath rewrites every row still stamped with the OLD
+	// path to `top` on the first open from the new one. Best-effort: a sync
+	// failure must not take down every loto command over a transient DB
+	// contention.
+	if wtID, wtErr := gate.WorktreeID(ctx, top); wtErr == nil {
+		if syncErr := s.SyncWorktreePath(ctx, wtID, host, top); syncErr != nil {
+			fmt.Fprintf(os.Stderr, "⚠ loto: worktree-path sync failed: %v\n  a worktree moved since its locks/claims were taken may read as foreign until they expire\n", syncErr)
+		}
 	}
 	sid, pinned := sessionUUID()
 	return &runtime{
