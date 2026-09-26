@@ -131,7 +131,7 @@ func (s *Store) insertAllLocks(ctx context.Context, tx *sql.Tx, sorted, all []do
 		// was actually persisted under, not the zero value the caller built it
 		// with — a caller minting a candidate envelope's LeaseEpoch reads this.
 		sorted[i].Epoch = epoch
-		written, err := insertOrRefreshLock(ctx, tx, sorted[i], beaconMaySupersede(sorted[i], all, ec), epoch)
+		written, err := insertOrRefreshLock(ctx, tx, sorted[i], beaconMaySupersede(sorted[i], all, ec), epoch, keysFor(ec))
 		if err != nil {
 			return err
 		}
@@ -341,13 +341,19 @@ func beaconMaySupersede(l domain.LockRecord, all []domain.LockRecord, ec domain.
 // matches both, so owner lookups and releases lose their one-row answer.
 // UPDATE OR IGNORE leaves the legacy row alone when this worktree already has
 // its own row: then the upsert below refreshes that one, as before.
-func adoptLegacyWorktreeRow(ctx context.Context, tx *sql.Tx, l domain.LockRecord) error {
+//
+// The target is the name the caller typed, so it matches under k's fold, the
+// same as resolveEpoch's SameTarget (PR #373 review): on a case-folding store
+// a legacy Foo.go row is the file the CLI now names foo.go. Adoption also
+// rewrites target_canonical to the caller's key, because the upsert's ON
+// CONFLICT is byte-exact and would otherwise insert beside the adopted row.
+func adoptLegacyWorktreeRow(ctx context.Context, tx *sql.Tx, l domain.LockRecord, k keyMatch) error {
 	if l.Worktree == "" {
 		return nil
 	}
 	_, err := tx.ExecContext(ctx,
-		`UPDATE OR IGNORE locks SET worktree = ? WHERE target_canonical = ? AND owner_uuid = ? AND worktree = ''`,
-		l.Worktree, l.Target.Canonical, string(l.OwnerUUID))
+		`UPDATE OR IGNORE locks SET worktree = ?, target_canonical = ? WHERE `+k.col("target_canonical")+` = ? AND owner_uuid = ? AND worktree = ''`, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
+		l.Worktree, l.Target.Canonical, k.key(l.Target.Canonical), string(l.OwnerUUID))
 	return err
 }
 
@@ -363,7 +369,7 @@ func adoptLegacyWorktreeRow(ctx context.Context, tx *sql.Tx, l domain.LockRecord
 // while the counter moved on, so a same-owner re-acquire after its OWN TTL
 // lapsed left row and counter permanently divergent and an epoch check read a
 // stale envelope as current.
-func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, supersede bool, epoch int64) (bool, error) {
+func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, supersede bool, epoch int64, k keyMatch) (bool, error) {
 	// Map 0 (UNKNOWN) → NULL at the store boundary so an absent start-time is a
 	// SQL null, matching legacy rows. A refresh re-stamps proc_start because the
 	// holder is the same process (same pid, same start-time).
@@ -371,7 +377,7 @@ func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, s
 	if l.ProcStart != 0 {
 		procStart = l.ProcStart
 	}
-	if err := adoptLegacyWorktreeRow(ctx, tx, l); err != nil {
+	if err := adoptLegacyWorktreeRow(ctx, tx, l, k); err != nil {
 		return false, err
 	}
 	// ON CONFLICT targets the composite PK (target_canonical, owner_uuid,

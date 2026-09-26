@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -267,5 +268,32 @@ func TestAcquireLocks_SiblingWorktreeIsFreshEpochGrant(t *testing.T) {
 	}
 	if renew[0].Epoch != gotA[0].Epoch {
 		t.Errorf("same-worktree renewal must keep its epoch: want %d, got %d", gotA[0].Epoch, renew[0].Epoch)
+	}
+}
+
+// TestAcquireLocks_AdoptsLegacyBlankWorktreeRowAcrossKeyFold (PR #373 review):
+// on a case-folding store a legacy blank-worktree row written in its on-disk
+// spelling (Foo.go) is the same file the CLI now names foo.go. Adoption must
+// find it under the fold and take the caller's key, or the upsert inserts a
+// second row beside it.
+func TestAcquireLocks_AdoptsLegacyBlankWorktreeRowAcrossKeyFold(t *testing.T) {
+	wtA := t.TempDir()
+	legacy := mkFileLock(t, "Foo.go", tcAlice, time.Hour)
+	legacy.Worktree = ""
+	s := reopen(t, seedLegacyLock(t, legacy), true)
+	ctx := context.Background()
+
+	again := legacy
+	again.Target = domain.Target{Canonical: strings.ToLower(legacy.Target.Canonical)}
+	again.Worktree = wtA
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{again}, aliveOn(tcHost)); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListLocks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Worktree != wtA {
+		t.Fatalf("want the legacy Foo.go row adopted into %q as one row, got %+v", wtA, rows)
 	}
 }
