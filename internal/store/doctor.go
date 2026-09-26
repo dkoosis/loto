@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -46,9 +48,33 @@ type DoctorReport struct {
 	// (path, candidate_id) order (ListCandidateClaims' own order, preserved
 	// by filtering rather than re-sorting).
 	StaleCandidateClaims []domain.CandidateClaim
-	SidecarFindings      []SidecarFinding
-	IntegrityOK          bool
-	IntegrityDetail      string
+	// StaleWorktreeStamps are lock/claim rows whose worktree stamp names a
+	// checkout path that no longer exists on disk — the moved/renamed-worktree
+	// symptom loto-in0v reports (Codex #371 comment 4111949212): `git worktree
+	// move`, or renaming the repo root, changes the checkout's real path while
+	// the stamp keeps the old one, so the checkout's own rows read as a
+	// sibling's until repaired. One entry per distinct old path, aggregating
+	// both tables' counts, reported for every owner (this is read-only
+	// triage). `loto doctor --repair` (RepairWorktreeStamps) is the explicit
+	// fix, scoped to the caller's own rows — DoctorRepair itself never
+	// touches these.
+	StaleWorktreeStamps []StaleWorktreeStamp
+	SidecarFindings     []SidecarFinding
+	IntegrityOK         bool
+	IntegrityDetail     string
+}
+
+// StaleWorktreeStamp is one distinct worktree path stamped on a lock or claim
+// row that no longer exists on disk — provably not a live sibling checkout
+// (Rules, dk 2026-09-26: "Never rewrite a stamp whose path still exists").
+type StaleWorktreeStamp struct {
+	OldPath string
+	Locks   int
+	Claims  int
+	// Owners is every owner_uuid with a lock or claim stamped OldPath, sorted.
+	// Stamp repair is owner-scoped, so the renderer offers the --moved-from
+	// command only to a caller in this list (PR #376 review).
+	Owners []string
 }
 
 // SidecarCheck cross-checks held locks against the CC session sidecar to
@@ -99,10 +125,82 @@ func (s *Store) DoctorAudit(ctx context.Context, thisHost string, hostKnown bool
 		return nil, err
 	}
 	r.ExpiredTerritoryTags = expiredNotes
+	if err := s.collectStaleWorktreeStamps(ctx, r); err != nil {
+		return nil, err
+	}
 	if err := s.runIntegrityCheck(ctx, r); err != nil {
 		return nil, err
 	}
 	return r, nil
+}
+
+// collectStaleWorktreeStamps fills r.StaleWorktreeStamps with every distinct
+// worktree path stamped on a lock or claim row that no longer exists on disk.
+// Read-only and not owner-scoped — this is triage for any caller running
+// `loto doctor`, independent of who --repair would later act on.
+func (s *Store) collectStaleWorktreeStamps(ctx context.Context, r *DoctorReport) error {
+	counts := map[string]*StaleWorktreeStamp{}
+	if err := addWorktreeCounts(ctx, s.db, counts,
+		`SELECT worktree, owner_uuid, COUNT(*) FROM locks WHERE worktree != '' GROUP BY worktree, owner_uuid`, false); err != nil {
+		return err
+	}
+	if err := addWorktreeCounts(ctx, s.db, counts,
+		`SELECT worktree, owner_uuid, COUNT(*) FROM claims WHERE worktree != '' GROUP BY worktree, owner_uuid`, true); err != nil {
+		return err
+	}
+	for path, c := range counts {
+		if worktreePathGone(path) {
+			slices.Sort(c.Owners)
+			c.Owners = slices.Compact(c.Owners)
+			r.StaleWorktreeStamps = append(r.StaleWorktreeStamps, *c)
+		}
+	}
+	sort.Slice(r.StaleWorktreeStamps, func(i, j int) bool {
+		return r.StaleWorktreeStamps[i].OldPath < r.StaleWorktreeStamps[j].OldPath
+	})
+	return nil
+}
+
+// addWorktreeCounts runs a `worktree, owner_uuid, COUNT(*)` grouping query against either
+// locks or claims and folds it into the shared per-path accumulator, keeping
+// one distinct-path set across both tables rather than reporting the same old
+// path twice.
+func addWorktreeCounts(ctx context.Context, db *sql.DB, counts map[string]*StaleWorktreeStamp, q string, isClaim bool) error {
+	rows, err := db.QueryContext(ctx, q)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var path, owner string
+		var n int
+		if err := rows.Scan(&path, &owner, &n); err != nil {
+			return err
+		}
+		c, ok := counts[path]
+		if !ok {
+			c = &StaleWorktreeStamp{OldPath: path}
+			counts[path] = c
+		}
+		c.Owners = append(c.Owners, owner)
+		if isClaim {
+			c.Claims += n
+		} else {
+			c.Locks += n
+		}
+	}
+	return rows.Err()
+}
+
+// worktreePathGone reports whether p provably no longer exists on disk — the
+// one condition the Rules require before a worktree stamp counts as stale
+// rather than a live sibling checkout. Any other stat failure (permission
+// denied, an unreadable parent, …) is NOT provable absence, so it reads as
+// "still there" — the conservative, non-rewriting side, mirroring
+// domain.SameWorktree's unknown-widens stance.
+func worktreePathGone(p string) bool {
+	_, err := os.Stat(p)
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // collectExpiredClaims fills r.ExpiredClaims with every TTL-lapsed claim in

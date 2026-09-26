@@ -25,7 +25,7 @@ import (
 
 func init() { register("doctor", cmdDoctor) } //nolint:gochecknoinits // command registry pattern
 
-func renderDoctorReport(stdout io.Writer, report *store.DoctorReport) {
+func renderDoctorReport(stdout io.Writer, report *store.DoctorReport, caller string) {
 	staleLocks := slices.Clone(report.StaleLocks)
 	sort.Slice(staleLocks, func(i, j int) bool {
 		return staleLocks[i].Target.Canonical < staleLocks[j].Target.Canonical
@@ -38,15 +38,18 @@ func renderDoctorReport(stdout io.Writer, report *store.DoctorReport) {
 		return sidecarFindings[i].Reason < sidecarFindings[j].Reason
 	})
 	// A note that lapsed with nobody having read it is a finding, so a box whose
-	// only trouble is one of those must not print ✓ healthy (loto-z3y1 D2).
+	// only trouble is one of those must not print ✓ healthy (loto-z3y1 D2). A
+	// moved/renamed worktree's stale stamps (loto-in0v) count the same way:
+	// `loto doctor --repair` fixes them, so they must not read as healthy either.
 	if len(staleLocks) == 0 && len(report.ExpiredClaims) == 0 && len(report.StaleCandidateClaims) == 0 &&
-		len(sidecarFindings) == 0 && len(report.ExpiredTerritoryTags) == 0 && report.IntegrityOK {
+		len(sidecarFindings) == 0 && len(report.ExpiredTerritoryTags) == 0 && len(report.StaleWorktreeStamps) == 0 &&
+		report.IntegrityOK {
 		fmt.Fprintln(stdout, "✓ healthy")
 		return
 	}
-	fmt.Fprintf(stdout, "✗ stale_locks=%d expired_claims=%d stale_candidate_claims=%d expired_territory_tags=%d sidecar_findings=%d integrity=%s candidate_claim_grace=%s\n",
+	fmt.Fprintf(stdout, "✗ stale_locks=%d expired_claims=%d stale_candidate_claims=%d expired_territory_tags=%d sidecar_findings=%d stale_worktree_stamps=%d integrity=%s candidate_claim_grace=%s\n",
 		len(staleLocks), len(report.ExpiredClaims), len(report.StaleCandidateClaims), len(report.ExpiredTerritoryTags),
-		len(sidecarFindings), report.IntegrityDetail, domain.CandidateClaimReclaimGrace)
+		len(sidecarFindings), len(report.StaleWorktreeStamps), report.IntegrityDetail, domain.CandidateClaimReclaimGrace)
 	for i := range staleLocks {
 		l := &staleLocks[i]
 		fmt.Fprintf(stdout, "✗ stale target=%s owner=%s expires_at=%s host=%s pid=%d\n",
@@ -71,6 +74,7 @@ func renderDoctorReport(stdout io.Writer, report *store.DoctorReport) {
 	// — a count alone tells the reader something was lost without telling them
 	// what, which is the worst of both.
 	render.EmitExpiredTerritoryTags(stdout, report.ExpiredTerritoryTags, time.Now())
+	renderStaleWorktreeStamps(stdout, report.StaleWorktreeStamps, caller)
 	for i := range sidecarFindings {
 		f := &sidecarFindings[i]
 		if f.Detail != "" {
@@ -81,6 +85,39 @@ func renderDoctorReport(stdout io.Writer, report *store.DoctorReport) {
 				relPath(f.Target), f.PID, f.Reason)
 		}
 	}
+}
+
+// renderStaleWorktreeStamps prints one ⚠ row per old worktree path a lock or
+// claim is still stamped with (loto-in0v Rules: "loto doctor without --repair
+// reports stale-path rows (one ⚠ row per old path, counts on line 1)" — the
+// counts-on-line-1 half is renderDoctorReport's summary line). ⚠, not ✗: the
+// row is not broken state on its own, and a vanished path may be a deleted
+// sibling rather than a move, which only its owner can say.
+//
+// The fix block is `loto doctor --repair --moved-from <old>`, printed only for
+// paths caller (a pinned owner; "" when unpinned) holds rows under: repair is
+// owner-scoped and explicit-only (PR #376 review), so any other command would
+// change nothing. Other owners' rows carry owners= so the reader knows whom
+// the path belongs to.
+func renderStaleWorktreeStamps(stdout io.Writer, stamps []store.StaleWorktreeStamp, caller string) {
+	var mine []string
+	for i := range stamps {
+		s := &stamps[i]
+		fmt.Fprintf(stdout, "⚠ stale_worktree_stamp old=%s locks=%d claims=%d owners=%s\n",
+			s.OldPath, s.Locks, s.Claims, strings.Join(s.Owners, ","))
+		if caller != "" && slices.Contains(s.Owners, caller) {
+			mine = append(mine, s.OldPath)
+		}
+	}
+	if len(mine) == 0 {
+		return
+	}
+	fmt.Fprintln(stdout, "```bash")
+	fmt.Fprintln(stdout, "# from this checkout's current path, if it was moved from <old>")
+	for _, old := range mine {
+		fmt.Fprintf(stdout, "loto doctor --repair --moved-from %s\n", shellQuote(old))
+	}
+	fmt.Fprintln(stdout, "```")
 }
 
 // renderIdentityGC reports the session-directory reap doctor just ran
@@ -128,15 +165,59 @@ func printDoctorBinaryIdentity(ctx context.Context, stdout io.Writer) string {
 	return repoTop
 }
 
-func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+// doctorFlags is cmdDoctor's parsed flag set. Split into its own type and
+// parseDoctorFlags below purely to keep cmdDoctor under funlen's statement
+// budget (same reasoning as printDoctorHeader's split, loto-jhbm) — the
+// --moved-from usage guard added alongside it is what tipped the count.
+type doctorFlags struct {
+	repair        bool
+	dryRun        bool
+	orphanMode    bool
+	restoreOrphan bool
+	movedFrom     string
+}
+
+// parseDoctorFlags parses cmdDoctor's flags and applies the one cross-flag
+// check --moved-from needs: it only means something together with --repair
+// (loto-in0v).
+func parseDoctorFlags(args []string, stderr io.Writer) (doctorFlags, int) {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	repair := fs.Bool("repair", false, "reclaim stale locks")
 	dryRun := fs.Bool("dry-run", false, "report what --repair would do, without writing")
 	orphanMode := fs.Bool("orphan-mode", false, "scan for orphan-mode files and report them")
 	restoreOrphan := fs.Bool("restore-orphan-mode", false, "with --repair, also restore writable mode on orphan-mode files (implies --orphan-mode)")
+	movedFrom := fs.String("moved-from", "", "with --repair, rewrite this owner's lock and claim stamps from this checkout's previous path (a moved or renamed worktree, loto-in0v); with --dry-run, count them")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
-		return 2
+		return doctorFlags{}, 2
+	}
+	if *movedFrom != "" && !*repair && !*dryRun {
+		fmt.Fprintln(stderr, "✗ --moved-from only means something with --repair or --dry-run")
+		return doctorFlags{}, 2
+	}
+	if *movedFrom != "" {
+		// Stamps are absolute, cleaned checkout roots; a relative or unclean
+		// spelling would otherwise match nothing, silently (cubic P2 on #376).
+		abs, err := filepath.Abs(*movedFrom)
+		if err != nil {
+			fmt.Fprintf(stderr, "✗ --moved-from: %v\n", err)
+			return doctorFlags{}, 2
+		}
+		*movedFrom = abs
+	}
+	return doctorFlags{
+		repair:        *repair,
+		dryRun:        *dryRun,
+		orphanMode:    *orphanMode,
+		restoreOrphan: *restoreOrphan,
+		movedFrom:     *movedFrom,
+	}, 0
+}
+
+func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	flags, code := parseDoctorFlags(args, stderr)
+	if code != 0 {
+		return code
 	}
 
 	repoTop := printDoctorBinaryIdentity(ctx, stdout)
@@ -148,6 +229,10 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
+
+	if refuseUnpinnedMovedFrom(rt, flags.movedFrom, stderr) {
+		return 2
+	}
 
 	printDoctorEnforcementStats(rt, stdout, stderr)
 
@@ -171,7 +256,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	printDoctorHeader(ctx, stdout, rt)
 	renderIdentityGC(stdout, sessionsReaped, sessionsResidual)
 
-	renderDoctorReport(stdout, report)
+	renderDoctorReport(stdout, report, pinnedCaller(rt))
 
 	// Dangling-stash report (loto-kotb): advisory only, never touched by
 	// --repair below — D8 forbids doctor from popping/applying/dropping a
@@ -186,30 +271,60 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	residue := reportClaimResidue(rt, repoTop, stdout)
 
 	orphans, scanIncomplete := scanOrphansAndHint(rt, repoTop, live, orphanFlags{
-		orphanMode:    *orphanMode,
-		restoreOrphan: *restoreOrphan,
-		repair:        *repair,
+		orphanMode:    flags.orphanMode,
+		restoreOrphan: flags.restoreOrphan,
+		repair:        flags.repair,
 	}, stdout)
 
-	if *dryRun {
-		// would_gc_claims mirrors the repair tx's gcClaimsTx sweep (D3);
-		// would_gc_candidate_claims mirrors gcCandidateClaimsTx (loto-u2p7) — the
-		// dry-run names everything --repair would delete, not just lock rows.
-		// candidate_claim_grace names the age floor a zero-evidence claim must
-		// clear before it counts (domain.CandidateClaimReclaimGrace, PR #298
-		// review) — so an operator sees why a fresh one didn't.
-		fmt.Fprintf(stdout, "✓ dry-run would_reclaim=%d would_gc_claims=%d would_gc_candidate_claims=%d would_release_residue=%d candidate_claim_grace=%s\n",
-			len(report.StaleLocks), len(report.ExpiredClaims), len(report.StaleCandidateClaims), len(residue), domain.CandidateClaimReclaimGrace)
-		if scanIncomplete {
-			return 3
-		}
-		return 0
+	if flags.dryRun {
+		return printDoctorDryRun(rt, report, len(residue), flags.movedFrom, scanIncomplete, stdout, stderr)
 	}
-	if *repair {
-		if code := doRepair(rt, live, *restoreOrphan, orphans, residue, stdout, stderr); code != 0 {
+	if flags.repair {
+		if code := doRepair(rt, live, flags.restoreOrphan, orphans, residue, flags.movedFrom, stdout, stderr); code != 0 {
 			return code
 		}
 	}
+	if scanIncomplete {
+		return 3
+	}
+	return 0
+}
+
+// refuseUnpinnedMovedFrom refuses --moved-from when no identity is pinned
+// and reports whether it did. Split from cmdDoctor for funlen.
+func refuseUnpinnedMovedFrom(rt *runtime, movedFrom string, stderr io.Writer) bool {
+	if movedFrom == "" || rt.AgentPinned {
+		return false
+	}
+	// Stamp repair is owner-scoped; an unpinned shell's throwaway owner
+	// matches no row, so a run would print ✓ and change nothing (Codex P2
+	// on #376).
+	fmt.Fprintln(stderr, "✗ --moved-from needs a pinned identity: this shell's owner is a throwaway that owns no stamp")
+	fmt.Fprintln(stderr, "```bash")
+	fmt.Fprintf(stderr, "LOTO_AGENT_ID=<owner uuid from doctor's owners=> loto doctor --repair --moved-from %s\n", shellQuote(movedFrom))
+	fmt.Fprintln(stderr, "```")
+	return true
+}
+
+// printDoctorDryRun prints the one-line summary of what --repair would do and
+// returns doctor's exit code. Split from cmdDoctor for funlen.
+func printDoctorDryRun(rt *runtime, report *store.DoctorReport, residueCount int, movedFrom string, scanIncomplete bool, stdout, stderr io.Writer) int {
+	// would_gc_claims mirrors the repair tx's gcClaimsTx sweep (D3);
+	// would_gc_candidate_claims mirrors gcCandidateClaimsTx (loto-u2p7) — the
+	// dry-run names everything --repair would delete, not just lock rows.
+	// candidate_claim_grace names the age floor a zero-evidence claim must
+	// clear before it counts (domain.CandidateClaimReclaimGrace, PR #298
+	// review) — so an operator sees why a fresh one didn't.
+	// would_repair_worktree_stamps is the exact owner- and
+	// --moved-from-scoped set --repair would rewrite (the same tx, rolled
+	// back) — the audit's stale-stamp rows span every owner (PR #376).
+	wouldStamps, err := rt.Store.PreviewWorktreeStampRepair(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), rt.RepoTop, movedFrom)
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ %v\n", err)
+		return 3
+	}
+	fmt.Fprintf(stdout, "✓ dry-run would_reclaim=%d would_gc_claims=%d would_gc_candidate_claims=%d would_release_residue=%d would_repair_worktree_stamps=%d candidate_claim_grace=%s\n",
+		len(report.StaleLocks), len(report.ExpiredClaims), len(report.StaleCandidateClaims), residueCount, len(wouldStamps), domain.CandidateClaimReclaimGrace)
 	if scanIncomplete {
 		return 3
 	}
@@ -259,12 +374,15 @@ func scanOrphansAndHint(rt *runtime, repoTop string, live domain.HolderLiveProbe
 	return orphans, scanIncomplete
 }
 
-func doRepair(rt *runtime, live domain.HolderLiveProbe, restoreOrphan bool, orphans []string, residue []claimResidue, stdout, stderr io.Writer) int {
+func doRepair(rt *runtime, live domain.HolderLiveProbe, restoreOrphan bool, orphans []string, residue []claimResidue, movedFrom string, stdout, stderr io.Writer) int {
 	if err := rt.Store.DoctorRepair(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), live); err != nil {
 		fmt.Fprintf(stderr, "✗ repair: %v\n", err)
 		return 3
 	}
 	fmt.Fprintln(stdout, "✓ repaired")
+	if code := repairWorktreeStamps(rt, movedFrom, stdout, stderr); code != 0 {
+		return code
+	}
 	if code := releaseClaimResidue(rt, residue, stdout, stderr); code != 0 {
 		return code
 	}
@@ -280,6 +398,34 @@ func doRepair(rt *runtime, live domain.HolderLiveProbe, restoreOrphan bool, orph
 		}
 	}
 	return 0
+}
+
+// repairWorktreeStamps runs loto-in0v's explicit moved/renamed-worktree fix
+// (RepairWorktreeStamps) as part of `loto doctor --repair --moved-from <old>`,
+// scoped to rows this caller owns that are stamped <old>. Empty movedFrom
+// rewrites nothing: an owner's vanished path may be a deleted sibling, not
+// this checkout (PR #376 Codex P1) — the report above prints the command.
+// rt.RepoTop == "" (repo top unresolved) makes RepairWorktreeStamps a no-op,
+// same posture as the rest of doctor's repair path.
+func repairWorktreeStamps(rt *runtime, movedFrom string, stdout, stderr io.Writer) int {
+	repaired, err := rt.Store.RepairWorktreeStamps(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), rt.RepoTop, movedFrom)
+	if err != nil {
+		fmt.Fprintf(stderr, "✗ repair-worktree-stamps: %v\n", err)
+		return 3
+	}
+	if len(repaired) > 0 {
+		fmt.Fprintf(stdout, "✓ repaired-worktree-stamps count=%d\n", len(repaired))
+	}
+	return 0
+}
+
+// pinnedCaller is the caller's owner uuid when an identity is pinned, else "":
+// an unpinned shell's throwaway owner owns no row, so nothing it could repair.
+func pinnedCaller(rt *runtime) string {
+	if !rt.AgentPinned {
+		return ""
+	}
+	return rt.Agent.UUID
 }
 
 // runOrphanScan performs the orphan-mode scan and reports any incomplete-scan
