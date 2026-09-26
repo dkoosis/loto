@@ -90,6 +90,7 @@ func (s *Store) BreakLocks(ctx context.Context, targets []domain.Target, agent d
 		results, err = applyBreakChangesTx(ctx, tx, breakBatch{
 			targets: targets, existing: existing, byAgent: byAgent,
 			mode: mode, reason: reason, ec: ec, now: now, expect: expect,
+			worktree: s.repoTop,
 		})
 		return err
 	})
@@ -111,6 +112,12 @@ type breakBatch struct {
 	ec       domain.EvalContext
 	now      time.Time
 	expect   BreakExpectations // nil, or per-target CAS preconditions
+	// worktree is this store's own checkout root (s.repoTop), threaded down to
+	// the per-owner DELETE (loto-8z87): `existing` is already scoped to it via
+	// scopeToWorktree, but under the widened locks PK a broken owner can hold a
+	// SIBLING row on the same canonical from another worktree, and the raw
+	// DELETE must not reach past its own worktree to find it.
+	worktree string
 }
 
 // applyBreakChangesTx classifies the batch and writes every consequence —
@@ -130,7 +137,7 @@ func applyBreakChangesTx(ctx context.Context, tx *sql.Tx, b breakBatch) ([]Break
 		}
 	}
 	for owner, canonicals := range deleteByOwner {
-		if err := deleteOwnedTx(ctx, tx, keysFor(b.ec), canonicals, owner); err != nil {
+		if err := deleteOwnedTx(ctx, tx, keysFor(b.ec), canonicals, owner, b.worktree); err != nil {
 			return nil, err
 		}
 	}

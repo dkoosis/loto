@@ -90,16 +90,24 @@ func (s *Store) DowngradeLocks(ctx context.Context, targets []domain.Target, own
 	return results, nil
 }
 
-// probeOwnerModes reads the current mode of each target held by owner in one
-// plain SELECT — no write tx (loto-kw5k). The op-flock held by the caller
-// serializes lock mutators across processes, so the read is authoritative.
-// Targets owner holds no lock on are absent from the returned map.
+// probeOwnerModes reads the current mode of each target held by owner IN THIS
+// STORE'S OWN WORKTREE in one plain SELECT — no write tx (loto-kw5k). The
+// op-flock held by the caller serializes lock mutators across processes, so
+// the read is authoritative. Targets owner holds no lock on (in this
+// worktree) are absent from the returned map.
+//
+// worktreeFilter(s.repoTop) scopes it (loto-8z87): under the widened locks PK
+// the same owner can hold a SIBLING row at the same canonical from another
+// linked worktree, and a downgrade issued from this checkout has no standing
+// over that row.
 func (s *Store) probeOwnerModes(ctx context.Context, owner string, targets []domain.Target) (map[string]string, error) {
 	k := s.keys()
 	ph, canonArgs := k.inTargets(targets)
-	args := append([]any{owner}, canonArgs...)
+	wtCond, wtArgs := worktreeFilter(s.repoTop)
+	args := append([]any{owner}, wtArgs...)
+	args = append(args, canonArgs...)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT target_canonical, mode FROM locks WHERE owner_uuid = ? AND `+k.col("target_canonical")+` IN (`+ph+`)`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+		`SELECT target_canonical, mode FROM locks WHERE owner_uuid = ? AND `+wtCond+` AND `+k.col("target_canonical")+` IN (`+ph+`)`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 	if err != nil {
 		return nil, err
 	}
@@ -131,9 +139,14 @@ func (s *Store) commitDowngrades(ctx context.Context, flip []domain.Target, owne
 
 	k := s.keys()
 	ph, canonArgs := k.inTargets(flip)
-	args := append([]any{domain.ModeShared, owner}, canonArgs...)
+	// worktreeFilter(s.repoTop) mirrors probeOwnerModes' scope (loto-8z87): flip
+	// was decided against that already-scoped read, but the raw UPDATE needs
+	// its own guard against a sibling-worktree row under the same owner.
+	wtCond, wtArgs := worktreeFilter(s.repoTop)
+	args := append([]any{domain.ModeShared, owner}, wtArgs...)
+	args = append(args, canonArgs...)
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE locks SET mode = ? WHERE owner_uuid = ? AND `+k.col("target_canonical")+` IN (`+ph+`)`, args...); err != nil { //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+		`UPDATE locks SET mode = ? WHERE owner_uuid = ? AND `+wtCond+` AND `+k.col("target_canonical")+` IN (`+ph+`)`, args...); err != nil { //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 		return err
 	}
 	if err := appendEventsTx(ctx, tx, events); err != nil {

@@ -119,3 +119,84 @@ func TestAcquireLocks_DoesNotReclaimStaleSiblingWorktreeRow(t *testing.T) {
 		t.Errorf("both worktrees' rows must stand, holders now %v", owners)
 	}
 }
+
+// loto-8z87: the locks PK was (target_canonical, owner_uuid) only, so ONE
+// owner taking the SAME repo-relative path in two linked worktrees (sibling
+// sessions sharing one LOTO_AGENT_ID, loto-81n) collided on acquire — the
+// second INSERT ... ON CONFLICT silently overwrote the first row's worktree,
+// lease and epoch, and the first worktree's lock vanished with no error. The
+// worktree is now part of the key: (target_canonical, owner_uuid, worktree).
+
+// TestAcquireLocks_SameOwnerTwoWorktrees_TwoRows: one owner acquiring a.go
+// stamped wtA then wtB must end up with two coexisting rows, one per
+// worktree — not one row whose worktree flips to the latest acquire.
+func TestAcquireLocks_SameOwnerTwoWorktrees_TwoRows(t *testing.T) {
+	wtA, wtB := t.TempDir(), t.TempDir()
+	s := mustOpenWithRepoTop(t, wtA)
+	ctx := context.Background()
+	a := mkFileLock(t, tcAGo, tcAlice, time.Hour)
+	a.Worktree = wtA
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	b := a
+	b.Worktree = wtB
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := s.LocksAt(ctx, a.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows (one per worktree), got %d: %+v", len(rows), rows)
+	}
+	seen := map[string]bool{}
+	for _, r := range rows {
+		if r.OwnerUUID != domain.AgentUUID(tcAlice) {
+			t.Errorf("row owner = %s, want %s", r.OwnerUUID, tcAlice)
+		}
+		seen[r.Worktree] = true
+	}
+	if !seen[wtA] || !seen[wtB] {
+		t.Errorf("want rows stamped %q and %q, got %+v", wtA, wtB, rows)
+	}
+}
+
+// TestReleaseLocks_SameOwnerTwoWorktrees_ScopedToOwnWorktree: releasing a.go
+// from a store opened on wtA must delete only wtA's row — the wtB row, held
+// by the SAME owner, must survive. Before loto-8z87 this could not even be
+// expressed (the two acquires above collapsed onto one row); it now exercises
+// the owner-scoped DELETE, which must not reach past its own worktree either.
+func TestReleaseLocks_SameOwnerTwoWorktrees_ScopedToOwnWorktree(t *testing.T) {
+	wtA, wtB := t.TempDir(), t.TempDir()
+	s := mustOpenWithRepoTop(t, wtA)
+	ctx := context.Background()
+	a := mkFileLock(t, tcAGo, tcAlice, time.Hour)
+	a.Worktree = wtA
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	b := a
+	b.Worktree = wtB
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, tcAlice, liveProbe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res[0].State != StateUnlocked {
+		t.Fatalf("release from wtA must report unlocked, got %+v", res[0])
+	}
+
+	rows, err := s.LocksAt(ctx, a.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Worktree != wtB {
+		t.Fatalf("wtB's row must survive the wtA release alone, got %+v", rows)
+	}
+}

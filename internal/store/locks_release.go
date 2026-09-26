@@ -93,10 +93,17 @@ func (s *Store) applyOwnedReleasesTx(ctx context.Context, tx *sql.Tx, owned []st
 	// Ack tags BEFORE deleting the host locks: the host-lock match must still
 	// resolve to set acked_at; if we DELETE first the tags would orphan instead,
 	// losing the audit ack (edge #6 distinguishes release-ack from break-orphan).
-	if err := ackTagsForReleaseTx(ctx, tx, s.keys(), owned, byAgent); err != nil {
+	//
+	// ‡ worktree-scoped (loto-8z87): s.repoTop names THIS store's own checkout.
+	// existing (loaded by withLockBatchTx) is already scoped to it via
+	// scopeToWorktree, so `owned` never names a foreign-worktree canonical —
+	// but with the widened PK, one owner can hold a SIBLING row at the same
+	// canonical from another worktree, and the raw DELETE/UPDATE below must not
+	// reach past its own worktree to find it.
+	if err := ackTagsForReleaseTx(ctx, tx, s.keys(), owned, byAgent, s.repoTop); err != nil {
 		return err
 	}
-	if err := deleteOwnedTx(ctx, tx, s.keys(), owned, byAgent); err != nil {
+	if err := deleteOwnedTx(ctx, tx, s.keys(), owned, byAgent, s.repoTop); err != nil {
 		return err
 	}
 	// Emit lock_released events in the same tx (atomic with the row deletes).
@@ -196,10 +203,17 @@ func vetoingHolder(holders []domain.LockRecord, ec domain.EvalContext) string {
 // host-lock subquery still matches; running it after would silently orphan
 // tags instead of acking them (would still get GC'd by doctor, but the audit
 // would lose the explicit ack timestamp).
-func ackTagsForReleaseTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals []string, byAgent string) error {
+//
+// worktree scopes the host-lock subquery to the caller's own checkout, via
+// worktreeFilter (loto-8z87). Under the widened PK a same-owner SIBLING row
+// from another worktree can share this exact (target, owner) pair; without
+// the scope its created_at could satisfy the tuple match and ack a tag that
+// belongs to the sibling's still-live lock.
+func ackTagsForReleaseTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals []string, byAgent, worktree string) error {
 	placeholders, args := k.inStrings(canonicals)
-	args = append([]any{time.Now().UnixNano()}, args...)
-	args = append(args, byAgent)
+	wtCond, wtArgs := worktreeFilter(worktree)
+	args = append(append([]any{time.Now().UnixNano()}, args...), byAgent)
+	args = append(args, wtArgs...)
 	// ‡ Every leg keys under k, the tuple's target member included: a tag this
 	// binary minted carries the folded key while its host lock row may carry an
 	// older loto's on-disk spelling, so a byte-exact tuple would orphan the tag
@@ -208,7 +222,7 @@ func ackTagsForReleaseTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals
 		` WHERE acked_at IS NULL`+
 		` AND (`+k.col("target_canonical")+`, lock_owner_uuid, lock_created_at) IN (`+
 		`   SELECT `+k.col("target_canonical")+`, owner_uuid, created_at FROM locks`+
-		`   WHERE `+k.col("target_canonical")+` IN (`+placeholders+`) AND owner_uuid = ?`+
+		`   WHERE `+k.col("target_canonical")+` IN (`+placeholders+`) AND owner_uuid = ? AND `+wtCond+
 		` )`, args...)
 	return err
 }
@@ -217,10 +231,18 @@ func ackTagsForReleaseTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals
 // byAgent in one statement. k is what lets it reach a row an older loto wrote
 // in the on-disk spelling — without it `loto unlock foo.go` deleted nothing
 // and still reported success (loto-8soe).
-func deleteOwnedTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals []string, byAgent string) error {
+//
+// worktree scopes the delete to the caller's own checkout, via worktreeFilter
+// (loto-8z87). Under the widened PK (target_canonical, owner_uuid, worktree)
+// the same owner can hold a SIBLING row on the same canonical from another
+// linked worktree; a bare owner+canonical DELETE would take both, undoing the
+// PK widening's whole point the moment anything actually released.
+func deleteOwnedTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals []string, byAgent, worktree string) error {
 	placeholders, args := k.inStrings(canonicals)
+	wtCond, wtArgs := worktreeFilter(worktree)
 	args = append(args, byAgent)
-	_, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE `+k.col("target_canonical")+` IN (`+placeholders+`) AND owner_uuid = ?`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+	args = append(args, wtArgs...)
+	_, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE `+k.col("target_canonical")+` IN (`+placeholders+`) AND owner_uuid = ? AND `+wtCond, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 
 	return err
 }
@@ -304,7 +326,7 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 		}
 		return SessionRelease{Results: []ReleaseResult{}, ClaimPrefixes: claimPrefixes}, nil
 	}
-	if err := s.releaseSessionTargetsTx(ctx, tx, canonicals, byAgent); err != nil {
+	if err := s.releaseSessionTargetsTx(ctx, tx, canonicals, byAgent, callerWorktree); err != nil {
 		return SessionRelease{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -325,16 +347,22 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 
 // releaseSessionTargetsTx acks tags, deletes the agent's host locks and emits
 // their release events for the matched rows, inside ReleaseBySession's tx.
-func (s *Store) releaseSessionTargetsTx(ctx context.Context, tx *sql.Tx, canonicals []sessionTarget, byAgent string) error {
+// callerWorktree scopes the delete the same way ReleaseLocks scopes on
+// s.repoTop (loto-8z87): sessionAmbiguityTx already refused the whole sweep
+// when a canonical carried a foreign, LIVE row, but `canonicals` can still
+// carry a same-owner row from another worktree when callerWorktree == "" (git
+// lookup failed) or the foreign row was already stale — the raw DELETE below
+// must still not reach past its own worktree for it.
+func (s *Store) releaseSessionTargetsTx(ctx context.Context, tx *sql.Tx, canonicals []sessionTarget, byAgent, callerWorktree string) error {
 	paths := make([]string, len(canonicals))
 	for i, c := range canonicals {
 		paths[i] = c.Canonical
 	}
 	// Ack tags before deleting host locks (same ordering as ReleaseLocks).
-	if err := ackTagsForReleaseTx(ctx, tx, s.keys(), paths, byAgent); err != nil {
+	if err := ackTagsForReleaseTx(ctx, tx, s.keys(), paths, byAgent, callerWorktree); err != nil {
 		return err
 	}
-	if err := deleteOwnedTx(ctx, tx, s.keys(), paths, byAgent); err != nil {
+	if err := deleteOwnedTx(ctx, tx, s.keys(), paths, byAgent, callerWorktree); err != nil {
 		return err
 	}
 	return emitLockReleaseEventsTx(ctx, tx, canonicals, byAgent, time.Now())

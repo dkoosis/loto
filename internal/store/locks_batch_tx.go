@@ -79,3 +79,16 @@ func scopeToWorktree(existing map[string][]domain.LockRecord, repoTop string) {
 		existing[k] = kept
 	}
 }
+
+// worktreeFilter returns a SQL predicate plus its two positional args that
+// mirrors domain.SameWorktree(worktree, locks.worktree) inside a raw query —
+// loto-8z87. True when the caller's own worktree is unset ("no repo frame",
+// today's reach), the row's is unset (a legacy row, read as "unknown" and
+// matched conservatively), or the two are byte-equal. Never narrower than
+// domain.SameWorktree, so a caller that already scoped an in-memory snapshot
+// with that predicate (scopeToWorktree above) gets the identical answer from
+// a raw DELETE/UPDATE/SELECT built with this clause. The two `?` placeholders
+// both bind worktree; append the returned args once, in clause order.
+func worktreeFilter(worktree string) (string, []any) {
+	return `(? = '' OR worktree = '' OR worktree = ?)`, []any{worktree, worktree}
+}

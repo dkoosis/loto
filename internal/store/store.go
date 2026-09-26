@@ -396,6 +396,11 @@ var migrationEnsures = []struct {
 	{"add tree_reports.acted_at", ensureTreeReportsActedAt},
 	{"add locks.worktree", ensureLocksWorktree},
 	{"add claims.worktree", ensureClaimsWorktree},
+	{"key locks pk on worktree", ensureLocksWorktreeKeyed},
+	{"add hook_calls.worktree", ensureHookCallsWorktree},
+	{"scope path_seq to worktree", ensurePathSeqWorktree},
+	{"scope path_observed to worktree", ensurePathObservedWorktree},
+	{"add tree_events.worktree", ensureTreeEventsWorktree},
 }
 
 // eventsCheckAdmitsEveryKind reports whether the live events DDL's CHECK names
@@ -905,7 +910,12 @@ func ensureLocksModeAndPK(ctx context.Context, db sqlExecQuerier, apply bool) (b
 		`SELECT count(*) FROM pragma_table_info('locks') WHERE pk > 0`).Scan(&pkCols); err != nil {
 		return false, err
 	}
-	if pkCols == 2 {
+	// >= 2, not == 2 (loto-8z87): ensureLocksWorktreeKeyed later widens the PK
+	// to 3 columns (target_canonical, owner_uuid, worktree), and a DB that
+	// already reached that shape must read as "already migrated" here too —
+	// this step only cares whether the legacy SINGLE-column PK was ever
+	// rebuilt, not how many columns the key grew to afterward.
+	if pkCols >= 2 {
 		return false, nil // already migrated (fresh DB or prior upgrade)
 	}
 	// Legacy single-column PK: rebuild. The old table has no `mode` column, so
@@ -931,6 +941,66 @@ INSERT INTO locks_new
    expires_at, host, pid, proc_start, branch, mode)
 SELECT target_canonical, owner_uuid, session_uuid, intent, created_at,
        expires_at, host, pid, proc_start, branch, 'exclusive'
+FROM locks;
+DROP TABLE locks;
+ALTER TABLE locks_new RENAME TO locks;
+-- target-only lookups ride the composite PK's leftmost column; no separate index.
+CREATE INDEX IF NOT EXISTS idx_locks_owner    ON locks(owner_uuid);
+CREATE INDEX IF NOT EXISTS idx_locks_session  ON locks(session_uuid);
+CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);`
+	if apply {
+		if _, err := db.ExecContext(ctx, rebuild); err != nil {
+			return false, err
+		}
+		return false, nil // applied: no longer outstanding
+	}
+	return true, nil
+}
+
+// ensureLocksWorktreeKeyed rebuilds the locks table so its PRIMARY KEY is
+// (target_canonical, owner_uuid, worktree) instead of (target_canonical,
+// owner_uuid) — loto-8z87, the same table-rebuild shape as
+// ensureLocksModeAndPK above. Runs LAST among the locks-column ensures (after
+// ensureLocksBeacon, ensureLocksEpoch, ensureLocksWorktree), so every column
+// the rebuild's SELECT names already exists by the time it fires.
+//
+// Every row already satisfies the wider key today: the OLD PK already forced
+// at most one row per (target_canonical, owner_uuid), so widening the key
+// cannot produce a duplicate — the copy is a straight INSERT ... SELECT,
+// nothing is deduped or dropped. user_version is not bumped (ensureLocksModeAndPK
+// precedent: a bump trips MoveCorruptAside and destroys live locks, loto-kwlp).
+func ensureLocksWorktreeKeyed(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	var pkCols int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('locks') WHERE pk > 0`).Scan(&pkCols); err != nil {
+		return false, err
+	}
+	if pkCols >= 3 {
+		return false, nil // already migrated (fresh DB or prior upgrade)
+	}
+	const rebuild = `
+CREATE TABLE locks_new (
+  target_canonical TEXT NOT NULL,
+  owner_uuid       TEXT NOT NULL,
+  session_uuid     TEXT NOT NULL,
+  intent           TEXT NOT NULL DEFAULT '',
+  created_at       INTEGER NOT NULL,
+  expires_at       INTEGER NOT NULL,
+  host             TEXT NOT NULL,
+  pid              INTEGER NOT NULL,
+  proc_start       INTEGER,
+  branch           TEXT NOT NULL DEFAULT '',
+  mode             TEXT NOT NULL DEFAULT 'exclusive',
+  beacon           INTEGER NOT NULL DEFAULT 0,
+  epoch            INTEGER NOT NULL DEFAULT 0,
+  worktree         TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (target_canonical, owner_uuid, worktree)
+);
+INSERT INTO locks_new
+  (target_canonical, owner_uuid, session_uuid, intent, created_at,
+   expires_at, host, pid, proc_start, branch, mode, beacon, epoch, worktree)
+SELECT target_canonical, owner_uuid, session_uuid, intent, created_at,
+       expires_at, host, pid, proc_start, branch, mode, beacon, epoch, worktree
 FROM locks;
 DROP TABLE locks;
 ALTER TABLE locks_new RENAME TO locks;

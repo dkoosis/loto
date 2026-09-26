@@ -25,8 +25,9 @@ func TestMigrate_AddsModeColumn(t *testing.T) {
 	}
 }
 
-// TestMigrate_LocksPKIsComposite asserts the locks PK spans two columns
-// (target_canonical, owner_uuid) on a fresh DB (loto-k5el.2 T1).
+// TestMigrate_LocksPKIsComposite asserts the locks PK spans three columns
+// (target_canonical, owner_uuid, worktree) on a fresh DB (loto-k5el.2 T1,
+// widened to include worktree by loto-8z87).
 func TestMigrate_LocksPKIsComposite(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
@@ -36,8 +37,8 @@ func TestMigrate_LocksPKIsComposite(t *testing.T) {
 		`SELECT count(*) FROM pragma_table_info('locks') WHERE pk > 0`).Scan(&pkCols); err != nil {
 		t.Fatalf("probe pk: %v", err)
 	}
-	if pkCols != 2 {
-		t.Fatalf("want composite PK over 2 columns, got %d", pkCols)
+	if pkCols != 3 {
+		t.Fatalf("want composite PK over 3 columns, got %d", pkCols)
 	}
 }
 
@@ -155,13 +156,15 @@ func TestMigrate_LegacyDBRoundTrip(t *testing.T) {
 		t.Fatalf("legacy rows must default to exclusive, got %d non-exclusive", nonExclusive)
 	}
 
-	// (c) PK is now composite (2 columns).
+	// (c) PK is now composite (3 columns: target_canonical, owner_uuid,
+	// worktree — widened from 2 by loto-8z87's ensureLocksWorktreeKeyed, which
+	// runs later in the same migrate pass this Open triggered).
 	var pkCols int
 	if err := s.db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('locks') WHERE pk > 0`).Scan(&pkCols); err != nil {
 		t.Fatalf("probe migrated pk: %v", err)
 	}
-	if pkCols != 2 {
+	if pkCols != 3 {
 		t.Fatalf("want composite PK after migrate, got %d", pkCols)
 	}
 

@@ -203,6 +203,11 @@ RETURNING target_canonical`,
 // `expires_at > now` carries the ErrLeaseExpired invariant down with it — the
 // op-flock makes both redundant today, and both stay so a caller that ever
 // reaches this path unserialized still cannot resurrect a lapsed lease.
+//
+// worktree (s.repoTop, via worktreeFilter) keeps the UPDATE from reaching a
+// SIBLING row the same owner holds on the same canonical in another linked
+// worktree (loto-8z87): `extend` was decided against LocksForOwnerAt, already
+// scoped the same way, but the raw UPDATE has no other way to stay inside it.
 func (s *Store) commitRefreshes(ctx context.Context, extend []domain.Target, owner string, newExpiry time.Time, events []domain.Event, now time.Time) error {
 	tx, cleanup, err := s.beginTx(ctx)
 	if err != nil {
@@ -212,9 +217,11 @@ func (s *Store) commitRefreshes(ctx context.Context, extend []domain.Target, own
 
 	k := s.keys()
 	placeholders, canonArgs := k.inTargets(extend)
-	args := append([]any{newExpiry.UnixNano(), owner, now.UnixNano()}, canonArgs...)
+	wtCond, wtArgs := worktreeFilter(s.repoTop)
+	args := append([]any{newExpiry.UnixNano(), owner, now.UnixNano()}, wtArgs...)
+	args = append(args, canonArgs...)
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE locks SET expires_at = ? WHERE owner_uuid = ? AND expires_at > ? AND `+k.col("target_canonical")+` IN (`+placeholders+`)`, //nolint:gosec // G202 placeholders are '?' chars only, all data via args
+		`UPDATE locks SET expires_at = ? WHERE owner_uuid = ? AND expires_at > ? AND `+wtCond+` AND `+k.col("target_canonical")+` IN (`+placeholders+`)`, //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 		args...); err != nil {
 		return err
 	}
