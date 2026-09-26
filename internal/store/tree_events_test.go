@@ -29,7 +29,7 @@ func preAs(t *testing.T, s *Store, owner domain.AgentUUID, callID string, at tim
 	t.Helper()
 	ok, err := s.RecordCallPre(context.Background(), HookCall{
 		CallID: callID, OwnerUUID: owner, SessionUUID: domain.SessionUUID("sess-" + owner),
-		ToolName: "Bash", TPre: at,
+		ToolName: tcToolBash, TPre: at,
 	}, obs)
 	if err != nil {
 		t.Fatalf("pre %s: %v", callID, err)
@@ -117,7 +117,7 @@ func TestTreeEvent_SpanningScopedToWorktree(t *testing.T) {
 	// Worktree A: owner A opens a call on a.go and never posts — still in
 	// flight when B's transition below files its event.
 	okA, err := s.RecordCallPre(ctx, HookCall{
-		CallID: "call-a-open", OwnerUUID: tcOwnerA, SessionUUID: "sess-a", ToolName: "Bash",
+		CallID: "call-a-open", OwnerUUID: tcOwnerA, SessionUUID: tcSessA, ToolName: tcToolBash,
 		TPre: now, Worktree: "/repo/wtA",
 	}, []HookPathState{unlocked(tcSHA1)})
 	if err != nil || !okA {
@@ -127,7 +127,7 @@ func TestTreeEvent_SpanningScopedToWorktree(t *testing.T) {
 	// Worktree B: owner B's OWN a.go changes d0 -> d1, filing an event on B's
 	// transition line.
 	okB, err := s.RecordCallPre(ctx, HookCall{
-		CallID: "call-b-write", OwnerUUID: tcOwnerB, SessionUUID: "sess-b", ToolName: "Bash",
+		CallID: "call-b-write", OwnerUUID: tcOwnerB, SessionUUID: "sess-b", ToolName: tcToolBash,
 		TPre: now.Add(time.Millisecond), Worktree: "/repo/wtB",
 	}, []HookPathState{unlocked(tcSHA1)})
 	if err != nil || !okB {
@@ -148,7 +148,7 @@ func TestTreeEvent_SpanningScopedToWorktree(t *testing.T) {
 
 func TestMigrate_AddsTreeEventTables(t *testing.T) {
 	s := mustOpen(t)
-	for _, table := range []string{"path_observed", "tree_events", "tree_event_spanners", "tree_reports"} {
+	for _, table := range []string{tcTblObs, "tree_events", "tree_event_spanners", "tree_reports"} {
 		var n int
 		if err := s.db.QueryRowContext(context.Background(),
 			`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); err != nil {

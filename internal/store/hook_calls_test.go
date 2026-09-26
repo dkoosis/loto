@@ -14,6 +14,10 @@ const (
 	tcHookPath2 = "internal/other_hooked.go"
 	tcOwnerA    = "owner-a"
 	tcOwnerB    = "owner-b"
+	tcToolBash  = "Bash"
+	tcSessA     = "sess-a"
+	tcTblSeq    = "path_seq"
+	tcTblObs    = "path_observed"
 )
 
 func hookObs(path, digest string) HookPathState {
@@ -23,7 +27,7 @@ func hookObs(path, digest string) HookPathState {
 func mustPre(t *testing.T, s *Store, callID string, tPre time.Time, obs ...HookPathState) {
 	t.Helper()
 	ok, err := s.RecordCallPre(context.Background(), HookCall{
-		CallID: callID, OwnerUUID: tcOwnerA, SessionUUID: "sess-a", ToolName: "Bash", TPre: tPre,
+		CallID: callID, OwnerUUID: tcOwnerA, SessionUUID: tcSessA, ToolName: tcToolBash, TPre: tPre,
 	}, obs)
 	if err != nil {
 		t.Fatalf("pre %s: %v", callID, err)
@@ -35,7 +39,7 @@ func mustPre(t *testing.T, s *Store, callID string, tPre time.Time, obs ...HookP
 
 func TestMigrate_AddsHookCallTables(t *testing.T) {
 	s := mustOpen(t)
-	for _, table := range []string{"hook_calls", "hook_call_paths", "path_seq"} {
+	for _, table := range []string{"hook_calls", "hook_call_paths", tcTblSeq} {
 		var n int
 		if err := s.db.QueryRowContext(context.Background(),
 			`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); err != nil {
@@ -102,7 +106,7 @@ func TestPathSeq_AdvancesIndependentlyPerWorktree(t *testing.T) {
 	preInWorktree := func(callID, worktree string, at time.Time, obs HookPathState) {
 		t.Helper()
 		ok, err := s.RecordCallPre(ctx, HookCall{
-			CallID: callID, OwnerUUID: tcOwnerA, SessionUUID: "sess-a", ToolName: "Bash",
+			CallID: callID, OwnerUUID: tcOwnerA, SessionUUID: tcSessA, ToolName: tcToolBash,
 			TPre: at, Worktree: worktree,
 		}, []HookPathState{obs})
 		if err != nil || !ok {

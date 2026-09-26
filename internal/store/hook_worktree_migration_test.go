@@ -172,7 +172,7 @@ func TestMigrate_HookBookkeepingWorktreeSurvivesUpgrade(t *testing.T) {
 	ctx := context.Background()
 
 	// (a) every legacy row survives, in every one of the four tables.
-	for _, table := range []string{"hook_calls", "path_seq", "path_observed", "tree_events"} {
+	for _, table := range []string{"hook_calls", tcTblSeq, tcTblObs, "tree_events"} {
 		var n int
 		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM `+table).Scan(&n); err != nil {
 			t.Fatalf("count %s: %v", table, err)
@@ -201,7 +201,7 @@ func TestMigrate_HookBookkeepingWorktreeSurvivesUpgrade(t *testing.T) {
 
 	// (c) path_seq and path_observed's PK is now the 3-column
 	// (path_canonical, worktree, epoch), not the legacy 2-column form.
-	for _, table := range []string{"path_seq", "path_observed"} {
+	for _, table := range []string{tcTblSeq, tcTblObs} {
 		var pkCols int
 		if err := s.db.QueryRowContext(ctx,
 			`SELECT count(*) FROM pragma_table_info(?) WHERE pk > 0`, table).Scan(&pkCols); err != nil {
