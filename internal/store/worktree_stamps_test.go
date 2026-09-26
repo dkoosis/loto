@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -134,7 +136,7 @@ func TestRepairWorktreeStamps_RewritesOwnedLockAndClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repaired, err := s.RepairWorktreeStamps(ctx, tcAlice, newPath, "")
+	repaired, err := s.RepairWorktreeStamps(ctx, tcAlice, newPath, oldPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,10 +166,10 @@ func TestRepairWorktreeStamps_RewritesOwnedLockAndClaim(t *testing.T) {
 
 // TestRepairWorktreeStamps_LiveSiblingNeverRewritten is the Rules' "never
 // rewrite a stamp whose path still exists" invariant on the write side:
-// bob's row is stamped with a path that is still a real directory (a live
-// sibling worktree), so alice's repair — even though it owns a DIFFERENT row
-// — must never touch it, and alice's own repair must not fire on a row whose
-// path still stands either.
+// alice's repair must not fire on a row whose stamped path still stands on
+// disk, even when she names that path with --moved-from. The live-sibling
+// case (bob's row untouched by alice's repair) is covered by
+// TestRepairWorktreeStamps_TwoLiveWorktreesRepairFromOneLeavesOtherUntouched.
 func TestRepairWorktreeStamps_LiveSiblingNeverRewritten(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
@@ -179,7 +181,7 @@ func TestRepairWorktreeStamps_LiveSiblingNeverRewritten(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repaired, err := s.RepairWorktreeStamps(ctx, tcAlice, newPath, "")
+	repaired, err := s.RepairWorktreeStamps(ctx, tcAlice, newPath, liveOldPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +214,7 @@ func TestRepairWorktreeStamps_TwoLiveWorktreesRepairFromOneLeavesOtherUntouched(
 		t.Fatal(err)
 	}
 
-	repaired, err := s.RepairWorktreeStamps(ctx, tcAlice, aliceNew, "")
+	repaired, err := s.RepairWorktreeStamps(ctx, tcAlice, aliceNew, aliceOld)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +271,7 @@ func TestRepairWorktreeStamps_CollisionKeepsOneRow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repaired, err := s.RepairWorktreeStamps(ctx, tcAlice, newPath, "")
+	repaired, err := s.RepairWorktreeStamps(ctx, tcAlice, newPath, oldPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,5 +321,171 @@ func TestRepairWorktreeStamps_MovedFromScopesToNamedPath(t *testing.T) {
 	}
 	if gotB == nil || gotB.Worktree != oldB {
 		t.Fatalf("oldB's row must be left for its own --moved-from run, got %+v", gotB)
+	}
+}
+
+// TestRepairWorktreeStamps_NoMovedFromRewritesNothing is the PR #376 Codex P1
+// tightening: owner match plus a vanished path cannot tell a MOVED checkout
+// from a DELETED sibling of the same pinned owner (loto-8z87 lets one owner
+// hold rows in two worktrees). Without --moved-from, nothing is adopted.
+func TestRepairWorktreeStamps_NoMovedFromRewritesNothing(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	deletedSibling := mkGoneMovedPath(t)
+	here := t.TempDir()
+
+	l := mkFileLockSessionWorktree(t, "a.go", tcAlice, "sess", "fixer-b", deletedSibling, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+
+	repaired, err := s.RepairWorktreeStamps(ctx, tcAlice, here, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repaired) != 0 {
+		t.Fatalf("no --moved-from: a deleted sibling's row must not be adopted, got %+v", repaired)
+	}
+	got, err := s.LockAt(ctx, l.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Worktree != deletedSibling {
+		t.Fatalf("lock stamp must be untouched, got %+v", got)
+	}
+}
+
+// TestRepairWorktreeStamps_MovedFromUncleanPathIsCleaned: a trailing slash or
+// a `..` segment names the same checkout, so it must match the stamp.
+func TestRepairWorktreeStamps_MovedFromUncleanPathIsCleaned(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	oldPath := mkGoneMovedPath(t)
+	newPath := t.TempDir()
+
+	l := mkFileLockSessionWorktree(t, "a.go", tcAlice, "sess", "fixer-a", oldPath, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	unclean := filepath.Dir(oldPath) + "/x/../" + filepath.Base(oldPath) + "/"
+	repaired, err := s.RepairWorktreeStamps(ctx, tcAlice, newPath, unclean)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repaired) != 1 {
+		t.Fatalf("unclean --moved-from %q must match stamp %q, got %+v", unclean, oldPath, repaired)
+	}
+}
+
+// TestRepairWorktreeStamps_MovedFromRelativeRefused: a relative path can
+// never equal an absolute stamp, so it is an error, not a silent no-op.
+func TestRepairWorktreeStamps_MovedFromRelativeRefused(t *testing.T) {
+	s := mustOpen(t)
+	_, err := s.RepairWorktreeStamps(context.Background(), tcAlice, t.TempDir(), "old/checkout")
+	if !errors.Is(err, ErrMovedFromNotAbsolute) {
+		t.Fatalf("want ErrMovedFromNotAbsolute, got %v", err)
+	}
+}
+
+// TestRepairWorktreeStamps_CollisionRehomesPendingTag (PR #376 Codex P2): the
+// stale row's pending tag must survive the collapse, re-pointed at the lock
+// that stays, so the holder still sees it.
+func TestRepairWorktreeStamps_CollisionRehomesPendingTag(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	oldPath := mkGoneMovedPath(t)
+	newPath := t.TempDir()
+
+	target := filepath.Join(t.TempDir(), "a.go")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	stale := domain.LockRecord{
+		Target: domain.Target{Canonical: target}, OwnerUUID: tcAlice, SessionUUID: "sess-old",
+		Intent: "work", CreatedAt: now, ExpiresAt: now.Add(time.Hour), Host: "h", PID: 1, Worktree: oldPath,
+	}
+	fresh := stale
+	fresh.SessionUUID = "sess-new"
+	fresh.CreatedAt = now.Add(time.Second)
+	fresh.Worktree = newPath
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{stale}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{fresh}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.InsertTag(ctx, NewTag{
+		TargetCanonical: domain.Canonical(stale.Target.Canonical), LockOwnerUUID: string(tcAlice),
+		LockCreatedAt: stale.CreatedAt.UnixNano(), TaggerUUID: string(tcBob), Text: "heads up",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.RepairWorktreeStamps(ctx, tcAlice, newPath, oldPath); err != nil {
+		t.Fatal(err)
+	}
+	tags, err := s.ListAliveForOwner(ctx, tcAlice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tags) != 1 || tags[0].Text != "heads up" {
+		t.Fatalf("the stale row's pending tag must survive the collapse on the kept lock, got %+v", tags)
+	}
+}
+
+// TestPreviewWorktreeStampRepair_ReportsWithoutWriting (PR #376 Codex P2 /
+// cubic P2): --dry-run must name the rows --repair --moved-from would rewrite,
+// and leave them as they are.
+func TestPreviewWorktreeStampRepair_ReportsWithoutWriting(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	oldPath := mkGoneMovedPath(t)
+	newPath := t.TempDir()
+
+	l := mkFileLockSessionWorktree(t, "a.go", tcAlice, "sess", "fixer-a", oldPath, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	would, err := s.PreviewWorktreeStampRepair(ctx, tcAlice, newPath, oldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(would) != 1 {
+		t.Fatalf("preview must report the one row, got %+v", would)
+	}
+	got, err := s.LockAt(ctx, l.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Worktree != oldPath {
+		t.Fatalf("preview must not write, got %+v", got)
+	}
+}
+
+// TestCollectStaleWorktreeStamps_NamesOwners: stamp repair is owner-scoped,
+// so the report carries who owns each stale path (cubic P2 on #376).
+func TestCollectStaleWorktreeStamps_NamesOwners(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	oldPath := mkGoneMovedPath(t)
+
+	a := mkFileLockSessionWorktree(t, "a.go", tcBob, "s1", "fixer-a", oldPath, time.Hour)
+	b := mkFileLockSessionWorktree(t, "b.go", tcAlice, "s2", "fixer-a", oldPath, time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a, b}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	report, err := s.DoctorAudit(ctx, "h", true, liveProbe, SidecarCheck{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.StaleWorktreeStamps) != 1 {
+		t.Fatalf("want one row, got %+v", report.StaleWorktreeStamps)
+	}
+	got := report.StaleWorktreeStamps[0]
+	want := []string{string(tcAlice), string(tcBob)}
+	slices.Sort(want)
+	if got.Locks != 2 || !slices.Equal(got.Owners, want) {
+		t.Fatalf("want locks=2 owners=%v, got %+v", want, got)
 	}
 }

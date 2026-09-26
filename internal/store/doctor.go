@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -70,6 +71,10 @@ type StaleWorktreeStamp struct {
 	OldPath string
 	Locks   int
 	Claims  int
+	// Owners is every owner_uuid with a lock or claim stamped OldPath, sorted.
+	// Stamp repair is owner-scoped, so the renderer offers the --moved-from
+	// command only to a caller in this list (PR #376 review).
+	Owners []string
 }
 
 // SidecarCheck cross-checks held locks against the CC session sidecar to
@@ -136,15 +141,17 @@ func (s *Store) DoctorAudit(ctx context.Context, thisHost string, hostKnown bool
 func (s *Store) collectStaleWorktreeStamps(ctx context.Context, r *DoctorReport) error {
 	counts := map[string]*StaleWorktreeStamp{}
 	if err := addWorktreeCounts(ctx, s.db, counts,
-		`SELECT worktree, COUNT(*) FROM locks WHERE worktree != '' GROUP BY worktree`, false); err != nil {
+		`SELECT worktree, owner_uuid, COUNT(*) FROM locks WHERE worktree != '' GROUP BY worktree, owner_uuid`, false); err != nil {
 		return err
 	}
 	if err := addWorktreeCounts(ctx, s.db, counts,
-		`SELECT worktree, COUNT(*) FROM claims WHERE worktree != '' GROUP BY worktree`, true); err != nil {
+		`SELECT worktree, owner_uuid, COUNT(*) FROM claims WHERE worktree != '' GROUP BY worktree, owner_uuid`, true); err != nil {
 		return err
 	}
 	for path, c := range counts {
 		if worktreePathGone(path) {
+			slices.Sort(c.Owners)
+			c.Owners = slices.Compact(c.Owners)
 			r.StaleWorktreeStamps = append(r.StaleWorktreeStamps, *c)
 		}
 	}
@@ -154,7 +161,7 @@ func (s *Store) collectStaleWorktreeStamps(ctx context.Context, r *DoctorReport)
 	return nil
 }
 
-// addWorktreeCounts runs a `worktree, COUNT(*)` grouping query against either
+// addWorktreeCounts runs a `worktree, owner_uuid, COUNT(*)` grouping query against either
 // locks or claims and folds it into the shared per-path accumulator, keeping
 // one distinct-path set across both tables rather than reporting the same old
 // path twice.
@@ -165,9 +172,9 @@ func addWorktreeCounts(ctx context.Context, db *sql.DB, counts map[string]*Stale
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var path string
+		var path, owner string
 		var n int
-		if err := rows.Scan(&path, &n); err != nil {
+		if err := rows.Scan(&path, &owner, &n); err != nil {
 			return err
 		}
 		c, ok := counts[path]
@@ -175,10 +182,11 @@ func addWorktreeCounts(ctx context.Context, db *sql.DB, counts map[string]*Stale
 			c = &StaleWorktreeStamp{OldPath: path}
 			counts[path] = c
 		}
+		c.Owners = append(c.Owners, owner)
 		if isClaim {
-			c.Claims = n
+			c.Claims += n
 		} else {
-			c.Locks = n
+			c.Locks += n
 		}
 	}
 	return rows.Err()

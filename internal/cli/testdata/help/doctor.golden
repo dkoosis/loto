@@ -2,7 +2,7 @@ Usage of doctor:
   -dry-run
     	report what --repair would do, without writing
   -moved-from string
-    	with --repair, name this checkout's own previous path explicitly (loto-in0v) rather than relying on on-disk auto-detection
+    	with --repair, rewrite this owner's lock and claim stamps from this checkout's previous path (a moved or renamed worktree, loto-in0v); with --dry-run, count them
   -orphan-mode
     	scan for orphan-mode files and report them
   -repair
