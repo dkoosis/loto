@@ -279,7 +279,9 @@ func sortHeldRows(rows []heldRow) {
 func heldByMe(t domain.Target, locks []domain.LockRecord, myUUID string, ec domain.EvalContext) bool {
 	for i := range locks {
 		l := &locks[i]
-		if !ec.SameTarget(t, l.Target) || l.EffectiveMode() != domain.ModeExclusive || l.IsBeacon() {
+		// A row from a sibling worktree names a different file (loto-3eq6).
+		if !ec.SameTarget(t, l.Target) || l.EffectiveMode() != domain.ModeExclusive || l.IsBeacon() ||
+			!domain.SameWorktree(ec.MyWorktree, l.Worktree) {
 			continue
 		}
 		if string(l.OwnerUUID) != myUUID && !ec.IsKin(l.OwnerUUID) {
@@ -306,7 +308,7 @@ func classifyUnheld(t domain.Target, renamedFrom string, locks []domain.LockReco
 	row := heldRow{Path: t.Canonical, State: heldStateUnlocked, RenamedFrom: renamedFrom}
 	for i := range locks {
 		l := &locks[i]
-		if !ec.SameTarget(t, l.Target) || string(l.OwnerUUID) == myUUID || ec.IsKin(l.OwnerUUID) || ec.IsStale(*l) {
+		if !peerLockCovers(t, l, myUUID, ec) {
 			continue
 		}
 		if row.State == heldStatePeerLock && string(l.OwnerUUID) >= row.HolderUUID {
@@ -335,6 +337,14 @@ func classifyUnheld(t domain.Target, renamedFrom string, locks []domain.LockReco
 // heldGlyph is ✗ in blocking mode and ⚠ in warn mode — the ONLY difference
 // between the two renderings, so "same output as ⚠ rows" is structural
 // rather than a second formatter that can drift.
+// peerLockCovers reports whether l is a live peer's lock on t in this
+// checkout — not mine or kin's, not stale, not a sibling worktree's row
+// (loto-3eq6).
+func peerLockCovers(t domain.Target, l *domain.LockRecord, myUUID string, ec domain.EvalContext) bool {
+	return ec.SameTarget(t, l.Target) && string(l.OwnerUUID) != myUUID && !ec.IsKin(l.OwnerUUID) && !ec.IsStale(*l) &&
+		domain.SameWorktree(ec.MyWorktree, l.Worktree)
+}
+
 // tallyHeldStates is the one triage over a verdict set: the printed header and
 // the persisted firing detail both read it, so the numbers a reader sees and
 // the numbers the rollout is measured on cannot disagree (loto-ugsr).
@@ -610,7 +620,7 @@ func runCheckHeld(ctx context.Context, a heldRunArgs, stdout, stderr io.Writer) 
 	if err != nil {
 		return gateInfraUnreachable(stderr, err)
 	}
-	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold}
+	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.RepoTop}
 	kin, err := parentKin(ctx)
 	if err != nil {
 		return gateInfraUnreachable(stderr, err)

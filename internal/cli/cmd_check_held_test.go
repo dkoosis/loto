@@ -1012,3 +1012,28 @@ func TestCheckHeld_UnstageRemedyTouchesOnlyThePathItNames(t *testing.T) {
 		t.Errorf("the remedy must not unstage a sibling whose name the glob happens to match: %q", out)
 	}
 }
+
+// TestDecideHeld_SiblingWorktreeRowsDoNotCount (loto-3eq6): check --held runs
+// in one checkout of a store shared by every linked worktree. My exclusive
+// lock taken in worktree B does not hold the file I am committing in A, and a
+// peer's lock in B is not a peer lock on A's file.
+func TestDecideHeld_SiblingWorktreeRowsDoNotCount(t *testing.T) {
+	now := time.Now()
+	ec := gateEC(now)
+	ec.Live = aliveProbe
+	ec.MyWorktree = tcWtA
+	mine := []domain.LockRecord{
+		{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateMyUUID, Mode: domain.ModeExclusive, ExpiresAt: now.Add(time.Hour), Worktree: tcWtB},
+	}
+	rows := decideHeldRows([]stagedPath{{Path: tcTargetA}}, mine, nil, gateMyUUID, ec)
+	if len(rows) != 1 || rows[0].State != heldStateUnlocked {
+		t.Errorf("my worktree-B lock must not hold worktree A's file: %+v", rows)
+	}
+	peer := []domain.LockRecord{
+		{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, Mode: domain.ModeExclusive, ExpiresAt: now.Add(time.Hour), Worktree: tcWtB},
+	}
+	rows = decideHeldRows([]stagedPath{{Path: tcTargetA}}, peer, nil, gateMyUUID, ec)
+	if len(rows) != 1 || rows[0].State != heldStateUnlocked {
+		t.Errorf("a peer's worktree-B lock must not read as a peer lock in A: %+v", rows)
+	}
+}

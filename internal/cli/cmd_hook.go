@@ -560,7 +560,7 @@ func hookObserve(ctx context.Context, rt *runtime, declared string, warn io.Writ
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold}
+	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.RepoTop}
 	holders := hookLiveHolders(locks, ec)
 
 	status, err := gitStatusPaths(ctx, rt.RepoTop)
@@ -640,10 +640,13 @@ func hookSeqAtObserve(rt *runtime, paths []string, holders map[string]domain.Loc
 // the lowest owner uuid wins, so the record is deterministic rather than
 // whatever order the scan happened to return (.claude/rules/design.md: same
 // input, byte-identical output).
+//
+// A row from a sibling worktree (ec.MyWorktree, loto-3eq6) names a different
+// file than the one this checkout observes, so it holds nothing here.
 func hookLiveHolders(locks []domain.LockRecord, ec domain.EvalContext) map[string]domain.LockRecord {
 	holders := map[string]domain.LockRecord{}
 	for i := range locks {
-		if ec.IsStale(locks[i]) {
+		if ec.IsStale(locks[i]) || !domain.SameWorktree(ec.MyWorktree, locks[i].Worktree) {
 			continue
 		}
 		key := locks[i].Target.Canonical

@@ -36,7 +36,7 @@ stdout 'a.go\thook: admitted Edit-family write'
 cd $WORK
 stdin write-a-wta.json
 ! loto hook pre
-stderr 'a.go'
+stderr 'path=a.go kind=lock blocker='$ALICE
 
 -- write-a-wtb.json --
 {"session_id":"s-1","tool_name":"Write","tool_use_id":"call-wtb","cwd":"/tmp","tool_input":{"file_path":"a.go"}}

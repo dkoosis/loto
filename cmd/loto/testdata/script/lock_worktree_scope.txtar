@@ -1,0 +1,26 @@
+# loto-3eq6, lock-verb half: `loto lock` stamps its row with the worktree it
+# ran in, so the same repo-relative path locked from two linked worktrees
+# (one shared store, two files on disk) coexists, while a second locker in
+# the SAME worktree is still refused. A dropped stamp (an unset worktree reads
+# as matching every worktree) turns the wt2 lock below red.
+
+exec git commit --allow-empty -m seed
+exec git worktree add $WORK/wt2 -b wt2branch
+touch a.go wt2/a.go
+
+env LOTO_AGENT_ID=$ALICE
+loto lock a.go -t 'alice in primary'
+stdout '✓ locked count=1'
+
+# Bob, in worktree B, locks the same-named file: a different file on disk.
+cd wt2
+env LOTO_AGENT_ID=$BOB
+loto lock a.go -t 'bob in wt2'
+stdout '✓ locked count=1'
+
+# Carol, in the primary checkout, still contends with Alice — and only her.
+cd $WORK
+env LOTO_AGENT_ID=cccccccc-0000-4000-8000-0000000ca201
+! loto lock a.go -t 'carol in primary'
+stdout 'blocker='$ALICE
+! stdout $BOB
