@@ -31,7 +31,7 @@ include .sandbox/lib/Makefile.cross.mk
 
 .PHONY: help scan check audit deploy report report-human \
         vet lint arch test race demo demo-v vuln dupl nilcheck stress scriptcheck \
-        docscheck makefilecheck selfcheck build install tidy clean hooks
+        docscheck makefilecheck selfcheck build install tidy clean hooks pack-drift
 
 BIN_DIR := bin
 BIN     := $(BIN_DIR)/loto
@@ -101,7 +101,7 @@ help: ## Show this help
 		/^## [^-]/ { printf "\n%s\n", substr($$0, 4) } \
 		/^[a-zA-Z0-9_-]+:.*?## / { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-check: vet lint arch test build docscheck scriptcheck makefilecheck selfcheck ## Full repo: vet + lint + arch + test + build + docs + scripts + conform-to-sdlc
+check: vet lint arch test build docscheck scriptcheck makefilecheck pack-drift selfcheck ## Full repo: vet + lint + arch + test + build + docs + scripts + pack-drift + conform-to-sdlc
 	@echo "=== check pass ==="
 
 # Dogfood the fleet gate (sd-th5.15): conform-to-sdlc is pinned as a go.mod tool
@@ -358,3 +358,6 @@ scan: ## Vet + lint + test changed packages only (fast inner loop)
 		go test -count=1 -cover $$PKGS && \
 		echo "=== scan pass ==="; \
 	fi
+
+pack-drift: ## Fail if the copied lintbrush pack rules drifted from upstream (network-soft)
+	@.golangci-rules/check-pack-drift.sh

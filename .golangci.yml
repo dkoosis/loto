@@ -114,7 +114,7 @@ linters:
           # ${base-path} = the .golangci.yml directory (golangci-lint v2). The
           # glob names ONLY bugclasses.go, so rule 2 (raw-state-write, the
           # opt-in file) stays off until loto moves durable state to atomicfile.
-          rules: "${base-path}/.golangci-rules/bugclasses.go"
+          rules: "${base-path}/.golangci-rules/bugclasses.go,${base-path}/.golangci-rules/modern.go"
           # Fail the run on rule-compile errors — never silently skip them.
           failOn: dsl
       disabled-checks:

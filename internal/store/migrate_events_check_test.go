@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -144,7 +145,7 @@ VALUES ('e1','a.go','lock_acquired','alice','','because','{"kept":true}',1);`
 func TestEnsureEventsCheckAllKinds_ReachesAnUpgradedDB(t *testing.T) {
 	const futureKind = "future_kind_added_after_this_db_existed"
 	orig := allEventKinds
-	allEventKinds = append(append([]string{}, orig...), futureKind)
+	allEventKinds = slices.Concat(orig, []string{futureKind})
 	t.Cleanup(func() { allEventKinds = orig })
 
 	ctx := context.Background()

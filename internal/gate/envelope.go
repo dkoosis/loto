@@ -252,7 +252,7 @@ func Capture(ctx context.Context, p CaptureParams) (Envelope, error) {
 	if err := p.validate(); err != nil {
 		return Envelope{}, err
 	}
-	writeSet := append([]string(nil), p.WriteSet...)
+	writeSet := slices.Clone(p.WriteSet)
 	slices.Sort(writeSet)
 	g := gitRunner{repoTop: p.RepoTop}
 

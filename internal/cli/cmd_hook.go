@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -515,7 +516,7 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, kin []domai
 	}
 	storeKin := kin
 	if sib != "" {
-		storeKin = append(append([]domain.AgentUUID{}, kin...), sib)
+		storeKin = slices.Concat(kin, []domain.AgentUUID{sib})
 	}
 	if _, err := rt.Store.AcquireLocks(rt.Ctx, []domain.LockRecord{rec}, memoLiveProbe(rt.liveProbe()), storeKin...); err != nil {
 		held, lerr := rt.Store.LocksAt(rt.Ctx, t)
@@ -654,7 +655,7 @@ func hookLiveHolders(locks []domain.LockRecord, ec domain.EvalContext) map[strin
 // warning — a removal and an odd name are both states, and neither may cost
 // the observation of every other path.
 func hookReadPaths(ctx context.Context, repoTop string, paths []string, warn io.Writer) []store.HookPathState {
-	sorted := append([]string(nil), paths...)
+	sorted := slices.Clone(paths)
 	sort.Strings(sorted)
 	present := make([]string, 0, len(sorted))
 	stats := make(map[string]string, len(sorted))
