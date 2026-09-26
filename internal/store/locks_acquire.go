@@ -272,7 +272,10 @@ func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domai
 		ex := &all[i]
 		// Kin rows (the parent identity behind a subagent stamp) are skipped
 		// exactly like same-owner rows: never reclaimed here, never blocking.
-		if !ec.SameTarget(ex.Target, l.Target) || ex.OwnerUUID == l.OwnerUUID || ec.IsKin(ex.OwnerUUID) {
+		// A row from a sibling worktree is a different file on disk
+		// (loto-3eq6): never reclaimed from here, never blocking.
+		if !ec.SameTarget(ex.Target, l.Target) || ex.OwnerUUID == l.OwnerUUID || ec.IsKin(ex.OwnerUUID) ||
+			!domain.SameWorktree(l.Worktree, ex.Worktree) {
 			continue
 		}
 		if ec.IsStale(*ex) {

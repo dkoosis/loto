@@ -183,7 +183,11 @@ func breakTargets(rt *runtime, args []string, intent, repoTop string, expect hol
 	before := make(map[string][]domain.LockRecord, len(targets))
 	for i := range targets {
 		if holders, herr := rt.Store.LocksAt(rt.Ctx, targets[i]); herr == nil {
-			before[targets[i].Canonical] = holders
+			// Same scope BreakLocks applies: a sibling worktree's row is not
+			// broken, so it is not reported as dispossessed (loto-3eq6).
+			before[targets[i].Canonical] = slices.DeleteFunc(holders, func(l domain.LockRecord) bool {
+				return !domain.SameWorktree(rt.RepoTop, l.Worktree)
+			})
 		}
 	}
 	var expectations store.BreakExpectations
