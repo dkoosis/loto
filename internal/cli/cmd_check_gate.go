@@ -88,16 +88,7 @@ func gateDecideWith(targets []domain.Target, locks []domain.LockRecord, claims [
 func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t domain.Target, locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ownSession domain.SessionUUID, ec domain.EvalContext) []render.GateDenyRow {
 	for i := range locks {
 		l := &locks[i]
-		// Kin rows (ec.Kin — the parent identity behind a subagent stamp) are
-		// this caller's own, same as myUUID (loto-wofb).
-		if !ec.SameTarget(t, l.Target) || string(l.OwnerUUID) == myUUID || ec.IsKin(l.OwnerUUID) || ec.IsStale(*l) ||
-			!domain.SameWorktree(ec.MyWorktree, l.Worktree) {
-			continue
-		}
-		// Commit-time only (gateDecideStaged): a beacon of this same session's
-		// sibling does not deny the session's commit. An empty ownSession
-		// matches nothing rather than everything.
-		if l.IsBeacon() && ownSession != "" && l.SessionUUID == ownSession {
+		if !gateLockDenies(t, l, myUUID, ownSession, ec) {
 			continue
 		}
 		key := "lock|" + t.Canonical + "|" + string(l.OwnerUUID)
@@ -129,6 +120,20 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 		})
 	}
 	return rows
+}
+
+// gateLockDenies reports whether lock l is foreign live coverage of t.
+func gateLockDenies(t domain.Target, l *domain.LockRecord, myUUID string, ownSession domain.SessionUUID, ec domain.EvalContext) bool {
+	// Kin rows (ec.Kin — the parent identity behind a subagent stamp) are
+	// this caller's own, same as myUUID (loto-wofb).
+	if !ec.SameTarget(t, l.Target) || string(l.OwnerUUID) == myUUID || ec.IsKin(l.OwnerUUID) || ec.IsStale(*l) ||
+		!domain.SameWorktree(ec.MyWorktree, l.Worktree) {
+		return false
+	}
+	// Commit-time only (gateDecideStaged): a beacon of this same session's
+	// sibling does not deny the session's commit. An empty ownSession
+	// matches nothing rather than everything.
+	return !l.IsBeacon() || ownSession == "" || l.SessionUUID != ownSession
 }
 
 // gateDecideAny is gateDecide's path-free sibling (ccp-vx4w): "does any
