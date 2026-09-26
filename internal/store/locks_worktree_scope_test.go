@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -286,6 +288,14 @@ func TestAcquireLocks_AdoptsLegacyBlankWorktreeRowAcrossKeyFold(t *testing.T) {
 	again := legacy
 	again.Target = domain.Target{Canonical: strings.ToLower(legacy.Target.Canonical)}
 	again.Worktree = wtA
+	// The folded spelling must exist for acquire's validate step: on a
+	// case-sensitive filesystem (linux CI) it is a separate path from Foo.go.
+	if err := os.MkdirAll(filepath.Dir(again.Target.Canonical), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(again.Target.Canonical, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{again}, aliveOn(tcHost)); err != nil {
 		t.Fatal(err)
 	}
