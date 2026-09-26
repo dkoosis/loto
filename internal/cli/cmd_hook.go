@@ -275,7 +275,7 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 
 	// Step 2 — drift, over the observation step 4 is about to record.
 	me := domain.AgentUUID(rt.Agent.UUID)
-	if _, err := rt.Store.RecordDrift(rt.Ctx, me, now, obs); err != nil {
+	if _, err := rt.Store.RecordDrift(rt.Ctx, me, rt.RepoTop, now, obs); err != nil {
 		fmt.Fprintf(stderr, "⚠ hook: drift: %v\n", err)
 	}
 	// Step 1 — deliver. Reports addressed to this owner are handed over once
@@ -283,13 +283,18 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 	// addressee's own next call.
 	hookDeliver(rt, me, now, stdout, stderr)
 
-	// Step 4 — record.
+	// Step 4 — record. Worktree is rt.RepoTop, the same checkout-root identity
+	// every other table in this store already scopes to (loto-v6xx): dirty
+	// unlocked paths use epoch 0 in every checkout, so path_seq / path_observed
+	// / the spanner query all need it to tell two worktrees' independent files
+	// apart at one repo-relative canonical.
 	recorded, err := rt.Store.RecordCallPre(rt.Ctx, store.HookCall{
 		CallID:      ev.ToolUseID,
 		OwnerUUID:   domain.AgentUUID(rt.Agent.UUID),
 		SessionUUID: rt.SessionUUID,
 		ToolName:    ev.ToolName,
 		TPre:        now,
+		Worktree:    rt.RepoTop,
 	}, obs)
 	if err != nil {
 		return hookSkip(stderr, "record pre: %v", err)
@@ -623,7 +628,7 @@ func hookSeqAtObserve(rt *runtime, paths []string, holders map[string]domain.Loc
 		if h, ok := holders[p]; ok {
 			epoch = h.Epoch
 		}
-		n, err := rt.Store.PathSeq(rt.Ctx, p, epoch)
+		n, err := rt.Store.PathSeq(rt.Ctx, p, rt.RepoTop, epoch)
 		if err != nil {
 			return nil, err
 		}

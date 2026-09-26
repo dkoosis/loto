@@ -85,6 +85,60 @@ func TestRecordCall_PreThenPostHoldsBothDigests(t *testing.T) {
 	}
 }
 
+// TestPathSeq_AdvancesIndependentlyPerWorktree is the bead's second acceptance
+// criterion (loto-v6xx): a.go in worktree A and a.go in worktree B are two
+// unrelated physical files sharing this store at one repo-relative canonical
+// — dirty unlocked paths use epoch 0 in every checkout — so each must number
+// its own transitions rather than merging into one line.
+func TestPathSeq_AdvancesIndependentlyPerWorktree(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	unlocked := func(digest string) HookPathState {
+		return HookPathState{Path: tcHookPath, Digest: digest, Stat: "stat-" + digest}
+	}
+
+	preInWorktree := func(callID, worktree string, at time.Time, obs HookPathState) {
+		t.Helper()
+		ok, err := s.RecordCallPre(ctx, HookCall{
+			CallID: callID, OwnerUUID: tcOwnerA, SessionUUID: "sess-a", ToolName: "Bash",
+			TPre: at, Worktree: worktree,
+		}, []HookPathState{obs})
+		if err != nil || !ok {
+			t.Fatalf("pre %s (worktree=%q): ok=%v err=%v", callID, worktree, ok, err)
+		}
+	}
+
+	// Worktree A: a.go changes d0 -> d1, taking seq 1 in A's line.
+	preInWorktree("call-wtA", "/repo/wtA", now, unlocked(tcSHA1))
+	if _, err := s.RecordCallPost(ctx, "call-wtA", now.Add(time.Second), []HookPathState{unlocked(tcSHA2)}); err != nil {
+		t.Fatalf("post wtA: %v", err)
+	}
+
+	// Worktree B: its OWN a.go changes d0 -> d1 too — a coincidence of content,
+	// not the same physical file. It must take seq 1 in B's line, not seq 2.
+	preInWorktree("call-wtB", "/repo/wtB", now.Add(2*time.Second), unlocked(tcSHA1))
+	if _, err := s.RecordCallPost(ctx, "call-wtB", now.Add(3*time.Second), []HookPathState{unlocked(tcSHA2)}); err != nil {
+		t.Fatalf("post wtB: %v", err)
+	}
+
+	seqA, err := s.PathSeq(ctx, tcHookPath, "/repo/wtA", 0)
+	if err != nil {
+		t.Fatalf("path seq A: %v", err)
+	}
+	seqB, err := s.PathSeq(ctx, tcHookPath, "/repo/wtB", 0)
+	if err != nil {
+		t.Fatalf("path seq B: %v", err)
+	}
+	if seqA != 1 {
+		t.Errorf("worktree A's seq: want 1, got %d", seqA)
+	}
+	if seqB != 1 {
+		t.Errorf("worktree B's seq: want 1 (independent of A), got %d", seqB)
+	}
+}
+
 // A path whose digest and stat are identical across the call keeps its number;
 // only a change takes the next one. Ordering is by seq, never by wall clock.
 func TestRecordCallPost_UnchangedPathKeepsItsSeq(t *testing.T) {
@@ -109,7 +163,7 @@ func TestRecordCallPost_UnchangedPathKeepsItsSeq(t *testing.T) {
 	if paths[0].SeqPre != paths[0].SeqPost {
 		t.Errorf("unchanged path moved: %d -> %d", paths[0].SeqPre, paths[0].SeqPost)
 	}
-	seq, err := s.PathSeq(ctx, tcHookPath, 1)
+	seq, err := s.PathSeq(ctx, tcHookPath, "", 1)
 	if err != nil {
 		t.Fatalf("path seq: %v", err)
 	}
@@ -155,7 +209,7 @@ func TestRecordCallPost_RepeatIsANoOp(t *testing.T) {
 	if pathsAfter[0] != pathsBefore[0] {
 		t.Errorf("path row moved:\n before %+v\n after  %+v", pathsBefore[0], pathsAfter[0])
 	}
-	seq, err := s.PathSeq(ctx, tcHookPath, 1)
+	seq, err := s.PathSeq(ctx, tcHookPath, "", 1)
 	if err != nil {
 		t.Fatalf("path seq: %v", err)
 	}
@@ -370,11 +424,11 @@ func TestPathSeq_IsKeyedToTheEpoch(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("post e1: %v", err)
 	}
-	seq1, err := s.PathSeq(ctx, tcHookPath, 1)
+	seq1, err := s.PathSeq(ctx, tcHookPath, "", 1)
 	if err != nil {
 		t.Fatalf("seq epoch 1: %v", err)
 	}
-	seq2, err := s.PathSeq(ctx, tcHookPath, 2)
+	seq2, err := s.PathSeq(ctx, tcHookPath, "", 2)
 	if err != nil {
 		t.Fatalf("seq epoch 2: %v", err)
 	}
@@ -501,7 +555,7 @@ func TestRecordCallPre_SeqPreIsPinnedToTheObservation(t *testing.T) {
 	ctx := context.Background()
 
 	// The hook observes: seq is 0 here, and the bytes it reads are seq 0's.
-	observed, err := s.PathSeq(ctx, tcHookPath, 1)
+	observed, err := s.PathSeq(ctx, tcHookPath, "", 1)
 	if err != nil {
 		t.Fatalf("observe seq: %v", err)
 	}
@@ -513,7 +567,7 @@ func TestRecordCallPre_SeqPreIsPinnedToTheObservation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("peer post: %v", err)
 	}
-	if n, serr := s.PathSeq(ctx, tcHookPath, 1); serr != nil || n != 1 {
+	if n, serr := s.PathSeq(ctx, tcHookPath, "", 1); serr != nil || n != 1 {
 		t.Fatalf("want the peer's transition at seq 1, got %d err=%v", n, serr)
 	}
 

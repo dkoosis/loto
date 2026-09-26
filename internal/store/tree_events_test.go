@@ -99,6 +99,53 @@ func sameStrings(got, want []string) bool {
 	return true
 }
 
+// TestTreeEvent_SpanningScopedToWorktree is the bead's first acceptance
+// criterion (loto-v6xx): dirty unlocked paths use epoch 0 in every checkout,
+// so without a worktree-scoped spanner query, an open call on a.go in one
+// worktree reads as spanning a transition to a.go observed in a SIBLING
+// worktree — two unrelated physical files sharing this store at one
+// repo-relative canonical.
+func TestTreeEvent_SpanningScopedToWorktree(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	unlocked := func(digest string) HookPathState {
+		return HookPathState{Path: tcHookPath, Digest: digest, Stat: "stat-" + digest}
+	}
+
+	// Worktree A: owner A opens a call on a.go and never posts — still in
+	// flight when B's transition below files its event.
+	okA, err := s.RecordCallPre(ctx, HookCall{
+		CallID: "call-a-open", OwnerUUID: tcOwnerA, SessionUUID: "sess-a", ToolName: "Bash",
+		TPre: now, Worktree: "/repo/wtA",
+	}, []HookPathState{unlocked(tcSHA1)})
+	if err != nil || !okA {
+		t.Fatalf("pre in worktree A: ok=%v err=%v", okA, err)
+	}
+
+	// Worktree B: owner B's OWN a.go changes d0 -> d1, filing an event on B's
+	// transition line.
+	okB, err := s.RecordCallPre(ctx, HookCall{
+		CallID: "call-b-write", OwnerUUID: tcOwnerB, SessionUUID: "sess-b", ToolName: "Bash",
+		TPre: now.Add(time.Millisecond), Worktree: "/repo/wtB",
+	}, []HookPathState{unlocked(tcSHA1)})
+	if err != nil || !okB {
+		t.Fatalf("pre in worktree B: ok=%v err=%v", okB, err)
+	}
+	out, err := s.RecordCallPost(ctx, "call-b-write", now.Add(time.Second), []HookPathState{unlocked(tcSHA2)})
+	if err != nil {
+		t.Fatalf("post in worktree B: %v", err)
+	}
+	if len(out.Events) != 1 {
+		t.Fatalf("want one event filed for B's transition, got %d", len(out.Events))
+	}
+	ev := out.Events[0]
+	if got := spannerOwners(ev); len(got) != 0 {
+		t.Errorf("B's event must NOT name A's open call from a sibling worktree as a spanner, got %v", got)
+	}
+}
+
 func TestMigrate_AddsTreeEventTables(t *testing.T) {
 	s := mustOpen(t)
 	for _, table := range []string{"path_observed", "tree_events", "tree_event_spanners", "tree_reports"} {
@@ -253,7 +300,7 @@ func TestTreeEvent_OneCallSpanningTwoTransitions(t *testing.T) {
 
 func seqOf(t *testing.T, s *Store, path string) int64 {
 	t.Helper()
-	n, err := s.PathSeq(context.Background(), path, 1)
+	n, err := s.PathSeq(context.Background(), path, "", 1)
 	if err != nil {
 		t.Fatalf("read seq: %v", err)
 	}
@@ -364,7 +411,7 @@ func TestRecordDrift_SeedsThenReportsOnce(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	out, err := s.RecordDrift(ctx, tcOwnerB, now, []HookPathState{obsFor(tcSHA1)})
+	out, err := s.RecordDrift(ctx, tcOwnerB, "", now, []HookPathState{obsFor(tcSHA1)})
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -372,7 +419,7 @@ func TestRecordDrift_SeedsThenReportsOnce(t *testing.T) {
 		t.Fatalf("the first observation seeds, it does not drift: %+v", out)
 	}
 
-	out, err = s.RecordDrift(ctx, tcOwnerB, now.Add(time.Second), []HookPathState{obsFor(tcSHA2)})
+	out, err = s.RecordDrift(ctx, tcOwnerB, "", now.Add(time.Second), []HookPathState{obsFor(tcSHA2)})
 	if err != nil {
 		t.Fatalf("drift: %v", err)
 	}
@@ -387,7 +434,7 @@ func TestRecordDrift_SeedsThenReportsOnce(t *testing.T) {
 		t.Errorf("drift reports to the holder (and the detector), got %v", got)
 	}
 
-	out, err = s.RecordDrift(ctx, tcOwnerB, now.Add(2*time.Second), []HookPathState{obsFor(tcSHA2)})
+	out, err = s.RecordDrift(ctx, tcOwnerB, "", now.Add(2*time.Second), []HookPathState{obsFor(tcSHA2)})
 	if err != nil {
 		t.Fatalf("third pass: %v", err)
 	}
@@ -528,14 +575,14 @@ func TestRecordDrift_DefersToAnInFlightCallThatRecordedThePath(t *testing.T) {
 	now := time.Now()
 
 	// A's earlier call seeds observed(f) at d0.
-	if _, err := s.RecordDrift(ctx, tcOwnerA, now, []HookPathState{obsFor(tcSHA1)}); err != nil {
+	if _, err := s.RecordDrift(ctx, tcOwnerA, "", now, []HookPathState{obsFor(tcSHA1)}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	// B opens a call over the path, then writes.
 	preAs(t, s, tcOwnerB, "b-write", now.Add(time.Second), obsFor(tcSHA1))
 
 	// A's pre lands before B posts: the file already reads d1.
-	out, err := s.RecordDrift(ctx, tcOwnerA, now.Add(2*time.Second), []HookPathState{obsFor(tcSHA2)})
+	out, err := s.RecordDrift(ctx, tcOwnerA, "", now.Add(2*time.Second), []HookPathState{obsFor(tcSHA2)})
 	if err != nil {
 		t.Fatalf("drift: %v", err)
 	}
@@ -561,7 +608,7 @@ func TestRecordDrift_DefersToAnInFlightCallThatRecordedThePath(t *testing.T) {
 
 	// The change is not lost while deferred: B's post moved observed(f), so
 	// A's next pre is silent rather than filing the drift late.
-	out, err = s.RecordDrift(ctx, tcOwnerA, now.Add(4*time.Second), []HookPathState{obsFor(tcSHA2)})
+	out, err = s.RecordDrift(ctx, tcOwnerA, "", now.Add(4*time.Second), []HookPathState{obsFor(tcSHA2)})
 	if err != nil {
 		t.Fatalf("after: %v", err)
 	}
@@ -577,11 +624,11 @@ func TestRecordDrift_FilesAfterTheDeferredCallsOwnerDies(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	if _, err := s.RecordDrift(ctx, tcOwnerA, now, []HookPathState{obsFor(tcSHA1)}); err != nil {
+	if _, err := s.RecordDrift(ctx, tcOwnerA, "", now, []HookPathState{obsFor(tcSHA1)}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	preAs(t, s, tcOwnerB, "b-gone", now.Add(time.Second), obsFor(tcSHA1))
-	out, err := s.RecordDrift(ctx, tcOwnerA, now.Add(2*time.Second), []HookPathState{obsFor(tcSHA2)})
+	out, err := s.RecordDrift(ctx, tcOwnerA, "", now.Add(2*time.Second), []HookPathState{obsFor(tcSHA2)})
 	if err != nil || len(out.Deferred) != 1 {
 		t.Fatalf("want deferred: %+v err=%v", out, err)
 	}
@@ -589,7 +636,7 @@ func TestRecordDrift_FilesAfterTheDeferredCallsOwnerDies(t *testing.T) {
 	if n, err := s.MarkDeadOwnerCalls(ctx, now, func(domain.SessionUUID) bool { return true }); err != nil || n != 1 {
 		t.Fatalf("dead-owner sweep: n=%d err=%v", n, err)
 	}
-	out, err = s.RecordDrift(ctx, tcOwnerA, now.Add(3*time.Second), []HookPathState{obsFor(tcSHA2)})
+	out, err = s.RecordDrift(ctx, tcOwnerA, "", now.Add(3*time.Second), []HookPathState{obsFor(tcSHA2)})
 	if err != nil {
 		t.Fatalf("after death: %v", err)
 	}
@@ -607,11 +654,11 @@ func TestRecordDrift_UnchangedPathIsNeitherSeededNorDrifted(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	out, err := s.RecordDrift(ctx, tcOwnerA, now, []HookPathState{obsFor(tcSHA1)})
+	out, err := s.RecordDrift(ctx, tcOwnerA, "", now, []HookPathState{obsFor(tcSHA1)})
 	if err != nil || !sameStrings(out.Seeded, []string{tcHookPath}) {
 		t.Fatalf("the first pass seeds: %+v err=%v", out, err)
 	}
-	out, err = s.RecordDrift(ctx, tcOwnerA, now.Add(time.Second), []HookPathState{obsFor(tcSHA1)})
+	out, err = s.RecordDrift(ctx, tcOwnerA, "", now.Add(time.Second), []HookPathState{obsFor(tcSHA1)})
 	if err != nil {
 		t.Fatalf("second pass: %v", err)
 	}
