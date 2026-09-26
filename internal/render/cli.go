@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -59,7 +60,7 @@ func getCwd() string {
 // EffectiveMode so a legacy/empty value renders as exclusive.
 func EmitLockSuccess(w io.Writer, recs []domain.LockRecord) {
 	cwd := getCwd()
-	sorted := append([]domain.LockRecord(nil), recs...)
+	sorted := slices.Clone(recs)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })
 	fmt.Fprintf(w, "✓ locked count=%d\n", len(sorted))
 	for i := range sorted {
@@ -73,7 +74,7 @@ func EmitLockSuccess(w io.Writer, recs []domain.LockRecord) {
 // is the one piece of state worth printing beside the path.
 func EmitBeaconSuccess(w io.Writer, recs []domain.LockRecord, ttl time.Duration) {
 	cwd := getCwd()
-	sorted := append([]domain.LockRecord(nil), recs...)
+	sorted := slices.Clone(recs)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })
 	fmt.Fprintf(w, "✓ beacon count=%d ttl=%s\n", len(sorted), ttl)
 	for i := range sorted {
@@ -86,7 +87,7 @@ func EmitBeaconSuccess(w io.Writer, recs []domain.LockRecord, ttl time.Duration)
 // the `⚠ target=…` line. Pass nil to suppress tag surfacing.
 func EmitConflictWithTags(w io.Writer, ce *store.MultiConflictError, tagsByTarget map[string][]store.Tag) {
 	cwd := getCwd()
-	blockers := append([]domain.LockRecord(nil), ce.Blockers...)
+	blockers := slices.Clone(ce.Blockers)
 	sort.Slice(blockers, func(i, j int) bool {
 		return blockers[i].Target.Canonical < blockers[j].Target.Canonical
 	})
@@ -118,7 +119,7 @@ func EmitConflictWithTags(w io.Writer, ce *store.MultiConflictError, tagsByTarge
 // within one command run even across several blocker rows.
 func EmitCandidateClaimConflict(w io.Writer, ce *store.CandidateClaimConflictError, now time.Time) {
 	cwd := getCwd()
-	blockers := append([]domain.CandidateClaim(nil), ce.Blockers...)
+	blockers := slices.Clone(ce.Blockers)
 	sort.Slice(blockers, func(i, j int) bool {
 		if blockers[i].PathCanonical != blockers[j].PathCanonical {
 			return blockers[i].PathCanonical < blockers[j].PathCanonical
@@ -154,7 +155,7 @@ func EmitClaimSuccess(w io.Writer, rec domain.ClaimRecord) {
 // blocker, holder named by owner id, sorted prefix then created_at.
 func EmitClaimConflict(w io.Writer, ce *store.ClaimConflictError) {
 	cwd := getCwd()
-	blockers := append([]domain.ClaimRecord(nil), ce.Blockers...)
+	blockers := slices.Clone(ce.Blockers)
 	sort.Slice(blockers, func(i, j int) bool {
 		if blockers[i].PathPrefix != blockers[j].PathPrefix {
 			return blockers[i].PathPrefix < blockers[j].PathPrefix
@@ -291,7 +292,7 @@ type InvalidTarget struct {
 
 func EmitInvalid(w io.Writer, items []InvalidTarget) {
 	cwd := getCwd()
-	sorted := append([]InvalidTarget(nil), items...)
+	sorted := slices.Clone(items)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
 	fmt.Fprintf(w, "✗ invalid count=%d\n", len(sorted))
 	for _, it := range sorted {
@@ -309,7 +310,7 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 		return 0
 	}
 	cwd := getCwd()
-	sorted := append([]store.ReleaseResult(nil), results...)
+	sorted := slices.Clone(results)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })
 	exit := writeReleaseTriageLine(w, sorted)
 	for _, r := range sorted {

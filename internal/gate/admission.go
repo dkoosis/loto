@@ -231,7 +231,7 @@ func checkDiffMatchesWriteSet(ctx context.Context, repoTop string, env Envelope)
 	}
 	actual := parseNameOnlyZ(out)
 	slices.Sort(actual)
-	declared := append([]string(nil), env.WriteSet...)
+	declared := slices.Clone(env.WriteSet)
 	slices.Sort(declared)
 
 	// diffStringSets(declared, actual) returns (onlyDeclared, onlyActual):

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -25,11 +26,11 @@ import (
 func init() { register("doctor", cmdDoctor) } //nolint:gochecknoinits // command registry pattern
 
 func renderDoctorReport(stdout io.Writer, report *store.DoctorReport) {
-	staleLocks := append([]domain.LockRecord(nil), report.StaleLocks...)
+	staleLocks := slices.Clone(report.StaleLocks)
 	sort.Slice(staleLocks, func(i, j int) bool {
 		return staleLocks[i].Target.Canonical < staleLocks[j].Target.Canonical
 	})
-	sidecarFindings := append([]store.SidecarFinding(nil), report.SidecarFindings...)
+	sidecarFindings := slices.Clone(report.SidecarFindings)
 	sort.Slice(sidecarFindings, func(i, j int) bool {
 		if sidecarFindings[i].Target != sidecarFindings[j].Target {
 			return sidecarFindings[i].Target < sidecarFindings[j].Target

@@ -36,14 +36,13 @@ const (
 func scrubTime(s string) string {
 	var b strings.Builder
 	for {
-		i := strings.Index(s, "expires_at=")
-		if i < 0 {
+		before, rest, found := strings.Cut(s, "expires_at=")
+		if !found {
 			b.WriteString(s)
 			return b.String()
 		}
-		b.WriteString(s[:i])
+		b.WriteString(before)
 		b.WriteString("expires_at=<T>")
-		rest := s[i+len("expires_at="):]
 		// The timestamp runs to the next space or newline.
 		j := strings.IndexAny(rest, " \n")
 		if j < 0 {

@@ -3,6 +3,7 @@ package render
 import (
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"time"
 )
@@ -47,7 +48,7 @@ type GateDenyRow struct {
 // are per-file), so it isn't repeated as a separate field.
 func EmitGateDeny(w io.Writer, rows []GateDenyRow) {
 	cwd := getCwd()
-	sorted := append([]GateDenyRow(nil), rows...)
+	sorted := slices.Clone(rows)
 	sort.Slice(sorted, func(i, j int) bool {
 		if sorted[i].Path != sorted[j].Path {
 			return sorted[i].Path < sorted[j].Path

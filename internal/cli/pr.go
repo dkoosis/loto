@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -325,7 +326,7 @@ func emitPRReport(w io.Writer, o prOpts, plan gate.BridgePlan, counts map[string
 	}
 	fmt.Fprintln(w)
 
-	sorted := append([]prRow(nil), rows...)
+	sorted := slices.Clone(rows)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].line < sorted[j].line })
 	for _, r := range sorted {
 		fmt.Fprintln(w, r.line)

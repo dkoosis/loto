@@ -1197,7 +1197,7 @@ func syncConflictFor(path string, locks []domain.LockRecord, claims []domain.Cla
 // worktree path the report names; a skip discards the temporary and leaves the
 // peer's bytes where they are.
 func syncApply(ctx context.Context, repoTop string, apply []syncDiff) (synced []string, skipped []syncTargetMismatch, err error) {
-	sorted := append([]syncDiff(nil), apply...)
+	sorted := slices.Clone(apply)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
 	for _, d := range sorted {
 		staged, stageErr := syncStageReplacement(ctx, repoTop, d)
