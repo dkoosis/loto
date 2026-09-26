@@ -146,6 +146,9 @@ type ClaimRecord struct {
 	CreatedAt   time.Time
 	ExpiresAt   time.Time
 	Host        string
+	// Worktree: the absolute checkout root the claim was taken from, same
+	// meaning and "" = unknown rule as LockRecord.Worktree (loto-19bz).
+	Worktree string
 }
 
 // Expired reports whether the claim's TTL lease has lapsed at now. Claims

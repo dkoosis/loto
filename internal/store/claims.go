@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS claims (
   created_at   INTEGER NOT NULL,
   expires_at   INTEGER NOT NULL,
   host         TEXT NOT NULL DEFAULT '',
+  worktree     TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (path_prefix, owner_uuid)
 );
 CREATE INDEX IF NOT EXISTS idx_claims_expires ON claims(expires_at);`
@@ -153,15 +154,16 @@ func partitionClaims(all []domain.ClaimRecord, rec domain.ClaimRecord, ec domain
 // time survives a refresh (mirrors insertOrRefreshLock).
 func insertOrRefreshClaim(ctx context.Context, tx *sql.Tx, c domain.ClaimRecord) error {
 	_, err := tx.ExecContext(ctx, `
-INSERT INTO claims(path_prefix, owner_uuid, session_uuid, intent, created_at, expires_at, host)
-VALUES (?,?,?,?,?,?,?)
+INSERT INTO claims(path_prefix, owner_uuid, session_uuid, intent, created_at, expires_at, host, worktree)
+VALUES (?,?,?,?,?,?,?,?)
 ON CONFLICT(path_prefix, owner_uuid) DO UPDATE SET
   intent=excluded.intent,
   expires_at=excluded.expires_at,
   session_uuid=excluded.session_uuid,
-  host=excluded.host`,
+  host=excluded.host,
+  worktree=excluded.worktree`,
 		c.PathPrefix, string(c.OwnerUUID), string(c.SessionUUID),
-		c.Intent, c.CreatedAt.UnixNano(), c.ExpiresAt.UnixNano(), c.Host,
+		c.Intent, c.CreatedAt.UnixNano(), c.ExpiresAt.UnixNano(), c.Host, c.Worktree,
 	)
 	return err
 }
@@ -230,7 +232,7 @@ func deleteClaimsBySessionTx(ctx context.Context, tx *sql.Tx, agent, session str
 	where := `owner_uuid = ?`
 	args := []any{agent}
 	if session != "" {
-		where += ` AND session_uuid = ?`
+		where += andSessionClause
 		args = append(args, session)
 	}
 	// Select-then-delete in the same tx so the caller can report exactly which

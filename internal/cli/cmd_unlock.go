@@ -311,10 +311,19 @@ func unlockAll(rt *runtime, onlyIntent string, stdout, stderr io.Writer) int {
 	// owner alone, then deletes the peer's lock. Same for the warning, which
 	// could observe one intent from a pre-release ListLocks while the sweep
 	// took two. One SELECT-and-DELETE under the op-flock answers both.
-	rel, err := rt.Store.ReleaseBySession(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), sessionFilter, onlyIntent)
+	//
+	// RepoTop is the caller's own checkout (worktree toplevel): the one signal
+	// that survives even when owner AND session ids both collapse onto one
+	// value across sibling subagents sharing a parent Claude Code session's
+	// env (loto-19bz). Not the branch — a branch switch in one worktree must
+	// not make its own locks foreign (Codex #371).
+	rel, err := rt.Store.ReleaseBySession(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), sessionFilter, onlyIntent, rt.RepoTop)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
+	}
+	if len(rel.Ambiguous) > 0 {
+		return renderAmbiguousRefusal(stderr, rt.RepoTop, rel.Ambiguous)
 	}
 
 	// Warn when an UNFILTERED sweep actually spanned more than one intent —
@@ -349,4 +358,25 @@ func warnPeerIntents(stdout io.Writer, rel store.SessionRelease) {
 		quoted[i] = fmt.Sprintf("%q", in)
 	}
 	fmt.Fprintf(stdout, "⚠ unlock-all-peer-intents count=%d intents=%s\n", len(rel.Results), strings.Join(quoted, ","))
+}
+
+// renderAmbiguousRefusal reports a `--all` sweep ReleaseBySession refused
+// outright (loto-19bz): at least one matching lock or claim was stamped from a
+// checkout other than the caller's own, so owner/session scoping alone could
+// not tell it apart from a sibling subagent's row sharing this call's
+// identity. Nothing was released — deterministic order per design.md, exit 1
+// (advisory conflict), the holding checkout on every row.
+func renderAmbiguousRefusal(stderr io.Writer, worktree string, holds []store.AmbiguousHold) int {
+	sort.Slice(holds, func(i, j int) bool {
+		if holds[i].Kind != holds[j].Kind {
+			return holds[i].Kind > holds[j].Kind // locks first
+		}
+		return holds[i].Canonical < holds[j].Canonical
+	})
+	fmt.Fprintf(stderr, "✗ identity ambiguous count=%d: rows held from a worktree other than %s — refusing --all rather than releasing another worktree's locks and claims\n", len(holds), worktree)
+	for _, h := range holds {
+		fmt.Fprintf(stderr, "  %s %s worktree=%s\n", h.Kind, relPath(h.Canonical), h.Worktree)
+	}
+	fmt.Fprintln(stderr, "  fix: loto unlock --all --only-intent \"<your intent>\"   (scopes the sweep to your own locks; leaves claims)")
+	return 1
 }
