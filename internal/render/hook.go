@@ -3,9 +3,11 @@ package render
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
+	"loto/internal/domain"
 	"loto/internal/store"
 )
 
@@ -109,9 +111,9 @@ func reportLine(r *store.TreeReport, cwd string, showAddressee bool, curWorktree
 	if showAddressee {
 		fmt.Fprintf(&b, "to=%s ", holderTag(string(r.Addressee)))
 	}
-	fmt.Fprintf(&b, "path=%s", relToCwd(r.Event.Path, cwd))
+	fmt.Fprintf(&b, "path=%s", escapeRowField(relToCwd(r.Event.Path, cwd)))
 	if wt := reportWorktreeField(r.Event.Worktree, curWorktree); wt != "" {
-		fmt.Fprintf(&b, " worktree=%s", wt)
+		fmt.Fprintf(&b, " worktree=%s", escapeRowField(wt))
 	}
 	fmt.Fprintf(&b, " rule=%s seq=%d", r.Event.Rule, r.Event.Seq)
 	if r.Event.HolderPre != "" {
@@ -140,6 +142,19 @@ func reportWorktreeField(eventWorktree, curWorktree string) string {
 		return ""
 	}
 	return eventWorktree
+}
+
+// escapeRowField quotes a one-row-per-line field that may carry an ASCII
+// control character — a git-provenance path is admitted with one
+// (domain.Provenance), and a linked worktree's directory name inherits
+// whatever the filesystem allows — so the escape has to happen here, at the
+// point of print, matching rowPath's precedent (cmd_check_held.go). An
+// ordinary field is untouched, so every existing golden stays byte-identical.
+func escapeRowField(s string) string {
+	if domain.HasControl(s) {
+		return strconv.Quote(s)
+	}
+	return s
 }
 
 // spannerList names each spanning call as owner:call_id — the owner because
