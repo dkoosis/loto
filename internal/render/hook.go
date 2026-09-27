@@ -3,9 +3,11 @@ package render
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
+	"loto/internal/domain"
 	"loto/internal/store"
 )
 
@@ -82,15 +84,19 @@ func dashIfEmpty(s string) string {
 //
 // header is the section's first line. showAddressee is set by `loto status`,
 // which lists every owner's undelivered reports; a delivery names no
-// addressee, since the reader is the addressee.
-func EmitReports(w io.Writer, header string, reports []store.TreeReport, showAddressee bool) {
+// addressee, since the reader is the addressee. curWorktree is the checkout
+// this call is rendering from (the delivering hook's rt.RepoTop) — an agent
+// working two linked worktrees of one repo can receive a report at either
+// one's next pre-hook, and reportWorktreeField names the event's own worktree
+// whenever it differs (loto-1h6x).
+func EmitReports(w io.Writer, header string, reports []store.TreeReport, showAddressee bool, curWorktree string) {
 	if len(reports) == 0 {
 		return
 	}
 	fmt.Fprintf(w, "⚠ %s count=%d\n", header, len(reports))
 	cwd := getCwd()
 	for i := range reports {
-		fmt.Fprintln(w, "⚠ "+reportLine(&reports[i], cwd, showAddressee))
+		fmt.Fprintln(w, "⚠ "+reportLine(&reports[i], cwd, showAddressee, curWorktree))
 	}
 	fmt.Fprintln(w, "```bash")
 	fmt.Fprintln(w, "loto events --kind tree_change_reported")
@@ -100,13 +106,16 @@ func EmitReports(w io.Writer, header string, reports []store.TreeReport, showAdd
 // reportLine is one report as a single keyed line. Keyed rather than columnar
 // because the fields present depend on the rule — a drift event has no
 // observing call, and only row 1 has a second holder to name.
-func reportLine(r *store.TreeReport, cwd string, showAddressee bool) string {
+func reportLine(r *store.TreeReport, cwd string, showAddressee bool, curWorktree string) string {
 	var b strings.Builder
 	if showAddressee {
 		fmt.Fprintf(&b, "to=%s ", holderTag(string(r.Addressee)))
 	}
-	fmt.Fprintf(&b, "path=%s rule=%s seq=%d",
-		relToCwd(r.Event.Path, cwd), r.Event.Rule, r.Event.Seq)
+	fmt.Fprintf(&b, "path=%s", escapeRowField(relToCwd(r.Event.Path, cwd)))
+	if wt := reportWorktreeField(r.Event.Worktree, curWorktree); wt != "" {
+		fmt.Fprintf(&b, " worktree=%s", escapeRowField(wt))
+	}
+	fmt.Fprintf(&b, " rule=%s seq=%d", r.Event.Rule, r.Event.Seq)
 	if r.Event.HolderPre != "" {
 		fmt.Fprintf(&b, " holder=%s", holderTag(string(r.Event.HolderPre)))
 	}
@@ -121,6 +130,31 @@ func reportLine(r *store.TreeReport, cwd string, showAddressee bool) string {
 		dashIfEmpty(shortDigest(r.Event.DigestPre)), dashIfEmpty(shortDigest(r.Event.DigestPost)),
 		r.Event.Note)
 	return b.String()
+}
+
+// reportWorktreeField names the checkout a report's event happened in, but
+// only when it differs from curWorktree, the checkout delivering the report
+// right now (loto-1h6x). A same-worktree or legacy (empty Event.Worktree)
+// report renders exactly as before — a field that never varies for the
+// common single-worktree case would be noise (.claude/rules/design.md).
+func reportWorktreeField(eventWorktree, curWorktree string) string {
+	if eventWorktree == "" || eventWorktree == curWorktree {
+		return ""
+	}
+	return eventWorktree
+}
+
+// escapeRowField quotes a one-row-per-line field that may carry an ASCII
+// control character — a git-provenance path is admitted with one
+// (domain.Provenance), and a linked worktree's directory name inherits
+// whatever the filesystem allows — so the escape has to happen here, at the
+// point of print, matching rowPath's precedent (cmd_check_held.go). An
+// ordinary field is untouched, so every existing golden stays byte-identical.
+func escapeRowField(s string) string {
+	if domain.HasControl(s) {
+		return strconv.Quote(s)
+	}
+	return s
 }
 
 // spannerList names each spanning call as owner:call_id — the owner because

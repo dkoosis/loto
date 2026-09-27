@@ -445,5 +445,5 @@ func printStatusReports(stdout, stderr io.Writer, rt *runtime, mine bool) {
 		fmt.Fprintf(stderr, "⚠ reports unreadable: %v\n", err)
 		return
 	}
-	render.EmitReports(stdout, "undelivered", reports, true)
+	render.EmitReports(stdout, "undelivered", reports, true, rt.RepoTop)
 }
