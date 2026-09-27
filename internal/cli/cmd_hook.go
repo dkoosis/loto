@@ -320,7 +320,7 @@ func hookDeliver(rt *runtime, me domain.AgentUUID, now time.Time, stdout, stderr
 		fmt.Fprintf(stderr, "⚠ hook: deliver reports: %v\n", err)
 		return
 	}
-	render.EmitReports(stdout, "reports", delivered, false)
+	render.EmitReports(stdout, "reports", delivered, false, rt.RepoTop)
 }
 
 // hookPost is I4 steps 5 and 6's report half: RecordCallPost files an event

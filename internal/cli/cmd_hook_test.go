@@ -666,3 +666,92 @@ func TestHook_OneUnhashablePathDoesNotSinkTheObservation(t *testing.T) {
 		t.Error("an ordinary path lost its digest to the unhashable one")
 	}
 }
+
+// TestHookDeliver_NamesTheEventWorktreeWhenDifferent is loto-1h6x's core AC:
+// an agent working two linked worktrees of one repo can receive a report at
+// whichever one's next pre-hook runs. b.go changes under the owner's own call
+// in the linked worktree B; the report that produces is not delivered there
+// (hookPost never calls hookDeliver), so it is still waiting when the SAME
+// owner's next pre-hook runs in worktree A. Since loto-v6xx a.go in A and a.go
+// in B are different files, the row must name B — a bare repo-relative path
+// would let the agent inspect or repair the wrong checkout (Codex P2 on
+// PR #374).
+func TestHookDeliver_NamesTheEventWorktreeWhenDifferent(t *testing.T) {
+	repo, wt := siblingCheckouts(t) // cwd is repo (fixer-a); wt is the fixer-b linked worktree
+	target := tcTargetB
+	if err := os.WriteFile(filepath.Join(wt, target), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(wt)
+	if code := Run([]string{tcCmdLock, target, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock in B: exit %d", code)
+	}
+	if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "b-1", "", "")); code != 0 {
+		t.Fatalf("pre in B: exit=%d err=%q", code, errOut)
+	}
+	if err := os.WriteFile(filepath.Join(wt, target), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, errOut, code := runHookEvent(t, tcHookPost, hookEventJSON("Bash", "b-1", "", "")); code != 0 {
+		t.Fatalf("post in B: exit=%d err=%q", code, errOut)
+	}
+	evs := treeEvents(t, target)
+	if len(evs) != 1 || evs[0].Rule != store.TreeRuleRow2 {
+		t.Fatalf("want one row2 event filed in B, got %+v", evs)
+	}
+	eventWorktree := evs[0].Worktree
+	if eventWorktree == "" {
+		t.Fatalf("the event carries no worktree, so this test cannot tell A from B")
+	}
+
+	// Back to A: the owner's next pre-hook runs in a different worktree than
+	// the one the change happened in.
+	t.Chdir(repo)
+	stdout, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "a-1", "", ""))
+	if code != 0 {
+		t.Fatalf("pre in A: exit=%d err=%q", code, errOut)
+	}
+	if !strings.Contains(stdout, "reports count=1") {
+		t.Fatalf("A's pre must deliver the report filed in B: %q", stdout)
+	}
+	if !strings.Contains(stdout, "worktree="+eventWorktree) {
+		t.Errorf("the delivered row must name B's worktree %q: %q", eventWorktree, stdout)
+	}
+}
+
+// TestHookDeliver_SameWorktreeRendersUnchanged is loto-1h6x's golden-diff
+// half: the same report, delivered at the addressee's next pre-hook in the
+// SAME worktree the change happened in, renders exactly as before this bead —
+// no worktree= field, since a field that never varies for the common
+// single-worktree case is noise (.claude/rules/design.md).
+func TestHookDeliver_SameWorktreeRendersUnchanged(t *testing.T) {
+	_, wt := siblingCheckouts(t)
+	target := tcTargetB
+	if err := os.WriteFile(filepath.Join(wt, target), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(wt)
+	if code := Run([]string{tcCmdLock, target, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock in B: exit %d", code)
+	}
+	if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "b-1", "", "")); code != 0 {
+		t.Fatalf("pre in B: exit=%d err=%q", code, errOut)
+	}
+	if err := os.WriteFile(filepath.Join(wt, target), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, errOut, code := runHookEvent(t, tcHookPost, hookEventJSON("Bash", "b-1", "", "")); code != 0 {
+		t.Fatalf("post in B: exit=%d err=%q", code, errOut)
+	}
+
+	stdout, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "b-2", "", ""))
+	if code != 0 {
+		t.Fatalf("second pre in B: exit=%d err=%q", code, errOut)
+	}
+	if !strings.Contains(stdout, "reports count=1") {
+		t.Fatalf("B's own next pre must deliver the report: %q", stdout)
+	}
+	if strings.Contains(stdout, "worktree=") {
+		t.Errorf("a same-worktree delivery must render unchanged, no worktree= field: %q", stdout)
+	}
+}
