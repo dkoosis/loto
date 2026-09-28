@@ -505,11 +505,16 @@ type postPathResult struct {
 // tool ran.
 func postOnePathTx(ctx context.Context, tx *sql.Tx, callID, worktree string, o HookPathState, recorded map[string]HookCallPath) (postPathResult, error) {
 	prev, wasRecorded := recorded[o.Path]
-	// A path first seen at post entered the status set inside the call — that
-	// IS the state change. A recorded path changed iff its content or its stat
-	// moved; the digest is the authority and stat is the corroborator.
+	// changed is a digest comparison and nothing else (loto-cspf). A recorded
+	// path's pre digest is prev.DigestPre; a path first seen at post has no
+	// recorded pre state, so it reads as "" — the same value an always-missing
+	// file carries, which is why a first-seen path with an empty digest (still
+	// missing) is also no change. Stat used to corroborate a digest match into
+	// "changed" anyway (mtime/perm bits moving alone); that filed half of every
+	// row5-row7 report reading digest_pre == digest_post, so stat no longer
+	// counts.
 	res := postPathResult{
-		changed:   !wasRecorded || prev.DigestPre != o.Digest || prev.StatPre != o.Stat,
+		changed:   prev.DigestPre != o.Digest,
 		epoch:     o.Epoch,
 		digestPre: prev.DigestPre,
 		holderPre: o.Holder,

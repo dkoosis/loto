@@ -390,6 +390,43 @@ func TestTreeEvent_EpochMovedDuringTheCallIsRow1(t *testing.T) {
 	}
 }
 
+// TestTreeEvent_UnchangedUnderAPeerLockFilesNoEvent is the bead's AC
+// (loto-cspf): a path a peer holds, opened but come back byte-identical, files
+// no event — even when its stat moved (a re-save with the same bytes touches
+// mtime without touching content). Half of every row5-row7 report read
+// digest_pre == digest_post because stat alone used to count as "changed";
+// this is the read that filed it. The same path, actually written on a later
+// call, still gets row5, reported to the holder.
+func TestTreeEvent_UnchangedUnderAPeerLockFilesNoEvent(t *testing.T) {
+	s := mustOpen(t)
+	now := time.Now()
+
+	preAs(t, s, tcOwnerB, "b-read", now, HookPathState{
+		Path: tcHookPath, Locked: true, Epoch: 1, Holder: tcOwnerA,
+		Digest: tcSHA1, Stat: "stat-1",
+	})
+	out := postAt(t, s, "b-read", now.Add(time.Second), HookPathState{
+		Path: tcHookPath, Locked: true, Epoch: 1, Holder: tcOwnerA,
+		Digest: tcSHA1, Stat: "stat-2",
+	})
+	if len(out.Events) != 0 {
+		t.Fatalf("want no event for an unchanged digest under a peer's lock, got %+v", out.Events)
+	}
+
+	preAs(t, s, tcOwnerB, "b-write", now.Add(2*time.Second), obsFor(tcSHA1))
+	out2 := postAt(t, s, "b-write", now.Add(3*time.Second), obsFor(tcSHA2))
+	if len(out2.Events) != 1 || out2.Events[0].Rule != TreeRuleRow5 {
+		t.Fatalf("want one row5 event, got %+v", out2.Events)
+	}
+	ev := out2.Events[0]
+	if ev.DigestPre == ev.DigestPost {
+		t.Errorf("a filed row5 must have a real digest change, got %q for both", ev.DigestPre)
+	}
+	if got := addresseesOf(t, s, ev.EventID); !sameStrings(got, []string{tcOwnerA, tcOwnerB}) {
+		t.Errorf("row5 must report to the holder and the observer, got %v", got)
+	}
+}
+
 // A dirtied unlocked path with nobody else in flight is row 8: an event is
 // filed, and no report is written — the row's only output is `L`'s
 // compare-and-set, which this bead does not build.
