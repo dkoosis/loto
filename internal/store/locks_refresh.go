@@ -106,10 +106,29 @@ const hookRefreshReason = "hook"
 // sweep it earns only when it actually wrote something — split out of
 // RecordCallPre so that call stays a single decision point on the hot path
 // instead of two (loto-wkul; gocognit flagged the inlined form).
-func refreshCallerLocksTx(ctx context.Context, tx *sql.Tx, owner, worktree string, now time.Time) error {
-	refreshed, err := refreshOwnLocksBelowHalfTTLTx(ctx, tx, owner, worktree, now)
-	if err != nil {
-		return err
+//
+// paths are the files this call touched: the path an Edit-family call
+// declares (pre), or a path whose content the call changed (post). Only the
+// caller's locks on those files are renewed (loto-hous): a lock the holder
+// stopped touching lapses on its own lease however busy the holder is
+// elsewhere — dk, 2026-09-28: zombie locks are the common failure, and an
+// agent's time in one file is short. No paths → nothing renewed.
+func refreshCallerLocksTx(ctx context.Context, tx *sql.Tx, k keyMatch, owner, worktree string, paths []string, now time.Time) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	// Bounded batches: one IN clause over a mass rewrite would exceed SQLite's
+	// bound-variable limit (32766) and fail the whole call's post.
+	const refreshBatch = 500
+	var refreshed []domain.Target
+	for len(paths) > 0 {
+		n := min(refreshBatch, len(paths))
+		got, err := refreshOwnLocksBelowHalfTTLTx(ctx, tx, k, owner, worktree, paths[:n], now)
+		if err != nil {
+			return err
+		}
+		refreshed = append(refreshed, got...)
+		paths = paths[n:]
 	}
 	if len(refreshed) == 0 {
 		return nil
@@ -117,7 +136,7 @@ func refreshCallerLocksTx(ctx context.Context, tx *sql.Tx, owner, worktree strin
 	return rotateEventsTx(ctx, tx, now)
 }
 
-// refreshOwnLocksBelowHalfTTLTx extends every lock owner currently holds
+// refreshOwnLocksBelowHalfTTLTx extends every lock owner holds on one of paths
 // whose remaining TTL has dropped under half of domain.DegradedModeTTL,
 // inside the caller's own transaction — RecordCallPre's, so `loto hook pre`
 // gets the heartbeat DESIGN.md:223 anticipated at no extra round trip
@@ -150,7 +169,7 @@ func refreshCallerLocksTx(ctx context.Context, tx *sql.Tx, owner, worktree strin
 // Returns the refreshed targets (nil when none needed it) so the caller can
 // decide whether to pay for rotateEventsTx — most hook calls touch nothing
 // here and should not.
-func refreshOwnLocksBelowHalfTTLTx(ctx context.Context, tx *sql.Tx, owner, worktree string, now time.Time) ([]domain.Target, error) {
+func refreshOwnLocksBelowHalfTTLTx(ctx context.Context, tx *sql.Tx, k keyMatch, owner, worktree string, paths []string, now time.Time) ([]domain.Target, error) {
 	const ttl = domain.DegradedModeTTL
 	newExpiry := now.Add(ttl)
 	halfDeadline := now.Add(ttl / 2)
@@ -163,8 +182,10 @@ func refreshOwnLocksBelowHalfTTLTx(ctx context.Context, tx *sql.Tx, owner, workt
 	// isolation is what makes the owner_uuid-scoped UPDATE below safe without
 	// it.
 	wtCond, wtArgs := worktreeFilter(worktree)
+	pathPH, pathArgs := k.inStrings(paths)
 	args := append([]any{newExpiry.UnixNano(), owner, now.UnixNano(), halfDeadline.UnixNano()}, wtArgs...)
-	q := `UPDATE locks SET expires_at = ? WHERE owner_uuid = ? AND expires_at > ? AND expires_at < ? AND ` + wtCond + ` RETURNING target_canonical` //nolint:gosec // G202 wtCond is a fixed predicate, all data via args
+	args = append(args, pathArgs...)
+	q := `UPDATE locks SET expires_at = ? WHERE owner_uuid = ? AND expires_at > ? AND expires_at < ? AND ` + wtCond + ` AND ` + k.col("target_canonical") + ` IN (` + pathPH + `) RETURNING target_canonical` //nolint:gosec // G202 wtCond, col and pathPH are fixed SQL, all data via args
 	rows, err := tx.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err

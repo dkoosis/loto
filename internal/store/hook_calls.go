@@ -355,12 +355,13 @@ VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
 	}
 
 	// loto-wkul: refresh the caller's own locks that have drifted under half
-	// TTL, in this same transaction — the automatic heartbeat DESIGN.md:223
+	// TTL — only on the file this call declares (loto-hous) — in this same
+	// transaction — the automatic heartbeat DESIGN.md:223
 	// anticipated, wired to the one caller that costs the agent nothing.
 	// RecordCallPre already runs on every write-capable tool call and already
 	// holds this transaction, so folding the refresh in here is what keeps it
 	// to one UPDATE and no second round trip.
-	if err := refreshCallerLocksTx(ctx, tx, string(call.OwnerUUID), call.Worktree, call.TPre); err != nil {
+	if err := refreshCallerLocksTx(ctx, tx, s.keys(), string(call.OwnerUUID), call.Worktree, declaredPaths(obs), call.TPre); err != nil {
 		return false, err
 	}
 
@@ -429,11 +430,9 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 		return PostOutcome{}, err
 	}
 
-	var out PostOutcome
-	for i := range obs {
-		if err := postOnePathWithEventTx(ctx, tx, callID, owner, worktree, obs[i], recorded, tPost, &out); err != nil {
-			return PostOutcome{}, err
-		}
+	out, err := s.postPathsTx(ctx, tx, callID, owner, worktree, obs, recorded, tPost)
+	if err != nil {
+		return PostOutcome{}, err
 	}
 
 	if _, err := tx.ExecContext(ctx,
@@ -447,6 +446,24 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 	out.Recorded = true
 	sort.Strings(out.Changed)
 	sort.Strings(out.Acted)
+	return out, nil
+}
+
+// postPathsTx posts every observed path, then renews the caller's locks on the
+// files the call changed (loto-hous): a change is work in that file whether or
+// not the call declared it (a Bash sed, a formatter).
+func (s *Store) postPathsTx(ctx context.Context, tx *sql.Tx, callID string, owner domain.AgentUUID, worktree string,
+	obs []HookPathState, recorded map[string]HookCallPath, tPost time.Time,
+) (PostOutcome, error) {
+	var out PostOutcome
+	for i := range obs {
+		if err := postOnePathWithEventTx(ctx, tx, callID, owner, worktree, obs[i], recorded, tPost, &out); err != nil {
+			return PostOutcome{}, err
+		}
+	}
+	if err := refreshCallerLocksTx(ctx, tx, s.keys(), string(owner), worktree, out.Changed, tPost); err != nil {
+		return PostOutcome{}, err
+	}
 	return out, nil
 }
 
@@ -1244,4 +1261,16 @@ func init() { //nolint:gochecknoinits // additive registration, same pattern as 
 			fn   ensureFn
 		}{"scope path_seq to worktree", ensurePathSeqWorktree},
 	)
+}
+
+// declaredPaths is the path an Edit-family call was admitted on, from its pre
+// observations — the one file a pre knows the call is about to work in.
+func declaredPaths(obs []HookPathState) []string {
+	var out []string
+	for i := range obs {
+		if obs[i].Declared {
+			out = append(out, obs[i].Path)
+		}
+	}
+	return out
 }

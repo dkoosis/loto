@@ -13,12 +13,18 @@ import (
 // reads its arithmetic without re-deriving the constant.
 const tcHookRefreshTTL = domain.DegradedModeTTL
 
-// preAt is preAs (tree_events_test.go) with no observed paths — the refresh
-// runs on every pre regardless of which file the call touches, per the
-// bead's Rules ("on every loto hook pre").
-func preAt(t *testing.T, s *Store, owner domain.AgentUUID, callID string, at time.Time) {
+// preAt is preAs (tree_events_test.go) with the given observed paths. The
+// refresh renews only a lock on a path the call declares (loto-hous), so a
+// test that wants a refresh passes touching(rec).
+func preAt(t *testing.T, s *Store, owner domain.AgentUUID, callID string, at time.Time, obs ...HookPathState) {
 	t.Helper()
-	preAs(t, s, owner, callID, at)
+	preAs(t, s, owner, callID, at, obs...)
+}
+
+// touching is the observation an Edit-family call on rec's file carries: the
+// path it was admitted on, locked, declared.
+func touching(rec domain.LockRecord) HookPathState {
+	return HookPathState{Path: rec.Target.Canonical, Locked: true, Declared: true, Epoch: 1, Holder: rec.OwnerUUID, Digest: tcSHA1}
 }
 
 // TestRecordCallPre_RefreshesOwnLockUnderHalfTTL is loto-wkul's first AC: a
@@ -37,7 +43,7 @@ func TestRecordCallPre_RefreshesOwnLockUnderHalfTTL(t *testing.T) {
 	}
 
 	// t0+16m: remaining is 14m, under half of 30m — the hook must refresh.
-	preAt(t, s, tcOwnerA, "call-1", t0.Add(16*time.Minute))
+	preAt(t, s, tcOwnerA, "call-1", t0.Add(16*time.Minute), touching(rec))
 
 	after, err := s.LockForOwnerAt(ctx, rec.Target, tcOwnerA)
 	if err != nil || after == nil {
@@ -55,7 +61,7 @@ func TestRecordCallPre_RefreshesOwnLockUnderHalfTTL(t *testing.T) {
 	// this call writes no second refresh. This is the bead's first AC in
 	// full: the lane crosses its original deadline alive, with no manual
 	// `loto refresh` anywhere in the test.
-	preAt(t, s, tcOwnerA, "call-2", t0.Add(31*time.Minute))
+	preAt(t, s, tcOwnerA, "call-2", t0.Add(31*time.Minute), touching(rec))
 
 	stillHeld, err := s.LockForOwnerAt(ctx, rec.Target, tcOwnerA)
 	if err != nil || stillHeld == nil {
@@ -82,7 +88,7 @@ func TestRecordCallPre_LeavesALockAboveHalfTTLAlone(t *testing.T) {
 	}
 
 	// t0+5m: remaining is 25m, well above half of 30m — no refresh.
-	preAt(t, s, tcOwnerA, "call-1", t0.Add(5*time.Minute))
+	preAt(t, s, tcOwnerA, "call-1", t0.Add(5*time.Minute), touching(rec))
 
 	after, err := s.LockForOwnerAt(ctx, rec.Target, tcOwnerA)
 	if err != nil || after == nil {
@@ -122,7 +128,7 @@ func TestRecordCallPre_NeverRefreshesAPeersLock(t *testing.T) {
 	// B's own pre, well under A's lock's half-TTL point, must not touch it —
 	// B holds nothing at this target, so B's owner_uuid excludes A's row by
 	// construction.
-	preAt(t, s, tcOwnerB, "call-b1", t0.Add(16*time.Minute))
+	preAt(t, s, tcOwnerB, "call-b1", t0.Add(16*time.Minute), touching(rec))
 
 	after, err := s.LockForOwnerAt(ctx, rec.Target, tcOwnerA)
 	if err != nil || after == nil {
@@ -157,7 +163,7 @@ func TestRecordCallPre_RefreshEventCarriesReasonHook(t *testing.T) {
 		t.Fatalf("acquire: %v", err)
 	}
 
-	preAt(t, s, tcOwnerA, "call-1", t0.Add(16*time.Minute))
+	preAt(t, s, tcOwnerA, "call-1", t0.Add(16*time.Minute), touching(rec))
 
 	evs, err := s.EventsForTarget(ctx, rec.Target)
 	if err != nil {
@@ -197,7 +203,7 @@ func TestRecordCallPre_NeverResurrectsAnAlreadyExpiredLease(t *testing.T) {
 		t.Fatalf("acquire: %v", err)
 	}
 
-	preAt(t, s, tcOwnerA, "call-1", t0)
+	preAt(t, s, tcOwnerA, "call-1", t0, touching(rec))
 
 	after, err := s.LockForOwnerAt(ctx, rec.Target, tcOwnerA)
 	if err != nil || after == nil {
@@ -271,7 +277,7 @@ func TestRecordCallPre_RefreshScopedToCallWorktree(t *testing.T) {
 		}
 	}
 
-	preAsIn(t, s, tcOwnerA, "call-in-A", wtA, t0.Add(16*time.Minute))
+	preAsIn(t, s, tcOwnerA, "call-in-A", wtA, t0.Add(16*time.Minute), touching(rec))
 
 	rows, err := s.LocksAt(ctx, rec.Target)
 	if err != nil {
@@ -288,5 +294,104 @@ func TestRecordCallPre_RefreshScopedToCallWorktree(t *testing.T) {
 		if r.Worktree == wtB && refreshed {
 			t.Errorf("hook activity in A must not refresh B's lease, expires_at=%v", r.ExpiresAt)
 		}
+	}
+}
+
+// TestRecordCallPre_LeavesAnUntouchedLockToLapse is loto-hous's first AC: an
+// owner working only in b.go does not keep its lock on a.go alive. dk
+// (2026-09-28): an agent's time in one file is short, and a zombie lock is
+// the common failure — a lock the holder stopped touching lapses on its own
+// lease, however busy the holder is elsewhere.
+func TestRecordCallPre_LeavesAnUntouchedLockToLapse(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	t0 := time.Now()
+
+	recA := mkFileLock(t, "a.go", tcOwnerA, tcHookRefreshTTL)
+	recA.CreatedAt, recA.ExpiresAt = t0, t0.Add(tcHookRefreshTTL)
+	recB := mkFileLock(t, "b.go", tcOwnerA, tcHookRefreshTTL)
+	recB.CreatedAt, recB.ExpiresAt = t0, t0.Add(tcHookRefreshTTL)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{recA, recB}, liveProbe); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	// t0+16m: both under half TTL; the call edits b.go only.
+	preAt(t, s, tcOwnerA, "call-b", t0.Add(16*time.Minute), touching(recB))
+
+	a, err := s.LockForOwnerAt(ctx, recA.Target, tcOwnerA)
+	if err != nil || a == nil {
+		t.Fatalf("read back a.go: %v %v", a, err)
+	}
+	if !a.ExpiresAt.Equal(t0.Add(tcHookRefreshTTL)) {
+		t.Errorf("work on b.go renewed the untouched a.go: expires_at=%v want %v", a.ExpiresAt, t0.Add(tcHookRefreshTTL))
+	}
+	b, err := s.LockForOwnerAt(ctx, recB.Target, tcOwnerA)
+	if err != nil || b == nil {
+		t.Fatalf("read back b.go: %v %v", b, err)
+	}
+	if !b.ExpiresAt.After(t0.Add(tcHookRefreshTTL)) {
+		t.Errorf("the touched b.go was not renewed: expires_at=%v", b.ExpiresAt)
+	}
+}
+
+// TestRecordCallPost_RenewsALockWhoseFileTheCallChanged is loto-hous's second
+// AC for writes no Edit declares: a Bash call that rewrites a locked file (a
+// sed, a formatter) renews the caller's lock on it at post.
+func TestRecordCallPost_RenewsALockWhoseFileTheCallChanged(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	t0 := time.Now()
+
+	rec := mkFileLock(t, "a.go", tcOwnerA, tcHookRefreshTTL)
+	rec.CreatedAt, rec.ExpiresAt = t0, t0.Add(tcHookRefreshTTL)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	pre := touching(rec)
+	pre.Declared = false // a Bash call names no file
+	preAt(t, s, tcOwnerA, "call-bash", t0.Add(16*time.Minute), pre)
+	if a, _ := s.LockForOwnerAt(ctx, rec.Target, tcOwnerA); a == nil || !a.ExpiresAt.Equal(t0.Add(tcHookRefreshTTL)) {
+		t.Fatalf("an undeclared observation renewed the lock at pre: %+v", a)
+	}
+
+	post := pre
+	post.Digest = tcSHA2
+	postAt(t, s, "call-bash", t0.Add(17*time.Minute), post)
+
+	a, err := s.LockForOwnerAt(ctx, rec.Target, tcOwnerA)
+	if err != nil || a == nil {
+		t.Fatalf("read back: %v %v", a, err)
+	}
+	if !a.ExpiresAt.After(t0.Add(tcHookRefreshTTL)) {
+		t.Errorf("a call that changed the locked file did not renew its lock: expires_at=%v", a.ExpiresAt)
+	}
+}
+
+// TestRefreshCallerLocks_ManyPathsStayUnderSQLVarLimit: a call that changes
+// more paths than SQLite binds variables still refreshes the lock it holds.
+func TestRefreshCallerLocks_ManyPathsStayUnderSQLVarLimit(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	t0 := time.Now()
+
+	rec := mkFileLock(t, "a.go", tcOwnerA, tcHookRefreshTTL)
+	rec.CreatedAt, rec.ExpiresAt = t0, t0.Add(tcHookRefreshTTL)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	paths := make([]string, 0, 40000)
+	for i := range 39999 {
+		paths = append(paths, "gen/f"+time.Duration(i).String()+".go")
+	}
+	paths = append(paths, rec.Target.Canonical)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // the tx is discarded; only refresh's error matters here
+	if err := refreshCallerLocksTx(ctx, tx, s.keys(), string(tcOwnerA), rec.Worktree, paths, t0.Add(16*time.Minute)); err != nil {
+		t.Fatalf("refresh over %d paths: %v", len(paths), err)
 	}
 }
