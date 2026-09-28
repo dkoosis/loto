@@ -406,6 +406,48 @@ path_candidate() {
   return 0
 }
 
+# quote_after STATE TOKEN — sets $_qa to the quote still open after TOKEN is
+# read starting inside STATE ("" = none, "'" or '"'). The gate re-splits a
+# quoted script on spaces, so "is the script still open?" is a question about
+# every quote in each fragment, not about its first or last character: the
+# shell glues 's/a b/c/'g into one word whose quote closes mid-token
+# (loto-dj7g). Reading a quote as still open swallows real file operands —
+# a lock bypass — so this walks each character as the shell would.
+_qa=""
+quote_after() {
+  local q="$1" t="$2" c i n
+  n=${#t}
+  for ((i = 0; i < n; i++)); do
+    c="${t:i:1}"
+    case "$q" in
+      "'") [ "$c" = "'" ] && q="" ;;
+      '"') case "$c" in \\) i=$((i + 1)) ;; '"') q="" ;; esac ;;
+      *) case "$c" in \\) i=$((i + 1)) ;; "'") q="'" ;; '"') q='"' ;; esac ;;
+    esac
+  done
+  _qa="$q"
+}
+
+# perl_switch TOKEN — reads one perl switch cluster (`-pi`, `-pe`, `-e'…'`,
+# `-Mstrict`) the way perl does, left to right, and sets $_ps_i (it holds
+# -i), $_ps_e (it holds -e/-E) and $_ps_next (that -e ends the token, so the
+# program is the next argument). -i, -e and the argument-taking switches
+# (-M -m -I -x -d -D -F -C -V) swallow the rest of the token, so the `i` in
+# `-Mstrict` or in an attached program is never read as -i.
+perl_switch() {
+  local t="${1#-}" c
+  _ps_i=0 _ps_e=0 _ps_next=0
+  while [ -n "$t" ]; do
+    c="${t:0:1}"; t="${t:1}"
+    case "$c" in
+      i) _ps_i=1; return 0 ;;                       # rest: backup extension
+      e|E) _ps_e=1; [ -z "$t" ] && _ps_next=1; return 0 ;;
+      M|m|I|x|d|D|F|C|V) return 0 ;;                # rest: the switch's value
+    esac
+  done
+  return 0
+}
+
 # _first_quoted STR — on success, sets $_fqt to the text between the first
 # matching pair of quotes in STR (whichever quote char opens first) and $_fqa
 # to what follows the closing quote; returns 1 if STR has no complete quoted
@@ -807,28 +849,22 @@ if [ "$tool" = "Bash" ]; then
         # "but", "by" — fall through path_candidate as if they were real
         # file operands (loto-dj7g). _script_open tracks an unclosed quote
         # across tokens so every fragment of the script is swallowed, not
-        # just its first word.
+        # just its first word; quote_after decides where it closes.
         _list="" _skip=0 _after_i=0 _script=0 _script_open=""
         for tok in $args; do
           if [ -n "$_script_open" ]; then
-            case "$tok" in
-              *"$_script_open") _script_open="" ;;
-            esac
+            quote_after "$_script_open" "$tok"; _script_open="$_qa"
             continue
           fi
           if [ "$_skip" = 1 ]; then
             _skip=0
-            case "$tok" in
-              \'?*\'|\"?*\") : ;;              # closed in one token
-              \'*) _script_open="'" ;;         # opens here — more tokens follow
-              \"*) _script_open='"' ;;
-            esac
+            quote_after "" "$tok"; _script_open="$_qa"   # open → more follow
             continue
           fi
           case "$tok" in
             -e|--expression|-f|--file) _skip=1; continue ;;
             -i) _after_i=1; continue ;;
-            -*) continue ;;
+            -*) quote_after "" "$tok"; _script_open="$_qa"; continue ;;  # -e'…'
           esac
           if [ "$_after_i" = 1 ]; then
             _after_i=0
@@ -836,11 +872,7 @@ if [ "$tool" = "Bash" ]; then
           fi
           if [ "$_have_e" = 0 ] && [ "$_script" = 0 ]; then
             _script=1                                     # the lone script arg
-            case "$tok" in
-              \'?*\'|\"?*\") : ;;
-              \'*) _script_open="'" ;;
-              \"*) _script_open='"' ;;
-            esac
+            quote_after "" "$tok"; _script_open="$_qa"
             continue
           fi
           path_candidate "$tok" && _list="$_list $_pc"
@@ -918,44 +950,43 @@ if [ "$tool" = "Bash" ]; then
         # loto-dj7g) — either way it is never a path, even when the shell's
         # word-splitting scatters a spaced script like 's{a b}{c d}' across
         # several $args tokens.
-        _inplace=0 _have_e=0
-        for tok in $args; do
-          case "$tok" in -*i*) _inplace=1 ;; esac
-          case "$tok" in -e|-E) _have_e=1 ;; esac
-        done
-        [ "$_inplace" = 1 ] || continue
+        # One pass, left to right, as perl reads its switches: they end at the
+        # first non-switch argument, and each cluster is read by perl_switch
+        # so `-e'…'` (attached program) and `-pe` (program next) both count
+        # as -e, and only a real -i — not the i in `-Mstrict` — is in place.
+        _inplace=0 _have_e=0 _opts=1
         _list="" _skip=0 _script=0 _script_open=""
         for tok in $args; do
           if [ -n "$_script_open" ]; then
-            case "$tok" in
-              *"$_script_open") _script_open="" ;;
-            esac
+            quote_after "$_script_open" "$tok"; _script_open="$_qa"
             continue
           fi
           if [ "$_skip" = 1 ]; then
             _skip=0
-            case "$tok" in
-              \'?*\'|\"?*\") : ;;
-              \'*) _script_open="'" ;;
-              \"*) _script_open='"' ;;
-            esac
+            quote_after "" "$tok"; _script_open="$_qa"
             continue
           fi
-          case "$tok" in
-            -e|-E) _skip=1; continue ;;
-            -*) continue ;;
-          esac
+          if [ "$_opts" = 1 ]; then
+            case "$tok" in
+              --) _opts=0; continue ;;
+              -?*)
+                perl_switch "$tok"
+                [ "$_ps_i" = 1 ] && _inplace=1
+                if [ "$_ps_e" = 1 ]; then _have_e=1; _skip="$_ps_next"; fi
+                quote_after "" "$tok"; _script_open="$_qa"   # -e'a b' spans on
+                continue
+                ;;
+            esac
+          fi
+          _opts=0
           if [ "$_have_e" = 0 ] && [ "$_script" = 0 ]; then
             _script=1
-            case "$tok" in
-              \'?*\'|\"?*\") : ;;
-              \'*) _script_open="'" ;;
-              \"*) _script_open='"' ;;
-            esac
+            quote_after "" "$tok"; _script_open="$_qa"
             continue
           fi
           path_candidate "$tok" && _list="$_list $_pc"
         done
+        [ "$_inplace" = 1 ] || continue
         if [ -z "$_list" ]; then
           unparsed "$verb"
           continue
