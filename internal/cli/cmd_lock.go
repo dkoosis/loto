@@ -411,8 +411,14 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 	// while its Write's beacon carries its derived id. The beacon stays, so
 	// the write gate still serializes siblings on it. An unpinned session id
 	// is random per process and names no one.
+	//
+	// Only from a subagent's shell (Codex #390): the root session locking a
+	// file its own subagent is mid-write on is still refused, which is the
+	// root's one signal that the child is there — the root's write path is
+	// plain `check`, which a shared beacon never denies. The marker failing
+	// closed puts every caller back on that refusal.
 	var session domain.SessionUUID
-	if rt.SessionPinned {
+	if rt.SessionPinned && identity.InSubagentShell() {
 		session = rt.SessionUUID
 	}
 	acquired, err := rt.Store.AcquireLocksBesideSessionBeacons(rt.Ctx, recs, live, session)

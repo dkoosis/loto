@@ -13,7 +13,15 @@ env LOTO_SUBAGENT_ID=agent-a1
 loto beacon a.go
 env LOTO_SUBAGENT_ID=
 
-# The same subagent's Bash `loto lock` is the parent identity. Not refused.
+# The ROOT session's lock (no subagent-shell marker) is still refused: that
+# refusal is the root's one signal its child is mid-write (Codex #390).
+env CLAUDE_CODE_CHILD_SESSION=
+! loto lock a.go -t 'root over its child'
+stdout '✗ blocked count=1'
+
+# The same subagent's Bash `loto lock` is the parent identity, from a shell
+# the harness marks as a subagent's. Not refused.
+env CLAUDE_CODE_CHILD_SESSION=1
 loto lock a.go -t 'worker declares its file'
 stdout '✓ locked count=1'
 stdout 'ℹ target=a.go session-beacon owner=.* writes=refused-for-other-subagents-until-expiry'

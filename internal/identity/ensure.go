@@ -267,6 +267,16 @@ func PinnedByEnv() bool {
 	return envIdentityBinding().pinsForAuthority()
 }
 
+// InSubagentShell reports whether this process runs in a shell Claude Code
+// spawned for a subagent: the harness sets CLAUDE_CODE_CHILD_SESSION there and
+// carries no per-subagent id alongside it, so this names "some subagent of
+// this session", never which one (loto-6sf4). Undocumented, like agent_id: a
+// caller must treat false as the safe answer, so its disappearance on a CC
+// upgrade narrows behavior back to the root's rather than widening it.
+func InSubagentShell() bool {
+	return os.Getenv("CLAUDE_CODE_CHILD_SESSION") != ""
+}
+
 // SessionIDFromEnv resolves the per-session id from the environment, empty
 // when neither variable is set. LOTO_SESSION_ID is the explicit override;
 // CLAUDE_CODE_SESSION_ID is the id Claude Code puts in the environment of
