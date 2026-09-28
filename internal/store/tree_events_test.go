@@ -390,6 +390,104 @@ func TestTreeEvent_EpochMovedDuringTheCallIsRow1(t *testing.T) {
 	}
 }
 
+// TestTreeEvent_UnchangedUnderAPeerLockFilesNoEvent is the bead's AC
+// (loto-cspf): a path a peer holds, opened but come back byte-identical, files
+// no event — even when its stat moved (a re-save with the same bytes touches
+// mtime without touching content). Half of every row5-row7 report read
+// digest_pre == digest_post because stat alone used to count as "changed";
+// this is the read that filed it. The same path, actually written on a later
+// call, still gets row5, reported to the holder.
+func TestTreeEvent_UnchangedUnderAPeerLockFilesNoEvent(t *testing.T) {
+	s := mustOpen(t)
+	now := time.Now()
+
+	preAs(t, s, tcOwnerB, "b-read", now, HookPathState{
+		Path: tcHookPath, Locked: true, Epoch: 1, Holder: tcOwnerA,
+		Digest: tcSHA1, Stat: "stat-1",
+	})
+	out := postAt(t, s, "b-read", now.Add(time.Second), HookPathState{
+		Path: tcHookPath, Locked: true, Epoch: 1, Holder: tcOwnerA,
+		Digest: tcSHA1, Stat: "stat-2",
+	})
+	if len(out.Events) != 0 {
+		t.Fatalf("want no event for an unchanged digest under a peer's lock, got %+v", out.Events)
+	}
+
+	preAs(t, s, tcOwnerB, "b-write", now.Add(2*time.Second), obsFor(tcSHA1))
+	out2 := postAt(t, s, "b-write", now.Add(3*time.Second), obsFor(tcSHA2))
+	if len(out2.Events) != 1 || out2.Events[0].Rule != TreeRuleRow5 {
+		t.Fatalf("want one row5 event, got %+v", out2.Events)
+	}
+	ev := out2.Events[0]
+	if ev.DigestPre == ev.DigestPost {
+		t.Errorf("a filed row5 must have a real digest change, got %q for both", ev.DigestPre)
+	}
+	if got := addresseesOf(t, s, ev.EventID); !sameStrings(got, []string{tcOwnerA, tcOwnerB}) {
+		t.Errorf("row5 must report to the holder and the observer, got %v", got)
+	}
+}
+
+// TestRecordCallPost_UnhashablePathStatChangeIsChanged is the cubic P2 on
+// loto-cspf: a path that will not hash (gate.HashPaths skipped it) carries an
+// empty digest at both pre and post, which the digest-only comparison reads
+// as "unchanged" even though the file plainly moved — its stat says so. The
+// stat fallback must still fire when BOTH digests are empty; it must NOT fire
+// when the digests match and are non-empty (that is the same-content re-save
+// TestTreeEvent_UnchangedUnderAPeerLockFilesNoEvent pins).
+func TestRecordCallPost_UnhashablePathStatChangeIsChanged(t *testing.T) {
+	s := mustOpen(t)
+	now := time.Now()
+
+	mustPre(t, s, "call-unhash", now, HookPathState{
+		Path: tcHookPath, Locked: true, Epoch: 1, Holder: tcOwnerA,
+		Digest: "", Stat: "10:420:100",
+	})
+	out := postAt(t, s, "call-unhash", now.Add(time.Second), HookPathState{
+		Path: tcHookPath, Locked: true, Epoch: 1, Holder: tcOwnerA,
+		Digest: "", Stat: "20:420:200",
+	})
+	if len(out.Changed) != 1 || out.Changed[0] != tcHookPath {
+		t.Fatalf("want changed=[%s] for an unhashable path whose stat moved, got %+v", tcHookPath, out.Changed)
+	}
+}
+
+// TestRecordCallPost_FirstSeenUnhashablePathIsChanged covers the other half
+// of the same P2: a path never recorded at pre reads as digest "" (the zero
+// value), the same reading a genuinely-absent path carries. A first-seen path
+// that IS present but unhashable must still file as changed — only a
+// first-seen path that is actually absent (hookStatAbsent) is "no change".
+func TestRecordCallPost_FirstSeenUnhashablePathIsChanged(t *testing.T) {
+	s := mustOpen(t)
+	now := time.Now()
+
+	mustPre(t, s, "call-newpath", now)
+	out := postAt(t, s, "call-newpath", now.Add(time.Second), HookPathState{
+		Path: tcHookPath, Locked: true, Epoch: 1, Holder: tcOwnerA,
+		Digest: "", Stat: "10:420:100",
+	})
+	if len(out.Changed) != 1 || out.Changed[0] != tcHookPath {
+		t.Fatalf("want changed=[%s] for a first-seen present-but-unhashable path, got %+v", tcHookPath, out.Changed)
+	}
+}
+
+// TestRecordCallPost_FirstSeenAbsentPathIsNotChanged pins the loto-cspf fix
+// itself: a path first observed at post that was never there (stat "absent")
+// files no event, even though it is "first seen" — the bug loto-cspf's digest
+// comparison was written to close.
+func TestRecordCallPost_FirstSeenAbsentPathIsNotChanged(t *testing.T) {
+	s := mustOpen(t)
+	now := time.Now()
+
+	mustPre(t, s, "call-neverthere", now)
+	out := postAt(t, s, "call-neverthere", now.Add(time.Second), HookPathState{
+		Path: tcHookPath, Locked: true, Epoch: 1, Holder: tcOwnerA,
+		Digest: "", Stat: "absent",
+	})
+	if len(out.Changed) != 0 {
+		t.Fatalf("want no change for a first-seen path that was never there, got %+v", out.Changed)
+	}
+}
+
 // A dirtied unlocked path with nobody else in flight is row 8: an event is
 // filed, and no report is written — the row's only output is `L`'s
 // compare-and-set, which this bead does not build.
