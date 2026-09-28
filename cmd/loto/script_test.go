@@ -33,22 +33,58 @@ var realHomeAtProcessStart = os.Getenv("HOME")
 // ~/.loto agents/session leak loto-bt6c fixed). internal/cli, internal/render
 // and internal/identity already carry this same floor; cmd/loto — the package
 // that ships the actual binary entrypoint — did not.
+//
+// Redirecting HOME alone is not enough: cli.StateDir's xdgStateHome
+// (internal/cli/paths.go) prefers $XDG_STATE_HOME over $HOME and only
+// consults the home dir when it is unset, and LOTO_BASE overrides StateDir
+// outright ahead of both. A shell (or CI) that exports either would still
+// steer a direct internal/cli call at the real state dir despite the HOME
+// redirect below (cubic P2, PR #384) — so the floor clears both too.
+//
+// ‡ The floor below runs ONLY when this process is the top-level `go test`
+// binary, never when it is the re-exec'd "loto" subcommand testscript.Main
+// dispatches to (same os.Args[0] check testscript.Main itself makes,
+// exe.go). This compiled test binary IS the "loto" testscript spawns for
+// every "loto ..." line in every script, so TestMain runs again, from
+// scratch, on EVERY one of those subprocesses — and each script's own Setup
+// has already set LOTO_BASE (and cleared XDG_STATE_HOME) explicitly for
+// that subprocess's cmd.Env, deliberately, per-script. An unconditional
+// clear here would win over that (LOTO_BASE is StateDir's highest-priority
+// var) and silently reset it to empty on every single "loto ..." call,
+// which then falls through to xdgStateHome()+HOME — and HOME here is a
+// FRESH os.MkdirTemp result on every invocation, so a script's own
+// `loto lock` and its later `loto check` would land in two different,
+// randomly-named state dirs instead of the one Setup meant them to share.
+// That silently broke the peer-lock advisory in every git-hook-driven
+// script (guard_postcheckout_moved and siblings) — caught only by running
+// the full suite, not this file's own canaries, which is why it is spelled
+// out here at length (loto-reuo).
 func TestMain(m *testing.M) {
-	fallback, err := os.MkdirTemp("", "loto-cmd-testhome-*")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "TestMain: mkdir fallback HOME:", err)
-		os.Exit(1)
+	if filepath.Base(os.Args[0]) != "loto" {
+		fallback, err := os.MkdirTemp("", "loto-cmd-testhome-*")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "TestMain: mkdir fallback HOME:", err)
+			os.Exit(1)
+		}
+		if err := os.Setenv("HOME", fallback); err != nil {
+			fmt.Fprintln(os.Stderr, "TestMain: set fallback HOME:", err)
+			os.Exit(1)
+		}
+		if err := os.Setenv("XDG_STATE_HOME", ""); err != nil {
+			fmt.Fprintln(os.Stderr, "TestMain: clear XDG_STATE_HOME:", err)
+			os.Exit(1)
+		}
+		if err := os.Setenv("LOTO_BASE", ""); err != nil {
+			fmt.Fprintln(os.Stderr, "TestMain: clear LOTO_BASE:", err)
+			os.Exit(1)
+		}
+		// No deferred os.RemoveAll(fallback) here — unlike the sibling floors
+		// in internal/cli, internal/render and internal/identity, testscript.Main
+		// below always calls os.Exit itself and never returns to this stack
+		// frame, so a defer would never run. fallback is a short-lived OS temp
+		// dir, not the real state dir this floor exists to protect — the OS
+		// reaps it same as any other stray /tmp entry.
 	}
-	if err := os.Setenv("HOME", fallback); err != nil {
-		fmt.Fprintln(os.Stderr, "TestMain: set fallback HOME:", err)
-		os.Exit(1)
-	}
-	// No deferred os.RemoveAll(fallback) here — unlike the sibling floors in
-	// internal/cli, internal/render and internal/identity, testscript.Main
-	// below always calls os.Exit itself and never returns to this stack
-	// frame, so a defer would never run. fallback is a short-lived OS temp
-	// dir, not the real state dir this floor exists to protect — the OS
-	// reaps it same as any other stray /tmp entry.
 
 	testscript.Main(m, map[string]func(){
 		"loto": func() {
@@ -71,6 +107,27 @@ func TestHomeGuardCanary_HomeIsNeverTheRealOne(t *testing.T) {
 	}
 	if got := os.Getenv("HOME"); got == realHomeAtProcessStart {
 		t.Fatalf("HOME = %q, want anything but the real invoking-user home %q — the loto-bt6c isolation floor is not active in cmd/loto", got, realHomeAtProcessStart)
+	}
+}
+
+// TestHomeGuardCanary_XDGStateHomeNeverLeaksTheRealStateDir is the
+// regression test for the second half of TestMain's floor (cubic P2, PR
+// #384): cli.StateDir's xdgStateHome (internal/cli/paths.go) prefers
+// $XDG_STATE_HOME over $HOME and only consults the home dir when it is
+// unset, so redirecting HOME alone did nothing when the invoking shell (or
+// CI) exports XDG_STATE_HOME — a future plain TestXxx calling into
+// internal/cli directly still resolved StateDir into whatever real directory
+// XDG_STATE_HOME named, and the original canary stayed green because it only
+// ever compared $HOME. LOTO_BASE overrides StateDir outright (same file), so
+// the floor clears that too. Delete or weaken either clear in TestMain and
+// this goes red the moment the invoking environment sets either var — e.g.
+// `XDG_STATE_HOME=$HOME/.local/state go test ./cmd/loto/...`.
+func TestHomeGuardCanary_XDGStateHomeNeverLeaksTheRealStateDir(t *testing.T) {
+	if got := os.Getenv("XDG_STATE_HOME"); got != "" {
+		t.Fatalf("XDG_STATE_HOME = %q, want empty — cli.StateDir's xdgStateHome prefers this over the redirected HOME, so a future direct internal/cli call would still land in the real state dir it names", got)
+	}
+	if got := os.Getenv("LOTO_BASE"); got != "" {
+		t.Fatalf("LOTO_BASE = %q, want empty — cli.StateDir overrides everything with this", got)
 	}
 }
 
