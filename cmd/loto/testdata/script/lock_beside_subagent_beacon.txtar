@@ -1,0 +1,48 @@
+# loto-6sf4: a subagent's Write mints a beacon owned by its derived id
+# (gate-file-lock.sh stamps LOTO_SUBAGENT_ID=$agent_id), but its Bash
+# `loto lock` runs unstamped, as the parent. The harness gives that Bash no
+# per-subagent id, so the lock cannot resolve to the beacon's owner. The lock
+# is taken beside a same-session beacon instead of refusing on it, and the
+# beacon stays: it is what a second sibling's write gate refuses on.
+
+env LOTO_AGENT_ID=$BOB
+env CLAUDE_CODE_SESSION_ID=sess-bob
+
+# Subagent a1 writes a.go: the gate script mints its beacon.
+env LOTO_SUBAGENT_ID=agent-a1
+loto beacon a.go
+env LOTO_SUBAGENT_ID=
+
+# The same subagent's Bash `loto lock` is the parent identity. Not refused.
+loto lock a.go -t 'worker declares its file'
+stdout '✓ locked count=1'
+stdout 'ℹ target=a.go session-beacon owner=.* writes=refused-for-other-subagents-until-expiry'
+loto status
+stdout 'target=a.go owner=bbbbbbbb-0000-4000-8000-000000000b0b .*mode=exclusive'
+stdout 'target=a.go owner=.* mode=shared intent="beacon: agent is writing this file"'
+
+# The write gate is unchanged: a different sibling is still denied on a1's
+# beacon, and a1 itself is admitted.
+env LOTO_SUBAGENT_ID=agent-b2
+! loto check --gate a.go
+stdout 'a.go'
+env LOTO_SUBAGENT_ID=agent-a1
+loto check --gate a.go
+stdout '✓ no conflicts'
+env LOTO_SUBAGENT_ID=
+
+# Another session's beacon still refuses.
+env CLAUDE_CODE_SESSION_ID=sess-other
+env LOTO_AGENT_ID=$ALICE
+env LOTO_SUBAGENT_ID=agent-c3
+loto beacon b.go
+env LOTO_SUBAGENT_ID=
+env LOTO_AGENT_ID=$BOB
+env CLAUDE_CODE_SESSION_ID=sess-bob
+! loto lock b.go -t 'not mine'
+stdout 'b.go'
+
+-- a.go --
+package a
+-- b.go --
+package b

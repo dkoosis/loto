@@ -42,8 +42,34 @@ func sortedByCanonical(recs []domain.LockRecord) []domain.LockRecord {
 // the parent identity so the beacon can sit beside the parent-owned exclusive
 // lock a worker took from Bash (loto-wofb). `loto lock` passes none — two
 // exclusive rows on one target under two family uuids is not a shape the
-// store wants, and a stamped `loto lock` does not occur outside tests.
+// store wants, and a stamped `loto lock` does not occur outside tests. It
+// calls AcquireLocksBesideSessionBeacons instead (loto-6sf4).
 func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live domain.HolderLiveProbe, kin ...domain.AgentUUID) ([]domain.LockRecord, error) {
+	return s.acquireLocks(ctx, recs, live, "", kin)
+}
+
+// AcquireLocksBesideSessionBeacons is AcquireLocks for `loto lock` (loto-6sf4):
+// a live BEACON whose session_uuid is session does not block a non-beacon
+// record. The lock row is inserted beside the beacon; the beacon stays.
+//
+// Why: a subagent's Write mints a beacon owned by its derived id, but its Bash
+// `loto lock` runs unstamped as the parent identity — the harness gives that
+// shell no per-subagent id — so without this the agent is refused by its own
+// beacon. The resulting shape (the parent's exclusive row beside a sibling's
+// beacon) is the one hook admission already leaves on every subagent write
+// (cli hookTakeLock), and the write gate is untouched: a sibling's beacon
+// still denies another sibling's write, because siblings are kin to the
+// parent's row, not to each other's beacons (cli gateDecide,
+// TestGateDecide_SiblingBeaconDeniesWrite).
+//
+// Narrow on purpose: only beacons, only this exact non-empty session, only for
+// a non-beacon incoming record. A same-session REAL lock and another session's
+// beacon still refuse. Stale rows are still reclaimed as usual.
+func (s *Store) AcquireLocksBesideSessionBeacons(ctx context.Context, recs []domain.LockRecord, live domain.HolderLiveProbe, session domain.SessionUUID) ([]domain.LockRecord, error) {
+	return s.acquireLocks(ctx, recs, live, session, nil)
+}
+
+func (s *Store) acquireLocks(ctx context.Context, recs []domain.LockRecord, live domain.HolderLiveProbe, besideBeaconsOf domain.SessionUUID, kin []domain.AgentUUID) ([]domain.LockRecord, error) {
 	if len(recs) == 0 {
 		return nil, nil
 	}
@@ -87,7 +113,7 @@ func (s *Store) AcquireLocks(ctx context.Context, recs []domain.LockRecord, live
 	// Bundle the (now, live, kin) ambient triple once. Host policy rides inside
 	// the probe closure (HolderLiveProbe takes the record), so one EvalContext
 	// serves every lock in the batch — no per-lock rebinding.
-	blockers, err := collectAllBlockers(ctx, tx, all, sorted, domain.EvalContext{Now: now, Live: live, Kin: kin, CaseFold: s.caseFold})
+	blockers, err := collectAllBlockers(ctx, tx, all, sorted, domain.EvalContext{Now: now, Live: live, Kin: kin, CaseFold: s.caseFold}, besideBeaconsOf)
 	if err != nil {
 		return nil, err
 	}
@@ -237,11 +263,13 @@ func validateFileTarget(repoTop string, rec domain.LockRecord) error {
 // collectAllBlockers returns the live conflicting holders plus the canonical
 // paths of reclaimed stale EXCLUSIVE rows (deduped) — the caller must restore
 // owner-write on those after commit unless it re-stripped them itself.
-func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, sorted []domain.LockRecord, ec domain.EvalContext) ([]domain.LockRecord, error) {
+//
+// besideBeaconsOf is AcquireLocksBesideSessionBeacons' session ("" = none).
+func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, sorted []domain.LockRecord, ec domain.EvalContext, besideBeaconsOf domain.SessionUUID) ([]domain.LockRecord, error) {
 	seen := map[string]bool{}
 	var blockers []domain.LockRecord
 	for i := range sorted {
-		bs, err := reclaimStaleAndCollectBlockers(ctx, tx, all, sorted[i], ec)
+		bs, err := reclaimStaleAndCollectBlockers(ctx, tx, all, sorted[i], ec, besideBeaconsOf)
 		if err != nil {
 			return nil, err
 		}
@@ -266,7 +294,7 @@ func collectAllBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord
 // returns the surviving blockers. Reclaim used to also report which paths
 // needed their owner-write bit put back; nothing strips it any more
 // (loto-zssw), so the reclaim is a pure row delete.
-func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, l domain.LockRecord, ec domain.EvalContext) ([]domain.LockRecord, error) {
+func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domain.LockRecord, l domain.LockRecord, ec domain.EvalContext, besideBeaconsOf domain.SessionUUID) ([]domain.LockRecord, error) {
 	var blockers []domain.LockRecord
 	for i := range all {
 		ex := &all[i]
@@ -282,6 +310,12 @@ func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domai
 			if err := reclaimStaleTx(ctx, tx, *ex, string(l.OwnerUUID), ec.Now); err != nil {
 				return nil, err
 			}
+			continue
+		}
+		// A live beacon of the caller's own session sits beside a lock
+		// (AcquireLocksBesideSessionBeacons, loto-6sf4). Never for an
+		// incoming beacon, never for an empty session.
+		if besideBeaconsOf != "" && !l.IsBeacon() && ex.IsBeacon() && ex.SessionUUID == besideBeaconsOf {
 			continue
 		}
 		// Mode-aware: a shared peer does not block a shared acquire. The
