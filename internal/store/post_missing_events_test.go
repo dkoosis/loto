@@ -205,3 +205,45 @@ func TestMarkDeadOwnerCalls_NoResolutionWhenNeverFlagged(t *testing.T) {
 		}
 	}
 }
+
+// A post_missing call ended by age alone resolves with reason "expired", not
+// "session_died" — no death was observed — and a post landing after that
+// ending writes no second resolution: one resolution per flagged call (PR #393
+// review).
+func TestMarkDeadOwnerCalls_ExpiredCallResolvesOnceAsExpired(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	const tReport = 10 * time.Minute
+	t0 := time.Now().Add(-InFlightMaxAge - time.Hour)
+
+	if _, err := s.RecordCallPre(ctx, HookCall{
+		CallID: "call-expired", OwnerUUID: tcOwnerA, SessionUUID: "sess-unknown", TPre: t0,
+	}, []HookPathState{hookObs(tcHookPath, tcSHA1)}); err != nil {
+		t.Fatalf("pre: %v", err)
+	}
+	if n, err := s.MarkPostMissing(ctx, t0.Add(tReport+time.Minute), tReport); err != nil || n != 1 {
+		t.Fatalf("sweep: n=%d err=%v", n, err)
+	}
+	now := time.Now()
+	if n, err := s.MarkDeadOwnerCalls(ctx, now, func(domain.SessionUUID) bool { return false }); err != nil || n != 1 {
+		t.Fatalf("mark expired: n=%d err=%v", n, err)
+	}
+	if _, err := s.RecordCallPost(ctx, "call-expired", now.Add(time.Minute),
+		[]HookPathState{hookObs(tcHookPath, tcSHA1)}); err != nil {
+		t.Fatalf("late post: %v", err)
+	}
+
+	evs, err := s.ListEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reasons []string
+	for _, e := range evs {
+		if e.Kind == EventPostMissingResolved {
+			reasons = append(reasons, e.Reason)
+		}
+	}
+	if len(reasons) != 1 || reasons[0] != "expired" {
+		t.Errorf("post_missing_resolved reasons = %q, want exactly [expired]", reasons)
+	}
+}

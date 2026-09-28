@@ -389,13 +389,13 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 	}
 	defer cleanup()
 
-	var postNs sql.NullInt64
+	var postNs, deadNs sql.NullInt64
 	var ownerStr, sessionStr, worktree string
 	var postMissing int
 	var tPreNs int64
 	if err := tx.QueryRowContext(ctx,
-		`SELECT t_post, owner_uuid, session_uuid, post_missing, t_pre, worktree FROM hook_calls WHERE call_id = ?`, callID,
-	).Scan(&postNs, &ownerStr, &sessionStr, &postMissing, &tPreNs, &worktree); err != nil {
+		`SELECT t_post, dead_at, owner_uuid, session_uuid, post_missing, t_pre, worktree FROM hook_calls WHERE call_id = ?`, callID,
+	).Scan(&postNs, &deadNs, &ownerStr, &sessionStr, &postMissing, &tPreNs, &worktree); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return PostOutcome{}, fmt.Errorf("%w: %s", ErrUnknownCall, callID)
 		}
@@ -415,9 +415,11 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 	// earlier MarkPostMissing sweep, and its post has now landed — late, but
 	// it landed. Written in the same tx as the t_post update below, so the
 	// pair (missing, resolved) commits atomically with the state it reports.
-	if postMissing != 0 {
+	// A call the dead-owner sweep already ended (dead_at set) was resolved
+	// there; a post landing after that writes no second resolution.
+	if postMissing != 0 && !deadNs.Valid {
 		if err := appendPostMissingResolvedTx(ctx, tx, callID, owner, domain.SessionUUID(sessionStr),
-			"posted", tPost.Sub(time.Unix(0, tPreNs)), tPost); err != nil {
+			resolvedPosted, tPost.Sub(time.Unix(0, tPreNs)), tPost); err != nil {
 			return PostOutcome{}, err
 		}
 	}
@@ -729,6 +731,20 @@ func (s *Store) InFlightCalls(ctx context.Context) ([]HookCall, error) {
 	return out, rows.Err()
 }
 
+// InFlightMaxAge is how long a call may stay in flight before it is ended as
+// dead without proof. No session in dk's environment runs this long (dk,
+// 2026-09-28), and a call whose session left no record probes unknown forever,
+// pinning hook_calls against retention for good (loto-szdx: 53 such calls held
+// every row since 2026-09-20). Ending a call touches no lock.
+const InFlightMaxAge = 6 * time.Hour
+
+// post_missing_resolved reasons: how a flagged call stopped being post_missing.
+const (
+	resolvedPosted      = "posted"       // its post landed, late
+	resolvedSessionDied = "session_died" // the probe proved its owner dead
+	resolvedExpired     = "expired"      // in flight past InFlightMaxAge
+)
+
 // MarkDeadOwnerCalls ends every in-flight call whose owner the liveness probe
 // finds dead — §3's second ending, and the only thing that stops a crashed
 // session's call from spanning every transition forever and pinning
@@ -737,7 +753,9 @@ func (s *Store) InFlightCalls(ctx context.Context) ([]HookCall, error) {
 // dead is asked once per distinct session and must answer true ONLY for a
 // PROVABLY dead session. An unknown verdict leaves the call in flight, which
 // is loto's standing rule everywhere else: a false "gone" hands a live peer's
-// territory away, while a false "alive" only delays a reclaim.
+// territory away, while a false "alive" only delays a reclaim. The one
+// exception is age: a call older than InFlightMaxAge ends whatever the probe
+// says, session id or not.
 //
 // The probe reads the filesystem, so it runs BETWEEN a read and a write rather
 // than inside a write transaction. The UPDATE re-asserts the in-flight
@@ -750,7 +768,7 @@ func (s *Store) MarkDeadOwnerCalls(ctx context.Context, now time.Time, dead func
 	if err != nil {
 		return 0, err
 	}
-	ids := deadOwnerCallIDs(open, dead)
+	ids, reasons := deadOwnerCallIDs(open, now, dead)
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -768,7 +786,7 @@ func (s *Store) MarkDeadOwnerCalls(ctx context.Context, now time.Time, dead func
 	defer cleanup()
 	var marked int
 	for _, id := range ids {
-		n, err := markOneDeadCallTx(ctx, tx, id, byID[id], now)
+		n, err := markOneDeadCallTx(ctx, tx, id, byID[id], reasons[id], now)
 		if err != nil {
 			return 0, err
 		}
@@ -784,7 +802,7 @@ func (s *Store) MarkDeadOwnerCalls(ctx context.Context, now time.Time, dead func
 // was post_missing, resolves that too. Split out of MarkDeadOwnerCalls's loop
 // so that function stays a plan (build the id list, then a tx) rather than
 // growing a nested branch per row.
-func markOneDeadCallTx(ctx context.Context, tx *sql.Tx, id string, c HookCall, now time.Time) (int, error) {
+func markOneDeadCallTx(ctx context.Context, tx *sql.Tx, id string, c HookCall, reason string, now time.Time) (int, error) {
 	res, err := tx.ExecContext(ctx,
 		`UPDATE hook_calls SET dead_at = ? WHERE call_id = ? AND `+hookCallInFlightSQL,
 		now.UnixNano(), id)
@@ -805,20 +823,28 @@ func markOneDeadCallTx(ctx context.Context, tx *sql.Tx, id string, c HookCall, n
 		// reads the PostMissing flag as it stood the moment the sweep decided
 		// the owner was dead.
 		if err := appendPostMissingResolvedTx(ctx, tx, id, c.OwnerUUID, c.SessionUUID,
-			"session_died", now.Sub(c.TPre), now); err != nil {
+			reason, now.Sub(c.TPre), now); err != nil {
 			return 0, err
 		}
 	}
 	return int(n), nil
 }
 
-// deadOwnerCallIDs picks the in-flight calls whose session the oracle calls
-// dead, sorted. The oracle is asked once per distinct session: it reads a
-// record off disk, and one crashed session usually owns several open calls.
-func deadOwnerCallIDs(open []HookCall, dead func(domain.SessionUUID) bool) []string {
+// deadOwnerCallIDs picks the in-flight calls older than InFlightMaxAge or whose
+// session the oracle calls dead, sorted, with why each was picked: reason
+// "expired" for age, "session_died" for a proven death. The oracle is asked
+// once per distinct session: it reads a record off disk, and one crashed session usually owns several open calls.
+func deadOwnerCallIDs(open []HookCall, now time.Time, dead func(domain.SessionUUID) bool) ([]string, map[string]string) {
 	verdict := map[domain.SessionUUID]bool{}
 	var ids []string
+	reasons := map[string]string{}
 	for i := range open {
+		// Age alone ends a call: see InFlightMaxAge.
+		if now.Sub(open[i].TPre) > InFlightMaxAge {
+			ids = append(ids, open[i].CallID)
+			reasons[open[i].CallID] = resolvedExpired
+			continue
+		}
 		// A call with no session id can never be judged, so it is never ended
 		// here; its owner may well be alive and about to post.
 		sess := open[i].SessionUUID
@@ -832,17 +858,18 @@ func deadOwnerCallIDs(open []HookCall, dead func(domain.SessionUUID) bool) []str
 		}
 		if v {
 			ids = append(ids, open[i].CallID)
+			reasons[open[i].CallID] = resolvedSessionDied
 		}
 	}
 	sort.Strings(ids)
-	return ids
+	return ids, reasons
 }
 
 // postMissingDetail is the events.detail payload post_missing and
 // post_missing_resolved both carry (§10b row 4): the call, its session, and
 // an age in milliseconds — time since t_pre for post_missing, time from t_pre
 // to resolution for post_missing_resolved. Which of the two happened rides in
-// Event.Reason ("posted" or "session_died"), not in this struct.
+// Event.Reason ("posted", "session_died" or "expired"), not in this struct.
 type postMissingDetail struct {
 	CallID  string `json:"call_id"`
 	Session string `json:"session,omitempty"`
@@ -851,8 +878,8 @@ type postMissingDetail struct {
 
 // appendPostMissingResolvedTx writes one post_missing_resolved row: this
 // call_id was flagged post_missing by an earlier MarkPostMissing sweep, and
-// now either its post landed (reason "posted") or its owner was found dead
-// (reason "session_died"). age is measured from t_pre, matching the age
+// now either its post landed (reason "posted"), its owner was found dead
+// (reason "session_died"), or it outlived InFlightMaxAge (reason "expired"). age is measured from t_pre, matching the age
 // post_missing itself records, so a reader can compare when a call was first
 // flagged against how long it eventually took to resolve.
 func appendPostMissingResolvedTx(ctx context.Context, tx *sql.Tx, callID string, owner domain.AgentUUID,

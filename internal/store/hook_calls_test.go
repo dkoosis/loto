@@ -729,6 +729,42 @@ func TestMarkDeadOwnerCalls_LeavesAnUnjudgeableCallAlone(t *testing.T) {
 	}
 }
 
+// A call in flight longer than InFlightMaxAge is dead without proof: no session
+// in dk's environment runs that long, and a call left open pins hook_calls
+// against retention for good (loto-szdx: 53 such calls since 2026-09-20). Its
+// age alone ends it, whatever the probe says and whether or not it has a
+// session id; a younger call the probe cannot judge stays in flight.
+func TestMarkDeadOwnerCalls_EndsACallOlderThanInFlightMaxAge(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+	old := now.Add(-InFlightMaxAge - time.Minute)
+	for _, c := range []HookCall{
+		{CallID: "call-old-unknown", OwnerUUID: tcOwnerA, SessionUUID: "sess-unknown", TPre: old},
+		{CallID: "call-old-nosession", OwnerUUID: tcOwnerA, TPre: old},
+		{CallID: "call-young-unknown", OwnerUUID: tcOwnerB, SessionUUID: "sess-young", TPre: now.Add(-InFlightMaxAge + time.Hour)},
+	} {
+		if _, err := s.RecordCallPre(ctx, c, nil); err != nil {
+			t.Fatalf("pre %s: %v", c.CallID, err)
+		}
+	}
+
+	n, err := s.MarkDeadOwnerCalls(ctx, now, func(domain.SessionUUID) bool { return false })
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("ended %d calls, want 2 (the two older than InFlightMaxAge)", n)
+	}
+	open, err := s.InFlightCalls(ctx)
+	if err != nil {
+		t.Fatalf("in-flight: %v", err)
+	}
+	if len(open) != 1 || open[0].CallID != "call-young-unknown" {
+		t.Fatalf("in flight after sweep = %v, want only call-young-unknown", open)
+	}
+}
+
 // A peer's transition landing between the observation and the record must not
 // exonerate this call from it. seq_pre is pinned to the number that held when
 // the digest beside it was read, so the spanning test still sees the span.
