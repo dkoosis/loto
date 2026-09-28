@@ -415,6 +415,75 @@ func TestLock_RejectsDuplicateTargets(t *testing.T) {
 	}
 }
 
+// TestLock_DashTMistakenAsTargets_NamesCorrection — loto-ja0h. flag.Parse only
+// keeps the LAST -t value as the intent, so `loto lock -t a.go -t b.go` leaves
+// fs.NArg() at zero and, before this fix, printed the bare generic usage line
+// — saying nothing about the mistake actually made. 63 such calls in 14 days
+// across every repo (loto-ja0h). Both -t values name existing regular files
+// here, which is the signal that -t was read as "target".
+func TestLock_DashTMistakenAsTargets_NamesCorrection(t *testing.T) {
+	repo := withTempProject(t)
+	if err := os.WriteFile(filepath.Join(repo, "b.go"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pinAgent(t)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, "-t", tcTargetA, "-t", "b.go"}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	got := errBuf.String()
+	if !strings.Contains(got, "-t is the intent") {
+		t.Errorf("stderr does not say -t is the intent: %q", got)
+	}
+	want := `loto lock a.go b.go -t "<intent>"`
+	if !strings.Contains(got, want) {
+		t.Errorf("stderr does not name the corrected command %q: %q", want, got)
+	}
+}
+
+// TestLock_DashTNotAFile_UsageUnchanged — the other half of the pair: a -t
+// value that is NOT an existing file (an actual intent string, just with no
+// positional target given) must still get today's plain usage error, or the
+// hint above would be firing unconditionally on every no-target call.
+func TestLock_DashTNotAFile_UsageUnchanged(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, "-t", "fix x"}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	got := errBuf.String()
+	if !strings.Contains(got, `usage: loto lock <target> [<target>...] -t "why"`) {
+		t.Errorf("expected the unchanged generic usage line: %q", got)
+	}
+	if strings.Contains(got, "-t is the intent") {
+		t.Errorf("the -t-is-the-intent hint must not fire when -t names no file: %q", got)
+	}
+}
+
+// TestLock_DashTMistake_LeavesNoLockRows pins AC3: the mistyped command must
+// not acquire anything before it is caught.
+func TestLock_DashTMistake_LeavesNoLockRows(t *testing.T) {
+	repo := withTempProject(t)
+	if err := os.WriteFile(filepath.Join(repo, "b.go"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pinAgent(t)
+	var out, errBuf bytes.Buffer
+	if code := Run([]string{tcCmdLock, "-t", tcTargetA, "-t", "b.go"}, &out, &errBuf); code != 2 {
+		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	var mineOut, mineErr bytes.Buffer
+	if code := Run([]string{"status", "--mine"}, &mineOut, &mineErr); code != 0 {
+		t.Fatalf("status --mine exit %d: out=%q err=%q", code, mineOut.String(), mineErr.String())
+	}
+	if !strings.Contains(mineOut.String(), "no locks") {
+		t.Errorf("the mistyped command left lock rows behind: %q", mineOut.String())
+	}
+}
+
 func TestLock_RejectsSymlinks(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)

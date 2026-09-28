@@ -76,11 +76,15 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "✗ --ttl must be positive, got %s\n", *ttl)
 		return 2
 	}
+	repoTop, _ := repoTopForCwd(ctx)
 	if fs.NArg() == 0 {
+		if mistaken := mistypedDashTTargets(args, repoTop); len(mistaken) > 0 {
+			emitDashTIsIntentHint(stderr, mistaken)
+			return 2
+		}
 		fmt.Fprintln(stderr, "usage: loto lock <target> [<target>...] -t \"why\"")
 		return 2
 	}
-	repoTop, _ := repoTopForCwd(ctx)
 	targets, invalid := validateLockTargets(fs.Args(), repoTop, false)
 	if len(invalid) > 0 {
 		render.EmitInvalid(stderr, invalid)
@@ -185,6 +189,75 @@ func statIsDir(repoTop, rel string) bool {
 		return false
 	}
 	return st.IsDir()
+}
+
+// mistypedDashTTargets — loto-ja0h. `loto lock -t a.go -t b.go` reads as
+// "target a.go, target b.go" to an agent, but flag.Parse keeps only the LAST
+// -t value as the intent (StringVar overwrites in place) and leaves
+// fs.NArg() at zero: the refusal that reached the caller before this fix was
+// the bare generic usage line, naming neither the mistake nor the fix. 63
+// such calls in 14 days across every repo (loto-usage assessment, bead
+// Givens).
+//
+// dashTIntentValues re-reads the ORIGINAL args (fs.Parse discards every -t
+// but the last), and this validates each one exactly like a positional
+// target would be — so `-t "fix the bug"` (a real intent, just missing its
+// target) still fails validation and falls through to today's plain usage
+// error unchanged. Only when at least one -t value survives as a real,
+// existing, regular file does this fire.
+func mistypedDashTTargets(rawArgs []string, repoTop string) []domain.Target {
+	vals := dashTIntentValues(rawArgs)
+	if len(vals) == 0 {
+		return nil
+	}
+	targets, _ := validateLockTargets(vals, repoTop, false)
+	return targets
+}
+
+// dashTIntentValues extracts every -t/--intent value (space- or
+// "="-separated, either dash count) from raw args, in the order given.
+// Mirrors permuteWith's own flag-vs-positional scan rather than reusing flag
+// state, because flag.Parse has already thrown away every -t but the last by
+// the time cmdLock can ask.
+func dashTIntentValues(args []string) []string {
+	var vals []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			break
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			continue
+		}
+		name := strings.TrimLeft(a, "-")
+		if eq := strings.IndexByte(name, '='); eq >= 0 {
+			if key := name[:eq]; key == "t" || key == "intent" {
+				vals = append(vals, name[eq+1:])
+			}
+			continue
+		}
+		if name != "t" && name != "intent" {
+			continue
+		}
+		if i+1 < len(args) {
+			vals = append(vals, args[i+1])
+			i++
+		}
+	}
+	return vals
+}
+
+// emitDashTIsIntentHint prints the corrected command line for a `loto lock`
+// call whose only "targets" were mistyped -t values. The real intent is
+// unknowable — every -t token the caller typed was consumed as a (wrong)
+// target — so the corrected line carries a literal "<intent>" placeholder
+// rather than guessing at one.
+func emitDashTIsIntentHint(w io.Writer, targets []domain.Target) {
+	paths := make([]string, 0, len(targets))
+	for _, t := range targets {
+		paths = append(paths, t.Canonical)
+	}
+	fmt.Fprintf(w, "✗ -t is the intent, not a target: loto lock %s -t \"<intent>\"\n", strings.Join(paths, " "))
 }
 
 // validateLockTargets canonicalizes and Lstat-validates each path before any
