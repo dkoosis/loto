@@ -117,9 +117,20 @@ func writeForeignForwarder(t *testing.T, foreignDir, repo string) {
 // intact chain, but wrong for reproducing loto-lw16's bug, where a repo that
 // carries no loto guard at all forwards through exactly like this and must
 // read as reason=not-installed, not an exec failure.
+//
+// Also lays down lib/forward-to-repo-hook.sh beside the hooks — the real
+// install-hooks always does, and isKnownForwarder (cmd_doctor.go) reads it as
+// the positive signal that this IS the sdlc doorman rather than a merely
+// silent foreign hook (Codex #387 P2, first finding). Without it, a no-answer
+// here could not be told from writeForeignNonForwarder's — see
+// TestDoctorGuard_ForeignNonForwarderWithEmptyLocal for that negative case.
 func writeForeignForwarderFailOpen(t *testing.T, foreignDir, repo string) {
 	t.Helper()
-	if err := os.MkdirAll(foreignDir, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(foreignDir, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	libBody := "#!/usr/bin/env sh\nforward_to_repo_hook() {\n\t:\n}\n"
+	if err := os.WriteFile(filepath.Join(foreignDir, "lib", "forward-to-repo-hook.sh"), []byte(libBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	for _, spec := range guardSpecs {
@@ -249,8 +260,46 @@ func TestDoctorGuard_ForwardedButNotInstalled(t *testing.T) {
 	if strings.Contains(out, "hooksPath-foreign") {
 		t.Errorf("a forwarded-but-empty repo must not read as hooksPath-foreign: %q", out)
 	}
-	if !strings.Contains(out, "```bash\nbash plugins/sdlc/bin/install-hooks\n```") {
+	if !strings.Contains(out, "bash plugins/sdlc/bin/install-hooks\n```") {
 		t.Errorf("expected an install-hooks fix block naming sdlc's install step: %q", out)
+	}
+	if !strings.Contains(out, "sd-8wth") {
+		t.Errorf("expected the fix block to name sd-8wth (Codex #387 P2: install-hooks alone does not clear this finding until sd-8wth lands): %q", out)
+	}
+
+	status := runOK(t, tcCmdStatus)
+	if !strings.Contains(status, "guard:   inert\n") {
+		t.Errorf("expected guard: inert in status: %q", status)
+	}
+}
+
+// TestDoctorGuard_ForeignNonForwarderWithEmptyLocal is Codex #387 P2's first
+// finding, pinned as its own test: a genuinely foreign, non-forwarding hook
+// (writeForeignNonForwarder — no lib/forward-to-repo-hook.sh beside it, so
+// isKnownForwarder reads false) occupies core.hooksPath, AND the repo carries
+// no loto guard at all (no writeHookFixture call). Both TestDoctorGuard_
+// ForwardedButNotInstalled's and this test's repos are locally empty; the
+// only difference is whether the foreign hook can be POSITIVELY identified as
+// the sdlc doorman. Unidentified stays reason=hooksPath-foreign — a no-answer
+// from an unrecognized hook proves nothing about why, so it must not be
+// guessed to be an absent loto guard.
+func TestDoctorGuard_ForeignNonForwarderWithEmptyLocal(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	// repo carries no .githooks at all, same as the not-installed case.
+	foreign := filepath.Join(t.TempDir(), "global-hooks")
+	writeForeignNonForwarder(t, foreign)
+	setHooksPath(t, repo, foreign)
+
+	out := runOK(t, tcCmdDoctor)
+	for _, label := range allGuardLabels {
+		want := "✗ guard=" + label + " unreachable reason=hooksPath-foreign probe=no-answer detail=" + foreign
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "not-installed") {
+		t.Errorf("an unidentified foreign hook must not be guessed as a not-installed loto guard, even with an empty local tree: %q", out)
 	}
 
 	status := runOK(t, tcCmdStatus)

@@ -780,6 +780,36 @@ func checkGuardReachability(ctx context.Context, repoTop string) []guardStatus {
 // before running any chain entry.
 const hookProbeEnvVar = "LOTO_HOOK_PROBE"
 
+// forwardLibRel is lib/forward-to-repo-hook.sh's path relative to the
+// directory core.hooksPath resolves to — the shared forwarding contract
+// plugins/sdlc/bin/install-hooks lays down beside every hook it installs
+// (loto-ea8y.10). Its presence is the one positive signal that the effective
+// hook at this path is the real sdlc global doorman, not merely something
+// that happens not to answer a probe.
+const forwardLibRel = "lib/forward-to-repo-hook.sh"
+
+// forwardLibMarker is the exported contract function name every doorman hook
+// sources and calls (lib/forward-to-repo-hook.sh's own header comment: "it
+// sources this file and calls: forward_to_repo_hook <hook-name> ..."). Read
+// is stronger than mere-existence: a decoy or stale file at the same relative
+// path without this function is not the doorman, ✗ recognized as one.
+const forwardLibMarker = "forward_to_repo_hook()"
+
+// isKnownForwarder reports whether resolved carries the sdlc doorman's own
+// forwarding library (Codex #387 P2, first finding): a no-answer probe alone
+// does not prove the effective hook is the fail-open doorman — it may be a
+// genuinely unrelated foreign hook that also happens to exit quietly. Only
+// when this positive identification holds does a no-answer get explained as
+// "the doorman correctly found nothing to forward to" rather than "hooksPath
+// bypasses everything" (checkForwardedGuard below).
+func isKnownForwarder(resolved string) bool {
+	data, err := os.ReadFile(filepath.Join(resolved, filepath.FromSlash(forwardLibRel)))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), forwardLibMarker)
+}
+
 // checkForwardedGuard is spec.hook's reachability when core.hooksPath does
 // NOT resolve to the repo's own .githooks — the doorman shape option A
 // commits to (a global hooks dir that forwards, never a per-repo override).
@@ -790,16 +820,20 @@ const hookProbeEnvVar = "LOTO_HOOK_PROBE"
 // case — called here too, unchanged.
 //
 // An executable file that does NOT answer the probe is ambiguous on its own
-// (loto-lw16): a doorman that fails open when the repo carries no loto guard
-// (Givens: exec into the repo hook, fail open when missing) looks identical
-// from here to a genuinely foreign tool's own hook — both exit silently with
-// no probe line. checkOneGuard on repoTop resolves it: if this repo's own
-// dispatcher/entry are not intact, nothing was ever chained here and the
-// no-answer is fully explained by that — reason=not-installed, naming the
-// repo as the thing missing a guard, not the hooksPath as bypassing one. Only
-// when the repo's own chain IS intact does a no-answer prove a real bypass —
-// reason=hooksPath-foreign probe=no-answer, the old reason token, preserved
-// for that case alone.
+// (loto-lw16, and Codex #387 P2 twice over): a doorman that fails open when
+// the repo carries no loto guard (Givens: exec into the repo hook, fail open
+// when missing) looks identical from here to a genuinely foreign tool's own
+// hook — both exit silently with no probe line. Two things must both hold
+// before that silence reads as "nothing was ever chained here" rather than a
+// real bypass: (1) isKnownForwarder proves the effective hook actually IS the
+// sdlc doorman, not some unrelated tool merely guessed to be one; (2) even
+// then, checkOneGuard on repoTop must find this repo's own dispatcher/entry
+// missing — a doorman whose repo chain is intact but still doesn't answer is
+// still a real bypass. Only when both hold is it reason=not-installed, naming
+// the repo as the thing missing a guard rather than the hooksPath as
+// bypassing one. Everything else — an unidentified forwarder, or an
+// identified one whose repo chain IS intact — keeps the old reason token,
+// reason=hooksPath-foreign probe=no-answer.
 func checkForwardedGuard(ctx context.Context, resolved, repoTop string, spec guardSpec) guardStatus {
 	target := filepath.Join(resolved, spec.hook)
 	fi, statErr := os.Stat(target)
@@ -809,8 +843,10 @@ func checkForwardedGuard(ctx context.Context, resolved, repoTop string, spec gua
 	if probeHookAnswers(ctx, target, spec.hook, repoTop) {
 		return checkOneGuard(repoTop, spec)
 	}
-	if local := checkOneGuard(repoTop, spec); !local.ok {
-		return guardStatus{spec: spec, reason: "not-installed", detail: local.detail}
+	if isKnownForwarder(resolved) {
+		if local := checkOneGuard(repoTop, spec); !local.ok {
+			return guardStatus{spec: spec, reason: "not-installed", detail: local.detail}
+		}
 	}
 	return guardStatus{spec: spec, reason: "hooksPath-foreign", detail: resolved, probe: "no-answer"}
 }
@@ -954,11 +990,14 @@ func guardSummary(statuses []guardStatus) string {
 // block under a ✗ row). The two failure shapes take different fixes, so they
 // get different blocks: reason=not-installed (loto-lw16 — the doorman
 // forwards fine, this repo just never chained a guard) points at sdlc's
-// install-hooks, the step that will make the global hooks run loto's guards
-// inline once sd-8wth lands; every other reason still points at `make hooks`,
-// this repo's own dispatcher/entry install step. Returns whether every guard
-// is reachable, for callers that also need the bool (status's
-// guard=ok/guard=inert line).
+// install-hooks, with a caveat comment naming sd-8wth (Codex #387 P2, second
+// finding: sd-8wth is a parallel sdlc change, not yet landed, and until it
+// lands install-hooks alone does not clear this finding — the global hooks
+// still forward rather than run the guards inline, so doctor's own probe
+// still finds no repo chain to answer through); every other reason still
+// points at `make hooks`, this repo's own dispatcher/entry install step.
+// Returns whether every guard is reachable, for callers that also need the
+// bool (status's guard=ok/guard=inert line).
 func renderGuardReachability(stdout io.Writer, statuses []guardStatus) bool {
 	anyFail := false
 	anyNotInstalled := false
@@ -982,6 +1021,8 @@ func renderGuardReachability(stdout io.Writer, statuses []guardStatus) bool {
 	}
 	if anyNotInstalled {
 		fmt.Fprintln(stdout, "```bash")
+		fmt.Fprintln(stdout, "# needs sdlc's sd-8wth landed first (global hooks run loto's guards inline);")
+		fmt.Fprintln(stdout, "# until then this installs the doorman but not a chain it can forward into")
 		fmt.Fprintln(stdout, "bash plugins/sdlc/bin/install-hooks")
 		fmt.Fprintln(stdout, "```")
 	}
