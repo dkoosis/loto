@@ -85,7 +85,14 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: loto lock <target> [<target>...] -t \"why\"")
 		return 2
 	}
-	targets, invalid := validateLockTargets(fs.Args(), repoTop, false)
+	// allowMissing=true (loto-i382): a path inside the repo that does not
+	// exist yet, with an existing parent, is a first-class lock target by
+	// default — no --create flag (dk's call on the bead). ~100 refusals in 14
+	// days were an agent locking a file it was about to CREATE;
+	// statFileTargetReason already tolerates ENOENT the same way `loto
+	// beacon`/hookAdmit do (loto-z5nb), and buildLockRecords below sets
+	// MayCreate so the store's own target validation agrees.
+	targets, invalid := validateLockTargets(fs.Args(), repoTop, true)
 	if len(invalid) > 0 {
 		render.EmitInvalid(stderr, invalid)
 		emitDirLockHint(stderr, invalid, fs.Args(), repoTop, *intent)
@@ -478,6 +485,10 @@ func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now t
 			Branch:      branch,
 			Mode:        mode,
 			Worktree:    rt.RepoTop,
+			// MayCreate mirrors the CLI-side allowMissing=true above
+			// (loto-i382): the store's own target validation would
+			// otherwise refuse a target this command just accepted.
+			MayCreate: true,
 		})
 	}
 	return recs
