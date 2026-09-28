@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -470,7 +471,23 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 		fmt.Fprint(stderr, w)
 	}
 	recs := buildLockRecords(targets, rt, intent, now, ttl, mode)
-	acquired, err := rt.Store.AcquireLocks(rt.Ctx, recs, live)
+	// A live beacon of this session does not refuse the lock (loto-6sf4): it is
+	// this session's own subagent writing — very often the very subagent
+	// running this `loto lock`, whose Bash resolves to the parent identity
+	// while its Write's beacon carries its derived id. The beacon stays, so
+	// the write gate still serializes siblings on it. An unpinned session id
+	// is random per process and names no one.
+	//
+	// Only from a subagent's shell (Codex #390): the root session locking a
+	// file its own subagent is mid-write on is still refused, which is the
+	// root's one signal that the child is there — the root's write path is
+	// plain `check`, which a shared beacon never denies. The marker failing
+	// closed puts every caller back on that refusal.
+	var session domain.SessionUUID
+	if rt.SessionPinned && identity.InSubagentShell() {
+		session = rt.SessionUUID
+	}
+	acquired, err := rt.Store.AcquireLocksBesideSessionBeacons(rt.Ctx, recs, live, session)
 	if err != nil {
 		if mce, ok := errors.AsType[*store.MultiConflictError](err); ok {
 			render.EmitConflictWithTags(stdout, mce, fetchTagsForBlockers(rt, mce.Blockers))
@@ -489,10 +506,49 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 		return 3
 	}
 	render.EmitLockSuccess(stdout, acquired)
+	emitSessionBeaconNotes(stdout, rt, targets, session, now)
 	// Foreign-claim advisory (loto-qoq): claims never block a lock, so this
 	// only runs on the success path, after the success rows.
 	emitForeignClaimAdvisories(stdout, foreignClaimAdvisoriesFor(rt, targets, now))
 	return 0
+}
+
+// emitSessionBeaconNotes names each live same-session beacon the lock was
+// taken beside (loto-6sf4), one ℹ row per (target, owner). The lock does not
+// lift it: until it lapses, the write gate still refuses every subagent of
+// this session except the one that minted it. Best-effort, like the claim
+// advisory — a read error prints nothing.
+func emitSessionBeaconNotes(w io.Writer, rt *runtime, targets []domain.Target, session domain.SessionUUID, now time.Time) {
+	if session == "" {
+		return
+	}
+	ec := domain.EvalContext{Now: now, CaseFold: rt.CaseFold}
+	var rows []domain.LockRecord
+	for _, t := range targets {
+		held, err := rt.Store.LocksAt(rt.Ctx, t)
+		if err != nil {
+			return
+		}
+		for i := range held {
+			r := held[i]
+			if !r.IsBeacon() || r.SessionUUID != session || string(r.OwnerUUID) == rt.Agent.UUID ||
+				!r.ExpiresAt.After(now) || !ec.SameTarget(t, r.Target) || !domain.SameWorktree(rt.RepoTop, r.Worktree) {
+				continue
+			}
+			r.Target = t
+			rows = append(rows, r)
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Target.Canonical != rows[j].Target.Canonical {
+			return rows[i].Target.Canonical < rows[j].Target.Canonical
+		}
+		return rows[i].OwnerUUID < rows[j].OwnerUUID
+	})
+	for i := range rows {
+		fmt.Fprintf(w, "ℹ target=%s session-beacon owner=%s expires_at=%s writes=refused-for-other-subagents-until-expiry\n",
+			relPath(rows[i].Target.Canonical), rows[i].OwnerUUID, rows[i].ExpiresAt.UTC().Format(time.RFC3339))
+	}
 }
 
 // fetchTagsForBlockers returns a map keyed by target_canonical of pending tags

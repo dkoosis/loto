@@ -192,7 +192,11 @@ Code shipped `ListAgents`/`SendMessage` natively). This is the keystone —
 without it, "release my locks on session end" is meaningless. A `/team`
 sibling stamped with `LOTO_SUBAGENT_ID` derives its own owner from
 (session id, stamp), so siblings serialize instead of collapsing onto one
-owner (loto-fs84). A caller with no session id and no `LOTO_AGENT_ID` is
+owner (loto-fs84). A sibling's Bash is not stamped — the harness gives
+it no per-subagent id — so its `loto lock` runs as the session; that lock
+is taken beside a live beacon of the same session rather than refused on
+it, and the beacon stays for the write gate to serialize siblings on
+(loto-6sf4). A caller with no session id and no `LOTO_AGENT_ID` is
 refused on every verb that writes an owner.
 
 **Useful holder reports.** When a Claude is blocked, it sees a KV row
