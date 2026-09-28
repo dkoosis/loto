@@ -21,8 +21,8 @@ import (
 //
 // ‡ These tests are filesystem-conditional by necessity: only the machine's
 // own FS can exercise its branch. The linux CI leg proves the two spellings
-// stay independent where they are genuinely two files; the darwin leg (weekly
-// backstop, or a `ci:macos` label) proves they converge where they are one.
+// stay independent where they are genuinely two files; the darwin CI
+// leg proves they converge where they are one.
 // Both branches are asserted in every test rather than skipped, so neither
 // runner is silently proving nothing.
 
