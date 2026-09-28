@@ -21,6 +21,11 @@ const (
 
 // --- guard reachability (loto-jomg) -----------------------------------------
 
+// allGuardLabels is every guardSpecs label, print order, shared by every test
+// that asserts all three rows at once — one literal source instead of
+// repeating the same three strings per test (goconst).
+var allGuardLabels = []string{"pre-commit-gate", "tree-move-guard", "ref-transaction-guard"}
+
 // dispatcherProbeScript is writeHookFixture's dispatcher body: a trimmed copy
 // of .githooks/lib/run-chain.sh's own LOTO_HOOK_PROBE=1 contract (loto-ea8y.11)
 // — computed toplevel, not baked in, so the same bytes work at any repo path —
@@ -102,6 +107,34 @@ func writeForeignForwarder(t *testing.T, foreignDir, repo string) {
 	}
 }
 
+// writeForeignForwarderFailOpen lays out, for every hook in guardSpecs, an
+// executable at foreignDir/<hook> that mirrors the REAL sdlc global doorman's
+// fail-open behavior (loto-ea8y.10 Givens: exec into the repo hook, fail open
+// when it is missing) — forward to repo/.githooks/<hook> only when that
+// dispatcher exists and is executable, else exit 0 silently. Distinct from
+// writeForeignForwarder, which assumes the repo dispatcher is always present
+// and unconditionally execs it: good for proving the probe travels through an
+// intact chain, but wrong for reproducing loto-lw16's bug, where a repo that
+// carries no loto guard at all forwards through exactly like this and must
+// read as reason=not-installed, not an exec failure.
+func writeForeignForwarderFailOpen(t *testing.T, foreignDir, repo string) {
+	t.Helper()
+	if err := os.MkdirAll(foreignDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, spec := range guardSpecs {
+		target := filepath.Join(repo, ".githooks", spec.hook)
+		body := "#!/usr/bin/env sh\n" +
+			"if [ -x " + shellQuote(target) + " ]; then\n" +
+			"\texec " + shellQuote(target) + " \"$@\"\n" +
+			"fi\n" +
+			"exit 0\n"
+		if err := os.WriteFile(filepath.Join(foreignDir, spec.hook), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // writeForeignNonForwarder lays out, for every hook in guardSpecs, an
 // executable at foreignDir/<hook> that ignores LOTO_HOOK_PROBE entirely —
 // some other tool's own hook script occupying the slot, never loto's.
@@ -173,11 +206,83 @@ func TestDoctorGuard_ForeignHooksPathNoAnswer(t *testing.T) {
 	setHooksPath(t, repo, foreign)
 
 	out := runOK(t, tcCmdDoctor)
-	for _, label := range []string{"pre-commit-gate", "tree-move-guard", "ref-transaction-guard"} {
+	for _, label := range allGuardLabels {
 		want := "✗ guard=" + label + " unreachable reason=hooksPath-foreign probe=no-answer detail=" + foreign
 		if !strings.Contains(out, want) {
 			t.Errorf("expected %q in: %q", want, out)
 		}
+	}
+
+	status := runOK(t, tcCmdStatus)
+	if !strings.Contains(status, "guard:   inert\n") {
+		t.Errorf("expected guard: inert in status: %q", status)
+	}
+}
+
+// TestDoctorGuard_ForwardedButNotInstalled is loto-lw16: the global doorman
+// DOES forward (writeForeignForwarderFailOpen, its real fail-open shape) but
+// the repo carries no loto guard at all — no .githooks tree whatsoever, the
+// sdlc/cc-plugins shape the bead's triage measured 2026-09-27. The forwarder
+// finds nothing to exec into and exits 0 silently, which reads identically to
+// a genuinely foreign hook from the probe's point of view (silent no-answer).
+// Before this bead that false-positived as reason=hooksPath-foreign
+// probe=no-answer; the repo was never bypassing anything, it just never had a
+// guard chained. The fix names the case truly (reason=not-installed) with a
+// fix block pointing at sdlc's install step, since sd-8wth (a parallel sdlc
+// change) makes the global hooks run loto's guards inline rather than
+// forwarding into a per-repo dispatcher.
+func TestDoctorGuard_ForwardedButNotInstalled(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	// repo carries no .githooks at all — never `make hooks`'d.
+	foreign := filepath.Join(t.TempDir(), "global-hooks")
+	writeForeignForwarderFailOpen(t, foreign, repo)
+	setHooksPath(t, repo, foreign)
+
+	out := runOK(t, tcCmdDoctor)
+	for _, label := range allGuardLabels {
+		want := "✗ guard=" + label + " unreachable reason=not-installed"
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "hooksPath-foreign") {
+		t.Errorf("a forwarded-but-empty repo must not read as hooksPath-foreign: %q", out)
+	}
+	if !strings.Contains(out, "```bash\nbash plugins/sdlc/bin/install-hooks\n```") {
+		t.Errorf("expected an install-hooks fix block naming sdlc's install step: %q", out)
+	}
+
+	status := runOK(t, tcCmdStatus)
+	if !strings.Contains(status, "guard:   inert\n") {
+		t.Errorf("expected guard: inert in status: %q", status)
+	}
+}
+
+// TestDoctorGuard_ForwardedNoAnswerStaysForeignWhenInstalled proves
+// reason=hooksPath-foreign stays reserved for a genuine bypass: the repo DOES
+// carry a fully installed loto guard (writeHookFixture, every hook), so a
+// forwarder that still fails to answer the probe (writeForeignNonForwarder)
+// cannot be explained by "nothing was chained" — this is
+// TestDoctorGuard_ForeignHooksPathNoAnswer's own scenario, re-asserted here to
+// pin the boundary loto-lw16 must not move.
+func TestDoctorGuard_ForwardedNoAnswerStaysForeignWhenInstalled(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeHookFixture(t, repo, "pre-commit", "post-checkout", "reference-transaction")
+	foreign := filepath.Join(t.TempDir(), "global-hooks")
+	writeForeignNonForwarder(t, foreign)
+	setHooksPath(t, repo, foreign)
+
+	out := runOK(t, tcCmdDoctor)
+	for _, label := range allGuardLabels {
+		want := "✗ guard=" + label + " unreachable reason=hooksPath-foreign probe=no-answer detail=" + foreign
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "not-installed") {
+		t.Errorf("a repo with an intact loto guard must not read as not-installed: %q", out)
 	}
 
 	status := runOK(t, tcCmdStatus)

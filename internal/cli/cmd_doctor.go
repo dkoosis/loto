@@ -733,7 +733,7 @@ var guardSpecs = []guardSpec{
 type guardStatus struct {
 	spec   guardSpec
 	ok     bool
-	reason string // machine-stable token, e.g. "hooksPath-foreign", "missing-entry"
+	reason string // machine-stable token, e.g. "hooksPath-foreign", "missing-entry", "not-installed"
 	detail string // the value or path that names the specific problem
 	probe  string // set only for reason=hooksPath-foreign: "no-answer"
 }
@@ -784,14 +784,22 @@ const hookProbeEnvVar = "LOTO_HOOK_PROBE"
 // NOT resolve to the repo's own .githooks — the doorman shape option A
 // commits to (a global hooks dir that forwards, never a per-repo override).
 // A missing or non-executable file at the effective path is reason=absent:
-// there is nothing there to route through. An executable file that does not
-// answer the probe correctly (a foreign tool's own hook, or the doorman's own
-// check refusing before it ever forwards — Givens: read the same as any
-// other non-answer, not a crash) is reason=hooksPath-foreign probe=no-answer,
-// preserving the old reason token as the Rules ask. A file that DOES answer
+// there is nothing there to route through. A file that DOES answer the probe
 // proves the chain reaches this repo's real dispatcher, so the guard's own
 // dispatcher/entry state is what checkOneGuard already checks for the direct
 // case — called here too, unchanged.
+//
+// An executable file that does NOT answer the probe is ambiguous on its own
+// (loto-lw16): a doorman that fails open when the repo carries no loto guard
+// (Givens: exec into the repo hook, fail open when missing) looks identical
+// from here to a genuinely foreign tool's own hook — both exit silently with
+// no probe line. checkOneGuard on repoTop resolves it: if this repo's own
+// dispatcher/entry are not intact, nothing was ever chained here and the
+// no-answer is fully explained by that — reason=not-installed, naming the
+// repo as the thing missing a guard, not the hooksPath as bypassing one. Only
+// when the repo's own chain IS intact does a no-answer prove a real bypass —
+// reason=hooksPath-foreign probe=no-answer, the old reason token, preserved
+// for that case alone.
 func checkForwardedGuard(ctx context.Context, resolved, repoTop string, spec guardSpec) guardStatus {
 	target := filepath.Join(resolved, spec.hook)
 	fi, statErr := os.Stat(target)
@@ -800,6 +808,9 @@ func checkForwardedGuard(ctx context.Context, resolved, repoTop string, spec gua
 	}
 	if probeHookAnswers(ctx, target, spec.hook, repoTop) {
 		return checkOneGuard(repoTop, spec)
+	}
+	if local := checkOneGuard(repoTop, spec); !local.ok {
+		return guardStatus{spec: spec, reason: "not-installed", detail: local.detail}
 	}
 	return guardStatus{spec: spec, reason: "hooksPath-foreign", detail: resolved, probe: "no-answer"}
 }
@@ -939,24 +950,42 @@ func guardSummary(statuses []guardStatus) string {
 }
 
 // renderGuardReachability prints one row per guard and, when any is
-// unreachable, one shared fix block (design.md: a ```bash fix block under a ✗
-// row). Returns whether every guard is reachable, for callers that also need
-// the bool (status's guard=ok/guard=inert line).
+// unreachable, a ```bash fix block naming its install step (design.md: a fix
+// block under a ✗ row). The two failure shapes take different fixes, so they
+// get different blocks: reason=not-installed (loto-lw16 — the doorman
+// forwards fine, this repo just never chained a guard) points at sdlc's
+// install-hooks, the step that will make the global hooks run loto's guards
+// inline once sd-8wth lands; every other reason still points at `make hooks`,
+// this repo's own dispatcher/entry install step. Returns whether every guard
+// is reachable, for callers that also need the bool (status's
+// guard=ok/guard=inert line).
 func renderGuardReachability(stdout io.Writer, statuses []guardStatus) bool {
 	anyFail := false
+	anyNotInstalled := false
+	anyOtherFail := false
 	for _, s := range statuses {
 		if s.ok {
 			fmt.Fprintf(stdout, "✓ guard=%s reachable entry=%s\n", s.spec.label, s.detail)
 			continue
 		}
 		anyFail = true
+		if s.reason == "not-installed" {
+			anyNotInstalled = true
+		} else {
+			anyOtherFail = true
+		}
 		if s.probe != "" {
 			fmt.Fprintf(stdout, "✗ guard=%s unreachable reason=%s probe=%s detail=%s\n", s.spec.label, s.reason, s.probe, s.detail)
 			continue
 		}
 		fmt.Fprintf(stdout, "✗ guard=%s unreachable reason=%s detail=%s\n", s.spec.label, s.reason, s.detail)
 	}
-	if anyFail {
+	if anyNotInstalled {
+		fmt.Fprintln(stdout, "```bash")
+		fmt.Fprintln(stdout, "bash plugins/sdlc/bin/install-hooks")
+		fmt.Fprintln(stdout, "```")
+	}
+	if anyOtherFail {
 		fmt.Fprintln(stdout, "```bash")
 		fmt.Fprintln(stdout, "make hooks")
 		fmt.Fprintln(stdout, "```")
