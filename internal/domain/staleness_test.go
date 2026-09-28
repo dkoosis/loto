@@ -103,6 +103,48 @@ func TestIsStale_NoDurablePid(t *testing.T) {
 	})
 }
 
+// TestIsStale_BeaconIgnoresDeadSessionProbe is loto-y87n: a beacon's
+// SessionUUID is a rotating witness — re-stamped to whichever sibling last
+// refreshed the row (records.go's IsBeacon doc: "the minting hook exits
+// milliseconds after the write it announces") — so one probe's DEAD verdict
+// for that witness (e.g. a session record whose recorded socket has since
+// gone missing, even though the owning Claude Code session is still up) is
+// not proof the beacon's owner is gone. A beacon carries no PID of its own to
+// cross-check, so unlike an ordinary lock, its only honest liveness authority
+// is the (short, 2m) TTL. Past-TTL beacons stay stale exactly as before —
+// only the pre-expiry DEAD override is disarmed.
+func TestIsStale_BeaconIgnoresDeadSessionProbe(t *testing.T) {
+	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	// A session-keyed probe (production's real shape, unlike hostPidProbe's
+	// pid-gated stub) that answers DEAD purely from a session witness — e.g. a
+	// session record whose recorded socket has since gone missing — with no
+	// regard to the lock row's own PID. This is the layer the real bug lives
+	// in: identity.ProbeSession never looks at the lock's PID at all.
+	sessionDead := func(LockRecord) Liveness { return LivenessDead }
+
+	t.Run("beacon within TTL is not stale even when the session probe reads dead", func(t *testing.T) {
+		ctx := EvalContext{Now: now, Live: sessionDead}
+		l := LockRecord{ExpiresAt: now.Add(2 * time.Minute), Host: "h", PID: 0, Beacon: true}
+		if ctx.IsStale(l) {
+			t.Fatal("live-TTL beacon must not be stale just because its session witness probes dead")
+		}
+	})
+	t.Run("beacon past TTL is still stale", func(t *testing.T) {
+		ctx := EvalContext{Now: now, Live: sessionDead}
+		l := LockRecord{ExpiresAt: now.Add(-time.Minute), Host: "h", PID: 0, Beacon: true}
+		if !ctx.IsStale(l) {
+			t.Fatal("expired beacon must still be stale (TTL gate still applies)")
+		}
+	})
+	t.Run("non-beacon PID-0 lock is unaffected: dead session probe still stales it", func(t *testing.T) {
+		ctx := EvalContext{Now: now, Live: sessionDead}
+		l := LockRecord{ExpiresAt: now.Add(time.Hour), Host: "h", PID: 0, SessionUUID: "sess-1"}
+		if !ctx.IsStale(l) {
+			t.Fatal("a plain (non-beacon) lock must still honor a dead-owner verdict")
+		}
+	})
+}
+
 // TestClassifyAndRemainingTTL pins loto-k5el.1 SC3 display helpers: Classify is
 // the display-tier refinement of IsStale (DEAD ⟺ IsStale; splits ¬stale into
 // ALIVE vs UNKNOWN) and RemainingTTL is the clamped TTL countdown.
@@ -165,6 +207,26 @@ func TestClassifyAndRemainingTTL(t *testing.T) {
 			if (ec.Classify(l) == LivenessDead) != ec.IsStale(l) {
 				t.Errorf("I1 violated for %+v: Classify=%v IsStale=%v", l, ec.Classify(l), ec.IsStale(l))
 			}
+		}
+	})
+	// loto-y87n: a beacon's session witness probing DEAD does not stale it
+	// (IsStale), so Classify must not render it DEAD either — `loto status`
+	// would count it expired and recommend a repair doctor now refuses. No
+	// witness to trust and none to reap on → UNKNOWN, TTL the sole authority.
+	t.Run("beacon within TTL whose session probes dead is UNKNOWN (I1 holds)", func(t *testing.T) {
+		sessionDead := func(LockRecord) Liveness { return LivenessDead }
+		ec := EvalContext{Now: now, Live: sessionDead}
+		for _, l := range []LockRecord{
+			{ExpiresAt: now.Add(2 * time.Minute), Host: host, PID: 0, Beacon: true},
+			{ExpiresAt: now.Add(-time.Minute), Host: host, PID: 0, Beacon: true},
+		} {
+			if (ec.Classify(l) == LivenessDead) != ec.IsStale(l) {
+				t.Errorf("I1 violated for %+v: Classify=%v IsStale=%v", l, ec.Classify(l), ec.IsStale(l))
+			}
+		}
+		l := LockRecord{ExpiresAt: now.Add(2 * time.Minute), Host: host, PID: 0, Beacon: true}
+		if got := ec.Classify(l); got != LivenessUnknown {
+			t.Errorf("Classify=%v want UNKNOWN", got)
 		}
 	})
 }
