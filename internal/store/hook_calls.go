@@ -157,6 +157,13 @@ func (c HookCall) Ended() time.Time {
 	return c.DeadAt
 }
 
+// statAbsent mirrors the cli hook reader's hookStatAbsent: the stat value a
+// path that is not there carries, distinct from an empty string so "removed"
+// and "never observed" stay apart. Duplicated rather than imported — cli
+// depends on store, not the other way — and the two must be kept in sync by
+// hand; hookReadPaths is the sole writer of this value onto HookPathState.Stat.
+const statAbsent = "absent"
+
 // HookPathState is one path as a hook observed it, at pre or at post. No
 // bytes: stat and digest only (§5 I3 step 4, "No bytes").
 type HookPathState struct {
@@ -496,6 +503,35 @@ type postPathResult struct {
 	declared  bool
 }
 
+// pathChanged is primarily a digest comparison (loto-cspf). A recorded path's
+// pre digest is prev.DigestPre; a path first seen at post has no recorded pre
+// state, so it reads as "" — the same value an always-missing file carries,
+// which is why a first-seen path that is still missing is also no change.
+// Stat used to corroborate ANY digest match into "changed" (mtime or perm
+// bits moving alone); that filed half of every row5-row7 report reading
+// digest_pre == digest_post, so a matching NON-empty digest no longer counts
+// stat at all.
+//
+// A present-but-unhashable path (hookReadPaths could not hash it) also
+// carries an empty digest, so two such observations read as digest-equal even
+// when the file plainly changed. The stat fallback still applies, but ONLY
+// when both digests are empty: a recorded path's stat moving is the change
+// signal digest cannot give it, and a first-seen path that is actually
+// PRESENT (stat != statAbsent) is a real appearance, not the always-missing
+// case the digest-only read is tuned for.
+func pathChanged(prev HookCallPath, wasRecorded bool, o HookPathState) bool {
+	if prev.DigestPre != o.Digest {
+		return true
+	}
+	if prev.DigestPre != "" || o.Digest != "" {
+		return false
+	}
+	if wasRecorded {
+		return prev.StatPre != o.Stat
+	}
+	return o.Stat != statAbsent
+}
+
 // postOnePathTx writes one path's post half and reports whether it changed.
 //
 // Two shapes, kept apart on purpose: a path the pre recorded is UPDATEd in
@@ -505,16 +541,8 @@ type postPathResult struct {
 // tool ran.
 func postOnePathTx(ctx context.Context, tx *sql.Tx, callID, worktree string, o HookPathState, recorded map[string]HookCallPath) (postPathResult, error) {
 	prev, wasRecorded := recorded[o.Path]
-	// changed is a digest comparison and nothing else (loto-cspf). A recorded
-	// path's pre digest is prev.DigestPre; a path first seen at post has no
-	// recorded pre state, so it reads as "" — the same value an always-missing
-	// file carries, which is why a first-seen path with an empty digest (still
-	// missing) is also no change. Stat used to corroborate a digest match into
-	// "changed" anyway (mtime/perm bits moving alone); that filed half of every
-	// row5-row7 report reading digest_pre == digest_post, so stat no longer
-	// counts.
 	res := postPathResult{
-		changed:   prev.DigestPre != o.Digest,
+		changed:   pathChanged(prev, wasRecorded, o),
 		epoch:     o.Epoch,
 		digestPre: prev.DigestPre,
 		holderPre: o.Holder,
