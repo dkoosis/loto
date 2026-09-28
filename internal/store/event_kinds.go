@@ -122,8 +122,9 @@ const (
 	//
 	// EventPostMissingResolved is written the one time a post_missing call
 	// stops being post_missing: either its post lands late (RecordCallPost,
-	// Reason "posted") or the liveness probe finds its owner dead
-	// (MarkDeadOwnerCalls, Reason "session_died"). A call that never crossed
+	// Reason "posted"), the liveness probe finds its owner dead
+	// (MarkDeadOwnerCalls, Reason "session_died"), or it stays in flight past
+	// InFlightMaxAge (MarkDeadOwnerCalls, Reason "expired"). A call that never crossed
 	// T_report writes neither kind — the pair only exists for calls the first
 	// kind already flagged, so "resolved" always has a "missing" to resolve.
 	EventPostMissing         = "post_missing"
