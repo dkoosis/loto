@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -394,6 +395,158 @@ func TestDropFinishedCalls_FloorKeepsAFreshPost(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("dropped %d fresh records, want 0", n)
+	}
+}
+
+// Retention's path half (loto-szdx.1 AC 1): every call DropFinishedCalls
+// drops loses ALL of its hook_call_paths rows, and every call it keeps —
+// whether kept by the floor or pinned by an older in-flight call — keeps
+// every one of its path rows, untouched, in the same pass. Each call here
+// carries two path rows (tcHookPath, tcHookPath2) so a delete that touched
+// the wrong call's rows, or only one of a call's two rows, would show.
+func TestDropFinishedCalls_PathRowsFollowTheirCall(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+	t0 := now.Add(-time.Hour)
+
+	twoPaths := func(digest string) []HookPathState {
+		return []HookPathState{hookObs(tcHookPath, digest), hookObs(tcHookPath2, digest)}
+	}
+	mustPost := func(callID string, tPost time.Time, digest string) {
+		t.Helper()
+		if _, err := s.RecordCallPost(ctx, callID, tPost, twoPaths(digest)); err != nil {
+			t.Fatalf("post %s: %v", callID, err)
+		}
+	}
+
+	// Finished long ago, no in-flight peer opened before either one ended:
+	// both are old enough and unpinned, so both are dropped.
+	mustPre(t, s, "call-drop-1", t0, twoPaths(tcSHA1)...)
+	mustPost("call-drop-1", t0.Add(time.Second), tcSHA1)
+	mustPre(t, s, "call-drop-2", t0.Add(2*time.Second), twoPaths(tcSHA1)...)
+	mustPost("call-drop-2", t0.Add(3*time.Second), tcSHA1)
+
+	// Opens after both drop-candidates above ended, and never posts: it pins
+	// any finished call whose own end comes after this call's t_pre.
+	mustPre(t, s, "call-open", t0.Add(10*time.Second), twoPaths(tcSHA1)...)
+
+	// Ends AFTER call-open's t_pre, so call-open pins it — kept despite being
+	// well past the age cutoff.
+	mustPre(t, s, "call-pinned-kept", t0.Add(20*time.Second), twoPaths(tcSHA1)...)
+	mustPost("call-pinned-kept", t0.Add(21*time.Second), tcSHA1)
+
+	// Ends inside the floor window (now, not t0-relative). call-open pins it
+	// too in this first pass; the second pass below unpins it, so there the
+	// floor alone is what keeps it.
+	mustPre(t, s, "call-floor-kept", now.Add(-2*time.Second), twoPaths(tcSHA1)...)
+	mustPost("call-floor-kept", now.Add(-time.Second), tcSHA1)
+
+	n, err := s.DropFinishedCalls(ctx, now, time.Minute)
+	if err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("dropped %d calls, want 2 (call-drop-1, call-drop-2)", n)
+	}
+
+	pathCount := func(callID string) int {
+		t.Helper()
+		var n int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT count(*) FROM hook_call_paths WHERE call_id = ?`, callID).Scan(&n); err != nil {
+			t.Fatalf("count paths for %s: %v", callID, err)
+		}
+		return n
+	}
+
+	for _, dropped := range []string{"call-drop-1", "call-drop-2"} {
+		if n := pathCount(dropped); n != 0 {
+			t.Errorf("%s: %d path rows survived its call being dropped, want 0", dropped, n)
+		}
+	}
+	for _, kept := range []string{"call-open", "call-pinned-kept", "call-floor-kept"} {
+		if n := pathCount(kept); n != 2 {
+			t.Errorf("%s: %d path rows, want its 2 kept intact", kept, n)
+		}
+	}
+
+	// Second pass: call-open posts (long ago), so nothing is in flight and no
+	// call is pinned. call-open and call-pinned-kept are past the cutoff and
+	// drop with their paths; call-floor-kept survives on the floor alone.
+	mustPost("call-open", t0.Add(30*time.Second), tcSHA1)
+	if n, err = s.DropFinishedCalls(ctx, now, time.Minute); err != nil {
+		t.Fatalf("second drop: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("second pass dropped %d calls, want 2 (call-open, call-pinned-kept)", n)
+	}
+	for _, dropped := range []string{"call-open", "call-pinned-kept"} {
+		if n := pathCount(dropped); n != 0 {
+			t.Errorf("second pass, %s: %d path rows survived its call being dropped, want 0", dropped, n)
+		}
+	}
+	if n := pathCount("call-floor-kept"); n != 2 {
+		t.Errorf("second pass, call-floor-kept: %d path rows, want its 2 kept by the floor alone", n)
+	}
+}
+
+// Plan pin (loto-szdx.1 AC 2): the path-row delete DropFinishedCalls runs
+// must never plan as a full scan of hook_call_paths — on sdlc's store
+// (224k path rows) that scan alone costs 79ms of a ~96ms pre-hook, every
+// call, even when nothing is dropped.
+//
+// RED until the implementation names dropFinishedCallPathsSQL as an
+// unexported package-level const in hook_calls.go (today the delete is
+// inline: `DELETE FROM hook_call_paths WHERE call_id NOT IN (SELECT call_id
+// FROM hook_calls)`, hook_calls.go ~line 996 — a NOT IN over the whole
+// table, which is exactly the scan this test pins against). The contract
+// this test holds the implementation to: a KEYED delete of only the
+// dropped calls' path rows, taking the same one bind arg (the cutoff
+// DropFinishedCalls' own hook_calls DELETE already computes as
+// now.Add(-floor).UnixNano()) and reusing that DELETE's own drop predicate,
+// e.g.
+//
+//	DELETE FROM hook_call_paths WHERE call_id IN (
+//	  SELECT call_id FROM hook_calls
+//	   WHERE COALESCE(t_post, dead_at) IS NOT NULL
+//	     AND COALESCE(t_post, dead_at) < ?
+//	     AND NOT EXISTS (
+//	       SELECT 1 FROM hook_calls peer
+//	        WHERE peer.t_post IS NULL AND peer.dead_at IS NULL
+//	          AND peer.t_pre < COALESCE(hook_calls.t_post, hook_calls.dead_at)))
+//
+// run BEFORE the hook_calls DELETE (call_id must still resolve against a
+// hook_calls row that has not been removed yet) — or an equivalent form
+// keyed per call_id. Either shape must search hook_call_paths by its
+// call_id-leading primary key, never scan it.
+func TestDropFinishedCalls_PathDeleteDoesNotScanHookCallPaths(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	rows, err := s.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+dropFinishedCallPathsSQL, time.Now().UnixNano())
+	if err != nil {
+		t.Fatalf("explain query plan: %v", err)
+	}
+	defer rows.Close()
+
+	var sawRow bool
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatalf("scan plan row: %v", err)
+		}
+		sawRow = true
+		if strings.Contains(detail, "SCAN hook_call_paths") {
+			t.Errorf("path delete plans as a scan: %q", detail)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+	if !sawRow {
+		t.Fatal("EXPLAIN QUERY PLAN returned no rows")
 	}
 }
 
