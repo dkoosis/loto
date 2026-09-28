@@ -574,6 +574,17 @@ func hookObserve(ctx context.Context, rt *runtime, declared string, warn io.Writ
 	}
 	statusPaths = len(status)
 
+	// git prints each path exactly as it sits on disk; a lock's key has
+	// already gone through foldTargetKey (loto-f8m8). Folding here too, the
+	// same way resolveStagedPaths folds a git-produced token (base=repoTop:
+	// git already ran with cmd.Dir=repoTop, so the token is repo-root-relative
+	// by construction), is what keeps one file on a case-folding filesystem
+	// from filing under two path_canonical spellings — one read as locked by a
+	// peer, the other as unattributed, for the same write (loto-dwu9). A path
+	// that fails to resolve keeps its raw spelling rather than dropping the
+	// observation.
+	foldStatusPaths(newCaseCache(), rt.RepoTop, status)
+
 	set := map[string]bool{}
 	for p := range holders {
 		set[p] = true
@@ -616,6 +627,18 @@ func hookObserve(ctx context.Context, rt *runtime, declared string, warn io.Writ
 		}
 	}
 	return obs, statusPaths, lockedBytes, nil
+}
+
+// foldStatusPaths folds each git-status path to its canonical lock key, in
+// place. A path that fails to resolve keeps its raw spelling rather than
+// dropping the observation. Split out of hookObserve to keep that function's
+// gocognit score under the gate; the fold logic itself is unchanged (loto-dwu9).
+func foldStatusPaths(cc *caseCache, repoTop string, status []string) {
+	for i, p := range status {
+		if t, terr := resolveGitTarget(cc, repoTop, repoTop, p); terr == nil {
+			status[i] = t.Canonical
+		}
+	}
 }
 
 // hookSeqAtObserve reads seq(f, E) for every path about to be observed, so the
