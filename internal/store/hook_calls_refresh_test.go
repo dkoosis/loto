@@ -381,7 +381,7 @@ func TestRefreshCallerLocks_ManyPathsStayUnderSQLVarLimit(t *testing.T) {
 		t.Fatalf("acquire: %v", err)
 	}
 	paths := make([]string, 0, 40000)
-	for i := 0; i < 39999; i++ {
+	for i := range 39999 {
 		paths = append(paths, "gen/f"+time.Duration(i).String()+".go")
 	}
 	paths = append(paths, rec.Target.Canonical)
@@ -390,7 +390,7 @@ func TestRefreshCallerLocks_ManyPathsStayUnderSQLVarLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer tx.Rollback() //nolint:errcheck // the tx is discarded; only refresh's error matters here
 	if err := refreshCallerLocksTx(ctx, tx, s.keys(), string(tcOwnerA), rec.Worktree, paths, t0.Add(16*time.Minute)); err != nil {
 		t.Fatalf("refresh over %d paths: %v", len(paths), err)
 	}
