@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS path_observed (
   digest         TEXT NOT NULL DEFAULT '',
   observed_at    INTEGER NOT NULL,
   worktree       TEXT NOT NULL DEFAULT '',
+  cache_key      TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (path_canonical, worktree, epoch)
 );
 
@@ -671,36 +672,41 @@ func observedAtTx(ctx context.Context, tx *sql.Tx, path, worktree string, epoch 
 	return stat, digest, true, nil
 }
 
-// ObservedDigest reads path_observed's last recorded stat and digest for one
-// locked path at one epoch, in this worktree — outside any transaction,
-// because it is a cache lookup a hook makes BEFORE it decides whether to hash
-// at all, not a step inside the record write (loto-szdx). A path whose stat
-// has not moved since this row was written did not change its content
-// either, by the same corroboration hookStatString's own doc comment already
-// relies on, so the caller may reuse digest here instead of re-hashing.
+// ObservedDigest reads the cache key and digest path_observed last recorded
+// for one locked path at one epoch, in this worktree — outside any
+// transaction, because it is a cache lookup a hook makes BEFORE it decides
+// whether to hash at all (loto-szdx). The caller may reuse digest only when
+// cacheKey equals the key it computes from a fresh lstat.
 //
-// known false means "no row at this (path, worktree, epoch)" — never
-// observed yet, or the lock changed hands since — and the caller must hash.
-func (s *Store) ObservedDigest(ctx context.Context, path, worktree string, epoch int64) (stat, digest string, known bool, err error) {
+// known false means the caller must hash: no row at this (path, worktree,
+// epoch), a row written without a cache key (racy, or before the column
+// existed), or a row whose digest is empty because the hash failed — an
+// empty digest served from cache would stop change tracking for as long as
+// the stat held still (cubic P2 on PR #380).
+func (s *Store) ObservedDigest(ctx context.Context, path, worktree string, epoch int64) (cacheKey, digest string, known bool, err error) {
 	err = s.db.QueryRowContext(ctx,
-		`SELECT stat, digest FROM path_observed WHERE path_canonical = ? AND worktree = ? AND epoch = ?`,
-		path, worktree, epoch).Scan(&stat, &digest)
+		`SELECT cache_key, digest FROM path_observed WHERE path_canonical = ? AND worktree = ? AND epoch = ?`,
+		path, worktree, epoch).Scan(&cacheKey, &digest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", false, nil
 	}
 	if err != nil {
 		return "", "", false, err
 	}
-	return stat, digest, true, nil
+	if cacheKey == "" || digest == "" {
+		return "", "", false, nil
+	}
+	return cacheKey, digest, true, nil
 }
 
 func setObservedTx(ctx context.Context, tx *sql.Tx, o HookPathState, worktree string, now time.Time) error {
 	_, err := tx.ExecContext(ctx, `
-INSERT INTO path_observed(path_canonical, epoch, stat, digest, observed_at, worktree) VALUES (?,?,?,?,?,?)
+INSERT INTO path_observed(path_canonical, epoch, stat, digest, observed_at, worktree, cache_key) VALUES (?,?,?,?,?,?,?)
 ON CONFLICT(path_canonical, worktree, epoch) DO UPDATE SET stat = excluded.stat,
                                                  digest = excluded.digest,
-                                                 observed_at = excluded.observed_at`,
-		o.Path, o.Epoch, o.Stat, o.Digest, now.UnixNano(), worktree)
+                                                 observed_at = excluded.observed_at,
+                                                 cache_key = excluded.cache_key`,
+		o.Path, o.Epoch, o.Stat, o.Digest, now.UnixNano(), worktree, o.CacheKey)
 	return err
 }
 
@@ -1071,5 +1077,18 @@ func init() { //nolint:gochecknoinits // additive registration, same pattern as 
 			name string
 			fn   ensureFn
 		}{"add tree_events.worktree", ensureTreeEventsWorktree},
+		struct {
+			name string
+			fn   ensureFn
+		}{"add path_observed.cache_key", ensurePathObservedCacheKey},
 	)
+}
+
+// ensurePathObservedCacheKey adds path_observed.cache_key to an existing DB
+// (loto-szdx). Runs after ensurePathObservedWorktree, whose rebuild does not
+// carry this column. The empty legacy value reads in ObservedDigest as
+// "not cached", so an upgraded DB hashes once more and then caches.
+func ensurePathObservedCacheKey(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	return ensureColumn(ctx, db, apply, "path_observed", "cache_key",
+		`ALTER TABLE path_observed ADD COLUMN cache_key TEXT NOT NULL DEFAULT ''`)
 }

@@ -11,6 +11,8 @@ import (
 
 const (
 	tcHookPath  = "internal/hooked.go"
+	tcHookStat  = "10:420:1"
+	tcCacheKey  = tcHookStat + ":1:2:3"
 	tcHookPath2 = "internal/other_hooked.go"
 	tcOwnerA    = "owner-a"
 	tcOwnerB    = "owner-b"
@@ -21,14 +23,14 @@ const (
 )
 
 func hookObs(path, digest string) HookPathState {
-	return HookPathState{Path: path, Locked: true, Epoch: 1, Holder: tcOwnerA, Digest: digest, Stat: "10:420:1"}
+	return HookPathState{Path: path, Locked: true, Epoch: 1, Holder: tcOwnerA, Digest: digest, Stat: tcHookStat}
 }
 
 // TestObservedDigest_ReadsWhatWasSeeded is loto-szdx's unit-level red/green:
-// the hook's digest cache (ObservedDigest) has to read back exactly what
-// RecordDrift's first pass over a locked path seeds into path_observed —
-// same stat string, same digest — or a hook that trusts it to skip a hash
-// would trust stale bytes.
+// the hook's digest cache (ObservedDigest) has to read back exactly the cache
+// key and digest RecordDrift's first pass over a locked path seeds into
+// path_observed, or a hook that trusts it to skip a hash would trust stale
+// bytes.
 func TestObservedDigest_ReadsWhatWasSeeded(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
@@ -40,7 +42,9 @@ func TestObservedDigest_ReadsWhatWasSeeded(t *testing.T) {
 		t.Error("a never-observed path reads as known")
 	}
 
-	out, err := s.RecordDrift(ctx, tcOwnerA, "", now, []HookPathState{hookObs(tcHookPath, tcSHA1)})
+	obs := hookObs(tcHookPath, tcSHA1)
+	obs.CacheKey = tcCacheKey
+	out, err := s.RecordDrift(ctx, tcOwnerA, "", now, []HookPathState{obs})
 	if err != nil {
 		t.Fatalf("RecordDrift seed: %v", err)
 	}
@@ -48,15 +52,15 @@ func TestObservedDigest_ReadsWhatWasSeeded(t *testing.T) {
 		t.Fatalf("want tcHookPath seeded, got %+v", out)
 	}
 
-	stat, digest, known, err := s.ObservedDigest(ctx, tcHookPath, "", 1)
+	key, digest, known, err := s.ObservedDigest(ctx, tcHookPath, "", 1)
 	if err != nil {
 		t.Fatalf("ObservedDigest after seed: %v", err)
 	}
 	if !known {
 		t.Fatal("a seeded path reads as unknown")
 	}
-	if stat != "10:420:1" || digest != tcSHA1 {
-		t.Errorf("stat=%q digest=%q, want stat=%q digest=%q", stat, digest, "10:420:1", tcSHA1)
+	if key != tcCacheKey || digest != tcSHA1 {
+		t.Errorf("key=%q digest=%q, want key=%q digest=%q", key, digest, tcCacheKey, tcSHA1)
 	}
 
 	// A different epoch is a different lock hand-off — its own cache entry,
@@ -65,6 +69,35 @@ func TestObservedDigest_ReadsWhatWasSeeded(t *testing.T) {
 		t.Fatalf("ObservedDigest at a different epoch: %v", err)
 	} else if known {
 		t.Error("a different epoch reads as known from epoch 1's row")
+	}
+}
+
+// TestObservedDigest_EmptyDigestOrKeyIsNotCached is cubic's P2 on PR #380: a
+// row whose hash failed (empty digest) or that carries no cache key (racy,
+// or written before the column existed) must read as unknown, so the hook
+// hashes again instead of serving "" for as long as the stat holds still.
+func TestObservedDigest_EmptyDigestOrKeyIsNotCached(t *testing.T) {
+	cases := []struct {
+		name, digest, key string
+	}{
+		{"hash failed", "", tcCacheKey},
+		{"no cache key", tcSHA1, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := mustOpen(t)
+			ctx := context.Background()
+			obs := hookObs(tcHookPath, tc.digest)
+			obs.CacheKey = tc.key
+			if _, err := s.RecordDrift(ctx, tcOwnerA, "", time.Now(), []HookPathState{obs}); err != nil {
+				t.Fatalf("RecordDrift seed: %v", err)
+			}
+			if _, _, known, err := s.ObservedDigest(ctx, tcHookPath, "", 1); err != nil {
+				t.Fatalf("ObservedDigest: %v", err)
+			} else if known {
+				t.Errorf("digest=%q key=%q reads as a cache hit; want unknown so the hook re-hashes", tc.digest, tc.key)
+			}
+		})
 	}
 }
 
@@ -649,7 +682,7 @@ func TestRecordCallPre_SeqPreIsPinnedToTheObservation(t *testing.T) {
 		CallID: "call-slow", OwnerUUID: tcOwnerB, SessionUUID: "sess-b", TPre: time.Now(),
 	}, []HookPathState{{
 		Path: tcHookPath, Locked: true, Epoch: 1, Holder: tcOwnerA,
-		Digest: tcSHA1, Stat: "10:420:1",
+		Digest: tcSHA1, Stat: tcHookStat,
 		SeqAtObserve: observed, SeqAtObserveKnown: true,
 	}}); err != nil {
 		t.Fatalf("slow pre: %v", err)

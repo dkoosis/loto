@@ -7,7 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -792,6 +792,9 @@ func TestHook_SteadyStatePreThenPostStaysUnder50msMedian(t *testing.T) {
 	if code := Run(lockArgs, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("lock %d bench files: exit %d", nFiles, code)
 	}
+	// A file written in the last hookRacyWindow is always hashed; the steady
+	// state this measures is files that have sat still longer than that.
+	waitPastRacyWindow()
 
 	// Warm the cache: the first pre+post after a lock always hashes (no
 	// path_observed row exists yet). Every call after this one is the
@@ -817,7 +820,7 @@ func TestHook_SteadyStatePreThenPostStaysUnder50msMedian(t *testing.T) {
 		durations = append(durations, time.Since(start))
 	}
 
-	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	slices.Sort(durations)
 	median := durations[len(durations)/2]
 	if median >= 50*time.Millisecond {
 		t.Errorf("pre+post median = %v over %d rounds, want <50ms (loto-szdx); all: %v", median, rounds, durations)
@@ -870,6 +873,7 @@ func TestHook_LockedUnchangedPathSurvivesHashingBeingUnavailable(t *testing.T) {
 	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("lock: exit %d", code)
 	}
+	waitPastRacyWindow()
 	// Warm: the first pre+post after a lock always hashes (no path_observed
 	// row exists yet), seeding the cache this test then relies on.
 	if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "warm", "", "")); code != 0 {
@@ -901,5 +905,115 @@ func TestHook_LockedUnchangedPathSurvivesHashingBeingUnavailable(t *testing.T) {
 	if p.DigestPre != warmDigest || p.DigestPost != warmDigest {
 		t.Errorf("a locked, unchanged path lost its digest when hashing was unavailable: pre=%q post=%q, want %q from cache (loto-szdx)",
 			p.DigestPre, p.DigestPost, warmDigest)
+	}
+}
+
+// rewriteKeepingStat replaces path's bytes with same-size content while
+// restoring the mode and the mtime the file had before — the one edit a
+// size:mode:mtime fingerprint cannot see (cubic P1 on PR #380). os.Chtimes
+// sets mtime from user space; ctime moves with the write and cannot be set
+// back, which is what the cache key has to lean on.
+func rewriteKeepingStat(t *testing.T, path string, content []byte) {
+	t.Helper()
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(content)) != before.Size() {
+		t.Fatalf("rewrite must keep size: have %d, new %d", before.Size(), len(content))
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, before.Mode().Perm()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hookStatString(after) != hookStatString(before) {
+		t.Fatalf("rewrite moved the size:mode:mtime stat (%q → %q); the test needs it unmoved",
+			hookStatString(before), hookStatString(after))
+	}
+}
+
+// waitPastRacyWindow sleeps until every file touched so far is older than
+// hookRacyWindow, so the next observation records a trusted cache key — a
+// cache that is never trusted would pass the rewrite test below vacuously.
+func waitPastRacyWindow() { time.Sleep(hookRacyWindow + 100*time.Millisecond) }
+
+// TestHook_SameSizeRewriteWithPreservedMtimeIsRehashed is cubic's P1 on PR
+// #380 as a red test: a locked file rewritten to different bytes of the same
+// size, with its mode and mtime put back, must NOT be served the cached
+// digest. The pre that follows must record the new content's digest.
+func TestHook_SameSizeRewriteWithPreservedMtimeIsRehashed(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	target := filepath.Join(repo, tcTargetA)
+	orig := bytes.Repeat([]byte("a"), 4096)
+	if err := os.WriteFile(target, orig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, repo, "add", "-A")
+	gitT(t, repo, "commit", "-q", "-m", "seed")
+
+	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock: exit %d", code)
+	}
+	waitPastRacyWindow()
+	if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "warm", "", "")); code != 0 {
+		t.Fatalf("warm pre: exit=%d err=%q", code, errOut)
+	}
+	if _, errOut, code := runHookEvent(t, tcHookPost, hookEventJSON("Bash", "warm", "", "")); code != 0 {
+		t.Fatalf("warm post: exit=%d err=%q", code, errOut)
+	}
+	_, warmPaths := hookCallPaths(t, "warm")
+	warmDigest := warmPaths[tcTargetA].DigestPost
+	if warmDigest == "" {
+		t.Fatal("warm call recorded no digest")
+	}
+
+	changed := bytes.Repeat([]byte("z"), len(orig))
+	rewriteKeepingStat(t, target, changed)
+	want := strings.TrimSpace(gitOutT(t, repo, "hash-object", tcTargetA))
+
+	if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "after", "", "")); code != 0 {
+		t.Fatalf("pre after rewrite: exit=%d err=%q", code, errOut)
+	}
+	_, afterPaths := hookCallPaths(t, "after")
+	if got := afterPaths[tcTargetA].DigestPre; got != want {
+		t.Errorf("same-size rewrite with preserved mtime: pre digest=%q, want %q (the new bytes); cached %q was served", got, want, warmDigest)
+	}
+}
+
+// TestHookCacheKey_RacyFileIsNotCached pins the racy rule: a file whose ctime
+// is not older than the observation by hookRacyWindow gets no cache key, so a
+// same-tick write after the hash cannot hide behind an unmoved ctime. Past
+// the window it gets a key that extends the stat string.
+func TestHookCacheKey_RacyFileIsNotCached(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k := hookCacheKey(fi, time.Now()); k != "" {
+		t.Errorf("a file written just now got cache key %q, want \"\" (racy)", k)
+	}
+	k := hookCacheKey(fi, time.Now().Add(hookRacyWindow+time.Second))
+	if k == "" {
+		t.Fatal("a file older than hookRacyWindow got no cache key")
+	}
+	if !strings.HasPrefix(k, hookStatString(fi)+":") {
+		t.Errorf("cache key %q does not extend the stat string %q", k, hookStatString(fi))
 	}
 }

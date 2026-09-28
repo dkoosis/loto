@@ -176,6 +176,10 @@ type HookPathState struct {
 	// the path does not exist. Stat is the cheap corroborator.
 	Digest string
 	Stat   string
+	// CacheKey is the fingerprint the hook's digest cache keys on (loto-szdx):
+	// Stat plus ctime, inode and device. Empty = do not cache this digest.
+	// Stored on path_observed only; never compared for events.
+	CacheKey string
 	// SeqAtObserve is seq(f, E) read at the START of the observation, before
 	// any stat or digest, and SeqAtObserveKnown says the caller set it.
 	//

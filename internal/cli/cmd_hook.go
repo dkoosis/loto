@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -682,11 +683,10 @@ func hookLiveHolders(locks []domain.LockRecord, ec domain.EvalContext) map[strin
 // warning — a removal and an odd name are both states, and neither may cost
 // the observation of every other path.
 //
-// ‡ A locked path whose stat matches what path_observed last recorded for its
-// current epoch is NOT re-hashed (loto-szdx): hookStatString's own doc
-// comment already treats stat as "the corroborator that catches a chmod or a
-// same-content rewrite" ahead of a real content hash, so a hit reuses the
-// cached digest and only a stat miss (or no cache row yet) pays for a hash.
+// ‡ A locked path whose cache key (hookCacheKey: size, mode, mtime, ctime,
+// inode, device) matches the key path_observed recorded with its digest at
+// the current epoch is NOT re-hashed (loto-szdx). A key miss, a racy key, or
+// no cache row yet pays for a hash.
 // Unlocked paths always hash — they are git-status's dirty set, which is
 // usually small and usually actually changing, and no cache row is ever
 // written for them (RecordDrift only observes locked paths). This is what
@@ -700,6 +700,10 @@ func hookReadPaths(ctx context.Context, rt *runtime, holders map[string]domain.L
 	sort.Strings(sorted)
 	present := make([]string, 0, len(sorted))
 	stats := make(map[string]string, len(sorted))
+	keys := make(map[string]string, len(sorted))
+	// Taken BEFORE any stat, so every hash below starts after it: the racy
+	// rule in hookCacheKey measures a file's ctime against this instant.
+	statStarted := time.Now()
 	for _, p := range sorted {
 		fi, err := os.Lstat(filepath.Join(repoTop, p))
 		if err != nil {
@@ -707,18 +711,16 @@ func hookReadPaths(ctx context.Context, rt *runtime, holders map[string]domain.L
 			continue
 		}
 		stats[p] = hookStatString(fi)
+		keys[p] = hookCacheKey(fi, statStarted)
 		present = append(present, p)
 	}
 
 	digests := make(map[string]string, len(present))
 	toHash := make([]string, 0, len(present))
 	for _, p := range present {
-		h, locked := holders[p]
-		if locked {
-			if prevStat, prevDigest, known, err := rt.Store.ObservedDigest(ctx, p, repoTop, h.Epoch); err == nil && known && prevStat == stats[p] {
-				digests[p] = prevDigest
-				continue
-			}
+		if d, ok := hookCachedDigest(ctx, rt, holders, repoTop, p, keys[p]); ok {
+			digests[p] = d
+			continue
 		}
 		toHash = append(toHash, p)
 	}
@@ -727,15 +729,62 @@ func hookReadPaths(ctx context.Context, rt *runtime, holders map[string]domain.L
 	if err != nil {
 		hashed = hookHashEachPath(ctx, repoTop, toHash, warn)
 	}
-	for p, d := range hashed {
-		digests[p] = d
-	}
+	maps.Copy(digests, hashed)
 
 	out := make([]store.HookPathState, 0, len(sorted))
 	for _, p := range sorted {
-		out = append(out, store.HookPathState{Path: p, Stat: stats[p], Digest: digests[p]})
+		st := store.HookPathState{Path: p, Stat: stats[p], Digest: digests[p]}
+		// A path that did not hash leaves no key: a cache row must never
+		// vouch for an empty digest (cubic P2 on PR #380).
+		if st.Digest != "" {
+			st.CacheKey = keys[p]
+		}
+		out = append(out, st)
 	}
 	return out
+}
+
+// hookCachedDigest serves a locked path's digest from path_observed when the
+// row was written under the same cache key the path has now. An empty key —
+// racy, or an OS with no ctime/inode — never hits.
+func hookCachedDigest(ctx context.Context, rt *runtime, holders map[string]domain.LockRecord, repoTop, p, key string) (string, bool) {
+	h, locked := holders[p]
+	if !locked || key == "" {
+		return "", false
+	}
+	prevKey, prevDigest, known, err := rt.Store.ObservedDigest(ctx, p, repoTop, h.Epoch)
+	if err != nil || !known || prevKey != key {
+		return "", false
+	}
+	return prevDigest, true
+}
+
+// hookRacyWindow is how long a file's ctime must predate the observation
+// before its cache key is trusted — git's "racy clean" rule. Two writes in
+// one timestamp tick share a ctime, so a write landing just after the hash,
+// in the tick the stat saw, would leave the key unmoved over new bytes.
+// Linux stamps inodes from a coarse clock (a few ms behind wall time); HFS+
+// and FAT keep 1s and 2s. 2s covers all of them, and costs only that a file
+// written in the last 2s is hashed.
+const hookRacyWindow = 2 * time.Second
+
+// hookCacheKey is the fingerprint a locked path's cached digest is keyed on
+// (loto-szdx): the stat string plus ctime, inode and device. Size, mode and
+// mtime alone do not prove the bytes are unchanged — os.Chtimes puts an mtime
+// back after a same-size rewrite (cubic P1 on PR #380). ctime cannot be set
+// from user space and moves on every write and chmod; the inode and device
+// move when a file is replaced by rename.
+//
+// "" means do not cache: the OS exposes no ctime/inode, or the ctime is not
+// clearly older than statStarted (hookRacyWindow).
+func hookCacheKey(fi os.FileInfo, statStarted time.Time) string {
+	ctime, ino, dev, ok := hookFileIdentity(fi)
+	if !ok || !ctime.Before(statStarted.Add(-hookRacyWindow)) {
+		return ""
+	}
+	return hookStatString(fi) + ":" +
+		strconv.FormatInt(ctime.UnixNano(), 10) + ":" +
+		strconv.FormatUint(ino, 10) + ":" + dev
 }
 
 // hookHashEachPath is the fallback when the batch hash fails: hash one path at
@@ -765,11 +814,10 @@ const hookStatAbsent = "absent"
 
 // hookStatString is `stat(f)`'s cheap part (§3): size, mode, mtime.
 //
-// ‡ Inode and ctime are deliberately left out. Reading them needs a
-// syscall.Stat_t cast and therefore a per-OS file, and the digest — which is
-// read for every path anyway — is the authority on whether content changed.
-// stat is the corroborator that catches a chmod or a same-content rewrite, and
-// mode plus mtime carry that.
+// ‡ Inode and ctime are deliberately left out of THIS string: it is what
+// events compare, and a ctime-only move (a no-op chmod) is not a tree change.
+// The digest is the authority on content. The digest cache does need them,
+// and keys on hookCacheKey, which extends this string.
 func hookStatString(fi os.FileInfo) string {
 	return strconv.FormatInt(fi.Size(), 10) + ":" +
 		strconv.FormatUint(uint64(fi.Mode().Perm()), 8) + ":" +

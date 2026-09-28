@@ -308,6 +308,9 @@ CREATE TABLE IF NOT EXISTS path_observed (
   -- worktree: same rationale and PK placement as path_seq.worktree above —
   -- one canonical path observed independently per checkout (loto-v6xx).
   worktree       TEXT NOT NULL DEFAULT '',
+  -- cache_key: the hook's digest-cache fingerprint (stat + ctime, inode,
+  -- device); '' = do not serve digest from cache (loto-szdx).
+  cache_key      TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (path_canonical, worktree, epoch)
 );
 
