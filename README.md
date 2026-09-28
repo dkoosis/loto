@@ -147,6 +147,7 @@ The project slug is derived from `git remote get-url origin` (normalized).
 | 1 | advisory conflict (lock held by another agent) |
 | 2 | usage error |
 | 3 | IO / system error |
+| 4 | `loto lock` only: peer beacons outlived `--wait` (default 90s); the output names `retry after HH:MM:SS UTC` |
 
 ## session identity
 

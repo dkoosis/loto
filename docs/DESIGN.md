@@ -177,7 +177,8 @@ inserted. Unlock is per-target best-effort
 
 Output is Claude-optimized KV: deterministic order, one record per line,
 fixed glyphs per `.claude/rules/design.md`. Exit codes are stable:
-`0` success, `1` advisory conflict, `2` usage, `3` IO/system. Holder
+`0` success, `1` advisory conflict, `2` usage, `3` IO/system, and for
+`loto lock` only `4` peer beacons outlived `--wait` (loto-5gcy). Holder
 identity always rides on the error.
 
 ## what makes this Claude-friendly
@@ -331,7 +332,8 @@ missed; `loto doctor --repair` mops up the rest.
 3. **No daemon.** Every operation is a fresh process. State lives on disk.
 4. **Claude-optimized KV output.** Deterministic order, fixed glyphs per
    `.claude/rules/design.md`. Exit codes stable (`0` success, `1` advisory
-   conflict, `2` usage, `3` IO/system).
+   conflict, `2` usage, `3` IO/system; `loto lock` adds `4`, beacon wait
+   capped).
 5. **Identity is per-session, not per-process.** Many shells, one owner id.
 6. **Reads are free.** loto coordinates writes. ✗ never gate reads.
    A lock is a row, not a mode change — the file on disk is untouched.

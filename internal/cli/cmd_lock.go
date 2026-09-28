@@ -41,10 +41,13 @@ const reasonGlobNotSupported = "glob-not-supported"
 
 // lockUsageHead is the point-of-use teaching surface for lock (loto-5rwc):
 // usage line plus worked examples. The flag list is appended by PrintDefaults.
-const lockUsageHead = `usage: loto lock <target> [<target>...] -t "why" [--shared]
+const lockUsageHead = `usage: loto lock <target> [<target>...] -t "why" [--shared] [--wait 90s]
 
 Acquire a lock on one or more targets. -t (intent) is required.
 Default mode is exclusive (sole writer). --shared takes a multi-reader lease.
+Blocked only by peer beacons (a writing agent's 2m lease), lock waits for them
+to lapse, up to --wait; then exit 4 names the time to retry. A real lock
+refuses at once (exit 1).
 
 examples:
   loto lock internal/store/store.go -t "store refactor"
@@ -62,6 +65,7 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	intent := fs.String("t", "", "intent (required)")
 	fs.StringVar(intent, "intent", "", "intent (required)")
 	shared := fs.Bool("shared", false, "acquire a shared (multi-reader) lock; default is exclusive")
+	wait := fs.Duration("wait", defaultBeaconWait, "longest wait on peer beacons before refusing (0 = refuse at once)")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
@@ -69,11 +73,8 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "✗ -t required: loto lock <target> [<target>...] -t \"why\"")
 		return 2
 	}
-	// A non-positive TTL mints an instantly-stale lock: the exclusive strip
-	// leaves the file read-only under a lease any peer may reclaim at once.
-	// Reject up front — claim parity (cmd_claim.go).
-	if *ttl <= 0 {
-		fmt.Fprintf(stderr, "✗ --ttl must be positive, got %s\n", *ttl)
+	if msg := lockDurationsErr(*ttl, *wait); msg != "" {
+		fmt.Fprintln(stderr, msg)
 		return 2
 	}
 	repoTop, _ := repoTopForCwd(ctx)
@@ -99,11 +100,31 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
 
-	mode := domain.ModeExclusive
-	if *shared {
-		mode = domain.ModeShared
+	return acquireBatch(rt, targets, lockRequest{intent: *intent, ttl: *ttl, mode: lockMode(*shared), wait: *wait}, rt.liveProbe(), stdout, stderr)
+}
+
+// lockMode maps --shared to the lease mode.
+func lockMode(shared bool) string {
+	if shared {
+		return domain.ModeShared
 	}
-	return acquireBatch(rt, targets, *intent, *ttl, mode, rt.liveProbe(), stdout, stderr)
+	return domain.ModeExclusive
+}
+
+// lockDurationsErr validates --ttl and --wait; empty is a pass.
+//
+// A non-positive TTL mints an instantly-stale lock: the exclusive strip
+// leaves the file read-only under a lease any peer may reclaim at once.
+// Reject up front — claim parity (cmd_claim.go). --wait 0 is legal: refuse
+// at once on a beacon, with the retry-after line (loto-5gcy).
+func lockDurationsErr(ttl, wait time.Duration) string {
+	if ttl <= 0 {
+		return fmt.Sprintf("✗ --ttl must be positive, got %s", ttl)
+	}
+	if wait < 0 {
+		return fmt.Sprintf("✗ --wait must not be negative, got %s", wait)
+	}
+	return ""
 }
 
 // emitDirLockHint — sd-hh0h. `loto lock <dir>` is refused with
@@ -398,14 +419,17 @@ func classifyCanonicalizeErr(err error) string {
 	}
 }
 
-func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.Duration, mode string, live domain.HolderLiveProbe, stdout, stderr io.Writer) int {
-	now := time.Now()
+func acquireBatch(rt *runtime, targets []domain.Target, req lockRequest, live domain.HolderLiveProbe, stdout, stderr io.Writer) int {
 	if w := degradedPidWarning(); w != "" {
 		fmt.Fprint(stderr, w)
 	}
-	recs := buildLockRecords(targets, rt, intent, now, ttl, mode)
-	acquired, err := rt.Store.AcquireLocks(rt.Ctx, recs, live)
+	acquired, now, err := acquireWaitingOnBeacons(rt, targets, req, live, stderr)
 	if err != nil {
+		if capped, ok := errors.AsType[*beaconWaitCappedError](err); ok {
+			render.EmitConflictWithTags(stdout, capped.conflict, fetchTagsForBlockers(rt, capped.conflict.Blockers))
+			emitBeaconRetryAfter(stdout, capped)
+			return exitLockBeaconWait
+		}
 		if mce, ok := errors.AsType[*store.MultiConflictError](err); ok {
 			render.EmitConflictWithTags(stdout, mce, fetchTagsForBlockers(rt, mce.Blockers))
 			return 1

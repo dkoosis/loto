@@ -1,7 +1,10 @@
-usage: loto lock <target> [<target>...] -t "why" [--shared]
+usage: loto lock <target> [<target>...] -t "why" [--shared] [--wait 90s]
 
 Acquire a lock on one or more targets. -t (intent) is required.
 Default mode is exclusive (sole writer). --shared takes a multi-reader lease.
+Blocked only by peer beacons (a writing agent's 2m lease), lock waits for them
+to lapse, up to --wait; then exit 4 names the time to retry. A real lock
+refuses at once (exit 1).
 
 examples:
   loto lock internal/store/store.go -t "store refactor"
@@ -14,3 +17,5 @@ examples:
     	intent (required)
   -ttl duration
     	lock TTL (default 30m0s)
+  -wait duration
+    	longest wait on peer beacons before refusing (0 = refuse at once) (default 1m30s)
