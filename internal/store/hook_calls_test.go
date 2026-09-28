@@ -24,6 +24,50 @@ func hookObs(path, digest string) HookPathState {
 	return HookPathState{Path: path, Locked: true, Epoch: 1, Holder: tcOwnerA, Digest: digest, Stat: "10:420:1"}
 }
 
+// TestObservedDigest_ReadsWhatWasSeeded is loto-szdx's unit-level red/green:
+// the hook's digest cache (ObservedDigest) has to read back exactly what
+// RecordDrift's first pass over a locked path seeds into path_observed —
+// same stat string, same digest — or a hook that trusts it to skip a hash
+// would trust stale bytes.
+func TestObservedDigest_ReadsWhatWasSeeded(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	if _, _, known, err := s.ObservedDigest(ctx, tcHookPath, "", 1); err != nil {
+		t.Fatalf("ObservedDigest before any observation: %v", err)
+	} else if known {
+		t.Error("a never-observed path reads as known")
+	}
+
+	out, err := s.RecordDrift(ctx, tcOwnerA, "", now, []HookPathState{hookObs(tcHookPath, tcSHA1)})
+	if err != nil {
+		t.Fatalf("RecordDrift seed: %v", err)
+	}
+	if len(out.Seeded) != 1 || out.Seeded[0] != tcHookPath {
+		t.Fatalf("want tcHookPath seeded, got %+v", out)
+	}
+
+	stat, digest, known, err := s.ObservedDigest(ctx, tcHookPath, "", 1)
+	if err != nil {
+		t.Fatalf("ObservedDigest after seed: %v", err)
+	}
+	if !known {
+		t.Fatal("a seeded path reads as unknown")
+	}
+	if stat != "10:420:1" || digest != tcSHA1 {
+		t.Errorf("stat=%q digest=%q, want stat=%q digest=%q", stat, digest, "10:420:1", tcSHA1)
+	}
+
+	// A different epoch is a different lock hand-off — its own cache entry,
+	// never this one's.
+	if _, _, known, err := s.ObservedDigest(ctx, tcHookPath, "", 2); err != nil {
+		t.Fatalf("ObservedDigest at a different epoch: %v", err)
+	} else if known {
+		t.Error("a different epoch reads as known from epoch 1's row")
+	}
+}
+
 func mustPre(t *testing.T, s *Store, callID string, tPre time.Time, obs ...HookPathState) {
 	t.Helper()
 	ok, err := s.RecordCallPre(context.Background(), HookCall{

@@ -671,6 +671,29 @@ func observedAtTx(ctx context.Context, tx *sql.Tx, path, worktree string, epoch 
 	return stat, digest, true, nil
 }
 
+// ObservedDigest reads path_observed's last recorded stat and digest for one
+// locked path at one epoch, in this worktree — outside any transaction,
+// because it is a cache lookup a hook makes BEFORE it decides whether to hash
+// at all, not a step inside the record write (loto-szdx). A path whose stat
+// has not moved since this row was written did not change its content
+// either, by the same corroboration hookStatString's own doc comment already
+// relies on, so the caller may reuse digest here instead of re-hashing.
+//
+// known false means "no row at this (path, worktree, epoch)" — never
+// observed yet, or the lock changed hands since — and the caller must hash.
+func (s *Store) ObservedDigest(ctx context.Context, path, worktree string, epoch int64) (stat, digest string, known bool, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT stat, digest FROM path_observed WHERE path_canonical = ? AND worktree = ? AND epoch = ?`,
+		path, worktree, epoch).Scan(&stat, &digest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	return stat, digest, true, nil
+}
+
 func setObservedTx(ctx context.Context, tx *sql.Tx, o HookPathState, worktree string, now time.Time) error {
 	_, err := tx.ExecContext(ctx, `
 INSERT INTO path_observed(path_canonical, epoch, stat, digest, observed_at, worktree) VALUES (?,?,?,?,?,?)

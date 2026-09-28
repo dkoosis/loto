@@ -5,9 +5,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"loto/internal/domain"
 	"loto/internal/identity"
@@ -753,5 +756,150 @@ func TestHookDeliver_SameWorktreeRendersUnchanged(t *testing.T) {
 	}
 	if strings.Contains(stdout, "worktree=") {
 		t.Errorf("a same-worktree delivery must render unchanged, no worktree= field: %q", stdout)
+	}
+}
+
+// TestHook_SteadyStatePreThenPostStaysUnder50msMedian is loto-szdx's
+// acceptance criterion, end to end. doctor measured hook_cost p50=123ms /
+// p50=141ms in the two busiest repos, both with roughly this many bytes
+// under lock (135-285KB) and both dominated by re-hashing locked files that
+// had not moved since the call before. 20 locked files summing ~300KB,
+// steady state (nothing changes between calls — the case a MEDIAN over
+// ongoing use is measuring, not a lock's first call): pre+post together
+// must median under 50ms.
+func TestHook_SteadyStatePreThenPostStaysUnder50msMedian(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+
+	const nFiles = 20
+	const fileSize = 15 * 1024 // 20 * 15KiB ≈ 300KB, matching the bead's benchmark.
+	dir := filepath.Join(repo, "bench")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := bytes.Repeat([]byte("x"), fileSize)
+	targets := make([]string, nFiles)
+	for i := range nFiles {
+		rel := filepath.Join("bench", fmt.Sprintf("f%02d.go", i))
+		if err := os.WriteFile(filepath.Join(repo, rel), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		targets[i] = rel
+	}
+
+	lockArgs := append([]string{tcCmdLock}, targets...)
+	lockArgs = append(lockArgs, tcFlagIntent, tcIntentTest)
+	if code := Run(lockArgs, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock %d bench files: exit %d", nFiles, code)
+	}
+
+	// Warm the cache: the first pre+post after a lock always hashes (no
+	// path_observed row exists yet). Every call after this one is the
+	// steady state the median below measures.
+	if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "warm", "", "")); code != 0 {
+		t.Fatalf("warm pre: exit=%d err=%q", code, errOut)
+	}
+	if _, errOut, code := runHookEvent(t, tcHookPost, hookEventJSON("Bash", "warm", "", "")); code != 0 {
+		t.Fatalf("warm post: exit=%d err=%q", code, errOut)
+	}
+
+	const rounds = 21
+	durations := make([]time.Duration, 0, rounds)
+	for i := range rounds {
+		callID := fmt.Sprintf("steady-%d", i)
+		start := time.Now()
+		if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", callID, "", "")); code != 0 {
+			t.Fatalf("pre %d: exit=%d err=%q", i, code, errOut)
+		}
+		if _, errOut, code := runHookEvent(t, tcHookPost, hookEventJSON("Bash", callID, "", "")); code != 0 {
+			t.Fatalf("post %d: exit=%d err=%q", i, code, errOut)
+		}
+		durations = append(durations, time.Since(start))
+	}
+
+	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	median := durations[len(durations)/2]
+	if median >= 50*time.Millisecond {
+		t.Errorf("pre+post median = %v over %d rounds, want <50ms (loto-szdx); all: %v", median, rounds, durations)
+	}
+}
+
+// failHashObject puts a "git" on PATH ahead of the real one that fails ANY
+// hash-object call (draining stdin first, so the caller does not block) and
+// forwards every other subcommand — status, rev-parse, add, commit — to the
+// real binary. It isolates "hashing is unavailable" from "git itself is
+// unavailable", the second of which hookObserve's own git-status read cannot
+// survive and this test does not want to exercise.
+func failHashObject(t *testing.T) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("no real git on PATH to wrap: %v", err)
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"hash-object\" ]; then cat >/dev/null; exit 1; fi\n" +
+		"exec \"" + realGit + "\" \"$@\"\n"
+	shim := filepath.Join(dir, "git")
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatalf("write git shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestHook_LockedUnchangedPathSurvivesHashingBeingUnavailable is loto-szdx's
+// deterministic proof, independent of any machine's absolute timing: once a
+// locked path's digest is cached in path_observed, a call that observes it
+// again with an unmoved stat must not need to hash it at all. git's
+// hash-object is made to fail (failHashObject) AFTER the cache is warm and
+// the tree is otherwise clean, so a call that still tried to hash would come
+// back with an EMPTY digest (hookHashEachPath warns and moves on rather than
+// failing the call) — unfixed code re-hashes every locked path on every call
+// and cannot produce anything else here; fixed code serves it from cache and
+// never touches hash-object.
+func TestHook_LockedUnchangedPathSurvivesHashingBeingUnavailable(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+
+	// Commit everything withTempProject seeded so git status is clean — the
+	// UNLOCKED half of hookReadPaths always hashes, and this test isolates
+	// the locked half the cache covers.
+	gitT(t, repo, "add", "-A")
+	gitT(t, repo, "commit", "-q", "-m", "seed")
+
+	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock: exit %d", code)
+	}
+	// Warm: the first pre+post after a lock always hashes (no path_observed
+	// row exists yet), seeding the cache this test then relies on.
+	if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "warm", "", "")); code != 0 {
+		t.Fatalf("warm pre: exit=%d err=%q", code, errOut)
+	}
+	if _, errOut, code := runHookEvent(t, tcHookPost, hookEventJSON("Bash", "warm", "", "")); code != 0 {
+		t.Fatalf("warm post: exit=%d err=%q", code, errOut)
+	}
+	_, warmPaths := hookCallPaths(t, "warm")
+	warmDigest := warmPaths[tcTargetA].DigestPost
+	if warmDigest == "" {
+		t.Fatal("warm call recorded no digest to compare against")
+	}
+
+	failHashObject(t)
+
+	if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "cold", "", "")); code != 0 {
+		t.Fatalf("pre with hashing unavailable: exit=%d err=%q", code, errOut)
+	}
+	if _, errOut, code := runHookEvent(t, tcHookPost, hookEventJSON("Bash", "cold", "", "")); code != 0 {
+		t.Fatalf("post with hashing unavailable: exit=%d err=%q", code, errOut)
+	}
+
+	_, coldPaths := hookCallPaths(t, "cold")
+	p, ok := coldPaths[tcTargetA]
+	if !ok {
+		t.Fatalf("the locked file dropped out of the record with hashing unavailable: %v", coldPaths)
+	}
+	if p.DigestPre != warmDigest || p.DigestPost != warmDigest {
+		t.Errorf("a locked, unchanged path lost its digest when hashing was unavailable: pre=%q post=%q, want %q from cache (loto-szdx)",
+			p.DigestPre, p.DigestPost, warmDigest)
 	}
 }

@@ -390,7 +390,16 @@ func hookAddRecordedPaths(rt *runtime, callID string, obs []store.HookPathState,
 	if len(missing) == 0 {
 		return obs, nil
 	}
-	states := hookReadPaths(rt.Ctx, rt.RepoTop, missing, warn)
+	// A cache-lookup hint for hookReadPaths, built from what the pre already
+	// recorded for each missing path — its own fresh lock scan has nothing to
+	// say about a path it never observed.
+	holders := make(map[string]domain.LockRecord, len(missing))
+	for _, p := range missing {
+		if rec := byPath[p]; rec.Locked {
+			holders[p] = domain.LockRecord{Epoch: rec.Epoch}
+		}
+	}
+	states := hookReadPaths(rt.Ctx, rt, holders, missing, warn)
 	for i := range states {
 		p := byPath[states[i].Path]
 		states[i].Locked = p.Locked
@@ -600,7 +609,7 @@ func hookObserve(ctx context.Context, rt *runtime, declared string, warn io.Writ
 		return nil, 0, 0, err
 	}
 
-	obs = hookReadPaths(ctx, rt.RepoTop, paths, warn)
+	obs = hookReadPaths(ctx, rt, holders, paths, warn)
 	for i := range obs {
 		h, locked := holders[obs[i].Path]
 		obs[i].Locked = locked
@@ -672,7 +681,21 @@ func hookLiveHolders(locks []domain.LockRecord, ec domain.EvalContext) map[strin
 // "absent" stat, and a path that will not hash gets an empty digest and a
 // warning — a removal and an odd name are both states, and neither may cost
 // the observation of every other path.
-func hookReadPaths(ctx context.Context, repoTop string, paths []string, warn io.Writer) []store.HookPathState {
+//
+// ‡ A locked path whose stat matches what path_observed last recorded for its
+// current epoch is NOT re-hashed (loto-szdx): hookStatString's own doc
+// comment already treats stat as "the corroborator that catches a chmod or a
+// same-content rewrite" ahead of a real content hash, so a hit reuses the
+// cached digest and only a stat miss (or no cache row yet) pays for a hash.
+// Unlocked paths always hash — they are git-status's dirty set, which is
+// usually small and usually actually changing, and no cache row is ever
+// written for them (RecordDrift only observes locked paths). This is what
+// keeps a busy repo's locked-but-quiescent files off the hash path on every
+// call, which is the whole of the bead: doctor measured p50=123ms/p50=141ms
+// in the two busiest repos with ~135-285KB under lock, dominated by
+// re-hashing bytes that had not moved since the last call observed them.
+func hookReadPaths(ctx context.Context, rt *runtime, holders map[string]domain.LockRecord, paths []string, warn io.Writer) []store.HookPathState {
+	repoTop := rt.RepoTop
 	sorted := slices.Clone(paths)
 	sort.Strings(sorted)
 	present := make([]string, 0, len(sorted))
@@ -686,10 +709,28 @@ func hookReadPaths(ctx context.Context, repoTop string, paths []string, warn io.
 		stats[p] = hookStatString(fi)
 		present = append(present, p)
 	}
-	digests, err := gate.HashPaths(ctx, repoTop, present)
-	if err != nil {
-		digests = hookHashEachPath(ctx, repoTop, present, warn)
+
+	digests := make(map[string]string, len(present))
+	toHash := make([]string, 0, len(present))
+	for _, p := range present {
+		h, locked := holders[p]
+		if locked {
+			if prevStat, prevDigest, known, err := rt.Store.ObservedDigest(ctx, p, repoTop, h.Epoch); err == nil && known && prevStat == stats[p] {
+				digests[p] = prevDigest
+				continue
+			}
+		}
+		toHash = append(toHash, p)
 	}
+
+	hashed, err := gate.HashPaths(ctx, repoTop, toHash)
+	if err != nil {
+		hashed = hookHashEachPath(ctx, repoTop, toHash, warn)
+	}
+	for p, d := range hashed {
+		digests[p] = d
+	}
+
 	out := make([]store.HookPathState, 0, len(sorted))
 	for _, p := range sorted {
 		out = append(out, store.HookPathState{Path: p, Stat: stats[p], Digest: digests[p]})
