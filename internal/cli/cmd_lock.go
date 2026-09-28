@@ -39,6 +39,12 @@ const reasonSymlink = "symlink"
 // `loto lock` takes literal paths, never a shell glob.
 const reasonGlobNotSupported = "glob-not-supported"
 
+// reasonNotFound is the design.md token for "nothing exists at this path" —
+// statFileTargetReason's plain ENOENT refusal and missingParentReason's
+// parent-absent refusal (loto-i382) both name it, since from the caller's
+// seat they are the identical shape: nothing to lock here.
+const reasonNotFound = "not-found"
+
 // lockUsageHead is the point-of-use teaching surface for lock (loto-5rwc):
 // usage line plus worked examples. The flag list is appended by PrintDefaults.
 const lockUsageHead = `usage: loto lock <target> [<target>...] -t "why" [--shared]
@@ -85,14 +91,15 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: loto lock <target> [<target>...] -t \"why\"")
 		return 2
 	}
-	// allowMissing=true (loto-i382): a path inside the repo that does not
-	// exist yet, with an existing parent, is a first-class lock target by
-	// default — no --create flag (dk's call on the bead). ~100 refusals in 14
-	// days were an agent locking a file it was about to CREATE;
-	// statFileTargetReason already tolerates ENOENT the same way `loto
-	// beacon`/hookAdmit do (loto-z5nb), and buildLockRecords below sets
-	// MayCreate so the store's own target validation agrees.
-	targets, invalid := validateLockTargets(fs.Args(), repoTop, true)
+	// loto-i382: a path inside the repo that does not exist yet, whose parent
+	// DOES exist, is a first-class lock target by default — no --create flag
+	// (dk's call on the bead). ~100 refusals in 14 days were an agent locking
+	// a file it was about to CREATE; statFileTargetReason already tolerates
+	// ENOENT the same way `loto beacon`/hookAdmit do (loto-z5nb), and
+	// buildLockRecords below sets MayCreate so the store's own target
+	// validation agrees. validateLockTargetsForLock adds the parent-exists
+	// requirement neither of those other two callers enforce.
+	targets, invalid := validateLockTargetsForLock(fs.Args(), repoTop)
 	if len(invalid) > 0 {
 		render.EmitInvalid(stderr, invalid)
 		emitDirLockHint(stderr, invalid, fs.Args(), repoTop, *intent)
@@ -300,14 +307,18 @@ func emitDashTIsIntentHint(w io.Writer, targets []domain.Target) {
 // store work, so rejection produces a single render.EmitInvalid block and
 // leaves zero side effects on disk or DB.
 //
-// allowMissing tolerates ENOENT instead of rejecting it — the beacon-scoped
-// carve-out (loto-z5nb): `loto beacon` announces a write about to happen, and
-// a Write tool call creating a brand-new path is exactly the case a beacon
-// exists to protect. domain.Canonicalize (inside resolveCLITarget) already
-// tolerates a non-existent path; this was the one place downstream that still
-// demanded the file pre-exist. Every other check — symlink, non-regular —
-// still runs unconditionally when the path DOES exist, and `loto lock` itself
-// passes false, unchanged.
+// allowMissing tolerates ENOENT instead of rejecting it — originally the
+// beacon-scoped carve-out (loto-z5nb): `loto beacon` announces a write about
+// to happen, and a Write tool call creating a brand-new path is exactly the
+// case a beacon exists to protect. domain.Canonicalize (inside
+// resolveCLITarget) already tolerates a non-existent path; this was the one
+// place downstream that still demanded the file pre-exist. Every other
+// check — symlink, non-regular — still runs unconditionally when the path
+// DOES exist. `loto lock` now passes true too (loto-i382): a missing target
+// is a first-class lock by default, no --create flag — but ONLY when its
+// parent exists, which this function does not check (beacon/hookAdmit must
+// not gain that restriction). validateLockTargetsForLock layers that
+// narrower rule on top, for `loto lock` alone.
 func validateLockTargets(args []string, repoTop string, allowMissing bool) ([]domain.Target, []render.InvalidTarget) {
 	targets := make([]domain.Target, 0, len(args))
 	seen := make(map[string]bool, len(args))
@@ -333,6 +344,54 @@ func validateLockTargets(args []string, repoTop string, allowMissing bool) ([]do
 		targets = append(targets, t)
 	}
 	return targets, invalid
+}
+
+// validateLockTargetsForLock is `loto lock`'s own entry point: it accepts a
+// missing target the way validateLockTargets(..., true) does, then enforces
+// the bead's Rule that beacon/hookAdmit deliberately do not — a missing
+// target is only lockable when its PARENT directory already exists
+// (loto-i382). `loto lock nodir/file.go` with nodir/ itself absent is still
+// refused reason=not-found, the same shape a plain missing file always used.
+func validateLockTargetsForLock(args []string, repoTop string) ([]domain.Target, []render.InvalidTarget) {
+	targets, invalid := validateLockTargets(args, repoTop, true)
+	kept := targets[:0]
+	for _, t := range targets {
+		if reason := missingParentReason(repoTop, t.Canonical); reason != "" {
+			invalid = append(invalid, render.InvalidTarget{Path: t.Canonical, Reason: reason})
+			continue
+		}
+		kept = append(kept, t)
+	}
+	return kept, invalid
+}
+
+// missingParentReason names the not-found refusal when canonical's PARENT
+// directory does not exist. Only meaningful for a target that itself passed
+// statFileTargetReason's allowMissing carve-out (an existing file's parent is
+// trivially present); repo-root targets (no directory segment) have no
+// parent to fail this check. Reuses "not-found" — the same reason a bare
+// missing file always reported before loto-i382 — rather than minting a
+// second token for what is, from the caller's seat, the identical refusal.
+func missingParentReason(repoTop, canonical string) string {
+	dir := filepath.Dir(canonical)
+	if dir == "." || dir == "" {
+		return ""
+	}
+	probe := dir
+	if repoTop != "" {
+		probe = filepath.Join(repoTop, dir)
+	}
+	lst, err := os.Lstat(probe)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return reasonNotFound
+		}
+		return "stat-failed: " + err.Error()
+	}
+	if !lst.IsDir() {
+		return reasonNotFound
+	}
+	return ""
 }
 
 // statFileTargetReason runs the Lstat-shaped half of target validation for
@@ -362,7 +421,7 @@ func statFileTargetReason(repoTop, canonical string, allowMissing bool) string {
 			return ""
 		}
 		if errors.Is(err, fs.ErrNotExist) {
-			return "not-found"
+			return reasonNotFound
 		}
 		return "stat-failed: " + err.Error()
 	}

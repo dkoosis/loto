@@ -19,6 +19,26 @@ import (
 // filesystem folds the missing-path spelling to the same key the later,
 // differently-cased, real file resolves to.
 
+// TestLock_MissingParentDirectoryStillRefused pins the bead's Rule text
+// exactly: "A path inside the repo that does not exist yet, and whose parent
+// directory exists, can be locked." A missing target whose parent ALSO does
+// not exist is still refused reason=not-found — the same shape a bare
+// missing file always reported — because `loto lock` alone (not
+// beacon/hookAdmit) enforces the parent-exists precondition.
+func TestLock_MissingParentDirectoryStillRefused(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, "nodir/file.go", "-t", tcIntentTest}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	combined := out.String() + errBuf.String()
+	if !strings.Contains(combined, "not-found") {
+		t.Errorf("expected reason=not-found: %q", combined)
+	}
+}
+
 // TestLock_MissingFileLockBlocksPeer is AC2: a peer's `loto lock` on the same
 // not-yet-existing path is blocked exactly like it would be for a real file.
 func TestLock_MissingFileLockBlocksPeer(t *testing.T) {
