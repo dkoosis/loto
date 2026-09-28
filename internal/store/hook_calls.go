@@ -729,6 +729,13 @@ func (s *Store) InFlightCalls(ctx context.Context) ([]HookCall, error) {
 	return out, rows.Err()
 }
 
+// InFlightMaxAge is how long a call may stay in flight before it is ended as
+// dead without proof. No session in dk's environment runs this long (dk,
+// 2026-09-28), and a call whose session left no record probes unknown forever,
+// pinning hook_calls against retention for good (loto-szdx: 53 such calls held
+// every row since 2026-09-20). Ending a call touches no lock.
+const InFlightMaxAge = 6 * time.Hour
+
 // MarkDeadOwnerCalls ends every in-flight call whose owner the liveness probe
 // finds dead — §3's second ending, and the only thing that stops a crashed
 // session's call from spanning every transition forever and pinning
@@ -737,7 +744,9 @@ func (s *Store) InFlightCalls(ctx context.Context) ([]HookCall, error) {
 // dead is asked once per distinct session and must answer true ONLY for a
 // PROVABLY dead session. An unknown verdict leaves the call in flight, which
 // is loto's standing rule everywhere else: a false "gone" hands a live peer's
-// territory away, while a false "alive" only delays a reclaim.
+// territory away, while a false "alive" only delays a reclaim. The one
+// exception is age: a call older than InFlightMaxAge ends whatever the probe
+// says, session id or not.
 //
 // The probe reads the filesystem, so it runs BETWEEN a read and a write rather
 // than inside a write transaction. The UPDATE re-asserts the in-flight
@@ -750,7 +759,7 @@ func (s *Store) MarkDeadOwnerCalls(ctx context.Context, now time.Time, dead func
 	if err != nil {
 		return 0, err
 	}
-	ids := deadOwnerCallIDs(open, dead)
+	ids := deadOwnerCallIDs(open, now, dead)
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -812,13 +821,18 @@ func markOneDeadCallTx(ctx context.Context, tx *sql.Tx, id string, c HookCall, n
 	return int(n), nil
 }
 
-// deadOwnerCallIDs picks the in-flight calls whose session the oracle calls
-// dead, sorted. The oracle is asked once per distinct session: it reads a
-// record off disk, and one crashed session usually owns several open calls.
-func deadOwnerCallIDs(open []HookCall, dead func(domain.SessionUUID) bool) []string {
+// deadOwnerCallIDs picks the in-flight calls older than InFlightMaxAge or whose
+// session the oracle calls dead, sorted. The oracle is asked once per distinct
+// session: it reads a record off disk, and one crashed session usually owns several open calls.
+func deadOwnerCallIDs(open []HookCall, now time.Time, dead func(domain.SessionUUID) bool) []string {
 	verdict := map[domain.SessionUUID]bool{}
 	var ids []string
 	for i := range open {
+		// Age alone ends a call: see InFlightMaxAge.
+		if now.Sub(open[i].TPre) > InFlightMaxAge {
+			ids = append(ids, open[i].CallID)
+			continue
+		}
 		// A call with no session id can never be judged, so it is never ended
 		// here; its owner may well be alive and about to post.
 		sess := open[i].SessionUUID
