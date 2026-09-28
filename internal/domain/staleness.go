@@ -202,7 +202,15 @@ func (c EvalContext) Classify(l LockRecord) Liveness {
 	if c.Live == nil {
 		return LivenessUnknown
 	}
-	return c.Live(l) // not stale ⟹ probe returned Alive or Unknown
+	v := c.Live(l)
+	if v == LivenessDead {
+		// Not stale yet probed DEAD: only a beacon inside its TTL reaches
+		// here (IsStale ignores its rotating session witness, loto-y87n).
+		// Rendering it DEAD would break I1 and send `loto status` to
+		// recommend a repair doctor refuses; UNKNOWN = TTL is the authority.
+		return LivenessUnknown
+	}
+	return v
 }
 
 // RemainingTTL is the time until the TTL backstop fires, clamped at 0. Expiry

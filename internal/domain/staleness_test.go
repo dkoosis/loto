@@ -209,6 +209,26 @@ func TestClassifyAndRemainingTTL(t *testing.T) {
 			}
 		}
 	})
+	// loto-y87n: a beacon's session witness probing DEAD does not stale it
+	// (IsStale), so Classify must not render it DEAD either — `loto status`
+	// would count it expired and recommend a repair doctor now refuses. No
+	// witness to trust and none to reap on → UNKNOWN, TTL the sole authority.
+	t.Run("beacon within TTL whose session probes dead is UNKNOWN (I1 holds)", func(t *testing.T) {
+		sessionDead := func(LockRecord) Liveness { return LivenessDead }
+		ec := EvalContext{Now: now, Live: sessionDead}
+		for _, l := range []LockRecord{
+			{ExpiresAt: now.Add(2 * time.Minute), Host: host, PID: 0, Beacon: true},
+			{ExpiresAt: now.Add(-time.Minute), Host: host, PID: 0, Beacon: true},
+		} {
+			if (ec.Classify(l) == LivenessDead) != ec.IsStale(l) {
+				t.Errorf("I1 violated for %+v: Classify=%v IsStale=%v", l, ec.Classify(l), ec.IsStale(l))
+			}
+		}
+		l := LockRecord{ExpiresAt: now.Add(2 * time.Minute), Host: host, PID: 0, Beacon: true}
+		if got := ec.Classify(l); got != LivenessUnknown {
+			t.Errorf("Classify=%v want UNKNOWN", got)
+		}
+	})
 }
 
 // ownerAliveProbe / ownerDeadProbe mirror the production probe's uuid-keyed
