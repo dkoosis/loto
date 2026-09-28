@@ -367,3 +367,31 @@ func TestRecordCallPost_RenewsALockWhoseFileTheCallChanged(t *testing.T) {
 		t.Errorf("a call that changed the locked file did not renew its lock: expires_at=%v", a.ExpiresAt)
 	}
 }
+
+// TestRefreshCallerLocks_ManyPathsStayUnderSQLVarLimit: a call that changes
+// more paths than SQLite binds variables still refreshes the lock it holds.
+func TestRefreshCallerLocks_ManyPathsStayUnderSQLVarLimit(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	t0 := time.Now()
+
+	rec := mkFileLock(t, "a.go", tcOwnerA, tcHookRefreshTTL)
+	rec.CreatedAt, rec.ExpiresAt = t0, t0.Add(tcHookRefreshTTL)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	paths := make([]string, 0, 40000)
+	for i := 0; i < 39999; i++ {
+		paths = append(paths, "gen/f"+time.Duration(i).String()+".go")
+	}
+	paths = append(paths, rec.Target.Canonical)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if err := refreshCallerLocksTx(ctx, tx, s.keys(), string(tcOwnerA), rec.Worktree, paths, t0.Add(16*time.Minute)); err != nil {
+		t.Fatalf("refresh over %d paths: %v", len(paths), err)
+	}
+}

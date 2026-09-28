@@ -117,9 +117,18 @@ func refreshCallerLocksTx(ctx context.Context, tx *sql.Tx, k keyMatch, owner, wo
 	if len(paths) == 0 {
 		return nil
 	}
-	refreshed, err := refreshOwnLocksBelowHalfTTLTx(ctx, tx, k, owner, worktree, paths, now)
-	if err != nil {
-		return err
+	// Bounded batches: one IN clause over a mass rewrite would exceed SQLite's
+	// bound-variable limit (32766) and fail the whole call's post.
+	const refreshBatch = 500
+	var refreshed []domain.Target
+	for len(paths) > 0 {
+		n := min(refreshBatch, len(paths))
+		got, err := refreshOwnLocksBelowHalfTTLTx(ctx, tx, k, owner, worktree, paths[:n], now)
+		if err != nil {
+			return err
+		}
+		refreshed = append(refreshed, got...)
+		paths = paths[n:]
 	}
 	if len(refreshed) == 0 {
 		return nil
