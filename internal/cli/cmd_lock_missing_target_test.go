@@ -91,15 +91,25 @@ func TestLock_MissingFileOutsideRepoStillRepoEscape(t *testing.T) {
 // key is computed from the resolved parent + name and does not depend on
 // whether anything is on disk yet (foldTargetKey already works this way; this
 // pins `loto lock`'s own acquire path to the same fact).
+//
+// ‡ cubic review on #388: a store-level row count alone does not prove the
+// NOW-EXISTING file resolves to that same key — only that nothing minted a
+// second row under some other key. A second agent's `loto lock` on the
+// now-real file, observed through the CLI, is the behavior the "same key"
+// claim actually cashes out as: if the file resolved to any key other than
+// the one alice holds, bob's lock would silently succeed.
 func TestLock_CreatingFileAfterLockKeepsSameLockRow(t *testing.T) {
 	repo := withTempProject(t)
-	pinAgent(t)
+	alice, bob := twoAgents(t)
 	if err := os.Mkdir(filepath.Join(repo, "new"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	const target = "new/file.go"
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid())) // durable live holder → hard block
 	if code := Run([]string{tcCmdLock, target, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("lock on missing %q failed", target)
+		t.Fatalf("alice lock on missing %q failed", target)
 	}
 
 	if err := os.WriteFile(filepath.Join(repo, "new", "file.go"), nil, 0o644); err != nil {
@@ -110,8 +120,8 @@ func TestLock_CreatingFileAfterLockKeepsSameLockRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open runtime: %v", err)
 	}
-	defer rt.Close()
 	held, err := rt.Store.ListLocks(rt.Ctx)
+	rt.Close()
 	if err != nil {
 		t.Fatalf("list locks: %v", err)
 	}
@@ -120,6 +130,19 @@ func TestLock_CreatingFileAfterLockKeepsSameLockRow(t *testing.T) {
 	}
 	if held[0].Target.Canonical != target {
 		t.Errorf("canonical key = %q, want %q unchanged by the file's later creation", held[0].Target.Canonical, target)
+	}
+
+	// The observable proof: bob locking the now-real file must still hit
+	// alice's row, not a fresh, unheld one.
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, target, "-t", tcIntentWrite}, &out, &errBuf)
+	if code != 1 {
+		t.Fatalf("expected bob blocked on the now-real file, got exit %d; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	combined := out.String() + errBuf.String()
+	if !strings.Contains(combined, "✗ blocked") || !strings.Contains(combined, "blocker=") {
+		t.Errorf("expected blocker report: %q", combined)
 	}
 }
 
@@ -133,15 +156,23 @@ func TestLock_CreatingFileAfterLockKeepsSameLockRow(t *testing.T) {
 // only the machine's own FS can exercise its branch. Where the FS is
 // case-sensitive, New.go and new.go are two different files, and the
 // assertion is the mirror one — the original lock on New.go is untouched.
+//
+// ‡ cubic review on #388: a bare row count does not prove the now-real
+// LOWER spelling actually resolves to alice's key — a second agent's
+// `loto lock` on the now-real spelling, observed through the CLI, does: it
+// must be blocked where the FS folds, and must succeed (a genuinely
+// different, unheld file) where it does not.
 func TestLockCaseVariantThenCreateSharesOneKey(t *testing.T) {
 	repo := withTempProject(t)
-	pinAgent(t)
+	alice, bob := twoAgents(t)
 	folds := caseVariantFSNote(t, repo)
 	const upper, lower = "New.go", "new.go"
 
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid())) // durable live holder → hard block
 	var out, errBuf bytes.Buffer
 	if code := Run([]string{tcCmdLock, upper, "-t", tcIntentTest}, &out, &errBuf); code != 0 {
-		t.Fatalf("lock on missing %q: exit=%d out=%q err=%q", upper, code, out.String(), errBuf.String())
+		t.Fatalf("alice lock on missing %q: exit=%d out=%q err=%q", upper, code, out.String(), errBuf.String())
 	}
 
 	if err := os.WriteFile(filepath.Join(repo, lower), nil, 0o644); err != nil {
@@ -152,11 +183,16 @@ func TestLockCaseVariantThenCreateSharesOneKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open runtime: %v", err)
 	}
-	defer rt.Close()
 	held, err := rt.Store.ListLocks(rt.Ctx)
+	rt.Close()
 	if err != nil {
 		t.Fatalf("list locks: %v", err)
 	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	var bobOut, bobErr bytes.Buffer
+	bobCode := Run([]string{tcCmdLock, lower, "-t", tcIntentWrite}, &bobOut, &bobErr)
+	bobCombined := bobOut.String() + bobErr.String()
 
 	if folds {
 		if len(held) != 1 {
@@ -165,11 +201,18 @@ func TestLockCaseVariantThenCreateSharesOneKey(t *testing.T) {
 		if held[0].Target.Canonical != lower {
 			t.Errorf("canonical key = %q, want the folded spelling %q (resolved parent + name)", held[0].Target.Canonical, lower)
 		}
+		if bobCode != 1 || !strings.Contains(bobCombined, "✗ blocked") {
+			t.Fatalf("case-insensitive FS: bob's lock on the now-real %q must hit alice's row; exit=%d %q", lower, bobCode, bobCombined)
+		}
 		return
 	}
 	// Case-sensitive filesystem: New.go and new.go are genuinely different
-	// files, so creating new.go must not touch the lock held on New.go.
+	// files, so creating new.go must not touch the lock held on New.go, and
+	// bob must be able to lock the untouched, unheld new.go outright.
 	if len(held) != 1 || held[0].Target.Canonical != upper {
 		t.Fatalf("case-sensitive FS: want the original lock on %q untouched, got %+v", upper, held)
+	}
+	if bobCode != 0 {
+		t.Fatalf("case-sensitive FS: bob's lock on the untouched, unheld %q should succeed; exit=%d %q", lower, bobCode, bobCombined)
 	}
 }
