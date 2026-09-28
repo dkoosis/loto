@@ -57,6 +57,20 @@ sarif_line() {
 	return 0
 }
 
+# sarif_doc tries the whole stream as one SARIF document first — a producer
+# other than golangci-lint (or a golangci-lint that starts pretty-printing)
+# may emit one that spans several lines, which sarif_line's single-line scan
+# cannot see at all (loto-fmov). Only when that fails does it fall back to
+# sarif_line, for the one shape that genuinely needs a scan: golangci-lint's
+# single-line document with a human trailer appended to the same stream.
+sarif_doc() {
+	if jq -e 'has("runs")' "$1" >/dev/null 2>&1; then
+		cat "$1"
+		return 0
+	fi
+	sarif_line "$1"
+}
+
 tmp=$(mktemp -d) || die "mktemp failed"
 trap 'rm -rf "$tmp"' EXIT
 out="$tmp/out"
@@ -98,12 +112,14 @@ sarif)
 	# formatter (--output.text.path=stderr does not move it) and not the
 	# lint-locked wrapper: reproduced with the pinned binary run bare.
 	#
-	# The document is one line, so keeping the first line that parses as SARIF
-	# is enough, and it is what the renderer gets too — cleaning the stream only
-	# for the count would still hand `fo` a malformed document. A producer whose
-	# whole output is already clean SARIF is unaffected: line one is the
-	# document.
-	sarif_line "$out" >"$tmp/sarif"
+	# golangci-lint's document is one line, so keeping the first line that
+	# parses as SARIF is enough for it, and it is what the renderer gets too —
+	# cleaning the stream only for the count would still hand `fo` a malformed
+	# document. But sarif_doc tries the WHOLE stream first, so a document that
+	# spans multiple lines (a different producer, or a pretty-printed one)
+	# still counts instead of reading as zero findings and hiding behind
+	# whatever landed on stderr (loto-fmov).
+	sarif_doc "$out" >"$tmp/sarif"
 	render_input=$tmp/sarif
 	findings=$(jq '[.runs[]?.results[]?] | length' "$tmp/sarif" 2>/dev/null) || findings=0
 	;;
