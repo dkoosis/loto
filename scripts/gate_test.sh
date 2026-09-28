@@ -84,6 +84,42 @@ expect sarif-clean-document-renders-findings 1 'stringsseq' -- \
 expect sarif-no-document-is-still-infra-failure 1 '✗ lint did not run' -- \
 	lint sarif -- bash -c 'echo "2 issues:"; echo "panic: boom" >&2; exit 1'
 
+# loto-fmov / #379 shape: lint-locked prints its version-mismatch notice to
+# stderr, then the wrapped golangci-lint emits a genuine finding — but as a
+# pretty-printed (multi-line) SARIF document rather than golangci-lint's usual
+# single line. sarif_line() only ever matched a document confined to one line,
+# so a real finding split across lines counted as zero, gate.sh took the "did
+# not run" branch, and the render showed only the stderr notice — hiding the
+# real finding behind it, naming no file and no rule.
+pretty_sarif_doc='{
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {"driver": {"name": "golangci-lint"}},
+      "results": [
+        {
+          "ruleId": "gocognit",
+          "level": "error",
+          "message": {"text": "cognitive complexity 16 of func hookObserve is high (> 15)"},
+          "locations": [{"physicalLocation": {"artifactLocation": {"uri": "internal/cli/cmd_hook.go"}, "region": {"startLine": 563, "startColumn": 1}}}]
+        }
+      ]
+    }
+  ]
+}'
+
+expect sarif-pretty-doc-with-stderr-notice-still-renders-finding 1 'cmd_hook.go:563' -- \
+	lint sarif -- bash -c "echo 'lint-locked: sandbox prebuilt is 2.11.4, repo pins 2.12.2 — ignoring it.' >&2; printf '%s\n' '$pretty_sarif_doc'; exit 1"
+
+# cubic P1 on loto-fmov: the pretty-printed doc above only ever appeared with
+# its trailer on stderr. A producer that appends the human summary to the
+# SAME stream as a multi-line document defeats both paths — the whole-file
+# probe rejects the trailing non-JSON text, and sarif_line's one-line-at-a-time
+# scan never sees a complete object because the document itself spans lines.
+# The real finding must still win over the "did not run" stderr notice.
+expect sarif-pretty-doc-with-same-stream-trailer-still-renders-finding 1 'cmd_hook.go:563' -- \
+	lint sarif -- bash -c "printf '%s\n1 issues:\n* gocognit: 1\n' '$pretty_sarif_doc'; exit 1"
+
 # A compile error under -json yields no test JSON at all.
 expect testjson-build-failure-shows-cause 2 'undefined: Frobnicate' -- \
 	test testjson -- bash -c 'echo "internal/x/y.go:9:2: undefined: Frobnicate" >&2; exit 2'
