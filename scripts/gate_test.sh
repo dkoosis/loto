@@ -111,6 +111,15 @@ pretty_sarif_doc='{
 expect sarif-pretty-doc-with-stderr-notice-still-renders-finding 1 'cmd_hook.go:563' -- \
 	lint sarif -- bash -c "echo 'lint-locked: sandbox prebuilt is 2.11.4, repo pins 2.12.2 — ignoring it.' >&2; printf '%s\n' '$pretty_sarif_doc'; exit 1"
 
+# cubic P1 on loto-fmov: the pretty-printed doc above only ever appeared with
+# its trailer on stderr. A producer that appends the human summary to the
+# SAME stream as a multi-line document defeats both paths — the whole-file
+# probe rejects the trailing non-JSON text, and sarif_line's one-line-at-a-time
+# scan never sees a complete object because the document itself spans lines.
+# The real finding must still win over the "did not run" stderr notice.
+expect sarif-pretty-doc-with-same-stream-trailer-still-renders-finding 1 'cmd_hook.go:563' -- \
+	lint sarif -- bash -c "printf '%s\n1 issues:\n* gocognit: 1\n' '$pretty_sarif_doc'; exit 1"
+
 # A compile error under -json yields no test JSON at all.
 expect testjson-build-failure-shows-cause 2 'undefined: Frobnicate' -- \
 	test testjson -- bash -c 'echo "internal/x/y.go:9:2: undefined: Frobnicate" >&2; exit 2'

@@ -57,15 +57,33 @@ sarif_line() {
 	return 0
 }
 
-# sarif_doc tries the whole stream as one SARIF document first — a producer
-# other than golangci-lint (or a golangci-lint that starts pretty-printing)
-# may emit one that spans several lines, which sarif_line's single-line scan
-# cannot see at all (loto-fmov). Only when that fails does it fall back to
-# sarif_line, for the one shape that genuinely needs a scan: golangci-lint's
-# single-line document with a human trailer appended to the same stream.
+# sarif_first_doc extracts the first complete top-level JSON value from a
+# stream, tolerating trailing non-JSON content after it. jq's parser is
+# incremental: fed a document followed by garbage, it emits the parsed
+# document to stdout before it errors out on the garbage. That recovers the
+# shape sarif_line cannot — a multi-line (pretty-printed) SARIF document with
+# a human summary appended to the SAME stream (cubic P1 on loto-fmov): the
+# whole-file probe in sarif_doc rejects the trailing text, and sarif_line's
+# one-line-at-a-time scan never finds a single line that parses alone.
+sarif_first_doc() {
+	jq -ce '.' "$1" 2>/dev/null | head -n 1
+}
+
+# sarif_doc tries the whole stream as one SARIF document first, then the
+# first complete document ignoring any trailer (sarif_first_doc, above —
+# handles a multi-line document with same-stream trailing text). Only when
+# both fail does it fall back to sarif_line, for the one shape that needs a
+# line-by-line scan: golangci-lint's single-line document with a human
+# trailer appended to the same stream.
 sarif_doc() {
 	if jq -e 'has("runs")' "$1" >/dev/null 2>&1; then
 		cat "$1"
+		return 0
+	fi
+	local first
+	first=$(sarif_first_doc "$1")
+	if [ -n "$first" ] && printf '%s\n' "$first" | jq -e 'has("runs")' >/dev/null 2>&1; then
+		printf '%s\n' "$first"
 		return 0
 	fi
 	sarif_line "$1"
