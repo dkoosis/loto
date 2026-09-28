@@ -72,9 +72,24 @@ func (c EvalContext) IsKin(u AgentUUID) bool {
 // TTL governs, no panic. Liveness accelerates staleness, it never extends the
 // lease: an ALIVE holder past its TTL is still stale (refresh is the remedy —
 // locks_refresh.go).
+//
+// A beacon is the one exception to the liveness override (loto-y87n): its
+// SessionUUID is a rotating witness, re-stamped to whichever sibling process
+// last refreshed the row (IsBeacon's doc: the minting hook exits milliseconds
+// after the write it announces), and a beacon carries no PID of its own to
+// cross-check that witness against. The session oracle's DEAD verdict for one
+// such witness — e.g. a session record whose recorded socket has since gone
+// missing, even though the owning Claude Code session is still up — is not
+// proof the beacon's owner is gone, and doctor was reporting exactly that:
+// live, unexpired beacons read stale. TTL (short, 2m, self-healing by design)
+// is the sole authority for a beacon; every other lock keeps the liveness
+// override.
 func (c EvalContext) IsStale(l LockRecord) bool {
 	if !c.Now.Before(l.ExpiresAt) {
 		return true
+	}
+	if l.IsBeacon() {
+		return false
 	}
 	return c.Live != nil && c.Live(l) == LivenessDead
 }

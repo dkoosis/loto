@@ -50,6 +50,48 @@ func TestDoctorRepairReclaims(t *testing.T) {
 	}
 }
 
+// TestDoctorSkipsLiveBeaconWithDeadSessionProbe is loto-y87n: a beacon
+// (PID 0, Beacon:true) whose stamped SessionUUID probes DEAD — e.g. a session
+// record whose recorded socket has since gone missing, even though the
+// owning Claude Code session is still up — must not be reported stale ahead
+// of its TTL, and --repair must leave it untouched. Unlike deadProbe
+// (liveprobe_test.go's hostPidProbe), which is already PID-gated and so
+// cannot exercise this path, sessionDead mirrors production's real oracle
+// (identity.ProbeSession): it answers purely from the session witness, with
+// no regard for the lock row's own PID.
+func TestDoctorSkipsLiveBeaconWithDeadSessionProbe(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	l := mkFileLock(t, "a.go", "alice", 2*time.Minute)
+	l.PID = 0
+	l.Mode = domain.ModeShared
+	l.Beacon = true
+
+	sessionDead := func(domain.LockRecord) domain.Liveness { return domain.LivenessDead }
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, sessionDead); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := s.DoctorAudit(ctx, l.Host, true, sessionDead, SidecarCheck{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.StaleLocks) != 0 {
+		t.Fatalf("live-TTL beacon must not be reported stale even when the session probe reads dead, got %+v", report.StaleLocks)
+	}
+
+	if err := s.DoctorRepair(ctx, "doctor-agent", sessionDead); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.LockAt(ctx, l.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("--repair must leave a live-TTL beacon in place")
+	}
+}
+
 func TestDoctorAudit_DetectsOrphanModeFiles(t *testing.T) {
 	dir := t.TempDir()
 	orphan := filepath.Join(dir, "orphan.go")
