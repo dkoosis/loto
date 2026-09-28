@@ -436,8 +436,9 @@ func TestDropFinishedCalls_PathRowsFollowTheirCall(t *testing.T) {
 	mustPre(t, s, "call-pinned-kept", t0.Add(20*time.Second), twoPaths(tcSHA1)...)
 	mustPost("call-pinned-kept", t0.Add(21*time.Second), tcSHA1)
 
-	// Ends inside the floor window (now, not t0-relative): kept regardless of
-	// any in-flight pin, because it has not aged past the cutoff yet.
+	// Ends inside the floor window (now, not t0-relative). call-open pins it
+	// too in this first pass; the second pass below unpins it, so there the
+	// floor alone is what keeps it.
 	mustPre(t, s, "call-floor-kept", now.Add(-2*time.Second), twoPaths(tcSHA1)...)
 	mustPost("call-floor-kept", now.Add(-time.Second), tcSHA1)
 
@@ -468,6 +469,25 @@ func TestDropFinishedCalls_PathRowsFollowTheirCall(t *testing.T) {
 		if n := pathCount(kept); n != 2 {
 			t.Errorf("%s: %d path rows, want its 2 kept intact", kept, n)
 		}
+	}
+
+	// Second pass: call-open posts (long ago), so nothing is in flight and no
+	// call is pinned. call-open and call-pinned-kept are past the cutoff and
+	// drop with their paths; call-floor-kept survives on the floor alone.
+	mustPost("call-open", t0.Add(30*time.Second), tcSHA1)
+	if n, err = s.DropFinishedCalls(ctx, now, time.Minute); err != nil {
+		t.Fatalf("second drop: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("second pass dropped %d calls, want 2 (call-open, call-pinned-kept)", n)
+	}
+	for _, dropped := range []string{"call-open", "call-pinned-kept"} {
+		if n := pathCount(dropped); n != 0 {
+			t.Errorf("second pass, %s: %d path rows survived its call being dropped, want 0", dropped, n)
+		}
+	}
+	if n := pathCount("call-floor-kept"); n != 2 {
+		t.Errorf("second pass, call-floor-kept: %d path rows, want its 2 kept by the floor alone", n)
 	}
 }
 
