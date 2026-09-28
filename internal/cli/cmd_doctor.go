@@ -814,12 +814,16 @@ func isKnownForwarder(resolved string) bool {
 // NOT resolve to the repo's own .githooks — the doorman shape option A
 // commits to (a global hooks dir that forwards, never a per-repo override).
 // A missing or non-executable file at the effective path is reason=absent:
-// there is nothing there to route through. A file that DOES answer the probe
-// proves the chain reaches this repo's real dispatcher, so the guard's own
-// dispatcher/entry state is what checkOneGuard already checks for the direct
-// case — called here too, unchanged.
+// there is nothing there to route through. A file that answers with the
+// forwarding contract proves the chain reaches this repo's real dispatcher,
+// so the guard's own dispatcher/entry state is what checkOneGuard already
+// checks for the direct case — called here too, unchanged. A file that
+// answers with the INLINE contract instead (sd-8wth, sdlc PR #874) ran the
+// guard itself, in the global hook, because this repo has no chain to
+// forward into — reachable on its own, no repo-local check needed at all.
 //
-// An executable file that does NOT answer the probe is ambiguous on its own
+// An executable file that does NOT answer either probe contract is ambiguous
+// on its own
 // (loto-lw16, and Codex #387 P2 twice over): a doorman that fails open when
 // the repo carries no loto guard (Givens: exec into the repo hook, fail open
 // when missing) looks identical from here to a genuinely foreign tool's own
@@ -840,8 +844,17 @@ func checkForwardedGuard(ctx context.Context, resolved, repoTop string, spec gua
 	if statErr != nil || fi.IsDir() || fi.Mode()&0o111 == 0 {
 		return guardStatus{spec: spec, reason: "absent", detail: target}
 	}
-	if probeHookAnswers(ctx, target, spec.hook, repoTop) {
+	switch probeHookAnswer(ctx, target, spec.hook, repoTop) {
+	case probeAnswerForward:
 		return checkOneGuard(repoTop, spec)
+	case probeAnswerInline:
+		// sd-8wth (sdlc PR #874, loto-lw16 comment 2026-09-28): the global
+		// hook ran the guard directly, inline, because this repo carries no
+		// .githooks chain to forward into at all — reachable on its own
+		// terms, no repo-local dispatcher/entry to check.
+		return guardStatus{spec: spec, ok: true, detail: target + " (inline)"}
+	case probeAnswerNone:
+		// falls through to the ambiguous-no-answer handling below.
 	}
 	if isKnownForwarder(resolved) {
 		if local := checkOneGuard(repoTop, spec); !local.ok {
@@ -851,15 +864,35 @@ func checkForwardedGuard(ctx context.Context, resolved, repoTop string, spec gua
 	return guardStatus{spec: spec, reason: "hooksPath-foreign", detail: resolved, probe: "no-answer"}
 }
 
-// probeHookAnswers runs target (the effective hook file for one guard,
+// probeAnswer is what running an effective hook with LOTO_HOOK_PROBE=1 proved
+// about it, once its exit code and output have been checked against the two
+// contracts a real doorman hook can answer with.
+type probeAnswer int
+
+const (
+	// probeAnswerNone: no answer matched either contract below — a failure to
+	// start, a non-zero exit, or output that matches neither exactly (Givens:
+	// a refusal upstream of the forward is not doctor's to explain — one
+	// outcome, not a taxonomy of why).
+	probeAnswerNone probeAnswer = iota
+	// probeAnswerForward: "loto-hook-probe <hook> <repoTop>" — .githooks/
+	// lib/run-chain.sh's own contract, printed before touching its chain. The
+	// chain reaches this repo's real dispatcher; checkOneGuard governs from
+	// here.
+	probeAnswerForward
+	// probeAnswerInline: "loto-hook-probe <hook> <repoTop> inline" — sd-8wth's
+	// contract for a repo with no .githooks chain: the global hook ran the
+	// guard itself rather than forwarding, so it names that difference with
+	// one appended word rather than silently reusing the forwarding line.
+	probeAnswerInline
+)
+
+// probeHookAnswer runs target (the effective hook file for one guard,
 // resolved from core.hooksPath) with LOTO_HOOK_PROBE=1 and empty stdin, and
-// reports whether it printed exactly "loto-hook-probe <hook> <repoTop>" and
-// exited 0 — the contract .githooks/lib/run-chain.sh answers before touching
-// its chain. Bounded by gitTimeout so a wedged foreign hook cannot hang
-// doctor; any failure to start, a non-zero exit, or output that does not
-// match exactly all read as "did not answer" — one outcome, not a taxonomy of
-// why (Givens: a refusal upstream of the forward is not doctor's to explain).
-func probeHookAnswers(ctx context.Context, target, hook, repoTop string) bool {
+// classifies what it printed against the two contracts a doorman hook can
+// answer with. Bounded by gitTimeout so a wedged foreign hook cannot hang
+// doctor.
+func probeHookAnswer(ctx context.Context, target, hook, repoTop string) probeAnswer {
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, target)
@@ -867,10 +900,18 @@ func probeHookAnswers(ctx context.Context, target, hook, repoTop string) bool {
 	cmd.Env = append(os.Environ(), hookProbeEnvVar+"=1")
 	out, err := cmd.Output()
 	if err != nil {
-		return false
+		return probeAnswerNone
 	}
+	got := strings.TrimRight(string(out), "\n")
 	want := "loto-hook-probe " + hook + " " + repoTop
-	return strings.TrimRight(string(out), "\n") == want
+	switch got {
+	case want:
+		return probeAnswerForward
+	case want + " inline":
+		return probeAnswerInline
+	default:
+		return probeAnswerNone
+	}
 }
 
 // resolveGitHooksPath resolves core.hooksPath (or git's unset-default,
