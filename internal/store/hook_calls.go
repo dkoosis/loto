@@ -955,6 +955,22 @@ func (s *Store) MarkPostMissing(ctx context.Context, now time.Time, tReport time
 	return len(toFlag), nil
 }
 
+// finishedCallDroppableSQL is DropFinishedCalls' retention predicate over
+// hook_calls: ended before the cutoff (the one bind arg), with no in-flight
+// call that started before it ended.
+const finishedCallDroppableSQL = `COALESCE(t_post, dead_at) IS NOT NULL
+   AND COALESCE(t_post, dead_at) < ?
+   AND NOT EXISTS (
+     SELECT 1 FROM hook_calls peer
+      WHERE peer.t_post IS NULL AND peer.dead_at IS NULL
+        AND peer.t_pre < COALESCE(hook_calls.t_post, hook_calls.dead_at))`
+
+// dropFinishedCallPathsSQL deletes the path rows of exactly the calls
+// finishedCallDroppableSQL will drop, searching hook_call_paths by its
+// call_id-leading primary key rather than scanning it.
+const dropFinishedCallPathsSQL = `DELETE FROM hook_call_paths WHERE call_id IN (
+  SELECT call_id FROM hook_calls WHERE ` + finishedCallDroppableSQL + `)`
+
 // DropFinishedCalls applies §3's retention: a finished call's record is kept
 // while any in-flight call has t_pre < the moment it ended, and dropped after.
 //
@@ -976,24 +992,22 @@ func (s *Store) DropFinishedCalls(ctx context.Context, now time.Time, floor time
 		return 0, err
 	}
 	defer cleanup()
-	res, err := tx.ExecContext(ctx, `
-DELETE FROM hook_calls
- WHERE COALESCE(t_post, dead_at) IS NOT NULL
-   AND COALESCE(t_post, dead_at) < ?
-   AND NOT EXISTS (
-     SELECT 1 FROM hook_calls peer
-      WHERE peer.t_post IS NULL AND peer.dead_at IS NULL
-        AND peer.t_pre < COALESCE(hook_calls.t_post, hook_calls.dead_at))`,
-		now.Add(-floor).UnixNano())
+	cutoff := now.Add(-floor).UnixNano()
+	// Path rows go first, keyed by the calls about to drop, while those calls
+	// still exist to name them. The old form — delete every path row whose call
+	// is gone — scanned all of hook_call_paths on every pre-hook (79ms of a
+	// ~96ms pre on a 224k-row store, loto-szdx.1). This DELETE below is the only
+	// place a call loses its record without its paths, so the keyed form leaves
+	// no orphans the scan would have caught.
+	if _, err := tx.ExecContext(ctx, dropFinishedCallPathsSQL, cutoff); err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM hook_calls WHERE `+finishedCallDroppableSQL, cutoff)
 	if err != nil {
 		return 0, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return 0, err
-	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM hook_call_paths WHERE call_id NOT IN (SELECT call_id FROM hook_calls)`); err != nil {
 		return 0, err
 	}
 	if err := commitTxFn(tx); err != nil {
