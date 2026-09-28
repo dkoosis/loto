@@ -387,17 +387,27 @@ func TestLock_NonRegularNonDirectoryGetsNoDirHint(t *testing.T) {
 	}
 }
 
-func TestLock_RejectNonExistentTarget(t *testing.T) {
-	withTempProject(t)
+// TestLock_AllowsNonExistentTargetInRepo is loto-i382's AC1 at repo-root
+// scope: an agent about to CREATE a file used to be refused reason=not-found
+// (~100 times in 14 days), so the write landed with no lock. A missing path
+// whose parent exists — here the repo root itself — is a lock target by
+// default now, no --create flag.
+func TestLock_AllowsNonExistentTargetInRepo(t *testing.T) {
+	repo := withTempProject(t)
 	pinAgent(t)
+	const target = "missing.go"
 	var out, errBuf bytes.Buffer
-	code := Run([]string{tcCmdLock, "missing.go", "-t", tcIntentTest}, &out, &errBuf)
-	if code != 2 {
-		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
+	code := Run([]string{tcCmdLock, target, "-t", tcIntentTest}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; out=%q err=%q", code, out.String(), errBuf.String())
 	}
-	combined := out.String() + errBuf.String()
-	if !strings.Contains(combined, "not-found") {
-		t.Errorf("expected reason=not-found: %q", combined)
+	if !strings.Contains(out.String(), "✓ locked") {
+		t.Errorf("expected ✓ locked: %q", out.String())
+	}
+	if _, statErr := os.Lstat(filepath.Join(repo, target)); statErr == nil {
+		t.Error("locking a missing target must not create it")
+	} else if !os.IsNotExist(statErr) {
+		t.Errorf("unexpected stat error on %q: %v", target, statErr)
 	}
 }
 
