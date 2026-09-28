@@ -311,6 +311,35 @@ checked "the sed script arg is not mistaken for a file" "$(printf '\t/tmp/nvhp/x
 checked "the BSD backup suffix is not mistaken for a file" "$(printf '\t/tmp/nvhp/x.go')" \
   "$(bash_env "sed -i '' 's/a/b/' /tmp/nvhp/x.go")"
 
+# A quoted script's own spaces scatter it across several $args tokens once the
+# gate's unquoted `for tok in $args` re-splits it — only the FIRST fragment
+# used to be dropped as "the script"; the rest (here "and", "but", "by") fell
+# through path_candidate as bare words and were checked/beaconed as if they
+# were real paths (loto-dj7g).
+touch real.md f1 f2 x.sh
+checked "a multi-word quoted sed script leaks no word as a path" "$(printf '\treal.md')" \
+  "$(bash_env "sed -i '' 's/and but by/x/' real.md")"
+checked "sed -i with two file operands checks both, not the script" "$(printf '\tf1\n\tf2')" \
+  "$(bash_env "sed -i '' 's/a/b/' f1 f2")"
+checked "perl -pi -e with a multi-word script checks the file, not the script" "$(printf '\tx.sh')" \
+  "$(bash_env "perl -pi -e 's{a b}{c d}' x.sh")"
+# A quote may close mid-token: the shell glues 's/a b/c/'g into one script,
+# so the quote closing before the trailing g must still end the script.
+checked "sed -i: a quote closed before a glued suffix ends the script" "$(printf '\treal.md')" \
+  "$(bash_env "sed -i 's/a b/c/'g real.md")"
+checked "sed -i: an attached -e script with spaces leaks no word" "$(printf '\treal.md')" \
+  "$(bash_env "sed -i -e's/a b/c/' real.md")"
+# perl -e may carry its program attached (-e'...'), and bundled (-pie / -ne).
+checked "perl -pi with an attached -e program checks the file" "$(printf '\treal.md')" \
+  "$(bash_env "perl -pi -e's/a/b/' real.md")"
+checked "perl -pi with an attached spaced -e program checks the file" "$(printf '\treal.md')" \
+  "$(bash_env "perl -pi -e's/a b/c/' real.md")"
+checked "perl -i -pe bundle takes the next token as the program" "$(printf '\treal.md')" \
+  "$(bash_env "perl -i -pe 's/a b/c/' real.md")"
+# Only the -i switch means in place; -Mstrict's i is part of a module name.
+checked "perl -Mstrict is not in-place" "" \
+  "$(bash_env "perl -Mstrict -e 'print while <>' real.md")"
+
 # > and >> -------------------------------------------------------------------
 runc "redirect > onto a peer-locked file blocks" 2 "$(bash_env 'echo hi > internal/score/landmark.go')"
 runc "redirect >> onto a peer-locked file blocks" 2 "$(bash_env 'echo hi >> internal/score/landmark.go')"
