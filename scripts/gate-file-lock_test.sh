@@ -95,10 +95,13 @@ export PATH="$WORK/bin:$PATH"
 # false-clean shape .claude/rules/standard-checks.md exists to stop.
 mkdir -p "$WORK/repo/internal/score/deep" "$WORK/repo/internal/other" "$WORK/repo/sub"
 # The absolute fixtures are literals in the assertions below, so their parents
-# have to exist where they are spelled. Created empty and removed on exit.
-_abs_fixtures="/tmp/loto-beacon /tmp/loto-wofb /tmp/nvhp /tmp/stash /tmp/s"
-mkdir -p $_abs_fixtures
-trap 'rm -rf "$WORK"; rmdir $_abs_fixtures 2>/dev/null' EXIT
+# have to exist where they are spelled. Spelled under $WORK (a fresh mktemp -d
+# per run) rather than fixed /tmp names — two concurrent runs of this suite
+# used to share literal dirs like /tmp/loto-beacon, so one run's EXIT trap
+# could rmdir them out from under the other (loto-iurk). $WORK already gets
+# rm -rf'd on exit, so nothing extra needs removing here.
+_abs_fixtures=("$WORK/loto-beacon" "$WORK/loto-wofb" "$WORK/nvhp" "$WORK/stash" "$WORK/s")
+mkdir -p "${_abs_fixtures[@]}"
 cd "$WORK/repo" || exit 1
 
 # Pin the hook's clean-verdict cache inside $WORK. Without this it lands in the
@@ -128,11 +131,11 @@ sub_bash_env() { printf '{"tool_name":"Bash","agent_id":%s,"tool_input":{"comman
 
 # --- Bash gate: blocks ---
 export LOCKED="internal/score/landmark.go"
-run "mv of peer-locked file blocks" 2 "$(bash_env 'mv internal/score/landmark.go /tmp/stash/landmark.go')"
+run "mv of peer-locked file blocks" 2 "$(bash_env "mv internal/score/landmark.go $WORK/stash/landmark.go")"
 run "rm of peer-locked file blocks" 2 "$(bash_env 'rm -rf internal/score/landmark.go')"
 run "cp onto peer-locked dest blocks" 2 "$(bash_env 'cp /tmp/new.go internal/score/landmark.go')"
 run "git mv of peer-locked file blocks" 2 "$(bash_env 'git mv internal/score/landmark.go x.go')"
-run "compound (&&) still scans mv" 2 "$(bash_env 'mkdir -p /tmp/s && mv internal/score/landmark.go /tmp/s/')"
+run "compound (&&) still scans mv" 2 "$(bash_env "mkdir -p $WORK/s && mv internal/score/landmark.go $WORK/s/")"
 
 # --- Bash gate: allows ---
 run "mv of unlocked file allows" 0 "$(bash_env 'mv internal/other/foo.go /tmp/x.go')"
@@ -169,17 +172,17 @@ beacon_run() {
 
 export LOCKED=""
 beacon_run "subagent Edit mints a beacon stamped with its agent_id" \
-  "$(printf 'sib-a\t/tmp/loto-beacon/a.go')" "$(sub_edit_env 'sib-a' '/tmp/loto-beacon/a.go')"
+  "$(printf 'sib-a\t%s' "$WORK/loto-beacon/a.go")" "$(sub_edit_env 'sib-a' "$WORK/loto-beacon/a.go")"
 beacon_run "a session with no agent_id mints nothing" \
-  "" "$(edit_env '/tmp/loto-beacon/a.go')"
+  "" "$(edit_env "$WORK/loto-beacon/a.go")"
 beacon_run "subagent Bash mints for the destructive verb's operand" \
-  "$(printf 'sib-b\t/tmp/loto-beacon/b.go')" "$(sub_bash_env 'sib-b' 'rm /tmp/loto-beacon/b.go')"
+  "$(printf 'sib-b\t%s' "$WORK/loto-beacon/b.go")" "$(sub_bash_env 'sib-b' "rm $WORK/loto-beacon/b.go")"
 
 # A blocked write must NOT announce itself — the beacon says "I am writing
 # here", and the whole point of the block is that it is not.
-export LOCKED="/tmp/loto-beacon/held.go"
+export LOCKED="$WORK/loto-beacon/held.go"
 beacon_run "a blocked subagent write mints nothing" \
-  "" "$(sub_edit_env 'sib-c' '/tmp/loto-beacon/held.go')"
+  "" "$(sub_edit_env 'sib-c' "$WORK/loto-beacon/held.go")"
 export LOCKED=""
 
 # --- stamped + gated check (loto-wofb) ---------------------------------------
@@ -200,12 +203,12 @@ cache_clear() { rm -rf "$WORK/loto-check-cache"; }
 export LOCKED=""
 cache_clear
 check_run "subagent Edit checks under its own stamp with --gate" \
-  "$(printf 'gate\t/tmp/loto-wofb/a.go\tsib-w1')" "$(sub_edit_env 'sib-w1' '/tmp/loto-wofb/a.go')"
+  "$(printf 'gate\t%s\tsib-w1' "$WORK/loto-wofb/a.go")" "$(sub_edit_env 'sib-w1' "$WORK/loto-wofb/a.go")"
 check_run "a session with no agent_id runs a plain, unstamped check" \
-  "$(printf '\t/tmp/loto-wofb/b.go')" "$(edit_env '/tmp/loto-wofb/b.go')"
+  "$(printf '\t%s' "$WORK/loto-wofb/b.go")" "$(edit_env "$WORK/loto-wofb/b.go")"
 # The cache is keyed per sibling: w1's clean verdict must not be served to w2.
 check_run "a second sibling is not served the first one's cached verdict" \
-  "$(printf 'gate\t/tmp/loto-wofb/a.go\tsib-w2')" "$(sub_edit_env 'sib-w2' '/tmp/loto-wofb/a.go')"
+  "$(printf 'gate\t%s\tsib-w2' "$WORK/loto-wofb/a.go")" "$(sub_edit_env 'sib-w2' "$WORK/loto-wofb/a.go")"
 cache_clear
 
 # --- fail-open notices + contract stamp (loto-tzmv.7) -----------------------
@@ -306,10 +309,10 @@ checked "sed without -i never consults loto" "" \
   "$(bash_env "sed -n '1,5p' internal/score/landmark.go")"
 # The script argument is not a filename — checking it would be a wasted round
 # trip over an expression that names no file.
-checked "the sed script arg is not mistaken for a file" "$(printf '\t/tmp/nvhp/x.go')" \
-  "$(bash_env "sed -i 's/a/b/' /tmp/nvhp/x.go")"
-checked "the BSD backup suffix is not mistaken for a file" "$(printf '\t/tmp/nvhp/x.go')" \
-  "$(bash_env "sed -i '' 's/a/b/' /tmp/nvhp/x.go")"
+checked "the sed script arg is not mistaken for a file" "$(printf '\t%s' "$WORK/nvhp/x.go")" \
+  "$(bash_env "sed -i 's/a/b/' $WORK/nvhp/x.go")"
+checked "the BSD backup suffix is not mistaken for a file" "$(printf '\t%s' "$WORK/nvhp/x.go")" \
+  "$(bash_env "sed -i '' 's/a/b/' $WORK/nvhp/x.go")"
 
 # A quoted script's own spaces scatter it across several $args tokens once the
 # gate's unquoted `for tok in $args` re-splits it — only the FIRST fragment
@@ -465,10 +468,10 @@ stderr_run "patch announces itself too" "NOT checked" "$(bash_env 'patch -p1 < /
 # beacons on the new shapes --------------------------------------------------
 export LOCKED=""
 beacon_run "a subagent redirect mints a beacon for its target" \
-  "$(printf 'sib-r\t/tmp/loto-beacon/r.go')" "$(sub_bash_env 'sib-r' 'echo hi > /tmp/loto-beacon/r.go')"
+  "$(printf 'sib-r\t%s' "$WORK/loto-beacon/r.go")" "$(sub_bash_env 'sib-r' "echo hi > $WORK/loto-beacon/r.go")"
 cache_clear
 beacon_run "a subagent sed -i mints a beacon for its target" \
-  "$(printf 'sib-s\t/tmp/loto-beacon/s.go')" "$(sub_bash_env 'sib-s' "sed -i 's/a/b/' /tmp/loto-beacon/s.go")"
+  "$(printf 'sib-s\t%s' "$WORK/loto-beacon/s.go")" "$(sub_bash_env 'sib-s' "sed -i 's/a/b/' $WORK/loto-beacon/s.go")"
 cache_clear
 
 # an unexpandable operand must never become a beacon (sd-xtx) ----------------
@@ -485,15 +488,15 @@ export LOCKED=""
 for _tok in '$TMP/x' '~/x/y' 'a/*.sh' 'a/?.sh' 'a/[ab].sh'; do
   cache_clear
   beacon_run "no beacon for the unexpandable operand $_tok" \
-    "$(printf 'sib-x\t/tmp/loto-beacon/dst.go')" \
-    "$(sub_bash_env 'sib-x' "mv $_tok /tmp/loto-beacon/dst.go")"
+    "$(printf 'sib-x\t%s' "$WORK/loto-beacon/dst.go")" \
+    "$(sub_bash_env 'sib-x' "mv $_tok $WORK/loto-beacon/dst.go")"
 done
 # The guard must not cost a real path its beacon — trading a false lock for a
 # missing one is not a fix.
 cache_clear
 beacon_run "two plain operands both still mint" \
-  "$(printf 'sib-x\t/tmp/loto-beacon/plain.go\nsib-x\t/tmp/loto-beacon/dst.go')" \
-  "$(sub_bash_env 'sib-x' 'mv /tmp/loto-beacon/plain.go /tmp/loto-beacon/dst.go')"
+  "$(printf 'sib-x\t%s\nsib-x\t%s' "$WORK/loto-beacon/plain.go" "$WORK/loto-beacon/dst.go")" \
+  "$(sub_bash_env 'sib-x' "mv $WORK/loto-beacon/plain.go $WORK/loto-beacon/dst.go")"
 cache_clear
 export LOCKED=""
 
