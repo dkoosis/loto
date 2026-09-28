@@ -423,12 +423,12 @@ func TestLock_RejectsDuplicateTargets(t *testing.T) {
 // here, which is the signal that -t was read as "target".
 func TestLock_DashTMistakenAsTargets_NamesCorrection(t *testing.T) {
 	repo := withTempProject(t)
-	if err := os.WriteFile(filepath.Join(repo, "b.go"), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, tcTargetB), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	pinAgent(t)
 	var out, errBuf bytes.Buffer
-	code := Run([]string{tcCmdLock, "-t", tcTargetA, "-t", "b.go"}, &out, &errBuf)
+	code := Run([]string{tcCmdLock, "-t", tcTargetA, "-t", tcTargetB}, &out, &errBuf)
 	if code != 2 {
 		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
 	}
@@ -436,9 +436,57 @@ func TestLock_DashTMistakenAsTargets_NamesCorrection(t *testing.T) {
 	if !strings.Contains(got, "-t is the intent") {
 		t.Errorf("stderr does not say -t is the intent: %q", got)
 	}
-	want := `loto lock a.go b.go -t "<intent>"`
+	want := `loto lock -t "<intent>" -- 'a.go' 'b.go'`
 	if !strings.Contains(got, want) {
 		t.Errorf("stderr does not name the corrected command %q: %q", want, got)
+	}
+}
+
+// TestLock_DashTMistake_QuotesTargetWithSpace — PR #382 review (cubic P2):
+// the corrected command line names each target unquoted and space-joined, so
+// a target containing a space silently splits into two argv words if pasted.
+// Each target must be individually shell-quoted (shellQuote, cmd_check.go),
+// the same helper every other copy-pasted hint in this package already uses.
+func TestLock_DashTMistake_QuotesTargetWithSpace(t *testing.T) {
+	repo := withTempProject(t)
+	if err := os.WriteFile(filepath.Join(repo, "b c.go"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pinAgent(t)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, "-t", tcTargetA, "-t", "b c.go"}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	got := errBuf.String()
+	if !strings.Contains(got, `'b c.go'`) {
+		t.Errorf("stderr does not shell-quote the space-containing target: %q", got)
+	}
+}
+
+// TestLock_DashTMistake_LeadingDashTargetAfterDoubleDash — PR #382 review
+// (cubic P2): a target that is itself a valid path but starts with "-" (e.g.
+// a mistyped -t value like "-weird.go") reads as an unknown flag if it
+// precedes -t in the corrected command. Naming it after a literal "--"
+// (permuteWith's own end-of-flags escape, flagperm.go) keeps the correction
+// executable.
+func TestLock_DashTMistake_LeadingDashTargetAfterDoubleDash(t *testing.T) {
+	repo := withTempProject(t)
+	if err := os.WriteFile(filepath.Join(repo, "-weird.go"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pinAgent(t)
+	var out, errBuf bytes.Buffer
+	code := Run([]string{tcCmdLock, "-t", tcTargetA, "-t", "-weird.go"}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
+	}
+	got := errBuf.String()
+	if !strings.Contains(got, `-t "<intent>" -- `) {
+		t.Errorf("stderr does not place -- before the targets: %q", got)
+	}
+	if idx := strings.Index(got, "--"); idx == -1 || !strings.Contains(got[idx:], `'-weird.go'`) {
+		t.Errorf("stderr does not name the leading-dash target after --: %q", got)
 	}
 }
 
@@ -467,16 +515,16 @@ func TestLock_DashTNotAFile_UsageUnchanged(t *testing.T) {
 // not acquire anything before it is caught.
 func TestLock_DashTMistake_LeavesNoLockRows(t *testing.T) {
 	repo := withTempProject(t)
-	if err := os.WriteFile(filepath.Join(repo, "b.go"), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, tcTargetB), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	pinAgent(t)
 	var out, errBuf bytes.Buffer
-	if code := Run([]string{tcCmdLock, "-t", tcTargetA, "-t", "b.go"}, &out, &errBuf); code != 2 {
+	if code := Run([]string{tcCmdLock, "-t", tcTargetA, "-t", tcTargetB}, &out, &errBuf); code != 2 {
 		t.Fatalf("exit %d, want 2; out=%q err=%q", code, out.String(), errBuf.String())
 	}
 	var mineOut, mineErr bytes.Buffer
-	if code := Run([]string{"status", "--mine"}, &mineOut, &mineErr); code != 0 {
+	if code := Run([]string{tcCmdStatus, "--mine"}, &mineOut, &mineErr); code != 0 {
 		t.Fatalf("status --mine exit %d: out=%q err=%q", code, mineOut.String(), mineErr.String())
 	}
 	if !strings.Contains(mineOut.String(), "no locks") {
