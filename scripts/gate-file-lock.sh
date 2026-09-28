@@ -10,9 +10,9 @@
 #     `bash mv peer/file dest` was not (the mechanism behind
 #     INCIDENT-ferret-t5d, cross-session variant).
 #
-# Shapes read out of a shell command (loto-nvhp, extended sd-wgcw):
-#   sed -i FILE… · > FILE and >> FILE · tee FILE… · cp/mv/rm (and git mv/rm)
-#     operands · install operands · dd of=FILE
+# Shapes read out of a shell command (loto-nvhp, extended sd-wgcw, loto-dj7g):
+#   sed -i FILE… · perl -i FILE… · > FILE and >> FILE · tee FILE… ·
+#     cp/mv/rm (and git mv/rm) operands · install operands · dd of=FILE
 #   and, inside a heredoc body fed to an interpreter (python/python3/ruby/
 #     node/perl/bash/sh — read off the verb the `<<` follows): the same
 #     shell shapes recursively for bash/sh, and a short list of each
@@ -158,7 +158,7 @@ notice_once() {
 unparsed() {
   notice_once bash-unparsed \
     "⚠ loto: '$1' writes in a shape this gate does not parse — that write was NOT checked against peers' locks" \
-    "⚠ gated shapes: sed -i · > and >> · tee · cp/mv/rm · install · dd of= · a heredoc's own writes when fed to python/ruby/node/perl/bash/sh. Everything else is unchecked."
+    "⚠ gated shapes: sed -i · perl -i · > and >> · tee · cp/mv/rm · install · dd of= · a heredoc's own writes when fed to python/ruby/node/perl/bash/sh. Everything else is unchecked."
 }
 
 # Bail if loto isn't on PATH — but say so. Don't fail the tool call.
@@ -800,9 +800,31 @@ if [ "$tool" = "Bash" ]; then
           esac
         done
         [ "$_inplace" = 1 ] || continue
-        _list="" _skip=0 _after_i=0 _script=0
+        # A quoted script containing a space (`'s/and but by/x/'`) is ONE
+        # shell argument but re-splits into several $args tokens the moment
+        # this loop iterates over $args unquoted. Marking only the FIRST such
+        # fragment as "the script" let the rest — bare words like "and",
+        # "but", "by" — fall through path_candidate as if they were real
+        # file operands (loto-dj7g). _script_open tracks an unclosed quote
+        # across tokens so every fragment of the script is swallowed, not
+        # just its first word.
+        _list="" _skip=0 _after_i=0 _script=0 _script_open=""
         for tok in $args; do
-          if [ "$_skip" = 1 ]; then _skip=0; continue; fi
+          if [ -n "$_script_open" ]; then
+            case "$tok" in
+              *"$_script_open") _script_open="" ;;
+            esac
+            continue
+          fi
+          if [ "$_skip" = 1 ]; then
+            _skip=0
+            case "$tok" in
+              \'?*\'|\"?*\") : ;;              # closed in one token
+              \'*) _script_open="'" ;;         # opens here — more tokens follow
+              \"*) _script_open='"' ;;
+            esac
+            continue
+          fi
           case "$tok" in
             -e|--expression|-f|--file) _skip=1; continue ;;
             -i) _after_i=1; continue ;;
@@ -813,7 +835,13 @@ if [ "$tool" = "Bash" ]; then
             case "$tok" in "''"|'""') continue ;; esac   # BSD backup suffix
           fi
           if [ "$_have_e" = 0 ] && [ "$_script" = 0 ]; then
-            _script=1; continue                          # the lone script arg
+            _script=1                                     # the lone script arg
+            case "$tok" in
+              \'?*\'|\"?*\") : ;;
+              \'*) _script_open="'" ;;
+              \"*) _script_open='"' ;;
+            esac
+            continue
           fi
           path_candidate "$tok" && _list="$_list $_pc"
         done
@@ -874,12 +902,65 @@ if [ "$tool" = "Bash" ]; then
         args="$_list"
         ;;
       patch|truncate|ed|ex|shred|make) unparsed "$verb"; continue ;;
-      awk|perl)
+      awk)
         # Only the in-place forms; a plain `awk '{print}'` writes nothing.
+        # gawk's `-i inplace` extension is its own separate-token shape, not
+        # parsed here — named and warned, same as any other unparsed writer.
         case " $args " in
           *' -i'*|*' -pi'*|*'inplace'*) unparsed "$verb" ;;
         esac
         continue
+        ;;
+      perl)
+        # `perl -i` writes its file operands in place. `-e SCRIPT` marks the
+        # script explicitly; with no -e, the first non-flag argument is the
+        # script instead (same shape as sed's lone-script fallback above,
+        # loto-dj7g) — either way it is never a path, even when the shell's
+        # word-splitting scatters a spaced script like 's{a b}{c d}' across
+        # several $args tokens.
+        _inplace=0 _have_e=0
+        for tok in $args; do
+          case "$tok" in -*i*) _inplace=1 ;; esac
+          case "$tok" in -e|-E) _have_e=1 ;; esac
+        done
+        [ "$_inplace" = 1 ] || continue
+        _list="" _skip=0 _script=0 _script_open=""
+        for tok in $args; do
+          if [ -n "$_script_open" ]; then
+            case "$tok" in
+              *"$_script_open") _script_open="" ;;
+            esac
+            continue
+          fi
+          if [ "$_skip" = 1 ]; then
+            _skip=0
+            case "$tok" in
+              \'?*\'|\"?*\") : ;;
+              \'*) _script_open="'" ;;
+              \"*) _script_open='"' ;;
+            esac
+            continue
+          fi
+          case "$tok" in
+            -e|-E) _skip=1; continue ;;
+            -*) continue ;;
+          esac
+          if [ "$_have_e" = 0 ] && [ "$_script" = 0 ]; then
+            _script=1
+            case "$tok" in
+              \'?*\'|\"?*\") : ;;
+              \'*) _script_open="'" ;;
+              \"*) _script_open='"' ;;
+            esac
+            continue
+          fi
+          path_candidate "$tok" && _list="$_list $_pc"
+        done
+        if [ -z "$_list" ]; then
+          unparsed "$verb"
+          continue
+        fi
+        args="$_list"
         ;;
       *) continue ;;
     esac
