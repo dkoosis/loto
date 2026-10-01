@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -12,7 +13,8 @@ import (
 const eventCols = `id,target_canonical,event_kind,actor_uuid,subject_uuid,reason,detail,created_at`
 
 // Events retention: cap at 1000 rows AND 7 days; rows violating either rule
-// are deleted. Rotation runs in-txn via rotateEventsTx — opportunistically on
+// are deleted. The gate evidence kinds keep their own bound instead (see
+// EvidenceRetentionMaxRows). Rotation runs in-txn via rotateEventsTx — opportunistically on
 // each AcquireLocks call (cheap) and inside the `loto doctor --repair` tx.
 const (
 	eventsRetentionMax = 1000
@@ -66,11 +68,48 @@ var eventKindRetentionMax = []struct { //nolint:gochecknoglobals // read-only re
 	{EventLockRefreshed, LockRefreshedRetentionMax},
 }
 
+// Evidence retention: the kinds a gate-promotion read counts outlive the
+// shared bound (loto-6itj).
+//
+// ‡ The promotion read needs a 14-day window of firings, and the shared bound
+// cannot hold one: 7 days by age, and on 2026-09-28 the lock and tree rows of
+// one busy day filled all 1000 rows, so the read on 2026-10-01 found one day
+// left of a planned fourteen. These kinds are rare — 21 firings on that busy
+// day — so they get their own cap and a longer age, and the shared cap does
+// not count them. A rare kind can then never be evicted by a chatty one.
+const (
+	EvidenceRetentionMaxRows = 1000
+	EvidenceRetentionAge     = 30 * 24 * time.Hour
+)
+
+// evidenceKinds are the kinds held under EvidenceRetention* instead of the
+// shared bound: the staged gate's firings, the override that bypasses it, and
+// the worktree births the ref guard admits (loto-iytm's Givens).
+var evidenceKinds = []string{EventStagedGateFired, EventGuardOverride, EventRefAdmitted} //nolint:gochecknoglobals // read-only retention policy table
+
+// evidenceKindsJSON is evidenceKinds as the JSON array rotateEventsTx binds
+// to json_each(?), so the SQL text stays constant whatever the list holds.
+func evidenceKindsJSON() string {
+	b, _ := json.Marshal(evidenceKinds) //nolint:errchkjson // a []string always marshals
+	return string(b)
+}
+
 // rotateEventsTx trims the events table per retention policy, in the caller's
 // tx: age first, then each capped kind's own share, then the global row cap.
+// Evidence kinds are bounded by their own age and cap, and are outside the
+// shared age and shared cap.
 func rotateEventsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	ev := evidenceKindsJSON()
 	cutoffNs := now.Add(-eventsRetentionAge).UnixNano()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE created_at < ?`, cutoffNs); err != nil {
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM events WHERE created_at < ?
+   AND event_kind NOT IN (SELECT value FROM json_each(?))`, cutoffNs, ev); err != nil {
+		return err
+	}
+	evCutoffNs := now.Add(-EvidenceRetentionAge).UnixNano()
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM events WHERE created_at < ?
+   AND event_kind IN (SELECT value FROM json_each(?))`, evCutoffNs, ev); err != nil {
 		return err
 	}
 	for _, k := range eventKindRetentionMax {
@@ -82,10 +121,18 @@ DELETE FROM events WHERE id IN (
 			return err
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM events WHERE id IN (
+  SELECT id FROM events WHERE event_kind IN (SELECT value FROM json_each(?))
+   ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
+)`, ev, EvidenceRetentionMaxRows); err != nil {
+		return err
+	}
 	_, err := tx.ExecContext(ctx, `
 DELETE FROM events WHERE id IN (
-  SELECT id FROM events ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
-)`, eventsRetentionMax)
+  SELECT id FROM events WHERE event_kind NOT IN (SELECT value FROM json_each(?))
+   ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
+)`, ev, eventsRetentionMax)
 	return err
 }
 

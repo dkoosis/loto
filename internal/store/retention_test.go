@@ -200,7 +200,7 @@ func TestAppendEventRotating_HoldsRetentionWithNoLockEverAcquired(t *testing.T) 
 	ctx := context.Background()
 
 	base := time.Now().Add(-time.Hour)
-	const n = eventsRetentionMax + 50
+	const n = EvidenceRetentionMaxRows + 50
 	for i := range n {
 		if _, err := s.AppendEventRotating(ctx, domain.Event{
 			Kind:      EventStagedGateFired,
@@ -216,14 +216,88 @@ func TestAppendEventRotating_HoldsRetentionWithNoLockEverAcquired(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != eventsRetentionMax {
-		t.Fatalf("got %d events, want %d — the append must carry the retention pass", len(got), eventsRetentionMax)
+	if len(got) != EvidenceRetentionMaxRows {
+		t.Fatalf("got %d events, want %d — the append must carry the retention pass", len(got), EvidenceRetentionMaxRows)
 	}
 	// The rows that survive are the newest, so the counter a promotion
 	// decision reads is the most recent window and not an arbitrary slice.
-	want := base.Add(time.Duration(n-eventsRetentionMax) * time.Millisecond).UnixNano()
+	want := base.Add(time.Duration(n-EvidenceRetentionMaxRows) * time.Millisecond).UnixNano()
 	if got[0].CreatedAt.UnixNano() != want {
 		t.Errorf("oldest surviving event=%d, want %d", got[0].CreatedAt.UnixNano(), want)
+	}
+}
+
+// loto-6itj: a gate firing outlives a flood of lock rows and the shared 7-day
+// age, and still lapses at its own 30-day age. On 2026-09-28 one busy day of
+// lock and tree rows filled the shared 1000-row cap, which erased the
+// promotion read's window.
+func TestRotateEvents_EvidenceKindsKeepTheirOwnBound(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	evidence := []struct {
+		kind string
+		age  time.Duration
+	}{
+		{EventStagedGateFired, 10 * 24 * time.Hour},
+		{EventGuardOverride, 8 * 24 * time.Hour},
+		{EventRefAdmitted, time.Hour},
+		{EventStagedGateFired, 31 * 24 * time.Hour}, // past the evidence age
+	}
+	for i, e := range evidence {
+		if _, err := s.AppendEvent(ctx, domain.Event{
+			Kind:      e.kind,
+			ActorUUID: tcAlice,
+			Reason:    tcGateModeWarn,
+			CreatedAt: now.Add(-e.age),
+		}); err != nil {
+			t.Fatalf("AppendEvent evidence[%d]: %v", i, err)
+		}
+	}
+	// A shared-bound row past 7 days lapses as before.
+	if _, err := s.AppendEvent(ctx, domain.Event{
+		Target:    domain.Target{Canonical: tcXGo},
+		Kind:      EventLockAcquired,
+		ActorUUID: tcAlice,
+		Reason:    "old",
+		CreatedAt: now.Add(-8 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("AppendEvent old lock row: %v", err)
+	}
+	for i := range eventsRetentionMax + 100 {
+		if _, err := s.AppendEvent(ctx, domain.Event{
+			Target:    domain.Target{Canonical: tcXGo},
+			Kind:      EventLockAcquired,
+			ActorUUID: tcAlice,
+			Reason:    "flood",
+			CreatedAt: now.Add(-time.Hour + time.Duration(i)*time.Millisecond),
+		}); err != nil {
+			t.Fatalf("AppendEvent flood[%d]: %v", i, err)
+		}
+	}
+
+	rotateEventsNow(ctx, t, s)
+
+	got, err := s.ListEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byKind := map[string]int{}
+	for _, e := range got {
+		byKind[e.Kind]++
+	}
+	if byKind[EventStagedGateFired] != 1 || byKind[EventGuardOverride] != 1 || byKind[EventRefAdmitted] != 1 {
+		t.Errorf("evidence rows = gate:%d override:%d admitted:%d, want 1 each (the 31-day firing lapses, the rest survive the flood)",
+			byKind[EventStagedGateFired], byKind[EventGuardOverride], byKind[EventRefAdmitted])
+	}
+	if byKind[EventLockAcquired] != eventsRetentionMax {
+		t.Errorf("lock rows = %d, want %d — evidence rows must not count against the shared cap", byKind[EventLockAcquired], eventsRetentionMax)
+	}
+	for _, e := range got {
+		if e.Kind == EventLockAcquired && e.Reason == "old" {
+			t.Error("an 8-day-old lock row survived — the shared 7-day age must still apply")
+		}
 	}
 }
 

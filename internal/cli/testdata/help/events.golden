@@ -4,8 +4,10 @@ Print the store's audit rows, oldest first. The read side of every counter
 loto writes — lock acquire/release/break, admission verdicts, the staged-lock
 gate's firings, and the tree hook's per-call timing.
 
-The window is bounded by events retention (1000 rows / 7 days), so this shows
-what the trail still holds, not everything that ever happened.
+The window is bounded by events retention (1000 rows / 7 days; the gate
+evidence kinds staged_lock_gate_fired, guard_override and ref_admitted keep
+their own 1000 rows / 30 days), so this shows what the trail still holds, not
+everything that ever happened.
 
 examples:
   loto events
