@@ -5,10 +5,10 @@ name: CI
 # protection. The detect job decides docs-only; test skips its steps and
 # still reports green. Any changed path outside the docs set runs the full gate.
 #
-# Linux + macOS on every run. The repo is public, so standard GitHub-hosted
-# runners (macos-latest included) cost nothing — no label, no weekly backstop
-# (dk, 2026-09-28). A private repo would bill macOS at 10x; revisit then.
-#   pull_request / push -> main / dispatch : linux + macOS
+# Linux only. macOS is never rented from GitHub (dk, 2026-10-07): every local
+# `make check`, which ships require before a PR opens, runs on dk's Mac and is
+# the macOS proof.
+#   pull_request / push -> main / dispatch : linux
 on:
   pull_request:
   push:
@@ -60,15 +60,13 @@ jobs:
     runs-on: ${{ matrix.runs-on }}
     # GitHub-hosted runners: a fresh checkout every run. The self-hosted
     # Linux box ([self-hosted,Linux,loto]) was retired — it went offline and
-    # wedged the `test (linux)` gate. macOS is GitHub-hosted arm64.
+    # wedged the `test (linux)` gate.
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: linux
             runs-on: ubuntu-latest
-          - name: macos
-            runs-on: macos-latest
 
     steps:
       - name: docs-only — skip the gate
