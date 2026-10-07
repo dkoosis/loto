@@ -293,15 +293,10 @@ check_path() {
   return "$rc"
 }
 
-# lock_owned_by_me PATH — true (rc 0) when a live lock already covers PATH's
-# exact path. Called ONLY after loto_check has denied PATH with kind=claim
-# rows and no kind=lock row, which means no FOREIGN lock covers it (a
-# kind=lock row is how `check`/`check --gate` name one, and neither ever
-# reports the caller's own lock). So an overlap `loto status` finds here,
-# under that precondition, can only be this session's own lock, or a kin
-# subagent's (sd-cpbj) — the one read this hook has for "do I already hold
-# this", since check/check --gate are both silent about a caller's own
-# holdings by design.
+# lock_owned_by_me PATH — true (rc 0) when this caller, or its session, holds a
+# lock on PATH's exact path. Called ONLY after a claim-only deny (sd-cpbj):
+# the one read this hook has for "do I already hold this", since check and
+# check --gate are both silent about a caller's own holdings by design.
 #
 # Never cached, unlike check_path's clean-verdict cache: this runs only on
 # the rare claim-only deny path, and a released or newly-taken lock has to be
@@ -323,9 +318,19 @@ lock_owned_by_me() {
   else
     out="$(loto_status "$path" 2>&1)"
   fi
-  case "$out" in
-    *'✗ overlap'*) return 0 ;;
-  esac
+  # A holder row is this caller's when status marks it self=true, or when its
+  # owner is the session itself — a subagent's kin, whose unstamped Bash
+  # `loto lock` runs as the session (loto-6sf4). Any other holder is a peer;
+  # `✗ overlap` alone says nothing about whose (loto-wuzh).
+  local sid="${LOTO_AGENT_ID:-${CLAUDE_CODE_SESSION_ID:-}}" line
+  while IFS= read -r line; do
+    case "$line" in
+      '✗ holder '*' self=true'*) return 0 ;;
+    esac
+    if [ -n "$sid" ]; then
+      case "$line" in '✗ holder '*" owner=$sid "*) return 0 ;; esac
+    fi
+  done <<<"$out"
   return 1
 }
 
@@ -666,20 +671,22 @@ block_claim_no_lock() {
 }
 
 # handle_deny PATH OUT — called once loto_check has denied PATH (rc=1), with
-# its rendered deny rows in OUT. A kind=lock row (render.GateKindLock) is a
-# foreign live exclusive lock or beacon — always blocks, unchanged from
-# before this function existed. A deny made ONLY of kind=claim rows names a
-# peer's directory claim, which is documented as non-blocking for a lock or
-# check beneath it — so it must not out-rank a lock THIS session already
-# holds on the exact file (sd-cpbj). check/check --gate never report the
-# caller's own lock either way, so lock_owned_by_me's fresh `loto status`
-# read is what tells "nobody holds it" (still refused) from "I do" (allowed,
-# override the claim).
+# its rendered deny rows in OUT. Every deny blocks except one made ONLY of
+# kind=claim rows: a peer's directory claim is documented as non-blocking for
+# a lock beneath it, so it must not out-rank a lock THIS session already holds
+# on the exact file (sd-cpbj). Only `check --gate` prints kind=; a root
+# session's plain `check` denies with untyped `✗ path=… blocker=…` rows and
+# only ever for a lock, so those block too (loto-wuzh). An output with no
+# claim row at all also blocks: a deny this function cannot read fails closed.
 handle_deny() {
-  local path="$1" out="$2"
-  case "$out" in
-    *'kind=lock'*) block "$path" "$out" ;;
-  esac
+  local path="$1" out="$2" line claims=0
+  while IFS= read -r line; do
+    case "$line" in
+      '✗ path='*'kind=claim'*) claims=1 ;;
+      '✗ path='*) block "$path" "$out" ;;
+    esac
+  done <<<"$out"
+  [ "$claims" = 1 ] || block "$path" "$out"
   if lock_owned_by_me "$path"; then
     mint_beacon "$path"
     return 0

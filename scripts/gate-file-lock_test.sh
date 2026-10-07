@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Tests for gate-file-lock.sh. Stubs `loto` on PATH so we can drive the gate's
-# decision without real cross-session locks. The stub treats any path whose
-# string contains a token listed in $LOCKED (newline-separated) as peer-held
-# by a foreign LOCK (exit 1, kind=lock); a token listed in $CLAIMED as covered
-# by a peer's directory CLAIM instead (exit 1, kind=claim, no kind=lock row —
-# the real render.EmitGateDeny shape, sd-cpbj); everything else is unlocked
-# (exit 0). `loto status` reports an overlap for any path containing a token
-# listed in $MYLOCK — the stand-in for "this session already holds a lock
-# here", since real check/check --gate never report the caller's own holdings
-# either way. It records every checked path to $CHECKLOG so we can assert
-# which paths the gate inspected.
+# decision without real cross-session locks. The stub prints what the real
+# binary prints — gate-file-lock_real_test.sh holds the two to each other
+# (loto-wuzh). Any path whose string contains a token listed in $LOCKED
+# (newline-separated) is peer-held by a foreign LOCK: exit 1, as kind=lock
+# under --gate and as an untyped `✗ path=… blocker=…` row under plain check. A
+# token listed in $CLAIMED is covered by a peer's directory CLAIM: --gate
+# denies with kind=claim (render.EmitGateDeny, sd-cpbj); plain check only
+# warns `⚠ under-claim` and exits 0. Everything else is unlocked (exit 0).
+# `loto status` prints a holder row for any path in $LOCKED (a peer's) and in
+# $MYLOCK (self=true, this session's own), since real check/check --gate never
+# report the caller's own holdings. It records every checked path to
+# $CHECKLOG so we can assert which paths the gate inspected.
 set -u
 
 HOOK="$(cd "$(dirname "$0")" && pwd)/gate-file-lock.sh"
@@ -45,8 +47,13 @@ case "$1" in
     while IFS= read -r tok; do
       [ -n "$tok" ] || continue
       case "$p" in *"$tok"*)
-        echo "✗ blocked count=1"
-        echo "✗ path=$p kind=lock blocker=peer-lock intent=\"test\" expires_at=2099-01-01T00:00:00Z"
+        if [ -z "$flags" ]; then
+          echo "✗ conflicts count=1 blocking=1"
+          echo "✗ path=$p blocker=peer-lock holder_target=$p intent=\"test\" expires_at=2099-01-01T00:00:00Z liveness=alive"
+        else
+          echo "✗ blocked count=1"
+          echo "✗ path=$p kind=lock blocker=peer-lock intent=\"test\" expires_at=2099-01-01T00:00:00Z"
+        fi
         exit 1
         ;;
       esac
@@ -54,6 +61,12 @@ case "$1" in
     while IFS= read -r tok; do
       [ -n "$tok" ] || continue
       case "$p" in *"$tok"*)
+        if [ -z "$flags" ]; then
+          echo "✓ no conflicts"
+          echo "⚠ under-claim count=1"
+          echo "⚠ target=$p under-claim owner=peer-claim intent=\"test\" prefix=$tok"
+          exit 0
+        fi
         echo "✗ blocked count=1"
         echo "✗ path=$p kind=claim blocker=peer-claim prefix=$tok intent=\"test\" expires_at=2099-01-01T00:00:00Z"
         echo "ℹ options=wait|pick-other-work|message-holder"
@@ -65,12 +78,21 @@ case "$1" in
     ;;
   status)
     shift
-    p="${1:-}"
+    p="${1:-}" rows=""
     while IFS= read -r tok; do
       [ -n "$tok" ] || continue
-      case "$p" in *"$tok"*) echo "✗ overlap count=1 target=$p"; exit 0 ;; esac
+      case "$p" in *"$tok"*) rows="${rows}✗ holder target=$p owner=peer-lock epoch=1 mode=exclusive intent=\"test\" ttl_remaining=1800s liveness=alive"$'\n' ;; esac
+    done <<<"${LOCKED:-}"
+    while IFS= read -r tok; do
+      [ -n "$tok" ] || continue
+      case "$p" in *"$tok"*) rows="${rows}✗ holder target=$p owner=me epoch=1 mode=exclusive intent=\"test\" ttl_remaining=1800s liveness=alive self=true"$'\n' ;; esac
     done <<<"${MYLOCK:-}"
-    echo "✓ free target=$p"
+    if [ -n "$rows" ]; then
+      echo "✗ overlap count=$(printf '%s' "$rows" | grep -c .) target=$p"
+      printf '%s' "$rows"
+    else
+      echo "✓ free target=$p"
+    fi
     exit 0
     ;;
   beacon)
@@ -556,34 +578,41 @@ cache_clear
 # --- a peer's claim never out-ranks this session's own lock (sd-cpbj) -------
 # loto's own contract: a directory claim is advisory and does not block a
 # lock or check beneath it ("advisory: claim does not block lock/check under
-# the prefix — still lock files before editing"). check/check --gate deny
-# with kind=claim regardless of who holds the file's own lock — that row is
-# invisible to --gate either way — so the gate has to ask a second question,
-# `loto status`, before it can tell "nobody holds it" from "I already do".
+# the prefix — still lock files before editing"). Only check --gate — a
+# subagent's — denies with kind=claim, and it does so regardless of who holds
+# the file's own lock, so the gate asks `loto status` a second question
+# before it can tell "nobody holds it" from "I already do".
 export LOCKED="" CLAIMED="internal/cli" MYLOCK="internal/cli/cmd_status.go"
 runc "a session's own lock under a peer's claim is not refused" 0 \
-  "$(edit_env 'internal/cli/cmd_status.go')"
+  "$(sub_edit_env 'sib-cp' 'internal/cli/cmd_status.go')"
 
 export LOCKED="" CLAIMED="internal/cli" MYLOCK=""
 runc "no lock under a peer's claim is still refused" 2 \
-  "$(edit_env 'internal/cli/cmd_status.go')"
+  "$(sub_edit_env 'sib-cp' 'internal/cli/cmd_status.go')"
+cache_clear
 stderr_run "the refusal names the lock to take, not the claim" \
-  "loto lock internal/cli/cmd_status.go" "$(edit_env 'internal/cli/cmd_status.go')"
+  "loto lock internal/cli/cmd_status.go" "$(sub_edit_env 'sib-cp' 'internal/cli/cmd_status.go')"
+runc "a root session under a peer's claim is not refused (plain check only warns)" 0 \
+  "$(edit_env 'internal/cli/cmd_status.go')"
 
-# A foreign LOCK still wins over this session's status either way — kind=lock
-# short-circuits handle_deny before lock_owned_by_me is ever consulted.
+# A foreign LOCK still wins over this session's status either way: any deny
+# row that is not kind=claim blocks before lock_owned_by_me is consulted —
+# --gate's kind=lock and a root session's untyped plain-check row alike
+# (loto-wuzh).
 export LOCKED="internal/cli/cmd_status.go" CLAIMED="" MYLOCK="internal/cli/cmd_status.go"
-runc "a foreign lock still blocks even if status also shows an overlap" 2 \
+runc "a foreign lock still blocks a subagent even if status also shows its own row" 2 \
+  "$(sub_edit_env 'sib-cp' 'internal/cli/cmd_status.go')"
+runc "a foreign lock still blocks a root session even if status also shows its own row" 2 \
   "$(edit_env 'internal/cli/cmd_status.go')"
 
 # The refusal path re-reads current state on every call — a conflict verdict
 # is never cached (only rc=0 is), so a claim released between two calls stops
 # refusing on the very next one, with no state carried over from call one.
 export LOCKED="" CLAIMED="internal/cli" MYLOCK=""
-runc "claim-blocked call one is refused" 2 "$(edit_env 'internal/cli/cmd_status.go')"
+runc "claim-blocked call one is refused" 2 "$(sub_edit_env 'sib-cp' 'internal/cli/cmd_status.go')"
 export CLAIMED=""
 runc "the same path allows on the next call once the claim is released" 0 \
-  "$(edit_env 'internal/cli/cmd_status.go')"
+  "$(sub_edit_env 'sib-cp' 'internal/cli/cmd_status.go')"
 export LOCKED="" CLAIMED="" MYLOCK=""
 cache_clear
 
