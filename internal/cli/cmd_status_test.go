@@ -398,6 +398,44 @@ func TestStatusSelfMarker_SameTargetTwoOwners(t *testing.T) {
 	}
 }
 
+// TestStatusSingleTarget_SelfMarkerOnHolderRows: `loto status <path>` is the
+// read the PreToolUse gate makes to tell its own lock from a peer's on that
+// path (loto-wuzh) — `✗ overlap` alone said nothing about whose, so the gate
+// admitted a write over a peer's lock. The holder rows carry the same marker
+// as the whole-repo view.
+func TestStatusSingleTarget_SelfMarkerOnHolderRows(t *testing.T) {
+	withTempProject(t)
+	alice, bob := twoAgents(t)
+	for _, uuid := range []string{alice.UUID, bob.UUID} {
+		t.Setenv("LOTO_AGENT_ID", uuid)
+		if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagShared},
+			&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+			t.Fatalf("shared lock for %s failed", uuid)
+		}
+	}
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdStatus, tcTargetA}, &out, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("status exit: %q", out.String())
+	}
+	var mine, peer string
+	for line := range strings.SplitSeq(out.String(), "\n") {
+		switch {
+		case strings.HasPrefix(line, "✗ holder ") && strings.Contains(line, "owner="+alice.UUID+" "):
+			mine = line
+		case strings.HasPrefix(line, "✗ holder ") && strings.Contains(line, "owner="+bob.UUID+" "):
+			peer = line
+		}
+	}
+	if !strings.HasSuffix(mine, " self=true") {
+		t.Errorf("caller's own holder row must end self=true: %q\n%s", mine, out.String())
+	}
+	if peer == "" || strings.Contains(peer, "self=true") {
+		t.Errorf("a peer's holder row must be present and unmarked: %q\n%s", peer, out.String())
+	}
+}
+
 // TestStatusSelfMarker_MarksOwnBeaconRow pins the second uuid space (Rules):
 // a beacon row carries a PER-AGENT uuid derived from (parent, LOTO_SUBAGENT_ID
 // stamp), distinct from the parent SESSION uuid on exclusive locks/claims. The

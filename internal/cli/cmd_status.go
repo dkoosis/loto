@@ -411,9 +411,12 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 		// epoch= joins owner= into the `owner@epoch` --expect-holder token; this
 		// is THE read a caller makes before deciding to break, so the token has
 		// to be here (loto-tqcw).
-		fmt.Fprintf(w, "✗ holder target=%s owner=%s epoch=%d mode=%s intent=%q ttl_remaining=%s liveness=%s\n",
+		// self=true lets the PreToolUse gate tell its own lock from a peer's on
+		// the same path (loto-wuzh); same marker as the whole-repo view.
+		self, _ := rowOwnerMark(string(l.OwnerUUID), rt.Agent.UUID, false)
+		fmt.Fprintf(w, "✗ holder target=%s owner=%s epoch=%d mode=%s intent=%q ttl_remaining=%s liveness=%s%s\n",
 			relPath(l.Target.Canonical), l.OwnerUUID, l.Epoch, l.EffectiveMode(), l.Intent,
-			fmtTTL(ec.RemainingTTL(*l)), ec.Classify(*l))
+			fmtTTL(ec.RemainingTTL(*l)), ec.Classify(*l), self)
 	}
 	if tags, err := rt.Store.ListAliveForTarget(rt.Ctx, domain.Canonical(t.Canonical)); err == nil {
 		render.EmitTagRows(w, tags)
