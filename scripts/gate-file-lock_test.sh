@@ -83,6 +83,12 @@ case "$1" in
       [ -n "$tok" ] || continue
       case "$p" in *"$tok"*) rows="${rows}✗ holder target=$p owner=peer-lock epoch=1 mode=exclusive intent=\"test\" ttl_remaining=1800s liveness=alive"$'\n' ;; esac
     done <<<"${LOCKED:-}"
+    # $PEERROW: a peer's holder row that status shows but check does not deny
+    # on — the row lock_owned_by_me must not read as this caller's.
+    while IFS= read -r tok; do
+      [ -n "$tok" ] || continue
+      case "$p" in *"$tok"*) rows="${rows}✗ holder target=$p owner=peer-shared epoch=1 mode=shared intent=\"test\" ttl_remaining=1800s liveness=alive"$'\n' ;; esac
+    done <<<"${PEERROW:-}"
     while IFS= read -r tok; do
       [ -n "$tok" ] || continue
       case "$p" in *"$tok"*) rows="${rows}✗ holder target=$p owner=me epoch=1 mode=exclusive intent=\"test\" ttl_remaining=1800s liveness=alive self=true"$'\n' ;; esac
@@ -604,6 +610,13 @@ runc "a foreign lock still blocks a subagent even if status also shows its own r
   "$(sub_edit_env 'sib-cp' 'internal/cli/cmd_status.go')"
 runc "a foreign lock still blocks a root session even if status also shows its own row" 2 \
   "$(edit_env 'internal/cli/cmd_status.go')"
+
+# Only a row the caller owns counts as its lock: a peer's holder row on the
+# same path under the claim is not this session's (loto-wuzh).
+export LOCKED="" CLAIMED="internal/cli" MYLOCK="" PEERROW="internal/cli/cmd_status.go"
+runc "a peer's holder row under a peer's claim is not read as this session's lock" 2 \
+  "$(sub_edit_env 'sib-cp' 'internal/cli/cmd_status.go')"
+export PEERROW=""
 
 # The refusal path re-reads current state on every call — a conflict verdict
 # is never cached (only rc=0 is), so a claim released between two calls stops
