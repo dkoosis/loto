@@ -61,6 +61,32 @@ golangci_lint_go_version() {
   golangci-lint version 2>&1 | grep -oP 'go\K[0-9]+\.[0-9]+' | head -1 || true
 }
 
+# A tool answers one of these probes when it is a working binary. `-V=full` is
+# for go/analysis checkers (nilaway): they reject --version and read `version`
+# as a package pattern.
+tool_runs() {
+  "$1" --version >/dev/null 2>&1 || "$1" -V=full >/dev/null 2>&1 || "$1" version >/dev/null 2>&1
+}
+
+# Repair: overwrite installed tools that differ from the committed prebuilt. A
+# container cached at an older commit keeps that commit's tools until this runs.
+# It copies straight into $INSTALL_DIR and probes nothing: dtree is a shell
+# script and answers no version probe, and a tool must not be deleted for that.
+refresh_stale_sandbox_binaries() {
+  [ -d "$PREBUILT_DIR" ] || return 0
+  for tool in "$PREBUILT_DIR"/*; do
+    [ -f "$tool" ] || continue
+    local toolname
+    toolname=$(basename "$tool")
+    if [ -f "$INSTALL_DIR/$toolname" ] && ! cmp -s "$tool" "$INSTALL_DIR/$toolname"; then
+      cp -f "$tool" "$INSTALL_DIR/$toolname"
+      chmod +x "$INSTALL_DIR/$toolname"
+      echo "  $toolname differs from the committed prebuilt, refreshed"
+    fi
+  done
+  return 0
+}
+
 # Repair: restore missing sandbox binaries (tools + project binaries) from .sandbox/bin/
 restore_sandbox_binaries() {
   [ -d "$PREBUILT_DIR" ] || return 0
@@ -71,7 +97,7 @@ restore_sandbox_binaries() {
     if ! have "$toolname"; then
       cp "$tool" "$INSTALL_DIR/$toolname"
       chmod +x "$INSTALL_DIR/$toolname"
-      if "$INSTALL_DIR/$toolname" --version >/dev/null 2>&1 || "$INSTALL_DIR/$toolname" version >/dev/null 2>&1; then
+      if tool_runs "$INSTALL_DIR/$toolname"; then
         repaired "missing $toolname" "restored from prebuilt" "true"
         echo "  restored $toolname from prebuilts"
       else
