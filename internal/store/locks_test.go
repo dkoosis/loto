@@ -464,8 +464,7 @@ func TestAcquireLocks_MultiFile_ConflictAbortsAtomically(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected conflict, got nil")
 	}
-	var mce *MultiConflictError
-	if !errors.As(err, &mce) {
+	if _, ok := errors.AsType[*MultiConflictError](err); !ok {
 		t.Fatalf("want *MultiConflictError, got %T", err)
 	}
 
@@ -697,8 +696,7 @@ func TestAcquireBlocksOnLiveSession(t *testing.T) {
 	bob := held
 	bob.OwnerUUID, bob.SessionUUID, bob.PID = tcBob, tcBob, 5555
 	_, err := s.AcquireLocks(ctx, []domain.LockRecord{bob}, liveProbe)
-	var mce *MultiConflictError
-	if !errors.As(err, &mce) {
+	if _, ok := errors.AsType[*MultiConflictError](err); !ok {
 		t.Fatalf("bob acquire over LIVE holder must conflict, got err=%v", err)
 	}
 }

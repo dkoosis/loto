@@ -8,7 +8,7 @@
 # ✗ SHELL := bash here — it would leak into every consumer's recipes, and .SHELLFLAGS
 # needs GNU make >= 3.82 (macOS ships 3.81).
 
-GOLANGCI_LINT_VER ?= v2.12.2
+GOLANGCI_LINT_VER ?= v2.14.0
 GO_ARCH_LINT_VER  ?= v1.15.0
 GOVULNCHECK_VER   ?= v1.1.4
 GOFUMPT_VER       ?= v0.9.2

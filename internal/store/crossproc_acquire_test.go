@@ -265,8 +265,7 @@ func crossProcRoleAcquire() crossProcVerdict {
 	if acqErr == nil {
 		return crossProcVerdict{Role: role, Outcome: crossProcWon, Owner: owner, PID: os.Getpid(), PPID: os.Getppid()}
 	}
-	var mce *MultiConflictError
-	if errors.As(acqErr, &mce) {
+	if mce, ok := errors.AsType[*MultiConflictError](acqErr); ok {
 		return crossProcVerdict{
 			Role: role, Outcome: crossProcConflict, Owner: owner, PID: os.Getpid(), PPID: os.Getppid(),
 			Err: acqErr.Error(), Blockers: blockerOwners(mce.Blockers),
@@ -523,8 +522,7 @@ func crossProcDoReclaimAcquire(role, dbPath, target, owner string) crossProcVerd
 	if acqErr == nil {
 		return crossProcVerdict{Role: role, Outcome: crossProcWon, Owner: owner, PID: os.Getpid(), PPID: os.Getppid()}
 	}
-	var mce *MultiConflictError
-	if errors.As(acqErr, &mce) {
+	if mce, ok := errors.AsType[*MultiConflictError](acqErr); ok {
 		return crossProcVerdict{
 			Role: role, Outcome: crossProcConflict, Owner: owner, PID: os.Getpid(), PPID: os.Getppid(),
 			Err: acqErr.Error(), Blockers: blockerOwners(mce.Blockers),

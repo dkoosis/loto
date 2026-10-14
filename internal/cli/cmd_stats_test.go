@@ -143,7 +143,7 @@ func TestDoctorFirstLineEqualsStatsFirstLine(t *testing.T) {
 	if statsOut == "" {
 		t.Fatalf("empty stats output, err=%q", errOut)
 	}
-	statsFirst := strings.SplitN(statsOut, "\n", 2)[0]
+	statsFirst, _, _ := strings.Cut(statsOut, "\n")
 	if !strings.HasPrefix(statsFirst, "enforcement-stats") && !strings.Contains(statsFirst, "enforcement-stats") {
 		t.Fatalf("stats' first line does not look like the triage line: %q", statsFirst)
 	}

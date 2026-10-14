@@ -51,8 +51,7 @@ func TestAcquire_ExclusiveBlocksShared(t *testing.T) {
 		t.Fatalf("alice exclusive: %v", err)
 	}
 	_, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe)
-	var mce *MultiConflictError
-	if !errors.As(err, &mce) {
+	if _, ok := errors.AsType[*MultiConflictError](err); !ok {
 		t.Fatalf("want MultiConflictError (exclusive blocks shared), got %v", err)
 	}
 }
