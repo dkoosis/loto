@@ -185,6 +185,12 @@ linters:
       - legacy
       - std-error-handling
     rules:
+      # gosec G703 (taint analysis, new in golangci-lint v2.14) traces the
+      # operator's own DB path into the store's file ops. That path is
+      # trusted config, not input, and every file the store opens derives from it.
+      - path: internal/store/
+        linters: [gosec]
+        text: G703
       # syscall.Stat_t.Nlink is uint16 on darwin, uint32 on linux/arm64, and
       # uint64 on linux/amd64 — the uint64() conversion two platforms need
       # reads as identity on linux/amd64. A nolint can't work: nolintlint
