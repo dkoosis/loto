@@ -19,6 +19,6 @@ gh pr comment <PR#> --body "@codex review"
 | security-adjacent (auth, input handling) | generated code |
 | large / sprawling change | reverts / cherry-picks of already-reviewed work |
 
-## macOS — every PR, in CI
+## macOS — every PR, locally
 
-CI runs linux + macOS on every PR and push (the repo is public, so hosted runners are free — dk, 2026-09-28). ✗ label, ✗ local darwin run to stand in for it.
+CI runs linux only (dk, 2026-10-07, #399). The local `make check` on dk's Mac, run before every ship, is the macOS proof. ✗ rent a macOS runner, ✗ ship without a local `make check`.

@@ -34,7 +34,7 @@ unpromoted work. The check is the backstop for branch-shaped publication.
 
 ‡ **Stacked PRs: merge children BEFORE deleting the parent branch.** Deleting a PR's base branch (e.g. `--delete-branch` on the parent) auto-CLOSES every PR stacked on it, and GitHub won't reopen a PR whose base is gone. Recovery: `git rebase --onto main <parent-tip-sha> <child>` to drop the now-squashed parent commit, force-push, open fresh PRs. Better: base stacked PRs on `main` from the start, or merge bottom-up before any branch delete. (#177→#179/#180 hit this; recovered as #181/#182.)
 
-‡ **CI = GitHub-hosted, linux + macOS on every PR/push**: `make check` then `make race`. Free because the repo is public. No self-hosted box; `mac-loto`/`trixi-loto` are retired.
+‡ **CI = GitHub-hosted, linux only, on every PR/push**: `make check` then `make race`. macOS is never rented from GitHub (dk, 2026-10-07, #399): the local `make check` on dk's Mac, which ships require before a PR opens, is the macOS proof. No self-hosted box; `mac-loto`/`trixi-loto` are retired.
 
 ‡ **Batch small fixes → one PR. Default: auto-batch.** ≥2 small/independent fixes in flight → ONE branch, ONE PR, one commit per fix — roll them up without asking. CI fires once at the PR (+ once on merge), NOT once per fix; a PR-per-one-liner multiplies CI runs for no benefit. Each fix stays its own commit (traceable); PR body lists them. ✗ mix a risky change in with trivial ones (drags the whole PR's review bar up).
 
