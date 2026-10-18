@@ -144,6 +144,27 @@ exec sh $WORK/run-fix.sh $WORK/.git/own-split-refusal.txt
 loto status
 ! stdout 'a\.go'
 
+# ── 5. a root session in a linked checkout is named its nested rows ───────
+# It may sweep its own subagents' checkouts, but a row in the main checkout
+# refuses the sweep, and the fix it gets is not the main-checkout one: it
+# names its own and its nested rows, and leaves the main checkout's alone.
+exec git -C $WORK/../5dr1-beside worktree add -q $WORK/../5dr1-beside/.claude/worktrees/agent-c -b agent-c
+cd $WORK/../5dr1-beside/.claude/worktrees/agent-c
+touch n.go
+loto lock n.go -t 'hook: admitted Edit-family write'
+cd $WORK
+loto lock c.go -t 'root work'
+cd $WORK/../5dr1-beside
+! loto unlock --all
+stderr 'identity ambiguous count=1'
+stderr '^\(cd .*agent-c'' && loto unlock ''n.go''\)$'
+! stderr 'loto unlock --all$'
+cp stderr $WORK/.git/linked-root-refusal.txt
+exec sh $WORK/run-fix.sh $WORK/.git/linked-root-refusal.txt
+loto status
+! stdout 'n\.go'
+stdout 'c\.go'
+
 -- run-fix.sh --
 # Pull the ```bash block out of a captured refusal and run it as printed.
 sed -n '/^```bash$/,/^```$/p' "$1" | sed '1d;$d' >"$1.sh"

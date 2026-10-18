@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -289,11 +290,19 @@ func expectedHolderCheckouts(rows []domain.LockRecord, expect holdRefList, own s
 // WHOLE holder set the CAS in that checkout will compare against: every row
 // domain.SameWorktree puts there, a row with no recorded checkout included,
 // since the break's own scoping keeps it (scopeToWorktree).
+//
+// ‡ A row with no recorded checkout goes on the FIRST line only. Every
+// checkout's CAS counts it, and the first break deletes it with its own
+// rows (deleteOwnedTx's filter matches an empty worktree), so a later line
+// still naming it would find it gone and refuse.
 func splitBreakLines(rows []domain.LockRecord, others []string, t domain.Target, intent string) []string {
 	out := make([]string, 0, len(others))
-	for _, wt := range others {
+	for n, wt := range others {
 		var refs []domain.HoldRef
 		for i := range rows {
+			if rows[i].Worktree == "" && n > 0 {
+				continue
+			}
 			if domain.SameWorktree(wt, rows[i].Worktree) {
 				refs = append(refs, domain.HoldRef{Owner: rows[i].OwnerUUID, Epoch: rows[i].Epoch})
 			}
@@ -432,7 +441,7 @@ func unlockAll(rt *runtime, onlyIntent string, stdout, stderr io.Writer) int {
 	}
 	if len(rel.Ambiguous) > 0 {
 		fix := ambiguousFix{
-			own:        ownWorktreeLocks(rt, sessionFilter, onlyIntent),
+			own:        reachedLocks(rt, sessionFilter, onlyIntent, scope),
 			onlyIntent: onlyIntent,
 			// Naming another checkout's rows as commands to run is safe only
 			// where the caller cannot be a sibling: a root session standing in
@@ -479,7 +488,7 @@ func warnPeerIntents(stdout io.Writer, rel store.SessionRelease) {
 // ambiguousFix is what renderAmbiguousRefusal needs to print a fix that
 // succeeds.
 type ambiguousFix struct {
-	own        []string // canonicals this session holds from the caller's own checkout
+	own        map[string][]string // checkout → canonicals of the rows the caller's scope reaches
 	onlyIntent string
 	root       bool // the caller may be handed commands for the other checkouts' rows
 }
@@ -521,9 +530,9 @@ func renderAmbiguousRefusal(stderr io.Writer, worktree string, holds []store.Amb
 		}
 		lines = append(lines, sweep)
 	} else {
-		fmt.Fprintln(stderr, "ℹ the rows above may be a sibling subagent's: leave them; release this checkout's own rows by path")
-		if len(fix.own) > 0 {
-			lines = append(lines, cdUnlock(worktree, "unlock", fix.own))
+		fmt.Fprintln(stderr, "ℹ the rows above may be a sibling subagent's: leave them; release your own rows by path")
+		for _, wt := range slices.Sorted(maps.Keys(fix.own)) {
+			lines = append(lines, cdUnlock(wt, "unlock", fix.own[wt]))
 		}
 	}
 	if len(lines) == 0 {
@@ -574,26 +583,34 @@ func cdUnlock(checkout, verb string, paths []string) string {
 	return fmt.Sprintf("(cd %s && loto %s %s)", shellQuote(checkout), verb, strings.Join(quoted, " "))
 }
 
-// ownWorktreeLocks lists, sorted and deduplicated, the canonicals a refused
-// sweep would have released from the caller's own checkout. Read outside the
-// refused transaction: it only feeds a printed fix, and a plain `loto
-// unlock` re-decides each path under its own lock anyway.
-func ownWorktreeLocks(rt *runtime, session domain.SessionUUID, onlyIntent string) []string {
+// reachedLocks groups, by checkout, the canonicals of the rows a refused
+// sweep would have released: the caller's own checkout's (keyed by its
+// toplevel), and each nested subagent checkout's when scope reaches it.
+// Read outside the refused transaction: it only feeds a printed fix, and a
+// plain `loto unlock` re-decides each path under its own lock anyway.
+func reachedLocks(rt *runtime, session domain.SessionUUID, onlyIntent string, scope store.WorktreeScope) map[string][]string {
 	locks, err := rt.Store.ListLocks(rt.Ctx)
 	if err != nil {
 		return nil
 	}
-	var out []string
+	out := map[string][]string{}
 	for i := range locks {
 		l := &locks[i]
 		if string(l.OwnerUUID) != rt.Agent.UUID || (session != "" && l.SessionUUID != session) ||
-			(onlyIntent != "" && l.Intent != onlyIntent) || !domain.SameWorktree(rt.RepoTop, l.Worktree) {
+			(onlyIntent != "" && l.Intent != onlyIntent) || !scope.Reaches(l.Worktree) {
 			continue
 		}
-		out = append(out, l.Target.Canonical)
+		wt := l.Worktree
+		if domain.SameWorktree(rt.RepoTop, wt) {
+			wt = rt.RepoTop
+		}
+		out[wt] = append(out[wt], l.Target.Canonical)
 	}
-	slices.Sort(out)
-	return slices.Compact(out)
+	for wt, paths := range out {
+		slices.Sort(paths)
+		out[wt] = slices.Compact(paths)
+	}
+	return out
 }
 
 // inMainCheckout reports whether repoTop is the repo's main checkout rather
