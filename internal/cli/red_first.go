@@ -31,18 +31,20 @@ import (
 // fix is not, and the test runs there. Nothing in the shared tree is written.
 
 // redFirstInfo names the route on the ℹ row above its fix block.
-const redFirstInfo = "ℹ red-first=throwaway-worktree — run the test against HEAD plus only the new test; the shared tree is not touched"
+const redFirstInfo = "ℹ red-first=throwaway-worktree — run the test against HEAD plus only the new test; <new-test-file> is repo-relative, <test-command> runs at the repo root; the shared tree is not touched"
 
 // redFirstRoute is the route, one shell line per element, printed verbatim
 // inside a ```bash block. The two <placeholders> are the only edits a reader
 // makes; cmd/loto/testdata/script/guard_red_first_route.txtar runs the
-// printed lines with them filled in. The test line is a subshell, so a red
-// test (the point of the exercise) still reaches the remove line.
+// printed lines with them filled in. Both paths are anchored at $top, so the
+// route works from any subdirectory. The test line is a subshell, so a red
+// test (the point of the exercise) still reaches the remove line, and the
+// last line hands back the test's own exit status: red stays nonzero.
 var redFirstRoute = []string{
-	`red=$(mktemp -d) && git worktree add -q --detach "$red" HEAD`,
-	`cp <new-test-file> "$red/<new-test-file>"`,
-	`(cd "$red" && <test-command>)`,
-	`git worktree remove -f "$red"`,
+	`top=$(git rev-parse --show-toplevel) && red=$(mktemp -d) && git worktree add -q --detach "$red" HEAD`,
+	`cp "$top/<new-test-file>" "$red/<new-test-file>"`,
+	`(cd "$red" && <test-command>); rc=$?`,
+	`git worktree remove -f "$red"; (exit "$rc")`,
 }
 
 // fileCheckoutFlag is git's post-checkout $3 for a file checkout.

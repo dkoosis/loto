@@ -52,18 +52,19 @@ cp check_test.src check_test.sh
 ! exec git stash
 stderr 'shape=stash'
 stderr 'ℹ red-first=throwaway-worktree'
-stderr '^red=\$\(mktemp -d\) && git worktree add -q --detach "\$red" HEAD$'
-stderr '^cp <new-test-file> "\$red/<new-test-file>"$'
-stderr '^\(cd "\$red" && <test-command>\)$'
-stderr '^git worktree remove -f "\$red"$'
+stderr '^top=\$\(git rev-parse --show-toplevel\) && red=\$\(mktemp -d\) && git worktree add -q --detach "\$red" HEAD$'
+stderr '^cp "\$top/<new-test-file>" "\$red/<new-test-file>"$'
+stderr '^\(cd "\$red" && <test-command>\); rc=\$\?$'
+stderr '^git worktree remove -f "\$red"; \(exit "\$rc"\)$'
 stderr '^# or: loto claim \. -t "<reason>"$'
 cp stderr .git/stash-refusal.txt
 
-# The route as printed: the test is red against HEAD, and the shared tree —
+# The route as printed: the test is red against HEAD, the route exits with
+# the test's nonzero status (not the cleanup's 0), and the shared tree —
 # bob's fix, his untracked test — is exactly as it was.
 exec git diff
 cp stdout .git/before.diff
-exec sh run-route.sh .git/stash-refusal.txt
+! exec sh run-route.sh .git/stash-refusal.txt
 stdout '^RED$'
 exec git diff
 cmp stdout .git/before.diff
@@ -79,15 +80,26 @@ exec git worktree list --porcelain
 exec git checkout -- impl.txt
 stderr '^⚠ shared-tree-file-checkout live=2$'
 stderr 'ℹ red-first=throwaway-worktree'
-stderr '^\(cd "\$red" && <test-command>\)$'
+stderr '^\(cd "\$red" && <test-command>\); rc=\$\?$'
 cp stderr .git/checkout-advisory.txt
 cmp impl.txt broken.txt
 
 cp fixed.txt impl.txt
 exec git diff
 cp stdout .git/before.diff
-exec sh run-route.sh .git/checkout-advisory.txt
+! exec sh run-route.sh .git/checkout-advisory.txt
 stdout '^RED$'
+exec git diff
+cmp stdout .git/before.diff
+
+# Run from a subdirectory, the route still copies the repo-relative test to
+# the same place in the worktree and runs it at the root.
+mkdir sub
+cd sub
+! exec sh ../run-route.sh ../.git/checkout-advisory.txt
+stdout '^RED$'
+! stderr 'No such file'
+cd ..
 exec git diff
 cmp stdout .git/before.diff
 
@@ -110,5 +122,5 @@ grep -q fixed impl.txt && echo GREEN || { echo RED; exit 1; }
 # Pull the ```bash block out of a captured loto message, drop its comment
 # lines, fill the two placeholders, and run it exactly as a reader would.
 sed -n '/^```bash$/,/^```$/p' "$1" | sed '1d;$d' | grep -v '^#' |
-	sed -e 's|<new-test-file>|check_test.sh|g' -e 's|<test-command>|sh check_test.sh|g' >.git/route.sh
-sh .git/route.sh
+	sed -e 's|<new-test-file>|check_test.sh|g' -e 's|<test-command>|sh check_test.sh|g' >"$(git rev-parse --git-dir)/route.sh"
+sh "$(git rev-parse --git-dir)/route.sh"
