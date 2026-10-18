@@ -1,0 +1,126 @@
+# loto-f8xt: in a checkout two live sessions share, a stash (refused by the
+# I1 ref guard) and a checkout -- / restore (advised by post-checkout) both
+# name the no-stash red-first route, and the route, run as printed with its
+# two placeholders filled in, runs the test against HEAD without touching
+# the shared tree. With one live session nothing is printed.
+#
+# Which hook sees what, measured on git 2.55.0: stash runs no post-checkout;
+# reference-transaction sees it as a refs/stash update. checkout -- and
+# restore run post-checkout with HEAD HEAD 0.
+
+exec git config core.hooksPath $REALHOOKS
+
+# ── fixture: impl.txt is broken at HEAD; bob's uncommitted fix and new test ─
+exec git branch -m base
+cp broken.txt impl.txt
+exec git add impl.txt
+exec git commit -m seed
+
+env LOTO_AGENT_ID=$BOB
+env CLAUDE_CODE_SESSION_ID=sess-bob
+loto whoami
+
+# ── one live session: nothing printed, stash passes ───────────────────────
+cp fixed.txt impl.txt
+exec git checkout -- impl.txt
+! stderr 'shared-tree-file-checkout'
+! stderr 'red-first'
+cp fixed.txt impl.txt
+exec git restore impl.txt
+! stderr 'red-first'
+cp fixed.txt impl.txt
+exec git stash
+! stderr 'red-first'
+exec git stash pop
+! stderr 'red-first'
+
+# ── two live sessions ─────────────────────────────────────────────────────
+# Alice records from another process (loto-2jgn: one process is one peer).
+spawnpid ALICEPID
+env SESSIONPID=$LOTO_PID
+env LOTO_PID=$ALICEPID
+env LOTO_AGENT_ID=$ALICE
+env CLAUDE_CODE_SESSION_ID=sess-alice
+loto whoami
+env LOTO_PID=$SESSIONPID
+env LOTO_AGENT_ID=$BOB
+env CLAUDE_CODE_SESSION_ID=sess-bob
+
+cp check_test.src check_test.sh
+
+# 1. stash: refused, and the refusal leads its fix block with the route.
+! exec git stash
+stderr 'shape=stash'
+stderr 'ℹ red-first=throwaway-worktree'
+stderr '^top=\$\(git rev-parse --show-toplevel\) && red=\$\(mktemp -d\) && git worktree add -q --detach "\$red" HEAD$'
+stderr '^cp "\$top/<new-test-file>" "\$red/<new-test-file>"$'
+stderr '^\(cd "\$red" && <test-command>\); rc=\$\?$'
+stderr '^git worktree remove -f "\$red"; \(exit "\$rc"\)$'
+stderr '^# or: loto claim \. -t "<reason>"$'
+cp stderr .git/stash-refusal.txt
+
+# The route as printed: the test is red against HEAD, the route exits with
+# the test's nonzero status (not the cleanup's 0), and the shared tree —
+# bob's fix, his untracked test — is exactly as it was.
+exec git diff
+cp stdout .git/before.diff
+! exec sh run-route.sh .git/stash-refusal.txt
+stdout '^RED$'
+exec git diff
+cmp stdout .git/before.diff
+exec git status --porcelain --untracked-files=no
+stdout '^ M impl.txt$'
+exists check_test.sh
+exec git worktree list --porcelain
+! stdout 'detached'
+! exec git rev-parse --verify --quiet refs/stash
+
+# 2. checkout -- : the file is overwritten (advisory, never refused), and the
+# advisory names the same route.
+exec git checkout -- impl.txt
+stderr '^⚠ shared-tree-file-checkout live=2$'
+stderr 'ℹ red-first=throwaway-worktree'
+stderr '^\(cd "\$red" && <test-command>\); rc=\$\?$'
+cp stderr .git/checkout-advisory.txt
+cmp impl.txt broken.txt
+
+cp fixed.txt impl.txt
+exec git diff
+cp stdout .git/before.diff
+! exec sh run-route.sh .git/checkout-advisory.txt
+stdout '^RED$'
+exec git diff
+cmp stdout .git/before.diff
+
+# Run from a subdirectory, the route still copies the repo-relative test to
+# the same place in the worktree and runs it at the root.
+mkdir sub
+cd sub
+! exec sh ../run-route.sh ../.git/checkout-advisory.txt
+stdout '^RED$'
+! stderr 'No such file'
+cd ..
+exec git diff
+cmp stdout .git/before.diff
+
+# 3. restore: same advisory.
+exec git restore impl.txt
+stderr '^⚠ shared-tree-file-checkout live=2$'
+stderr 'red-first=throwaway-worktree'
+
+# A branch switch's own path is unchanged: still refused by I1, no advisory.
+! exec git checkout -b y
+! stderr 'shared-tree-file-checkout'
+
+-- broken.txt --
+broken
+-- fixed.txt --
+fixed
+-- check_test.src --
+grep -q fixed impl.txt && echo GREEN || { echo RED; exit 1; }
+-- run-route.sh --
+# Pull the ```bash block out of a captured loto message, drop its comment
+# lines, fill the two placeholders, and run it exactly as a reader would.
+sed -n '/^```bash$/,/^```$/p' "$1" | sed '1d;$d' | grep -v '^#' |
+	sed -e 's|<new-test-file>|check_test.sh|g' -e 's|<test-command>|sh check_test.sh|g' >"$(git rev-parse --git-dir)/route.sh"
+sh "$(git rev-parse --git-dir)/route.sh"

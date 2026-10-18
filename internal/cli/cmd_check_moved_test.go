@@ -350,3 +350,34 @@ func TestCollapseMovedRows_SortedByPath(t *testing.T) {
 		t.Fatalf("rows must sort by path: %+v", rows)
 	}
 }
+
+// loto-f8xt: a file checkout (checkout -- / restore: same HEAD twice, flag 0)
+// in a checkout two live sessions share prints the shared-tree advisory and
+// the red-first route; with one live session, the plain pass line.
+func TestCheckMoved_FileCheckoutUnderTwoSessionsNamesRedFirstRoute(t *testing.T) {
+	repo := withTempProject(t)
+	a := pinAgent(t)
+	_, head := twoHeads(t, repo)
+	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
+
+	if got, code := movedRun(t, head, head, fileCheckoutFlag); code != 0 || got != tcMovedClean {
+		t.Errorf("one live session: code=%d out=%q, want the pass line", code, got)
+	}
+
+	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
+	got, code := movedRun(t, head, head, fileCheckoutFlag)
+	if code != 0 {
+		t.Fatalf("advisory must never block: exit %d", code)
+	}
+	want := "⚠ shared-tree-file-checkout live=2\n" +
+		"ℹ a checkout -- or restore overwrote working-tree files a live peer may be editing; git does not name them\n" +
+		redFirstInfo + "\n```bash\n" + strings.Join(redFirstRoute, "\n") + "\n```\n"
+	if got != want {
+		t.Errorf("two live sessions:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+
+	// A branch checkout with the same HEAD on both sides moved nothing.
+	if got, _ := movedRun(t, head, head, "1"); got != tcMovedClean {
+		t.Errorf("branch flag, same head: out=%q, want the pass line", got)
+	}
+}

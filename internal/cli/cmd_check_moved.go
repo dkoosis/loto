@@ -139,9 +139,9 @@ func printMoved(stdout io.Writer, rows []movedRow) {
 // `loto check --moved <old-head> <new-head> [<is-branch-checkout>]`.
 //
 // The third operand is git's own post-checkout flag (1 = branch checkout,
-// 0 = file checkout). It is accepted and ignored rather than refused, so the
-// hook can forward "$@" verbatim: a file checkout passes the same HEAD
-// twice, which diffs to nothing on its own.
+// 0 = file checkout), forwarded verbatim by the hook. A file checkout passes
+// the same HEAD twice, which diffs to nothing; flag 0 there routes to
+// runFileCheckoutAdvisory (loto-f8xt).
 //
 // EVERY failure path exits 0 with a stderr notice. An advisory that turns a
 // detached HEAD, a shallow clone, or an unreachable store into a non-zero
@@ -154,6 +154,12 @@ func runCheckMoved(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	oldHead, newHead := args[0], args[1]
 	if oldHead == newHead {
+		// A file checkout (checkout -- / restore) moves no HEAD, so there is
+		// no diff to read; it gets the shared-tree advisory instead
+		// (loto-f8xt). A zero HEAD is an unborn branch: no route to name.
+		if len(args) == 3 && args[2] == fileCheckoutFlag && !isZeroOID(oldHead) {
+			return runFileCheckoutAdvisory(ctx, stdout, stderr)
+		}
 		printMoved(stdout, nil)
 		return 0
 	}

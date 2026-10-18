@@ -9,8 +9,13 @@
 # stops the chain and would keep 50-beads from running, for a warning.
 #
 # git's argv: $1 previous HEAD, $2 new HEAD, $3 1=branch checkout 0=file
-# checkout. All three are forwarded verbatim; `loto check --moved` accepts
-# and ignores the third.
+# checkout. All three are forwarded verbatim; `loto check --moved` reads the
+# third to tell a file checkout (same HEAD twice) from a no-op.
+#
+# Any ⚠ header is forwarded: `⚠ moved-peer-locks` for a branch switch that
+# rewrote a peer's locked path, `⚠ shared-tree-file-checkout` for a checkout
+# -- or restore under two live sessions, which names the no-stash red-first
+# route (loto-f8xt).
 #
 # Silence is the pass signal. The command prints `✓ moved-peer-locks count=0`
 # when no peer holds anything the move touched, and this drops that line:
@@ -33,7 +38,7 @@ fi
 _loto_moved_out=$(loto check --moved "$1" "$2" "$3") || exit 0
 
 case "$_loto_moved_out" in
-"⚠ moved-peer-locks"*) echo "$_loto_moved_out" >&2 ;;
+"⚠ "*) echo "$_loto_moved_out" >&2 ;;
 esac
 
 exit 0

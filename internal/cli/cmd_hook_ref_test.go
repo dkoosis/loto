@@ -233,9 +233,14 @@ func TestRunHookRef_StashAndBranchDeleteRefused(t *testing.T) {
 	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
 	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
 
-	for _, tc := range []struct{ name, txn, shape string }{
-		{"stash", tcOIDZero + " " + tcOIDB + " refs/stash\n", refShapeStash},
-		{"branch delete", tcOIDZero + " " + tcOIDZero + " refs/heads/x\n", refShapeBranchDelete},
+	for _, tc := range []struct {
+		name, txn, shape string
+		redFirst         bool
+	}{
+		// A stash is the red-first check's first step, so its refusal names
+		// the route that needs none (loto-f8xt); a branch delete is not.
+		{"stash", tcOIDZero + " " + tcOIDB + " refs/stash\n", refShapeStash, true},
+		{"branch delete", tcOIDZero + " " + tcOIDZero + " refs/heads/x\n", refShapeBranchDelete, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, _, stderr := runRefHook(t, tcPhasePrepared, tc.txn)
@@ -244,6 +249,15 @@ func TestRunHookRef_StashAndBranchDeleteRefused(t *testing.T) {
 			}
 			if !strings.Contains(stderr, "shape="+tc.shape) {
 				t.Errorf("refusal must name the shape %q; got:\n%s", tc.shape, stderr)
+			}
+			for _, line := range append([]string{redFirstInfo}, redFirstRoute...) {
+				if got := strings.Contains(stderr, line+"\n"); got != tc.redFirst {
+					t.Errorf("refusal carries %q = %v, want %v; got:\n%s", line, got, tc.redFirst, stderr)
+				}
+			}
+			// The route leads the block, so the claim is the alternative.
+			if got := strings.Contains(stderr, "# or: loto claim"); got != tc.redFirst {
+				t.Errorf("claim line '# or:' prefixed = %v, want %v; got:\n%s", got, tc.redFirst, stderr)
 			}
 		})
 	}
