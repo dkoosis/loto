@@ -100,6 +100,9 @@ type ReleaseResult struct {
 	// dead holder in created_at,owner order (StateReclaimedStale).
 	Owner string
 	Mode  string // mode of the released row; "" → exclusive (loto-k5el.2)
+	// Worktree is set only on a row a session sweep released from a checkout
+	// other than the caller's own (WorktreeScope.Nested, loto-5dr1).
+	Worktree string
 }
 
 // BreakResult is the per-target outcome from BreakLocks. Err is nil on success;

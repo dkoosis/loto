@@ -1,0 +1,119 @@
+# loto-5dr1: a session releases its own locks across worktrees, and a
+# sibling's locks stay untouched.
+#
+# One session (owner $ALICE, session sess-root) runs Agent subagents with
+# `isolation: worktree`: Claude Code puts their checkouts INSIDE the main one,
+# at .claude/worktrees/agent-<id>, and their writes take locks under the
+# session's own ids, stamped with the subagent's checkout. From the main
+# checkout, one `loto unlock --all` releases them all. From one subagent's
+# checkout, `--all` still refuses over a sibling's rows (loto-19bz), and its
+# fix line releases only its own.
+
+exec git commit --allow-empty -m seed
+exec git worktree add -q $WORK/.claude/worktrees/agent-a -b agent-a
+exec git worktree add -q $WORK/.claude/worktrees/agent-b -b agent-b
+
+env LOTO_AGENT_ID=$ALICE
+env CLAUDE_CODE_SESSION_ID=sess-root
+env CLAUDE_CODE_CHILD_SESSION=1
+
+# ── 1. the root session, from the main checkout, releases its subagents' ──
+cd $WORK/.claude/worktrees/agent-a
+touch a.go
+loto lock a.go -t 'hook: admitted Edit-family write'
+cd $WORK/.claude/worktrees/agent-b
+touch b.go
+loto lock b.go -t 'hook: admitted Edit-family write'
+cd $WORK
+touch c.go
+env CLAUDE_CODE_CHILD_SESSION=
+loto lock c.go -t 'root work'
+
+loto unlock --all
+stdout 'count=3'
+stdout '^✓ target=a.go worktree=.claude/worktrees/agent-a$'
+stdout '^✓ target=b.go worktree=.claude/worktrees/agent-b$'
+stdout '^✓ target=c.go$'
+loto status
+! stdout 'a.go|b.go|c.go'
+
+# ── 2. a subagent's --all never reaches its sibling ───────────────────────
+env CLAUDE_CODE_CHILD_SESSION=1
+cd $WORK/.claude/worktrees/agent-a
+loto lock a.go -t 'hook: admitted Edit-family write'
+cd $WORK/.claude/worktrees/agent-b
+loto lock b.go -t 'hook: admitted Edit-family write'
+
+cd $WORK/.claude/worktrees/agent-a
+! loto unlock --all
+stderr 'identity ambiguous count=1'
+stderr '  lock b.go worktree=.*agent-b$'
+stderr 'may be a sibling subagent''s: leave them'
+stderr '^\(cd .*agent-a'' && loto unlock ''a.go''\)$'
+! stderr 'agent-b'' && loto'
+! stderr '^loto unlock --all$'
+cp stderr $WORK/.git/sibling-refusal.txt
+
+# The fix, run as printed, releases a.go and leaves the sibling's b.go held.
+exec sh $WORK/run-fix.sh $WORK/.git/sibling-refusal.txt
+loto status
+! stdout 'a\.go'
+stdout 'b\.go'
+
+# The env signal lost (a root-looking shell in the subagent's checkout): the
+# sibling is still out of reach, because agent-b is not inside agent-a.
+env CLAUDE_CODE_CHILD_SESSION=
+loto lock a.go -t 'hook: admitted Edit-family write'
+! loto unlock --all
+stderr 'identity ambiguous count=1'
+! stderr 'agent-b'' && loto'
+loto status
+stdout 'b\.go'
+loto unlock a.go
+
+# A subagent WITHOUT its own checkout shares the main one; its shell says so,
+# and its --all does not take the isolated siblings' rows nested there.
+env CLAUDE_CODE_CHILD_SESSION=1
+cd $WORK
+! loto unlock --all
+stderr 'identity ambiguous count=1'
+stderr 'may be a sibling subagent''s'
+loto status
+stdout 'b\.go'
+env CLAUDE_CODE_CHILD_SESSION=
+
+# ── 3. from the main checkout, a checkout BESIDE it is named, not swept ───
+exec git worktree add -q $WORK/../5dr1-beside -b beside
+cd $WORK/../5dr1-beside
+touch x.go
+loto lock x.go -t 'root work beside'
+cd $WORK
+! loto unlock --all
+stderr 'identity ambiguous count=1'
+stderr 'every row above is this session''s'
+stderr '^\(cd .*5dr1-beside'' && loto unlock ''x.go''\)$'
+stderr '^loto unlock --all$'
+cp stderr $WORK/.git/beside-refusal.txt
+exec sh $WORK/run-fix.sh $WORK/.git/beside-refusal.txt
+stdout 'count=1'
+loto status
+! stdout 'a\.go|b\.go|x\.go'
+
+# ── 4. --force --expect-holder breaks a holder status shows elsewhere ─────
+cd $WORK/.claude/worktrees/agent-a
+loto lock a.go -t 'hook: admitted Edit-family write'
+cd $WORK
+exec sh $WORK/break.sh a.go
+stdout '✓ broken'
+! stderr 'holder-changed'
+loto status
+! stdout 'a\.go'
+
+-- run-fix.sh --
+# Pull the ```bash block out of a captured refusal and run it as printed.
+sed -n '/^```bash$/,/^```$/p' "$1" | sed '1d;$d' >"$1.sh"
+sh -e "$1.sh"
+-- break.sh --
+# Read the holder token off `loto status` the way an agent would, then break.
+tok=$(loto status "$1" | sed -n 's/.*owner=\([^ ]*\) epoch=\([0-9]*\).*/\1@\2/p' | head -n 1)
+loto unlock "$1" --force -t 'subagent finished' --expect-holder "$tok"

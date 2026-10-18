@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/identity"
 	"loto/internal/render"
 	"loto/internal/store"
 )
@@ -176,6 +177,18 @@ func breakTargets(rt *runtime, args []string, intent, repoTop string, expect hol
 	if code != 0 {
 		return code
 	}
+	// The checkout the break acts in: the caller's own, unless the CAS names
+	// a holder status shows in exactly one other checkout (loto-5dr1).
+	st, worktree := rt.Store, rt.RepoTop
+	if len(expect) > 0 && len(targets) == 1 {
+		wt, code := expectedHolderWorktree(rt, targets[0], expect, intent, stderr)
+		if code != 0 {
+			return code
+		}
+		if wt != "" {
+			st, worktree = rt.Store.InWorktree(wt), wt
+		}
+	}
 	// Snapshot every current holder BEFORE the break (loto-sblu). BreakLocks
 	// deletes the lock rows — and gc-sweeps their tags — inside its own
 	// transaction, so this is the only chance to learn who is about to be
@@ -186,7 +199,7 @@ func breakTargets(rt *runtime, args []string, intent, repoTop string, expect hol
 			// Same scope BreakLocks applies: a sibling worktree's row is not
 			// broken, so it is not reported as dispossessed (loto-3eq6).
 			before[targets[i].Canonical] = slices.DeleteFunc(holders, func(l domain.LockRecord) bool {
-				return !domain.SameWorktree(rt.RepoTop, l.Worktree)
+				return !domain.SameWorktree(worktree, l.Worktree)
 			})
 		}
 	}
@@ -207,7 +220,7 @@ func breakTargets(rt *runtime, args []string, intent, repoTop string, expect hol
 	// --force ORPHANS tags (gc-deletes them) rather than acking, by design
 	// (edge #6, release-ack vs break-orphan). Force is the dead-holder escape
 	// hatch, not a voluntary "you can go now" — the waiter retries at cycle-end.
-	results, err := rt.Store.BreakLocks(rt.Ctx, targets, domain.AgentUUID(rt.Agent.UUID), store.BreakForce, intent, rt.liveProbe(), expectations)
+	results, err := st.BreakLocks(rt.Ctx, targets, domain.AgentUUID(rt.Agent.UUID), store.BreakForce, intent, rt.liveProbe(), expectations)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
@@ -215,6 +228,50 @@ func breakTargets(rt *runtime, args []string, intent, repoTop string, expect hol
 	exit := render.EmitBreakResults(stdout, stderr, results)
 	notifyDispossessed(rt, intent, time.Now(), before, results, stdout)
 	return exit
+}
+
+// expectedHolderWorktree finds the checkout whose row on t the CAS names.
+// `loto status` lists every checkout's rows and prints owner@epoch with no
+// checkout, so a holder read there and stated back from the main checkout
+// used to find nothing in the caller's own checkout: holder-changed,
+// actual=none, for a lock status was showing (loto-5dr1).
+//
+// Returns "" to break in the caller's own checkout: a named holder sits
+// there, or none sits anywhere (the CAS then reports holder-changed as
+// before). Returns the one other checkout every named holder sits in. Named
+// holders spread over two or more other checkouts cannot be one break: it
+// refuses, exit 2, naming the command per checkout.
+func expectedHolderWorktree(rt *runtime, t domain.Target, expect holdRefList, intent string, stderr io.Writer) (string, int) {
+	rows, err := rt.Store.LocksAt(rt.Ctx, t)
+	if err != nil {
+		return "", 0
+	}
+	var others []string
+	for i := range rows {
+		r := &rows[i]
+		if !slices.Contains(expect, domain.HoldRef{Owner: r.OwnerUUID, Epoch: r.Epoch}) {
+			continue
+		}
+		if domain.SameWorktree(rt.RepoTop, r.Worktree) {
+			return "", 0
+		}
+		others = append(others, r.Worktree)
+	}
+	slices.Sort(others)
+	others = slices.Compact(others)
+	switch len(others) {
+	case 0:
+		return "", 0
+	case 1:
+		return others[0], 0
+	}
+	fmt.Fprintf(stderr, "✗ expect-holder-split count=%d: the named holders sit in %d checkouts; break each from its own\n", len(expect), len(others))
+	fmt.Fprintln(stderr, "```bash")
+	for _, wt := range others {
+		fmt.Fprintf(stderr, "(cd %s && loto unlock %s --force -t %s --expect-holder <owner@epoch held there>)\n", shellQuote(wt), shellQuote(t.Canonical), shellQuote(intent))
+	}
+	fmt.Fprintln(stderr, "```")
+	return "", 2
 }
 
 // notifyDispossessed tells whoever a successful --force break just dispossessed
@@ -317,13 +374,30 @@ func unlockAll(rt *runtime, onlyIntent string, stdout, stderr io.Writer) int {
 	// value across sibling subagents sharing a parent Claude Code session's
 	// env (loto-19bz). Not the branch — a branch switch in one worktree must
 	// not make its own locks foreign (Codex #371).
-	rel, err := rt.Store.ReleaseBySession(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), sessionFilter, onlyIntent, rt.RepoTop)
+	//
+	// The one widening is Nested (loto-5dr1): a root session's sweep also
+	// takes its rows from checkouts INSIDE its own — the ones Claude Code
+	// makes for its Agent subagents with `isolation: worktree`. It needs a
+	// pinned session (an owner-only sweep could take another session's rows)
+	// and a shell that is not a subagent's; and even if that env signal is
+	// lost, sibling checkouts are never nested inside one another, so one
+	// sibling's sweep still cannot reach another's (store.WorktreeScope).
+	scope := store.WorktreeScope{Own: rt.RepoTop, Nested: rt.SessionPinned && !identity.InSubagentShell()}
+	rel, err := rt.Store.ReleaseBySession(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), sessionFilter, onlyIntent, scope)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
 	if len(rel.Ambiguous) > 0 {
-		return renderAmbiguousRefusal(stderr, rt.RepoTop, rel.Ambiguous)
+		fix := ambiguousFix{
+			own:        ownWorktreeLocks(rt, sessionFilter, onlyIntent),
+			onlyIntent: onlyIntent,
+			// Naming another checkout's rows as commands to run is safe only
+			// where the caller cannot be a sibling: a root session standing in
+			// the repo's main checkout, which no isolated subagent ever is.
+			root: scope.Nested && inMainCheckout(rt.Ctx, rt.RepoTop),
+		}
+		return renderAmbiguousRefusal(stderr, rt.RepoTop, rel.Ambiguous, fix)
 	}
 
 	// Warn when an UNFILTERED sweep actually spanned more than one intent —
@@ -360,16 +434,34 @@ func warnPeerIntents(stdout io.Writer, rel store.SessionRelease) {
 	fmt.Fprintf(stdout, "⚠ unlock-all-peer-intents count=%d intents=%s\n", len(rel.Results), strings.Join(quoted, ","))
 }
 
+// ambiguousFix is what renderAmbiguousRefusal needs to print a fix that
+// succeeds.
+type ambiguousFix struct {
+	own        []string // canonicals this session holds from the caller's own checkout
+	onlyIntent string
+	root       bool // the caller may be handed commands for the other checkouts' rows
+}
+
 // renderAmbiguousRefusal reports a `--all` sweep ReleaseBySession refused
 // outright (loto-19bz): at least one matching lock or claim was stamped from a
-// checkout other than the caller's own, so owner/session scoping alone could
-// not tell it apart from a sibling subagent's row sharing this call's
+// checkout the caller's scope does not reach, so owner/session scoping alone
+// could not tell it apart from a sibling subagent's row sharing this call's
 // identity. Nothing was released — deterministic order per design.md, exit 1
 // (advisory conflict), the holding checkout on every row.
-func renderAmbiguousRefusal(stderr io.Writer, worktree string, holds []store.AmbiguousHold) int {
+//
+// ‡ The fix block holds only commands that succeed (loto-5dr1: the old
+// `--only-intent` hint was refused the same way whenever the other rows
+// shared the intent). A caller that could be a sibling gets the release of
+// its own checkout's rows and nothing that reaches another's; a root session
+// in the main checkout also gets each other checkout's release, run from
+// inside it, and then the sweep.
+func renderAmbiguousRefusal(stderr io.Writer, worktree string, holds []store.AmbiguousHold, fix ambiguousFix) int {
 	sort.Slice(holds, func(i, j int) bool {
 		if holds[i].Kind != holds[j].Kind {
 			return holds[i].Kind > holds[j].Kind // locks first
+		}
+		if holds[i].Worktree != holds[j].Worktree {
+			return holds[i].Worktree < holds[j].Worktree
 		}
 		return holds[i].Canonical < holds[j].Canonical
 	})
@@ -377,6 +469,100 @@ func renderAmbiguousRefusal(stderr io.Writer, worktree string, holds []store.Amb
 	for _, h := range holds {
 		fmt.Fprintf(stderr, "  %s %s worktree=%s\n", h.Kind, relPath(h.Canonical), h.Worktree)
 	}
-	fmt.Fprintln(stderr, "  fix: loto unlock --all --only-intent \"<your intent>\"   (scopes the sweep to your own locks; leaves claims)")
+	var lines []string
+	if fix.root {
+		fmt.Fprintln(stderr, "ℹ every row above is this session's, held from a checkout outside this one: release each from inside it, then sweep")
+		lines = append(lines, otherWorktreeReleases(holds)...)
+		sweep := "loto unlock --all"
+		if fix.onlyIntent != "" {
+			sweep += " --only-intent " + shellQuote(fix.onlyIntent)
+		}
+		lines = append(lines, sweep)
+	} else {
+		fmt.Fprintln(stderr, "ℹ the rows above may be a sibling subagent's: leave them; release this checkout's own rows by path")
+		if len(fix.own) > 0 {
+			lines = append(lines, cdUnlock(worktree, "unlock", fix.own))
+		}
+	}
+	if len(lines) == 0 {
+		fmt.Fprintln(stderr, "ℹ this checkout holds none of the rows; nothing here to release")
+		return 1
+	}
+	fmt.Fprintln(stderr, "```bash")
+	for _, l := range lines {
+		fmt.Fprintln(stderr, l)
+	}
+	fmt.Fprintln(stderr, "```")
 	return 1
+}
+
+// otherWorktreeReleases is one command per (checkout, kind) in holds: the
+// per-path release, run from inside the checkout that holds the rows, which
+// is the scope a plain `loto unlock` and `loto unclaim` act in. holds is
+// already sorted by kind, then worktree, then path.
+func otherWorktreeReleases(holds []store.AmbiguousHold) []string {
+	var out []string
+	for i := 0; i < len(holds); {
+		j := i
+		var paths []string
+		for j < len(holds) && holds[j].Kind == holds[i].Kind && holds[j].Worktree == holds[i].Worktree {
+			paths = append(paths, holds[j].Canonical)
+			j++
+		}
+		verb := "unlock"
+		if holds[i].Kind == "claim" {
+			verb = "unclaim"
+		}
+		out = append(out, cdUnlock(holds[i].Worktree, verb, paths))
+		i = j
+	}
+	return out
+}
+
+// cdUnlock renders `(cd '<checkout>' && loto <verb> '<path>'...)`. Canonicals
+// are repo-relative, so they resolve from the checkout's toplevel whatever
+// the caller's own cwd is.
+func cdUnlock(checkout, verb string, paths []string) string {
+	quoted := make([]string, len(paths))
+	for i, p := range paths {
+		quoted[i] = shellQuote(p)
+	}
+	return fmt.Sprintf("(cd %s && loto %s %s)", shellQuote(checkout), verb, strings.Join(quoted, " "))
+}
+
+// ownWorktreeLocks lists, sorted and deduplicated, the canonicals a refused
+// sweep would have released from the caller's own checkout. Read outside the
+// refused transaction: it only feeds a printed fix, and a plain `loto
+// unlock` re-decides each path under its own lock anyway.
+func ownWorktreeLocks(rt *runtime, session domain.SessionUUID, onlyIntent string) []string {
+	locks, err := rt.Store.ListLocks(rt.Ctx)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for i := range locks {
+		l := &locks[i]
+		if string(l.OwnerUUID) != rt.Agent.UUID || (session != "" && l.SessionUUID != session) ||
+			(onlyIntent != "" && l.Intent != onlyIntent) || !domain.SameWorktree(rt.RepoTop, l.Worktree) {
+			continue
+		}
+		out = append(out, l.Target.Canonical)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// inMainCheckout reports whether repoTop is the repo's main checkout rather
+// than a linked worktree: its git dir is the common dir. Any git failure
+// answers false, the narrower fix.
+func inMainCheckout(ctx context.Context, repoTop string) bool {
+	if repoTop == "" {
+		return false
+	}
+	out, err := gitCmd(ctx, repoTop, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir")
+	if err != nil {
+		return false
+	}
+	dirs := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	return len(dirs) == 2 && dirs[0] != "" && dirs[0] == dirs[1]
 }

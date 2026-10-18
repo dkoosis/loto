@@ -311,12 +311,23 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 	}
 	cwd := getCwd()
 	sorted := slices.Clone(results)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })
+	// Worktree breaks the tie: one sweep can release the same path from the
+	// caller's checkout and from a subagent's (loto-5dr1).
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Target.Canonical != sorted[j].Target.Canonical {
+			return sorted[i].Target.Canonical < sorted[j].Target.Canonical
+		}
+		return sorted[i].Worktree < sorted[j].Worktree
+	})
 	exit := writeReleaseTriageLine(w, sorted)
 	for _, r := range sorted {
 		path := relToCwd(r.Target.Canonical, cwd)
 		switch r.State {
 		case store.StateUnlocked:
+			if r.Worktree != "" {
+				fmt.Fprintf(w, "✓ target=%s worktree=%s\n", path, relToCwd(r.Worktree, cwd))
+				continue
+			}
 			fmt.Fprintf(w, "✓ target=%s\n", path)
 		case store.StateReclaimedStale:
 			fmt.Fprintf(w, "✓ target=%s state=reclaimed-stale owner=%s\n", path, r.Owner)
