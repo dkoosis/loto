@@ -34,7 +34,7 @@ func TestReleaseBySession_ReleasesLocksAndClaimsAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", "")
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", WorktreeScope{})
 	results, claims := rel.Results, rel.ClaimPrefixes
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
@@ -68,7 +68,7 @@ func TestReleaseBySession_ScopedToSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", "")
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", WorktreeScope{})
 	results := rel.Results
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
@@ -106,7 +106,7 @@ func TestReleaseBySession_AgentScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "", "", "")
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "", "", WorktreeScope{})
 	results := rel.Results
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
@@ -136,7 +136,7 @@ func TestReleaseBySession_EmptyResult(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "no-such-session", "", "")
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "no-such-session", "", WorktreeScope{})
 	results := rel.Results
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
@@ -162,7 +162,7 @@ func TestReleaseBySession_LeavesModeUntouched(t *testing.T) {
 		t.Fatalf("acquire must not touch mode bits, got %o", st.Mode().Perm())
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", "")
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", WorktreeScope{})
 	results := rel.Results
 	if err != nil {
 		t.Fatal(err)
@@ -228,7 +228,7 @@ func TestReleaseBySession_OnlyIntent_SelectsAndDeletesInOneTx(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", tcLaneAIntent, "")
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", tcLaneAIntent, WorktreeScope{})
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestReleaseBySession_OnlyIntent_KeepsClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", tcLaneAIntent, "")
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", tcLaneAIntent, WorktreeScope{})
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestReleaseBySession_ReportsEveryIntentItSwept(t *testing.T) {
 		}
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", "")
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", WorktreeScope{})
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestReleaseBySession_ForeignWorktreeRefusesEntireSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", tcWorktreeB)
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeB})
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -376,7 +376,7 @@ func TestReleaseBySession_SameBranchForeignWorktreeRefuses(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", tcWorktreeB)
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeB})
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -398,7 +398,7 @@ func TestReleaseBySession_ClaimOnlyForeignWorktreeRefuses(t *testing.T) {
 	if err := s.ClaimPrefix(ctx, c, nil); err != nil {
 		t.Fatal(err)
 	}
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", tcWorktreeB)
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeB})
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestReleaseBySession_ForeignLockRollsBackOwnClaimsToo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", tcWorktreeB)
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeB})
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestReleaseBySession_BranchSwitchSameWorktreeSweeps(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
 		t.Fatal(err)
 	}
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", tcWorktreeA)
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", WorktreeScope{Own: tcWorktreeA})
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -487,7 +487,7 @@ func TestReleaseBySession_UnknownWorktreeNeverEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Unknown caller checkout: nothing is foreign, both release.
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", "")
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", WorktreeScope{})
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -533,7 +533,7 @@ func TestReleaseBySession_ExpiredForeignRowsNeverWedgeSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", tcWorktreeB)
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeB})
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -552,5 +552,141 @@ func TestReleaseBySession_ExpiredForeignRowsNeverWedgeSweep(t *testing.T) {
 	}
 	if got == nil {
 		t.Error("the expired foreign lock must be left for lazy reclaim, not released from another worktree")
+	}
+}
+
+// The loto-5dr1 checkouts: a session's main checkout, two Agent subagents'
+// `isolation: worktree` checkouts nested inside it, and a sibling worktree
+// beside it rather than inside it.
+const (
+	tcWorktreeMain   = "/repo"
+	tcWorktreeAgentA = "/repo/.claude/worktrees/agent-a"
+	tcWorktreeAgentB = "/repo/.claude/worktrees/agent-b"
+	tcWorktreeBeside = "/repo-wt-x"
+)
+
+// acquireAt takes one session lock stamped from checkout, and returns it.
+func acquireAt(t *testing.T, s *Store, name, checkout string) domain.LockRecord {
+	t.Helper()
+	l := mkFileLockSessionWorktree(t, name, tcAlice, "shared-session", "", checkout, time.Hour)
+	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{l}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+// TestReleaseBySession_NestedScopeReleasesOwnSubagentWorktrees is loto-5dr1's
+// core AC at the store: from the main checkout, one sweep with Nested set
+// releases the session's rows held from every subagent checkout inside it,
+// its own row on the same path included, and names the subagent rows'
+// checkout on their results.
+func TestReleaseBySession_NestedScopeReleasesOwnSubagentWorktrees(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	a := acquireAt(t, s, "a.go", tcWorktreeAgentA)
+	b := acquireAt(t, s, "b.go", tcWorktreeAgentB)
+	own := acquireAt(t, s, "c.go", tcWorktreeMain)
+	// The same path held from a subagent checkout too: two rows, two deletes.
+	ownCopy := own
+	ownCopy.Worktree = tcWorktreeAgentA
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{ownCopy}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+	c := mkClaimSession(tcPkgStore, tcAlice, "shared-session", time.Hour)
+	c.Worktree = tcWorktreeAgentB
+	if err := s.ClaimPrefix(ctx, c, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeMain, Nested: true})
+	if err != nil {
+		t.Fatalf("ReleaseBySession: %v", err)
+	}
+	if len(rel.Ambiguous) != 0 {
+		t.Fatalf("nested subagent rows are the session's own, got ambiguous %+v", rel.Ambiguous)
+	}
+	if len(rel.Results) != 4 {
+		t.Fatalf("want 4 rows released (a, b, c twice), got %+v", rel.Results)
+	}
+	wts := map[string]string{}
+	for _, r := range rel.Results {
+		wts[r.Target.Canonical+"|"+r.Worktree] = r.Worktree
+	}
+	for _, key := range []string{
+		a.Target.Canonical + "|" + tcWorktreeAgentA,
+		b.Target.Canonical + "|" + tcWorktreeAgentB,
+		own.Target.Canonical + "|",
+		own.Target.Canonical + "|" + tcWorktreeAgentA,
+	} {
+		if _, ok := wts[key]; !ok {
+			t.Errorf("missing release result %q in %+v", key, rel.Results)
+		}
+	}
+	if len(rel.ClaimPrefixes) != 1 {
+		t.Errorf("the subagent checkout's claim is the session's own, got %v", rel.ClaimPrefixes)
+	}
+	locks, err := s.ListLocks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locks) != 0 {
+		t.Errorf("every row must be gone, got %+v", locks)
+	}
+}
+
+// TestReleaseBySession_NestedScopeNeverReachesASibling keeps loto-19bz
+// standing under Nested: a sweep from one subagent's checkout cannot reach a
+// sibling's (the two are side by side, neither inside the other), nor a
+// checkout beside the main one. Refused whole; every row stays.
+func TestReleaseBySession_NestedScopeNeverReachesASibling(t *testing.T) {
+	for _, tc := range []struct{ name, caller, foreign string }{
+		{"sibling subagent", tcWorktreeAgentA, tcWorktreeAgentB},
+		{"checkout beside main", tcWorktreeMain, tcWorktreeBeside},
+		{"parent from a subagent", tcWorktreeAgentA, tcWorktreeMain},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := mustOpen(t)
+			ctx := context.Background()
+			own := acquireAt(t, s, "own.go", tc.caller)
+			sib := acquireAt(t, s, "sib.go", tc.foreign)
+
+			rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tc.caller, Nested: true})
+			if err != nil {
+				t.Fatalf("ReleaseBySession: %v", err)
+			}
+			if len(rel.Ambiguous) != 1 || rel.Ambiguous[0].Canonical != sib.Target.Canonical || rel.Ambiguous[0].Worktree != tc.foreign {
+				t.Fatalf("want the one foreign row named, got %+v", rel.Ambiguous)
+			}
+			if len(rel.Results) != 0 {
+				t.Errorf("a refused sweep releases nothing, got %+v", rel.Results)
+			}
+			for _, l := range []domain.LockRecord{own, sib} {
+				got, err := s.LocksAt(ctx, l.Target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(got) != 1 {
+					t.Errorf("%s must survive the refused sweep, got %+v", l.Target.Canonical, got)
+				}
+			}
+		})
+	}
+}
+
+// TestReleaseBySession_NestedOffStillRefusesSubagentRows: without Nested (a
+// subagent's shell, or an unpinned session), a nested checkout's row is
+// foreign as before.
+func TestReleaseBySession_NestedOffStillRefusesSubagentRows(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	acquireAt(t, s, "a.go", tcWorktreeAgentA)
+
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeMain})
+	if err != nil {
+		t.Fatalf("ReleaseBySession: %v", err)
+	}
+	if len(rel.Ambiguous) != 1 || len(rel.Results) != 0 {
+		t.Fatalf("Nested off must refuse the subagent row; ambiguous=%+v results=%+v", rel.Ambiguous, rel.Results)
 	}
 }

@@ -185,7 +185,7 @@ from them is exactly where it can bite:
 |---|---|
 | Lock belongs to a *worker* | identity is per-**session** (invariant 5 below); subagents of one session collapse to one "worker" |
 | Hasp — each exposed worker locks | one owner per session, no hasp; same owner re-locks its own path without conflict |
-| Only the applier removes it | honored per-owner — but `unlock --all` under a shared session sweeps siblings' locks |
+| Only the applier removes it | honored per-owner and per-checkout — `unlock --all` refuses over a row from another checkout, except the root session's own subagent checkouts nested inside its own; siblings in one shared checkout still collapse |
 | Lock means stop, physically | the harness gate approximates it; advisory at root, and it only reaches tools the hook matches |
 
 The gap between the metaphor and the code is the standing design backlog, not

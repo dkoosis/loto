@@ -79,6 +79,18 @@ func WithRepoTop(top string) OpenOption {
 	return func(s *Store) { s.repoTop = top }
 }
 
+// InWorktree returns a view of s that resolves and scopes rows to another
+// checkout of the same repo: same database handle, repoTop swapped. A
+// compare-and-swap break names its holder exactly (owner@epoch), and the row
+// it names may sit in a subagent's checkout rather than the caller's
+// (loto-5dr1); a break through this view reaches that checkout's row and no
+// other. The view shares s's handle: close s, never the view.
+func (s *Store) InWorktree(top string) *Store {
+	v := *s
+	v.repoTop = top
+	return &v
+}
+
 // WithCaseFoldedKeys tells the store that repo paths live on a case-folding
 // filesystem, so two keys differing only by case name one file (loto-8soe).
 // See Store.caseFold for why the caller, not this package, answers that.
