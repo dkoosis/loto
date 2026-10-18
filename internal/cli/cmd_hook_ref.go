@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -750,13 +751,19 @@ func printRefRefusal(stderr io.Writer, refusals []refRefusal, self string, live 
 	sort.Strings(peers)
 	fmt.Fprintf(stderr, "ℹ live-peers=%s\n", strings.Join(peers, ","))
 	fmt.Fprintln(stderr, "ℹ this move would rewrite their working tree; a stash or branch delete is not undoable for them")
-	collisionFix := printRefCollisionRows(stderr, refusals)
+	fix := printRefCollisionRows(stderr, refusals)
+	// A stash is most often a red-first check (stash, test, pop); the route
+	// that needs no stash leads the fix block (loto-f8xt).
+	if slices.ContainsFunc(refusals, func(r refRefusal) bool { return r.Shape == refShapeStash }) {
+		fmt.Fprintln(stderr, redFirstInfo)
+		fix = append(slices.Clone(redFirstRoute), fix...)
+	}
 	fmt.Fprintln(stderr, "ℹ override=checkout-wide-claim")
 	fmt.Fprintln(stderr, "```bash")
-	for _, line := range collisionFix {
+	for _, line := range fix {
 		fmt.Fprintln(stderr, line)
 	}
-	if len(collisionFix) > 0 {
+	if len(fix) > 0 {
 		fmt.Fprintln(stderr, `# or: loto claim . -t "<reason>"`)
 	} else {
 		fmt.Fprintln(stderr, `loto claim . -t "<reason>"`)
