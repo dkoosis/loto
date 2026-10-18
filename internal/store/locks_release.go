@@ -397,9 +397,11 @@ func (s *Store) releaseSessionTargetsTx(ctx context.Context, tx *sql.Tx, canonic
 // under its own owner and session ids, from checkouts Claude Code puts INSIDE
 // its tree (<top>/.claude/worktrees/agent-<id>). Those are the session's own
 // and its sweep takes them. Sibling subagents' checkouts are never nested
-// inside one another, so a sweep from one sibling's checkout still cannot
-// reach another's even with Nested set — the loto-19bz refusal stands
-// structurally, not only on the caller's word that it is the root.
+// inside one another, so a sweep from one isolated sibling's checkout still
+// cannot reach another's even with Nested set — the loto-19bz refusal stands
+// structurally for them, not only on the caller's word that it is the root.
+// A subagent sharing the root's own checkout has only that word (see
+// cmd_unlock.go unlockAll).
 type WorktreeScope struct {
 	// Own is the caller's checkout toplevel. "" skips the worktree check.
 	Own string

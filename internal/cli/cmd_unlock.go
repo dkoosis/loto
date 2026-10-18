@@ -379,9 +379,15 @@ func unlockAll(rt *runtime, onlyIntent string, stdout, stderr io.Writer) int {
 	// takes its rows from checkouts INSIDE its own — the ones Claude Code
 	// makes for its Agent subagents with `isolation: worktree`. It needs a
 	// pinned session (an owner-only sweep could take another session's rows)
-	// and a shell that is not a subagent's; and even if that env signal is
-	// lost, sibling checkouts are never nested inside one another, so one
-	// sibling's sweep still cannot reach another's (store.WorktreeScope).
+	// and a shell that is not a subagent's. If that env signal is lost, an
+	// ISOLATED sibling's sweep still cannot reach another's: sibling checkouts
+	// are never nested inside one another (store.WorktreeScope).
+	//
+	// ‡ Residual, accepted with dk (PR for loto-5dr1): a subagent with no
+	// checkout of its own stands in the root's checkout with the root's ids.
+	// CLAUDE_CODE_CHILD_SESSION is the only signal that tells it from the
+	// root; if a harness upgrade drops it, that subagent's --all also takes
+	// its isolated siblings' nested rows.
 	scope := store.WorktreeScope{Own: rt.RepoTop, Nested: rt.SessionPinned && !identity.InSubagentShell()}
 	rel, err := rt.Store.ReleaseBySession(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), sessionFilter, onlyIntent, scope)
 	if err != nil {
