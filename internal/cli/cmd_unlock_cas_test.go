@@ -235,31 +235,36 @@ func TestUnlockForce_ExpectHolder_WithAllRefused(t *testing.T) {
 	}
 }
 
-// TestSplitBreakLines_NamesEveryHolderTheCheckoutsCASSees is loto-5dr1: a
-// split --expect-holder refusal prints one break per checkout, and each must
-// name the whole holder set the CAS there will compare against when the
-// lines run in order. A row with no recorded checkout counts in every
-// checkout until the first break deletes it, so it is named on the first
-// line and on no later one.
-func TestSplitBreakLines_NamesEveryHolderTheCheckoutsCASSees(t *testing.T) {
+// TestSplitBreakLines_NamesOnlyTheCallersHolders is loto-5dr1: a split
+// --expect-holder refusal prints one break per checkout naming the holders
+// the caller named that sit there. A holder the caller never named (here
+// late@7, which took the path after the caller read status) is never added,
+// so that line still refuses with holder-changed. A named row with no
+// recorded checkout counts in every checkout until the first break deletes
+// it, so it is named on the first line and on no later one.
+func TestSplitBreakLines_NamesOnlyTheCallersHolders(t *testing.T) {
+	const (
+		agentA = "/repo/.claude/worktrees/agent-a"
+		agentB = "/repo/.claude/worktrees/agent-b"
+		owner  = domain.AgentUUID("owner-a")
+		legacy = domain.AgentUUID("legacy")
+	)
 	rows := []domain.LockRecord{
-		{OwnerUUID: "owner-a", Epoch: 5, Worktree: "/repo/.claude/worktrees/agent-a"},
-		{OwnerUUID: "owner-a", Epoch: 6, Worktree: "/repo/.claude/worktrees/agent-b"},
-		{OwnerUUID: "legacy", Epoch: 1},
+		{OwnerUUID: owner, Epoch: 5, Worktree: agentA},
+		{OwnerUUID: "late", Epoch: 7, Worktree: agentA},
+		{OwnerUUID: owner, Epoch: 6, Worktree: agentB},
+		{OwnerUUID: legacy, Epoch: 1},
 	}
-	got := splitBreakLines(rows, []string{"/repo/.claude/worktrees/agent-a", "/repo/.claude/worktrees/agent-b"}, domain.Target{Canonical: tcTargetA}, "done")
+	expect := holdRefList{
+		{Owner: owner, Epoch: 5}, {Owner: owner, Epoch: 6}, {Owner: legacy, Epoch: 1},
+	}
+	got := splitBreakLines(rows, []string{agentA, agentB}, expect, domain.Target{Canonical: tcTargetA}, "done")
 	want := []string{
-		`(cd '/repo/.claude/worktrees/agent-a' && loto unlock 'a.go' --force -t 'done' --expect-holder 'legacy@1' --expect-holder 'owner-a@5')`,
-		// The legacy row is gone once the first break runs.
-		`(cd '/repo/.claude/worktrees/agent-b' && loto unlock 'a.go' --force -t 'done' --expect-holder 'owner-a@6')`,
+		`(cd '` + agentA + `' && loto unlock 'a.go' --force -t 'done' --expect-holder 'legacy@1' --expect-holder 'owner-a@5')`,
+		`(cd '` + agentB + `' && loto unlock 'a.go' --force -t 'done' --expect-holder 'owner-a@6')`,
 	}
-	if len(got) != len(want) {
-		t.Fatalf("got %d lines, want %d: %q", len(got), len(want), got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("line %d:\ngot  %s\nwant %s", i, got[i], want[i])
-		}
+	if !slices.Equal(got, want) {
+		t.Errorf("got:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 

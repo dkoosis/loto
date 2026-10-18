@@ -258,7 +258,7 @@ func expectedHolderWorktree(rt *runtime, t domain.Target, expect holdRefList, in
 	}
 	fmt.Fprintf(stderr, "✗ expect-holder-split count=%d: the named holders sit in %d checkouts; break each from its own\n", len(expect), len(checkouts))
 	fmt.Fprintln(stderr, "```bash")
-	for _, line := range splitBreakLines(rows, checkouts, t, intent) {
+	for _, line := range splitBreakLines(rows, checkouts, expect, t, intent) {
 		fmt.Fprintln(stderr, line)
 	}
 	fmt.Fprintln(stderr, "```")
@@ -286,25 +286,27 @@ func expectedHolderCheckouts(rows []domain.LockRecord, expect holdRefList, own s
 	return slices.Compact(out)
 }
 
-// splitBreakLines is one break per checkout in others, each stating the
-// WHOLE holder set the CAS in that checkout will compare against: every row
-// domain.SameWorktree puts there, a row with no recorded checkout included,
-// since the break's own scoping keeps it (scopeToWorktree).
+// splitBreakLines is one break per checkout in others, each naming the
+// holders the caller named that sit there. Only those: a holder the caller
+// never named is never added, so a row that appeared since the caller read
+// `loto status` still refuses that line with holder-changed, the CAS's
+// whole point.
 //
-// ‡ A row with no recorded checkout goes on the FIRST line only. Every
+// ‡ A named row with no recorded checkout goes on the FIRST line only. Every
 // checkout's CAS counts it, and the first break deletes it with its own
 // rows (deleteOwnedTx's filter matches an empty worktree), so a later line
 // still naming it would find it gone and refuse.
-func splitBreakLines(rows []domain.LockRecord, others []string, t domain.Target, intent string) []string {
+func splitBreakLines(rows []domain.LockRecord, others []string, expect holdRefList, t domain.Target, intent string) []string {
 	out := make([]string, 0, len(others))
 	for n, wt := range others {
 		var refs []domain.HoldRef
 		for i := range rows {
-			if rows[i].Worktree == "" && n > 0 {
+			ref := domain.HoldRef{Owner: rows[i].OwnerUUID, Epoch: rows[i].Epoch}
+			if !slices.Contains(expect, ref) || (rows[i].Worktree == "" && n > 0) {
 				continue
 			}
 			if domain.SameWorktree(wt, rows[i].Worktree) {
-				refs = append(refs, domain.HoldRef{Owner: rows[i].OwnerUUID, Epoch: rows[i].Epoch})
+				refs = append(refs, ref)
 			}
 		}
 		domain.SortHoldRefs(refs)
