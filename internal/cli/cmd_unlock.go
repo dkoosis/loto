@@ -496,24 +496,26 @@ func renderAmbiguousRefusal(stderr io.Writer, worktree string, holds []store.Amb
 	return 1
 }
 
-// otherWorktreeReleases is one command per (checkout, kind) in holds: the
-// per-path release, run from inside the checkout that holds the rows, which
-// is the scope a plain `loto unlock` and `loto unclaim` act in. holds is
-// already sorted by kind, then worktree, then path.
+// otherWorktreeReleases is the per-path release of every row in holds, run
+// from inside the checkout that holds it, which is the scope a plain `loto
+// unlock` acts in: one `unlock` per checkout, and one `unclaim` per claim,
+// since unclaim takes exactly one prefix. holds is already sorted by kind,
+// then worktree, then path.
 func otherWorktreeReleases(holds []store.AmbiguousHold) []string {
 	var out []string
 	for i := 0; i < len(holds); {
+		if holds[i].Kind == "claim" {
+			out = append(out, cdUnlock(holds[i].Worktree, "unclaim", []string{holds[i].Canonical}))
+			i++
+			continue
+		}
 		j := i
 		var paths []string
 		for j < len(holds) && holds[j].Kind == holds[i].Kind && holds[j].Worktree == holds[i].Worktree {
 			paths = append(paths, holds[j].Canonical)
 			j++
 		}
-		verb := "unlock"
-		if holds[i].Kind == "claim" {
-			verb = "unclaim"
-		}
-		out = append(out, cdUnlock(holds[i].Worktree, verb, paths))
+		out = append(out, cdUnlock(holds[i].Worktree, "unlock", paths))
 		i = j
 	}
 	return out

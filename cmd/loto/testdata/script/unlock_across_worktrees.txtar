@@ -87,17 +87,22 @@ exec git worktree add -q $WORK/../5dr1-beside -b beside
 cd $WORK/../5dr1-beside
 touch x.go
 loto lock x.go -t 'root work beside'
+mkdir pkg1 pkg2
+loto claim pkg1 -t 'root territory beside'
+loto claim pkg2 -t 'root territory beside'
 cd $WORK
 ! loto unlock --all
-stderr 'identity ambiguous count=1'
+stderr 'identity ambiguous count=3'
 stderr 'every row above is this session''s'
 stderr '^\(cd .*5dr1-beside'' && loto unlock ''x.go''\)$'
+stderr '^\(cd .*5dr1-beside'' && loto unclaim ''pkg1''\)$'
+stderr '^\(cd .*5dr1-beside'' && loto unclaim ''pkg2''\)$'
 stderr '^loto unlock --all$'
 cp stderr $WORK/.git/beside-refusal.txt
 exec sh $WORK/run-fix.sh $WORK/.git/beside-refusal.txt
 stdout 'count=1'
 loto status
-! stdout 'a\.go|b\.go|x\.go'
+! stdout 'a\.go|b\.go|x\.go|pkg1|pkg2'
 
 # ── 4. --force --expect-holder breaks a holder status shows elsewhere ─────
 cd $WORK/.claude/worktrees/agent-a
