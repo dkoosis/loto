@@ -265,10 +265,26 @@ func expectedHolderWorktree(rt *runtime, t domain.Target, expect holdRefList, in
 	case 1:
 		return others[0], 0
 	}
+	// One break per checkout, each stating that checkout's WHOLE holder set:
+	// the CAS there compares against every row it finds, not only the ones
+	// this call named.
 	fmt.Fprintf(stderr, "✗ expect-holder-split count=%d: the named holders sit in %d checkouts; break each from its own\n", len(expect), len(others))
 	fmt.Fprintln(stderr, "```bash")
 	for _, wt := range others {
-		fmt.Fprintf(stderr, "(cd %s && loto unlock %s --force -t %s --expect-holder <owner@epoch held there>)\n", shellQuote(wt), shellQuote(t.Canonical), shellQuote(intent))
+		var refs []domain.HoldRef
+		for i := range rows {
+			if rows[i].Worktree == wt {
+				refs = append(refs, domain.HoldRef{Owner: rows[i].OwnerUUID, Epoch: rows[i].Epoch})
+			}
+		}
+		domain.SortHoldRefs(refs)
+		var b strings.Builder
+		fmt.Fprintf(&b, "(cd %s && loto unlock %s --force -t %s", shellQuote(wt), shellQuote(t.Canonical), shellQuote(intent))
+		for _, ref := range refs {
+			fmt.Fprintf(&b, " --expect-holder %s", shellQuote(ref.String()))
+		}
+		b.WriteString(")")
+		fmt.Fprintln(stderr, b.String())
 	}
 	fmt.Fprintln(stderr, "```")
 	return "", 2
