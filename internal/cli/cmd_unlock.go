@@ -265,15 +265,25 @@ func expectedHolderWorktree(rt *runtime, t domain.Target, expect holdRefList, in
 	case 1:
 		return others[0], 0
 	}
-	// One break per checkout, each stating that checkout's WHOLE holder set:
-	// the CAS there compares against every row it finds, not only the ones
-	// this call named.
 	fmt.Fprintf(stderr, "✗ expect-holder-split count=%d: the named holders sit in %d checkouts; break each from its own\n", len(expect), len(others))
 	fmt.Fprintln(stderr, "```bash")
+	for _, line := range splitBreakLines(rows, others, t, intent) {
+		fmt.Fprintln(stderr, line)
+	}
+	fmt.Fprintln(stderr, "```")
+	return "", 2
+}
+
+// splitBreakLines is one break per checkout in others, each stating the
+// WHOLE holder set the CAS in that checkout will compare against: every row
+// domain.SameWorktree puts there, a row with no recorded checkout included,
+// since the break's own scoping keeps it (scopeToWorktree).
+func splitBreakLines(rows []domain.LockRecord, others []string, t domain.Target, intent string) []string {
+	out := make([]string, 0, len(others))
 	for _, wt := range others {
 		var refs []domain.HoldRef
 		for i := range rows {
-			if rows[i].Worktree == wt {
+			if domain.SameWorktree(wt, rows[i].Worktree) {
 				refs = append(refs, domain.HoldRef{Owner: rows[i].OwnerUUID, Epoch: rows[i].Epoch})
 			}
 		}
@@ -284,10 +294,9 @@ func expectedHolderWorktree(rt *runtime, t domain.Target, expect holdRefList, in
 			fmt.Fprintf(&b, " --expect-holder %s", shellQuote(ref.String()))
 		}
 		b.WriteString(")")
-		fmt.Fprintln(stderr, b.String())
+		out = append(out, b.String())
 	}
-	fmt.Fprintln(stderr, "```")
-	return "", 2
+	return out
 }
 
 // notifyDispossessed tells whoever a successful --force break just dispossessed

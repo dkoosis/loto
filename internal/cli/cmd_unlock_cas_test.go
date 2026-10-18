@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"loto/internal/domain"
 )
 
 const tcFlagExpectHolder = "--expect-holder"
@@ -229,5 +231,31 @@ func TestUnlockForce_ExpectHolder_WithAllRefused(t *testing.T) {
 	Run([]string{tcCmdStatus, tcStoreStoreGo}, &status, io.Discard)
 	if strings.Contains(status.String(), "✓ free") {
 		t.Errorf("the sibling lock must survive too; status=%q", status.String())
+	}
+}
+
+// TestSplitBreakLines_NamesEveryHolderTheCheckoutsCASSees is loto-5dr1: a
+// split --expect-holder refusal prints one break per checkout, and each must
+// name the whole holder set the CAS there compares against — a row with no
+// recorded checkout counts in every checkout, so leaving it out would print
+// a break that fails with holder-changed.
+func TestSplitBreakLines_NamesEveryHolderTheCheckoutsCASSees(t *testing.T) {
+	rows := []domain.LockRecord{
+		{OwnerUUID: "owner-a", Epoch: 5, Worktree: "/repo/.claude/worktrees/agent-a"},
+		{OwnerUUID: "owner-a", Epoch: 6, Worktree: "/repo/.claude/worktrees/agent-b"},
+		{OwnerUUID: "legacy", Epoch: 1},
+	}
+	got := splitBreakLines(rows, []string{"/repo/.claude/worktrees/agent-a", "/repo/.claude/worktrees/agent-b"}, domain.Target{Canonical: tcTargetA}, "done")
+	want := []string{
+		`(cd '/repo/.claude/worktrees/agent-a' && loto unlock 'a.go' --force -t 'done' --expect-holder 'legacy@1' --expect-holder 'owner-a@5')`,
+		`(cd '/repo/.claude/worktrees/agent-b' && loto unlock 'a.go' --force -t 'done' --expect-holder 'legacy@1' --expect-holder 'owner-a@6')`,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d lines, want %d: %q", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line %d:\ngot  %s\nwant %s", i, got[i], want[i])
+		}
 	}
 }
