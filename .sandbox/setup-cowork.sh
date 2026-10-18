@@ -22,7 +22,7 @@ SANDBOX_DIR="$REPO_DIR/.sandbox"
 # literal drifts silently until a build fails with a toolchain mismatch
 # (loto-qo0y item 5).
 GO_VERSION="$(awk '/^go /{print $2}' "$REPO_DIR/go.mod")"
-GOLANGCI_LINT_VER="v2.11.4"
+GOLANGCI_LINT_VER="v2.14.0"
 GO_ARCH_LINT_VER="v1.14.0"
 GOVULNCHECK_VER="v1.1.4"
 GOFUMPT_VER="v0.9.2"

@@ -541,8 +541,7 @@ func TestAcquireLocks_BlockedEvenBySameOwnersOwnCandidateClaim(t *testing.T) {
 	}
 
 	_, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe)
-	var cce *CandidateClaimConflictError
-	if !errors.As(err, &cce) {
+	if _, ok := errors.AsType[*CandidateClaimConflictError](err); !ok {
 		t.Fatalf("want CandidateClaimConflictError even for the claim's own owner, got %v", err)
 	}
 }
@@ -598,8 +597,7 @@ func TestAcquireLocks_CandidateClaimBlockAbortsWholeBatch(t *testing.T) {
 	}
 
 	_, err := s.AcquireLocks(ctx, []domain.LockRecord{clean, blocked}, liveProbe)
-	var cce *CandidateClaimConflictError
-	if !errors.As(err, &cce) {
+	if _, ok := errors.AsType[*CandidateClaimConflictError](err); !ok {
 		t.Fatalf("want CandidateClaimConflictError, got %v", err)
 	}
 	if got, _ := s.LockAt(ctx, clean.Target); got != nil {

@@ -885,8 +885,7 @@ func TestDoctorRepair_ReclaimsAbandonedCandidateClaim(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err == nil {
 		t.Fatal("lock over an unresolved candidate claim must be refused before repair")
 	} else {
-		var ccce *CandidateClaimConflictError
-		if !errors.As(err, &ccce) {
+		if _, ok := errors.AsType[*CandidateClaimConflictError](err); !ok {
 			t.Fatalf("want *CandidateClaimConflictError, got %T: %v", err, err)
 		}
 	}
@@ -1061,8 +1060,7 @@ func TestDoctorRepair_LiveSessionCandidateClaimSurvives(t *testing.T) {
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, sessionAlive); err == nil {
 		t.Fatal("a live candidate claim must still block lock acquisition")
 	} else {
-		var ccce *CandidateClaimConflictError
-		if !errors.As(err, &ccce) {
+		if _, ok := errors.AsType[*CandidateClaimConflictError](err); !ok {
 			t.Fatalf("want *CandidateClaimConflictError, got %T: %v", err, err)
 		}
 	}
