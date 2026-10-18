@@ -131,6 +131,19 @@ stdout '✓ broken'
 loto status
 ! stdout 'a\.go'
 
+# A holder in this checkout plus one in a subagent's: also a split, both
+# breaks printed and both run.
+loto lock a.go -t 'root work'
+cd $WORK/.claude/worktrees/agent-a
+loto lock a.go -t 'hook: admitted Edit-family write'
+cd $WORK
+! exec sh $WORK/break-all.sh a.go
+stderr 'expect-holder-split count=2'
+cp stderr $WORK/.git/own-split-refusal.txt
+exec sh $WORK/run-fix.sh $WORK/.git/own-split-refusal.txt
+loto status
+! stdout 'a\.go'
+
 -- run-fix.sh --
 # Pull the ```bash block out of a captured refusal and run it as printed.
 sed -n '/^```bash$/,/^```$/p' "$1" | sed '1d;$d' >"$1.sh"

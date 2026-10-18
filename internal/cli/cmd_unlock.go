@@ -236,42 +236,53 @@ func breakTargets(rt *runtime, args []string, intent, repoTop string, expect hol
 // used to find nothing in the caller's own checkout: holder-changed,
 // actual=none, for a lock status was showing (loto-5dr1).
 //
-// Returns "" to break in the caller's own checkout: a named holder sits
-// there, or none sits anywhere (the CAS then reports holder-changed as
-// before). Returns the one other checkout every named holder sits in. Named
-// holders spread over two or more other checkouts cannot be one break: it
-// refuses, exit 2, naming the command per checkout.
+// Returns "" to break in the caller's own checkout: the named holders sit
+// only there, or nowhere (the CAS then reports holder-changed as before).
+// Returns the one other checkout when every named holder sits there. Named
+// holders spread over two or more checkouts cannot be one break: it
+// refuses, exit 2, printing one runnable break per checkout.
 func expectedHolderWorktree(rt *runtime, t domain.Target, expect holdRefList, intent string, stderr io.Writer) (string, int) {
 	rows, err := rt.Store.LocksAt(rt.Ctx, t)
 	if err != nil {
 		return "", 0
 	}
-	var others []string
-	for i := range rows {
-		r := &rows[i]
-		if !slices.Contains(expect, domain.HoldRef{Owner: r.OwnerUUID, Epoch: r.Epoch}) {
-			continue
-		}
-		if domain.SameWorktree(rt.RepoTop, r.Worktree) {
-			return "", 0
-		}
-		others = append(others, r.Worktree)
-	}
-	slices.Sort(others)
-	others = slices.Compact(others)
-	switch len(others) {
-	case 0:
+	checkouts := expectedHolderCheckouts(rows, expect, rt.RepoTop)
+	switch {
+	case len(checkouts) == 0:
 		return "", 0
-	case 1:
-		return others[0], 0
+	case len(checkouts) == 1 && checkouts[0] == rt.RepoTop:
+		return "", 0
+	case len(checkouts) == 1:
+		return checkouts[0], 0
 	}
-	fmt.Fprintf(stderr, "✗ expect-holder-split count=%d: the named holders sit in %d checkouts; break each from its own\n", len(expect), len(others))
+	fmt.Fprintf(stderr, "✗ expect-holder-split count=%d: the named holders sit in %d checkouts; break each from its own\n", len(expect), len(checkouts))
 	fmt.Fprintln(stderr, "```bash")
-	for _, line := range splitBreakLines(rows, others, t, intent) {
+	for _, line := range splitBreakLines(rows, checkouts, t, intent) {
 		fmt.Fprintln(stderr, line)
 	}
 	fmt.Fprintln(stderr, "```")
 	return "", 2
+}
+
+// expectedHolderCheckouts lists, sorted, the checkouts the named holders sit
+// in, the caller's own (own) spelled as own. A row with no recorded checkout
+// is in none of them in particular: every checkout's CAS counts it
+// (domain.SameWorktree), so it decides nothing about where to break.
+func expectedHolderCheckouts(rows []domain.LockRecord, expect holdRefList, own string) []string {
+	var out []string
+	for i := range rows {
+		r := &rows[i]
+		if r.Worktree == "" || !slices.Contains(expect, domain.HoldRef{Owner: r.OwnerUUID, Epoch: r.Epoch}) {
+			continue
+		}
+		wt := r.Worktree
+		if domain.SameWorktree(own, wt) {
+			wt = own
+		}
+		out = append(out, wt)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // splitBreakLines is one break per checkout in others, each stating the

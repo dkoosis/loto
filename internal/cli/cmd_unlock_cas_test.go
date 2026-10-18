@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -257,5 +258,42 @@ func TestSplitBreakLines_NamesEveryHolderTheCheckoutsCASSees(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("line %d:\ngot  %s\nwant %s", i, got[i], want[i])
 		}
+	}
+}
+
+// TestExpectedHolderCheckouts: where a --expect-holder break must run. The
+// caller's own checkout counts like any other, so own + one other is a
+// split, not a break here that the CAS would refuse; a row with no recorded
+// checkout decides nothing, since every checkout's CAS counts it.
+func TestExpectedHolderCheckouts(t *testing.T) {
+	const (
+		own   = "/repo"
+		agent = "/repo/.claude/worktrees/agent-a"
+	)
+	rows := []domain.LockRecord{
+		{OwnerUUID: "o", Epoch: 1, Worktree: own},
+		{OwnerUUID: "o", Epoch: 2, Worktree: agent},
+		{OwnerUUID: "legacy", Epoch: 3},
+	}
+	ref := func(owner string, epoch int64) domain.HoldRef {
+		return domain.HoldRef{Owner: domain.AgentUUID(owner), Epoch: epoch}
+	}
+	for _, tc := range []struct {
+		name   string
+		expect holdRefList
+		want   []string
+	}{
+		{"own only", holdRefList{ref("o", 1)}, []string{own}},
+		{"other only", holdRefList{ref("o", 2)}, []string{agent}},
+		{"other plus unknown", holdRefList{ref("o", 2), ref("legacy", 3)}, []string{agent}},
+		{"own plus other is a split", holdRefList{ref("o", 1), ref("o", 2)}, []string{own, agent}},
+		{"nothing named", holdRefList{ref("x", 9)}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := expectedHolderCheckouts(rows, tc.expect, own)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
