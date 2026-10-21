@@ -28,10 +28,12 @@ type checkConflict struct {
 type altSurfaceArgs struct {
 	branchTyped                           bool
 	branch                                string
+	worktreeTyped                         bool
+	worktree                              string
 	held, moved, gate, staged, cwdUnknown bool
 }
 
-// checkAltSurface dispatches `check`'s non-path questions — --branch,
+// checkAltSurface dispatches `check`'s non-path questions — --branch, --worktree,
 // --held, --moved — before any repo resolution or store IO, the way --gate
 // branches before openRuntime. handled=false means none applied and the
 // caller carries on down the ordinary path check.
@@ -42,12 +44,22 @@ type altSurfaceArgs struct {
 // "✓ no paths" — a green light to publish, handed out because the caller's
 // shell expanded to nothing. It refuses instead.
 func checkAltSurface(ctx context.Context, fs *flag.FlagSet, a altSurfaceArgs, stdout, stderr io.Writer) (rc int, handled bool) {
+	others := fs.NArg() > 0 || a.staged || a.gate || a.cwdUnknown || a.held || a.moved
 	if a.branchTyped {
-		if fs.NArg() > 0 || a.staged || a.gate || a.cwdUnknown || a.held || a.moved {
+		if others || a.worktreeTyped {
 			fmt.Fprintln(stderr, "✗ --branch takes no paths and no other check flag")
 			return 2, true
 		}
 		return runCheckBranch(ctx, a.branch, stdout, stderr), true
+	}
+	// --worktree is keyed on TYPED for the same reason: an unset variable
+	// must not fall through to "✓ no paths", a green light to delete a tree.
+	if a.worktreeTyped {
+		if others {
+			fmt.Fprintln(stderr, "✗ --worktree takes no paths and no other check flag")
+			return 2, true
+		}
+		return runCheckWorktree(ctx, a.worktree, stdout, stderr), true
 	}
 	if a.held || a.moved {
 		return routeHeldOrMoved(ctx, heldMovedArgs{
@@ -70,6 +82,7 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 	branch := fs.String("branch", "", "check a BRANCH instead of paths: exit 1 if another checkout has it and its owner is not provably gone")
 	held := fs.Bool("held", false, "report every path NOT locked by this session (the commit gate's question, the inverse of --gate); ships advisory — ⚠ rows and exit 0 — and LOTO_GATE_MODE=block turns the same rows into ✗ and exit 1")
 	moved := fs.Bool("moved", false, "advisory only: given two HEADs, print a ⚠ row for each path the move changed that a live peer holds; always exits 0")
+	worktree := fs.String("worktree", "", "check a worktree PATH instead of paths: exit 1 if another live session is working at or inside it, locks or not; exit 3 if a live session there cannot be placed")
 	cwdUnknown := fs.Bool("cwd-unknown", false, "the caller's working directory is not knowable here (e.g. mcp__trixi__agent_shell): refuse relative paths instead of resolving them against the wrong base")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return nil, "", "", false, false, 2, true
@@ -77,6 +90,7 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 
 	if rc, handled := checkAltSurface(ctx, fs, altSurfaceArgs{
 		branchTyped: flagWasSet(fs, "branch"), branch: *branch,
+		worktreeTyped: flagWasSet(fs, "worktree"), worktree: *worktree,
 		held: *held, moved: *moved, gate: *gateFlag, staged: *staged, cwdUnknown: *cwdUnknown,
 	}, stdout, stderr); handled {
 		return nil, "", "", false, false, rc, true

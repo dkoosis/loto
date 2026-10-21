@@ -11,3 +11,5 @@ Usage of check:
     	advisory only: given two HEADs, print a ⚠ row for each path the move changed that a live peer holds; always exits 0
   -staged
     	read paths from git diff --cached
+  -worktree string
+    	check a worktree PATH instead of paths: exit 1 if another live session is working at or inside it, locks or not; exit 3 if a live session there cannot be placed

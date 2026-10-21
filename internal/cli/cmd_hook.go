@@ -215,11 +215,30 @@ func runHook(ctx context.Context, pre bool, stdout, stderr io.Writer) int {
 		return hookSkip(stderr, "%v", err)
 	}
 	defer rt.Close()
+	hookNoteCheckout(rt, ev, stderr)
 
 	if pre {
 		return hookPre(ctx, rt, ev, started, stdout, stderr)
 	}
 	return hookPost(ctx, rt, ev, started, stderr)
+}
+
+// hookNoteCheckout re-records the checkout this session is working in, so a
+// session that entered a worktree after SessionStart — EnterWorktree, or a cd
+// — is placed there, not where whoami first saw it (loto-nwoz). rt.RepoTop is
+// the checkout every other row this hook writes is scoped to.
+//
+// A subagent's call is skipped: it runs in its parent's process under its
+// parent's session id, so recording its isolation worktree would move the
+// parent back and forth between the two trees on every call. Best-effort, as
+// every write here is: a failure warns and the tool call goes on.
+func hookNoteCheckout(rt *runtime, ev hookEvent, stderr io.Writer) {
+	if ev.AgentID != "" {
+		return
+	}
+	if _, err := identity.RecordCheckout(string(rt.SessionUUID), rt.RepoTop); err != nil {
+		fmt.Fprintf(stderr, "⚠ hook: record checkout: %v\n", err)
+	}
 }
 
 // hookPre is I3 steps 1 through 4.

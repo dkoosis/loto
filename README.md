@@ -61,6 +61,7 @@ make install   # installs to $GOPATH/bin
 loto lock <path>... -t "<intent>"     # acquire one or more locks atomically; -t required
 loto unlock <path>... -t "<intent>"   # release; --force to break another's, --all for all mine
 loto check [<path>...]                # check targets for conflicts; --staged for git staged paths
+loto check --worktree <path>          # is another live session working in this worktree? exit 0 free, 1 occupied, 3 unknown
 loto status                           # who holds what; --mine to filter
 loto doctor [--dry-run|--repair]      # detect and optionally repair stale locks
 loto whoami                           # this session's owner id; records its liveness witnesses
@@ -162,6 +163,35 @@ on every verb that would write an owner.
 pid, start-time and messaging socket at `~/.loto/session/<sid>.json`. That is
 the evidence `loto lock`/`check`/`doctor` use to tell a holder whose session
 is still up from one whose session died, before the TTL backstop.
+
+## before deleting a worktree
+
+`loto check --worktree <path>` is the presence query for any tool that deletes
+worktrees. Locks are not the question: a session sitting in a clean, pushed
+worktree holds none.
+
+```sh
+loto check --worktree ../repo-wt-x || echo "keep it"
+# ✗ worktree=/Users/dk/Projects/repo-wt-x occupied occupied=1 unknown=0
+# ✗ session=12ca0467-... state=occupied source=loto pid=25182 at=/Users/dk/Projects/repo-wt-x
+```
+
+A session counts as working at the path when the checkout its loto record
+names, or the `cwd` in Claude Code's own `~/.claude/sessions/<pid>.json`, is
+the path or inside it. The loto record's checkout is re-recorded by
+`loto hook pre|post` whenever a tool call runs from another checkout, so a
+session that entered a worktree after it started is placed there. The
+caller's own session never counts.
+
+| Exit | Meaning |
+|------|---------|
+| 0 | free: no other live session works there |
+| 1 | occupied: a live session works there; each is named on a ✗ row |
+| 3 | unknown: a live session in this repo cannot be placed — no loto record, or its liveness cannot be decided — or the path will not resolve |
+
+Every non-zero exit means keep the worktree. A missing loto record is never
+read as free. A subagent's isolation worktree is not covered: it runs in its
+parent's process and no record names its path.
 
 ## what "lock-out / tag-out" means
 
