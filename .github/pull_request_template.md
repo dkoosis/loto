@@ -6,10 +6,10 @@
 
 ## Beads
 
-Closes: <bead-ids, comma-separated — or "none">
+Closes: <bead-id — one Closes: line per bead, or "none">
 
-<!-- On merge, close them with the landing ref:
-     bd close <ids> --reason "merged #<PR> (<sha>)". See .claude/rules/workflow.md. -->
+<!-- sdlc merge closes these beads; do not run bd close after a merge.
+     See .claude/rules/workflow.md. -->
 
 ## Notes
 
