@@ -38,7 +38,7 @@ unpromoted work. The check is the backstop for branch-shaped publication.
 
 ‡ **Batch small fixes → one PR. Default: auto-batch.** ≥2 small/independent fixes in flight → ONE branch, ONE PR, one commit per fix — roll them up without asking. CI fires once at the PR (+ once on merge), NOT once per fix; a PR-per-one-liner multiplies CI runs for no benefit. Each fix stays its own commit (traceable); PR body lists them. ✗ mix a risky change in with trivial ones (drags the whole PR's review bar up).
 
-‡ **PR ↔ issues.** Every PR body carries a `Closes:` trailer naming the beads it lands, one `Closes: <id>` line each (no bead → `Closes: none`); `sdlc ship --closes=<ids>` writes them. ✗ `Closes: loto-abc, loto-def` on one line — `sdlc merge` cannot read it. Squash-merge keeps the trailer in main's commit. `sdlc merge` closes the beads the trailer names, so ✗ `bd close` after a merge.
+‡ **PR ↔ issues.** A PR body names the beads it lands in `Closes:` trailers, one `Closes: <id>` line each; `sdlc ship --closes=<ids>` writes them. No bead → `sdlc ship --closes=none`, which writes no line; ✗ a hand-written `Closes: none` — `sdlc merge` runs `bd close none` on it. ✗ `Closes: loto-abc, loto-def` on one line — `sdlc merge` cannot read it. Squash-merge keeps the trailer in main's commit. `sdlc merge` closes the beads the trailer names, so ✗ `bd close` after a merge.
 
 - docs(boot) / docs-only commits → direct to main is fine. test-only (non-store/identity) → direct fine.
 - phantom-lint: golangci can flag findings in `.claude/worktrees/agent-*` copies — verify against real `internal/` source; `golangci-lint cache clean` if stale.
