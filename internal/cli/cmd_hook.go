@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"loto/internal/domain"
@@ -207,6 +208,13 @@ func runHook(ctx context.Context, pre bool, stdout, stderr io.Writer) int {
 	if !identity.PinnedByEnv() {
 		return hookSkip(stderr, "%v", errIdentityUnpinned)
 	}
+	// git status is the costliest fork a hook makes, and it needs nothing
+	// openRuntime opens, so it runs alongside openRuntime's own rev-parse fork
+	// and the store open (loto-szdx). Every return path waits for it (here,
+	// and in hookPre/hookPost): a git status still running after the hook
+	// exits could hold .git/index.lock against the tool call it observes.
+	status := startGitStatusPaths(ctx, "")
+	defer func() { _, _ = status() }()
 	// openRuntime, not openRuntimeGC: this is the per-tool-call hot path and
 	// must not pay the session GC sweep (loto-6pn6, same reason `loto beacon`
 	// takes this door).
@@ -217,9 +225,9 @@ func runHook(ctx context.Context, pre bool, stdout, stderr io.Writer) int {
 	defer rt.Close()
 
 	if pre {
-		return hookPre(ctx, rt, ev, started, stdout, stderr)
+		return hookPre(ctx, rt, ev, started, status, stdout, stderr)
 	}
-	return hookPost(ctx, rt, ev, started, stderr)
+	return hookPost(ctx, rt, ev, started, status, stderr)
 }
 
 // hookPre is I3 steps 1 through 4.
@@ -237,7 +245,8 @@ func runHook(ctx context.Context, pre bool, stdout, stderr io.Writer) int {
 // handed the report in the same call rather than the next one. For every other
 // addressee the two orders are indistinguishable: their report was filed by
 // someone else's earlier hook.
-func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, stdout, stderr io.Writer) int {
+func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, status gitStatusWait, stdout, stderr io.Writer) int {
+	defer func() { _, _ = status() }()
 	now := time.Now()
 	tReport := hookTReport()
 	// Dead-owner first: it is what MOVES a call out of flight, and the two
@@ -268,7 +277,7 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 		}
 	}
 
-	obs, statusPaths, lockedBytes, err := hookObserve(ctx, rt, declared, stderr)
+	obs, statusPaths, lockedBytes, err := hookObserve(ctx, rt, declared, status, stderr)
 	if err != nil {
 		return hookSkip(stderr, "observe: %v", err)
 	}
@@ -327,8 +336,9 @@ func hookDeliver(rt *runtime, me domain.AgentUUID, now time.Time, stdout, stderr
 // for every state change, names the calls that span it, and writes the reports
 // those changes owe. The verdict table's `good`, `copy` and `L` columns are
 // deferred until §10b's acted/reported ratio says whether holders act at all.
-func hookPost(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, stderr io.Writer) int {
-	obs, statusPaths, lockedBytes, err := hookObserve(ctx, rt, "", stderr)
+func hookPost(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, status gitStatusWait, stderr io.Writer) int {
+	defer func() { _, _ = status() }()
+	obs, statusPaths, lockedBytes, err := hookObserve(ctx, rt, "", status, stderr)
 	if err != nil {
 		return hookSkip(stderr, "observe: %v", err)
 	}
@@ -560,7 +570,7 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, kin []domai
 // Returns the observations sorted by path (same input, byte-identical record),
 // how many paths git status listed, and the total bytes under lock — the two
 // numbers the timing counter reports.
-func hookObserve(ctx context.Context, rt *runtime, declared string, warn io.Writer) (obs []store.HookPathState, statusPaths int, lockedBytes int64, err error) {
+func hookObserve(ctx context.Context, rt *runtime, declared string, gitStatus gitStatusWait, warn io.Writer) (obs []store.HookPathState, statusPaths int, lockedBytes int64, err error) {
 	locks, err := rt.Store.ListLocks(rt.Ctx)
 	if err != nil {
 		return nil, 0, 0, err
@@ -568,7 +578,7 @@ func hookObserve(ctx context.Context, rt *runtime, declared string, warn io.Writ
 	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.RepoTop}
 	holders := hookLiveHolders(locks, ec)
 
-	status, err := gitStatusPaths(ctx, rt.RepoTop)
+	status, err := gitStatus()
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -577,8 +587,8 @@ func hookObserve(ctx context.Context, rt *runtime, declared string, warn io.Writ
 	// git prints each path exactly as it sits on disk; a lock's key has
 	// already gone through foldTargetKey (loto-f8m8). Folding here too, the
 	// same way resolveStagedPaths folds a git-produced token (base=repoTop:
-	// git already ran with cmd.Dir=repoTop, so the token is repo-root-relative
-	// by construction), is what keeps one file on a case-folding filesystem
+	// porcelain output is repo-root-relative from any cwd in the checkout, so
+	// the token is repo-root-relative by construction), is what keeps one file on a case-folding filesystem
 	// from filing under two path_canonical spellings — one read as locked by a
 	// peer, the other as unattributed, for the same write (loto-dwu9). A path
 	// that fails to resolve keeps its raw spelling rather than dropping the
@@ -786,6 +796,38 @@ func gitStatusPaths(parent context.Context, repoTop string) ([]string, error) {
 	}
 	sort.Strings(paths)
 	return paths, nil
+}
+
+// gitStatusWait blocks until a git status started by startGitStatusPaths
+// finishes and returns its paths. Calling it again returns the same result.
+type gitStatusWait func() ([]string, error)
+
+// startGitStatusPaths starts gitStatusPaths in dir and returns its wait. The
+// hook passes "", this process's cwd: the checkout openRuntime resolves its
+// toplevel from, so the hook need not wait for that toplevel to start. Porcelain
+// output is repo-root-relative from any cwd in the checkout, so the paths
+// match a run with cmd.Dir=repoTop.
+//
+// ‡ The pre takes its status snapshot before the sweeps and admission rather
+// than after, and the observed set does not change for it: admission adds the
+// declared path to the set itself, and the locked paths come from ListLocks,
+// read after admission. Only a path some other process dirties within those
+// few milliseconds can differ, and that race exists at any moment the
+// snapshot is taken.
+func startGitStatusPaths(ctx context.Context, dir string) gitStatusWait {
+	type result struct {
+		paths []string
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		paths, err := gitStatusPaths(ctx, dir)
+		done <- result{paths, err}
+	}()
+	return sync.OnceValues(func() ([]string, error) {
+		r := <-done
+		return r.paths, r.err
+	})
 }
 
 // hookTReport reads T_report from the environment, falling back to the
