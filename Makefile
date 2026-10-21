@@ -30,7 +30,7 @@ include .sandbox/lib/Makefile.doctor.mk
 include .sandbox/lib/Makefile.cross.mk
 
 .PHONY: help scan check audit deploy report report-human \
-        vet lint arch test race demo demo-v vuln dupl nilcheck stress scriptcheck \
+        vet lint arch test race demo demo-v vuln dupl nilcheck stress perf scriptcheck \
         docscheck makefilecheck selfcheck build install tidy clean hooks pack-drift
 
 BIN_DIR := bin
@@ -241,6 +241,9 @@ race: ## Run tests with race detector (slow, fo-rendered)
 
 stress: ## Concurrent-agent conformance gauntlet (build-tag stress)
 	go test -tags=stress -race -run TestStress -count=1 -timeout=2m ./...
+
+perf: ## Wall-clock bounds (build-tag perf; host-dependent, so never in check or CI)
+	go test -tags=perf -run TestHook_PrePostMedianUnder50msAt300KB -count=1 -v ./internal/cli
 
 vuln: ## Scan for known vulnerabilities (fo-rendered)
 	@if ! command -v govulncheck >/dev/null 2>&1; then \

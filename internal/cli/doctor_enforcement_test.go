@@ -200,7 +200,9 @@ func TestDoctorEnforcement_SelfTestPreRefused(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 	prevPre := selfTestPre
-	selfTestPre = func(context.Context, *runtime, hookEvent, time.Time, io.Writer, io.Writer) int { return 2 }
+	selfTestPre = func(context.Context, *runtime, hookEvent, time.Time, gitStatusWait, io.Writer, io.Writer) int {
+		return 2
+	}
 	t.Cleanup(func() { selfTestPre = prevPre })
 
 	out := runOK(t, tcCmdDoctor)
@@ -216,7 +218,7 @@ func TestDoctorEnforcement_SelfTestPostRefused(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 	prevPost := selfTestPost
-	selfTestPost = func(context.Context, *runtime, hookEvent, time.Time, io.Writer) int { return 2 }
+	selfTestPost = func(context.Context, *runtime, hookEvent, time.Time, gitStatusWait, io.Writer) int { return 2 }
 	t.Cleanup(func() { selfTestPost = prevPost })
 
 	out := runOK(t, tcCmdDoctor)

@@ -375,10 +375,10 @@ func checkHookSelfTest(ctx context.Context, rt *runtime) enforcementFinding {
 // a full or partial record for it to delete.
 func runHookSelfTestOnce(ctx context.Context, rt *runtime, ev hookEvent, callID, label string, fix []string) enforcementFinding {
 	var discard bytes.Buffer
-	if code := selfTestPre(ctx, rt, ev, time.Now(), &discard, &discard); code != 0 {
+	if code := selfTestPre(ctx, rt, ev, time.Now(), startGitStatusPaths(ctx, rt.RepoTop), &discard, &discard); code != 0 {
 		return enforcementFinding{label: label, detail: fmt.Sprintf("reason=pre-refused exit=%d", code), fix: fix}
 	}
-	if code := selfTestPost(ctx, rt, ev, time.Now(), &discard); code != 0 {
+	if code := selfTestPost(ctx, rt, ev, time.Now(), startGitStatusPaths(ctx, rt.RepoTop), &discard); code != 0 {
 		return enforcementFinding{label: label, detail: fmt.Sprintf("reason=post-refused exit=%d", code), fix: fix}
 	}
 	call, _, ok, err := rt.Store.CallRecord(rt.Ctx, callID)

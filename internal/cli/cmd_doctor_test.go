@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -470,6 +471,45 @@ func TestDoctorGuard_ForeignHooksPathForwards(t *testing.T) {
 	status := runOK(t, tcCmdStatus)
 	if !strings.Contains(status, "guard:   ok\n") {
 		t.Errorf("expected guard: ok in status: %q", status)
+	}
+}
+
+// TestStatusGuard_ProbesRunAtOnce is loto-szdx's status fix: the guard rows'
+// hook probes run at once, not one after another. Each foreign hook marks its
+// arrival, then waits (4s at most, inside gitTimeout) until all three have
+// arrived before it forwards. Run at once, every probe sees the others and
+// answers; run in series, the first one waits alone, gives up and exits 1,
+// and its row reads as a bypass. No clock threshold, so a slow runner cannot
+// fail it.
+func TestStatusGuard_ProbesRunAtOnce(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeHookFixture(t, repo, "pre-commit", "post-checkout", "reference-transaction")
+	foreign := filepath.Join(t.TempDir(), "global-hooks")
+	if err := os.MkdirAll(foreign, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	arrivals := t.TempDir()
+	for _, spec := range guardSpecs {
+		target := filepath.Join(repo, ".githooks", spec.hook)
+		body := "#!/usr/bin/env sh\n" +
+			"touch " + shellQuote(filepath.Join(arrivals, spec.hook)) + "\n" +
+			"arrived() { set -- " + shellQuote(arrivals) + "/*; [ $# -ge " + strconv.Itoa(len(guardSpecs)) + " ]; }\n" +
+			"i=0\n" +
+			"until arrived; do\n" +
+			"\t[ $i -ge 40 ] && exit 1\n" +
+			"\tsleep 0.1; i=$((i+1))\n" +
+			"done\n" +
+			"exec " + shellQuote(target) + " \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(foreign, spec.hook), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setHooksPath(t, repo, foreign)
+
+	status := runOK(t, tcCmdStatus)
+	if !strings.Contains(status, "guard:   ok\n") {
+		t.Errorf("want guard: ok — every probe answers only if all three ran at once: %q", status)
 	}
 }
 
