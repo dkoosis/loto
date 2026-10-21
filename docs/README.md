@@ -5,6 +5,7 @@ Index of design + reference docs for loto. Audience: future Claudes and dk.
 ## top-level
 
 - [DESIGN.md](DESIGN.md) — what loto is for, the design contract, what stays out of scope.
+- [write-gate.md](write-gate.md) — the write gate on one page: one actor, one kind of hold, one conflict rule.
 - [../ROADMAP.md](../ROADMAP.md) — the destination and the epics that get there; status lives in `.beads/`.
 - [true-bug-audit-2026-04-29.md](true-bug-audit-2026-04-29.md) — point-in-time correctness/concurrency/persistence audit.
 
