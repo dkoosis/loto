@@ -1,3 +1,5 @@
+//go:build perf
+
 package cli
 
 import (
@@ -16,8 +18,10 @@ import (
 // TestHook_PrePostMedianUnder50msAt300KB is loto-szdx's benchmark clause:
 // with 300KB locked over 20 files, a pre+post pair's median stays under 50ms —
 // doctor's hook_cost threshold (p50>50ms) reads the same pair. Measured
-// in-process, as the hook_timing row is. Skipped under -race and -short,
-// where the bound measures the instrumentation, not the hook.
+// in-process, as the hook_timing row is. A wall-clock bound depends on the
+// host, so it builds only under the perf tag (`make perf`), never in `make
+// check` or CI. Skipped under -race and -short, where the bound measures the
+// instrumentation, not the hook.
 func TestHook_PrePostMedianUnder50msAt300KB(t *testing.T) {
 	if raceEnabled || testing.Short() {
 		t.Skip("wall-clock bound; -race and -short runs do not measure the hook")
