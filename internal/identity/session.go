@@ -44,7 +44,14 @@ type SessionRecord struct {
 	// session started outside any repo. Unknown is never counted as "here":
 	// I1's failure direction is to pass, and a session re-records on its next
 	// `loto whoami`.
-	Repo       string    `json:"repo,omitempty"`
+	Repo string `json:"repo,omitempty"`
+	// Checkout is the git toplevel the session is working in NOW: Repo at
+	// record time, then re-recorded by `loto hook pre|post` whenever a tool
+	// call runs from a different checkout — EnterWorktree, or a cd into one
+	// (loto-nwoz). Repo stays where the session started, so I1's per-checkout
+	// count is unchanged; Checkout is what `loto check --worktree` reads to
+	// say a session is sitting in a tree. Empty means unknown, as for Repo.
+	Checkout   string    `json:"checkout,omitempty"`
 	RecordedAt time.Time `json:"recorded_at"`
 }
 
@@ -80,21 +87,53 @@ func RecordSession(a *Agent, repoTop string) (*SessionRecord, error) {
 		PID:        pid,
 		ProcStart:  procStart,
 		Repo:       repoTop,
+		Checkout:   repoTop,
 		RecordedAt: time.Now().UTC(),
 	}
-	body, err := json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	if err := mkdirAllSync(sessionDir()); err != nil {
-		return nil, err
-	}
-	// atomicfile: sibling temp, fsync, rename over the final path, then fsync
-	// the parent dir (loto-cq6 / gh#131), with F_FULLFSYNC on darwin.
-	if err := atomicfile.WriteFile(path, body, 0o600); err != nil {
+	if err := writeSession(path, rec); err != nil {
 		return nil, err
 	}
 	return rec, nil
+}
+
+// writeSession publishes rec at path. atomicfile: sibling temp, fsync, rename
+// over the final path, then fsync the parent dir (loto-cq6 / gh#131), with
+// F_FULLFSYNC on darwin.
+func writeSession(path string, rec *SessionRecord) error {
+	body, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := mkdirAllSync(sessionDir()); err != nil {
+		return err
+	}
+	return atomicfile.WriteFile(path, body, 0o600)
+}
+
+// RecordCheckout re-records the checkout session sid is working in, when it
+// differs from the one its record names. The hook calls it on every tool
+// call, so the common case — same checkout as last time — reads one small
+// file and writes nothing. changed=false with a nil error also covers a
+// session with no record: whoami never ran, and a record cannot be made here
+// without the witnesses whoami gathers, so `loto check --worktree` reads that
+// session from Claude Code's own record instead (loto-nwoz).
+func RecordCheckout(sid, checkout string) (changed bool, err error) {
+	if sid == "" || checkout == "" {
+		return false, nil
+	}
+	path, err := sessionPath(sid)
+	if err != nil {
+		return false, err
+	}
+	rec, ok := readSession(sid)
+	if !ok || rec.Checkout == checkout {
+		return false, nil
+	}
+	rec.Checkout = checkout
+	if err := writeSession(path, &rec); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // sessionPID resolves the long-lived session process id. LOTO_PID is what the
@@ -249,8 +288,8 @@ func liveOwnerUUIDs(repoTop string) map[string]struct{} {
 		live = dropRotatedSelfIDs(live)
 	}
 	out := make(map[string]struct{}, len(live))
-	for _, rec := range live {
-		out[rec.UUID] = struct{}{}
+	for i := range live {
+		out[live[i].UUID] = struct{}{}
 	}
 	return out
 }
@@ -295,8 +334,8 @@ func dropRotatedSelfIDs(live []SessionRecord) []SessionRecord {
 		return live
 	}
 	mine := -1
-	for i, rec := range live {
-		if rec.SessionID == self {
+	for i := range live {
+		if live[i].SessionID == self {
 			mine = i
 			break
 		}
@@ -305,11 +344,11 @@ func dropRotatedSelfIDs(live []SessionRecord) []SessionRecord {
 		return live
 	}
 	out := make([]SessionRecord, 0, len(live))
-	for i, rec := range live {
-		if i != mine && rec.sameProcess(me) {
+	for i := range live {
+		if i != mine && live[i].sameProcess(me) {
 			continue
 		}
-		out = append(out, rec)
+		out = append(out, live[i])
 	}
 	return out
 }

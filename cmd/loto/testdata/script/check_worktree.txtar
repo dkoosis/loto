@@ -1,0 +1,99 @@
+# loto-nwoz: `loto check --worktree <path>` answers whether another live
+# session is working at that path or inside it, holding locks or not — the
+# presence query a tool owes before deleting a worktree. sdlc tidy asked loto
+# only about locks and branches, so a live session sitting in a clean tree
+# with no lock read as unoccupied.
+
+exec git commit -q --allow-empty -m seed
+exec git worktree add -q $WORK/wa -b wa
+exec git worktree add -q $WORK/wb -b wb
+env SELF=$LOTO_PID
+env CLAUDE_CODE_SESSION_ID=me
+env LOTO_AGENT_ID=$ALICE
+
+# Nobody else anywhere: free, exit 0, and the ✓ line says so.
+loto check --worktree wa
+stdout '^✓ worktree=.*/wa free occupied=0 unknown=0$'
+
+# A dead session's record names wa: free. Its socket is gone and its pid is
+# not running.
+cd wa
+env CLAUDE_CODE_SESSION_ID=dead1 LOTO_AGENT_ID=$BOB LOTO_PID=999999 CLAUDE_CODE_MESSAGING_SOCKET=$WORK/gone.sock
+loto whoami
+env CLAUDE_CODE_SESSION_ID=me LOTO_AGENT_ID=$ALICE LOTO_PID=$SELF CLAUDE_CODE_MESSAGING_SOCKET=
+cd $WORK
+loto check --worktree wa
+stdout '^✓ worktree=.*/wa free'
+
+# A live session sitting in wa with no locks: occupied, exit 1, named.
+spawnpid PEER1
+cd wa
+env CLAUDE_CODE_SESSION_ID=peer1 LOTO_AGENT_ID=$BOB LOTO_PID=$PEER1
+loto whoami
+env CLAUDE_CODE_SESSION_ID=me LOTO_AGENT_ID=$ALICE LOTO_PID=$SELF
+cd $WORK
+! loto check --worktree wa
+stdout '^✗ worktree=.*/wa occupied occupied=1 unknown=0$'
+stdout '^✗ session=peer1 state=occupied source=loto pid=[0-9]+ at=.*/wa$'
+! stdout dead1
+loto status
+stdout 'no locks'
+
+# A path inside wa counts too; wb is still free.
+! loto check --worktree wa/sub/..
+loto check --worktree wb
+stdout '^✓ worktree=.*/wb free'
+
+# The caller's own session never counts against itself.
+env CLAUDE_CODE_SESSION_ID=peer1 LOTO_PID=$PEER1
+loto check --worktree wa
+stdout '^✓ worktree=.*/wa free'
+env CLAUDE_CODE_SESSION_ID=me LOTO_PID=$SELF
+
+# A session that started in the main checkout and then entered wb is
+# occupied at wb: its next tool call's hook re-records the checkout.
+spawnpid PEER2
+env CLAUDE_CODE_SESSION_ID=peer2 LOTO_AGENT_ID=$BOB LOTO_PID=$PEER2
+loto whoami
+env CLAUDE_CODE_SESSION_ID=me LOTO_AGENT_ID=$ALICE LOTO_PID=$SELF
+loto check --worktree wb
+stdout '^✓ worktree=.*/wb free'
+cd wb
+env CLAUDE_CODE_SESSION_ID=peer2 LOTO_AGENT_ID=$BOB LOTO_PID=$PEER2
+stdin $WORK/enter.json
+loto hook pre
+env CLAUDE_CODE_SESSION_ID=me LOTO_AGENT_ID=$ALICE LOTO_PID=$SELF
+cd $WORK
+! loto check --worktree wb
+stdout '^✗ session=peer2 state=occupied source=loto pid=[0-9]+ at=.*/wb$'
+
+# A live Claude Code session with no loto record, anywhere in this repo,
+# makes the answer unknown: exit 3, never free.
+spawnpid CC
+exec sh -c 'mkdir -p "$HOME/.claude/sessions" && printf "{\"pid\":%s,\"sessionId\":\"cc1\",\"cwd\":\"%s\"}" "$CC" "$WORK" > "$HOME/.claude/sessions/$CC.json"'
+exec sh -c 'printf "{\"pid\":%s,\"sessionId\":\"me\",\"cwd\":\"%s/wb\"}" "$SELF" "$WORK" > "$HOME/.claude/sessions/$SELF.json"'
+! loto check --worktree wb
+stdout '^✗ worktree=.*/wb occupied occupied=1 unknown=1$'
+stdout '^✗ session=cc1 state=unknown source=claude pid=[0-9]+ at=.* reason=no-loto-record$'
+! stdout 'session=me '
+exec git worktree add -q $WORK/wc2 -b wc2
+! loto check --worktree wc2
+stdout '^✗ worktree=.*/wc2 unknown occupied=0 unknown=1$'
+stdout '^✗ session=cc1 state=unknown source=claude pid=[0-9]+ at=.* reason=no-loto-record$'
+
+# The same Claude Code session, once loto has a live record of it placing it
+# elsewhere, no longer makes wc2 unknown.
+env CLAUDE_CODE_SESSION_ID=cc1 LOTO_AGENT_ID=$BOB LOTO_PID=$CC
+loto whoami
+env CLAUDE_CODE_SESSION_ID=me LOTO_AGENT_ID=$ALICE LOTO_PID=$SELF
+loto check --worktree wc2
+stdout '^✓ worktree=.*/wc2 free'
+
+# An empty or unset --worktree refuses, never "✓ no paths".
+! loto check --worktree ''
+stderr '--worktree needs a path'
+! loto check --worktree wa a.go
+stderr '--worktree takes no paths'
+
+-- enter.json --
+{"session_id":"peer2","tool_name":"EnterWorktree","tool_use_id":"call-enter","cwd":"/tmp"}
