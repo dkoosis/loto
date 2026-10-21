@@ -14,6 +14,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"loto/internal/domain"
@@ -762,16 +763,25 @@ func checkGuardReachability(ctx context.Context, repoTop string) []guardStatus {
 		return out
 	}
 	resolved, hooksPathOK, err := resolveGitHooksPath(ctx, repoTop)
+	// The rows run at once. A forwarded row forks the effective hook to probe
+	// it, ~33ms apiece under the sdlc doorman, and three probes in series were
+	// most of `loto status` (loto-szdx's profile: probeHookAnswer, 100ms of
+	// 120ms). The rows share nothing but read-only files, and out[i] keeps
+	// print order, so running them together changes no verdict.
+	var wg sync.WaitGroup
 	for i, spec := range guardSpecs {
-		switch {
-		case err != nil:
-			out[i] = guardStatus{spec: spec, reason: "hooksPath-unreadable", detail: err.Error()}
-		case hooksPathOK:
-			out[i] = checkOneGuard(repoTop, spec)
-		default:
-			out[i] = checkForwardedGuard(ctx, resolved, repoTop, spec)
-		}
+		wg.Go(func() {
+			switch {
+			case err != nil:
+				out[i] = guardStatus{spec: spec, reason: "hooksPath-unreadable", detail: err.Error()}
+			case hooksPathOK:
+				out[i] = checkOneGuard(repoTop, spec)
+			default:
+				out[i] = checkForwardedGuard(ctx, resolved, repoTop, spec)
+			}
+		})
 	}
+	wg.Wait()
 	return out
 }
 

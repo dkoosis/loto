@@ -561,7 +561,7 @@ func TestEvents_ShowsAHookTimingRowPerPreAndPost(t *testing.T) {
 	}
 
 	var out, errBuf bytes.Buffer
-	if code := Run([]string{"events", "--kind", store.EventHookTiming}, &out, &errBuf); code != 0 {
+	if code := Run([]string{tcCmdEvents, tcFlagKind, store.EventHookTiming}, &out, &errBuf); code != 0 {
 		t.Fatalf("loto events: exit=%d err=%q", code, errBuf.String())
 	}
 	body := out.String()
