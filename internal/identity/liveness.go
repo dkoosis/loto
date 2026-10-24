@@ -1,6 +1,9 @@
 package identity
 
-import "os"
+import (
+	"os"
+	"strings"
+)
 
 // SessionLiveness is the liveness verdict for the session behind a lock. THE
 // one session oracle (loto-ygty): three independent approximations (lock pid
@@ -128,6 +131,10 @@ func (r SessionRecord) Verdict() LivenessVerdict {
 	}
 	return LivenessVerdict{Liveness: SessionLive, Reason: witnessReason(r.Socket, reasonPID), Record: rec}
 }
+
+// PIDProven reports whether a Verdict reason says the record's pid was matched
+// against its process start time, so the pid cannot be a recycled one.
+func PIDProven(reason string) bool { return strings.HasSuffix(reason, reasonProcStart) }
 
 // witnessReason prefixes a pid-side reason with "socket+" when the socket
 // also witnessed, so the token says which evidence carried the verdict.

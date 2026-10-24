@@ -120,7 +120,10 @@ func decideWorktreePresence(sc presenceScope, lotoRecs []lotoSession, ccRecs []c
 		s := &lotoRecs[i]
 		if s.Liveness == identity.SessionLive {
 			placedSID[s.Rec.SessionID] = true
-			if s.Rec.PID > 0 {
+			// A pid alone may be recycled: it places a Claude record under
+			// another session id (/clear rotates it) only once the start
+			// time proved the pid is still this record's process.
+			if s.Rec.PID > 0 && identity.PIDProven(s.Reason) {
 				placedPID[s.Rec.PID] = true
 			}
 		}
