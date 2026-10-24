@@ -1,7 +1,7 @@
 # loto's write gate, on one page
 
-**Status:** proposed 2026-10-21 (loto-61g3); waiting on dk's ratification, a
-decision nug in his mnemd review queue.
+**Status:** ratified by dk 2026-10-21 (loto-61g3, merged as #406). This page
+is the gate's model; the build below makes the code match it.
 **Bound by:** nug `91a8938fa733` (prevent H1, detect H2; nothing reads a
 command string) and the conflict-class survey, nug `b2b0a9df507c`.
 
@@ -15,13 +15,14 @@ first, and dk ratifies that change.
 | **actor** | One Claude Code process: `(host, pid, process start time)`, read from its session record. Its subagents, in-process or `isolation: worktree`, are the same actor. `/clear` rotates the session id but not the actor. A shell with no session record is not an actor and gets no protection. |
 | **worktree** | The checkout's admin dir within the repo's common git dir: `main` for the primary checkout, `worktrees/<name>` for a linked one. `git worktree move` keeps it. |
 | **target** | A path relative to the worktree root, case-folded where the filesystem folds case. A directory target covers every path beneath it. |
-| **hold** | The only kind: `(actor, worktree, target, epoch)` plus a lease. Exclusive. `loto lock` takes one; the pre-hook takes one when it admits an Edit or Write of a path its actor does not hold. Beacons and claims are holds. |
+| **hold** | The only kind: `(actor, worktree, target, epoch)` plus a lease. Exclusive. `loto lock` and `loto claim` take one; the pre-hook takes one when it admits a gated write (below) of a path its actor does not hold. Beacons and claims are holds; shared mode and `loto downgrade` go. |
 | **live** | The hold's actor is not provably dead, and either its lease has not expired or the actor has a call in flight that began before the lease expired. A write to the held target (declared at pre or seen changed at post) renews the lease; nothing else does. |
 | **conflict rule** | Actor `a` in worktree `w` may not hold or write target `t` while a live hold of another actor in `w` covers `t` or is covered by it. |
 
 One function decides it: `Decide(actor, worktree, target) → admit | refuse(holder)`.
-Every surface calls it: the Edit/Write pre-hook, `loto lock`, `loto check`,
-`loto sync`, `loto submit`. Nothing else decides a write.
+Every surface calls it: the pre-hook for gated writes, `loto lock`,
+`loto claim`, `loto check`, `loto sync`, `loto submit`. Nothing else decides a
+write.
 
 **Gated:** Edit, Write, MultiEdit and NotebookEdit, where the path is exact.
 **Not gated:** Bash. Its writes fall to H2 detection: before/after digests of
@@ -41,8 +42,8 @@ Seven copies of the write decision diverged (review 2026-10-07):
 (submit), plus `handle_deny` in `scripts/gate-file-lock.sh`. Each asks "is
 this holder me, kin or a peer" from five attributes: session id, subagent
 stamp, pid, worktree and branch. The model keeps two: actor and worktree.
-`Decide` reads only the holds covering one target in one worktree, an indexed
-lookup, against ~100ms per Edit at 200 locks today.
+`Decide` reads only the holds that cover one target or lie beneath it, in one
+worktree, an indexed lookup, against ~100ms per Edit at 200 locks today.
 
 ## The kin-or-peer fixes since 2026-09-09
 
@@ -81,11 +82,12 @@ D = derived from the model. X = dropped: the case cannot arise, or its code goes
 
 ## The build
 
-Each waits on dk's ratification (blocked by loto-61g3).
+dk ratified the model; each bead below is open to build.
 
 - loto-njgz: one `Decide` replaces the seven copies.
 - loto-j88z: delete the Bash command parser.
-- loto-hof2: fold beacons and claims into the hold.
+- loto-hof2: fold beacons and claims into the hold; retire shared mode and
+  `loto downgrade`, since the hold is exclusive.
 - loto-e1ku: the actor is the process.
 - loto-ojq3: remove the staged-lock gate. loto-6itj is closed with it.
 - loto-d0cb survives: a hold stays live while its actor's in-flight call began
