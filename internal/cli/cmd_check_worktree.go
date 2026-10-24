@@ -120,7 +120,10 @@ func decideWorktreePresence(sc presenceScope, lotoRecs []lotoSession, ccRecs []c
 		s := &lotoRecs[i]
 		if s.Liveness == identity.SessionLive {
 			placedSID[s.Rec.SessionID] = true
-			if s.Rec.PID > 0 {
+			// A pid alone may be recycled: it places a Claude record under
+			// another session id (/clear rotates it) only once the start
+			// time proved the pid is still this record's process.
+			if s.Rec.PID > 0 && identity.PIDProven(s.Reason) {
 				placedPID[s.Rec.PID] = true
 			}
 		}
@@ -272,7 +275,13 @@ func runCheckWorktree(ctx context.Context, path string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "✗ list worktrees of %s: %v\n", path, err)
 		return 3
 	}
-	lotoRecs, ccRecs := otherSessions()
+	lotoRecs, ccRecs, err := otherSessions()
+	if err != nil {
+		// Claude Code's records are the witness for a session loto has no
+		// record of; unread, any checkout of the repo may hold one.
+		fmt.Fprintf(stderr, "✗ read Claude Code sessions: %v\n", err)
+		return 3
+	}
 	sc := presenceScope{Target: target, Trees: trees, Fold: caseInsensitiveFS(target)}
 	verdicts := decideWorktreePresence(sc, lotoRecs, ccRecs, canonPath)
 
@@ -311,8 +320,9 @@ func repoTrees(ctx context.Context, dir string) ([]string, error) {
 }
 
 // otherSessions reads every loto and Claude Code session record on this host
-// but the caller's own, each with its liveness verdict.
-func otherSessions() ([]lotoSession, []claudeSession) {
+// but the caller's own, each with its liveness verdict. An unreadable Claude
+// Code session dir is an error, not an empty list.
+func otherSessions() ([]lotoSession, []claudeSession, error) {
 	var lotoRecs []lotoSession
 	recs := identity.Sessions()
 	for i := range recs {
@@ -322,12 +332,16 @@ func otherSessions() ([]lotoSession, []claudeSession) {
 		v := recs[i].Verdict()
 		lotoRecs = append(lotoRecs, lotoSession{Rec: recs[i], Liveness: v.Liveness, Reason: v.Reason})
 	}
+	ccs, err := identity.ClaudeSessions()
+	if err != nil {
+		return nil, nil, err
+	}
 	var ccRecs []claudeSession
-	for _, c := range identity.ClaudeSessions() {
+	for _, c := range ccs {
 		if c.IsCaller() {
 			continue
 		}
 		ccRecs = append(ccRecs, claudeSession{Rec: c, Liveness: c.Liveness()})
 	}
-	return lotoRecs, ccRecs
+	return lotoRecs, ccRecs, nil
 }

@@ -2,6 +2,8 @@ package identity
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -55,12 +57,17 @@ type ClaudeSession struct {
 
 // ClaudeSessions reads every Claude Code session record on this host, sorted
 // by pid. A record that does not parse, or names no pid, is skipped: it
-// carries nothing to probe. A missing directory is no sessions.
-func ClaudeSessions() []ClaudeSession {
+// carries nothing to probe. A missing directory is no sessions; any other
+// read error is returned, because these records are the only witness for a
+// session loto has no record of, and an unread directory is not an empty one.
+func ClaudeSessions() ([]ClaudeSession, error) {
 	dir := filepath.Join(homeDir(), ".claude", "sessions")
 	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var out []ClaudeSession
 	for _, e := range entries {
@@ -78,7 +85,7 @@ func ClaudeSessions() []ClaudeSession {
 		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].PID < out[j].PID })
-	return out
+	return out, nil
 }
 
 // Liveness judges a Claude Code record by its pid, and by its messaging

@@ -70,6 +70,19 @@ func TestDecideWorktreePresence(t *testing.T) {
 			loto:   []lotoSession{{Rec: rec("s1", "/R/WB", 7), Liveness: identity.SessionLive}},
 		},
 		{
+			name:   "a pid the start time proved places a Claude record under a rotated session id",
+			target: wb,
+			loto:   []lotoSession{{Rec: rec("s1", main, 7), Liveness: identity.SessionLive, Reason: "procstart"}},
+			cc:     []claudeSession{{Rec: identity.ClaudeSession{PID: 7, SessionID: "s2", CWD: main}, Liveness: identity.SessionLive}},
+		},
+		{
+			name:   "a pid with no start-time proof does not place a Claude record under another session id",
+			target: wb,
+			loto:   []lotoSession{{Rec: rec("s1", main, 7), Liveness: identity.SessionLive, Reason: "pid"}},
+			cc:     []claudeSession{{Rec: identity.ClaudeSession{PID: 7, SessionID: "s2", CWD: main}, Liveness: identity.SessionLive}},
+			want:   []presenceVerdict{{Session: "s2", PID: 7, State: presenceUnknown, Source: presenceSourceClaude, At: main, Reason: reasonNoLotoRecord}},
+		},
+		{
 			name:   "a dead Claude session is nothing",
 			target: main,
 			cc:     []claudeSession{{Rec: identity.ClaudeSession{PID: 9, SessionID: "c1", CWD: main}, Liveness: identity.SessionDead}},
