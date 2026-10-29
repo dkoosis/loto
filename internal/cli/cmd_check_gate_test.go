@@ -387,7 +387,7 @@ func TestGateDecideAny(t *testing.T) {
 			// peer's claim in another worktree does not refuse it.
 			name: "a foreign claim in another worktree does not deny",
 			claims: []domain.ClaimRecord{
-				{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "foe claim", Worktree: "/elsewhere", ExpiresAt: now.Add(time.Hour)},
+				{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: gateIntentFoe, Worktree: "/elsewhere", ExpiresAt: now.Add(time.Hour)},
 			},
 			want: 0,
 		},
