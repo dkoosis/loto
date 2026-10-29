@@ -64,7 +64,7 @@ func TestClaimRecordExpired(t *testing.T) {
 	}
 }
 
-func TestClaimCoversTarget(t *testing.T) {
+func TestRefuses_Claim(t *testing.T) {
 	now := time.Now()
 	const myUUID = "11111111-1111-1111-1111-111111111111"
 	const foeUUID = "22222222-2222-2222-2222-222222222222"
@@ -88,8 +88,9 @@ func TestClaimCoversTarget(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := ClaimCoversTarget(c.c, c.target, myUUID, now); got != c.want {
-				t.Errorf("ClaimCoversTarget(%+v, %q) = %v; want %v", c.c, c.target, got, c.want)
+			ec := EvalContext{Now: now}
+			if got := ec.Refuses(myUUID, "", c.target, ec.ClaimHold(c.c)); got != c.want {
+				t.Errorf("Refuses(%+v, %q) = %v; want %v", c.c, c.target, got, c.want)
 			}
 		})
 	}
@@ -145,8 +146,8 @@ func TestEvalContextFoldedComparisonsResolveLegacyKeys(t *testing.T) {
 			if got := ec.PrefixCovers(claim.PathPrefix, target); got != c.want {
 				t.Errorf("PrefixCovers(%q,%q) = %v; want %v", claim.PathPrefix, target, got, c.want)
 			}
-			if got := ec.ClaimCovers(claim, target, "owner-b"); got != c.want {
-				t.Errorf("ClaimCovers = %v; want %v", got, c.want)
+			if got := ec.Refuses("owner-b", "", target, ec.ClaimHold(claim)); got != c.want {
+				t.Errorf("Refuses = %v; want %v", got, c.want)
 			}
 		})
 	}
@@ -157,11 +158,11 @@ func TestEvalContextFoldedComparisonsResolveLegacyKeys(t *testing.T) {
 func TestEvalContextFoldWidensOnlyThePathLeg(t *testing.T) {
 	ec := EvalContext{Now: time.Now(), CaseFold: true}
 	mine := ClaimRecord{PathPrefix: "Docs", OwnerUUID: "me", ExpiresAt: ec.Now.Add(time.Hour)}
-	if ec.ClaimCovers(mine, "docs/x.md", "me") {
+	if ec.Refuses("me", "", "docs/x.md", ec.ClaimHold(mine)) {
 		t.Error("a caller's own claim must not cover its own target")
 	}
 	dead := ClaimRecord{PathPrefix: "Docs", OwnerUUID: "other", ExpiresAt: ec.Now.Add(-time.Hour)}
-	if ec.ClaimCovers(dead, "docs/x.md", "me") {
+	if ec.Refuses("me", "", "docs/x.md", ec.ClaimHold(dead)) {
 		t.Error("an expired claim must not cover a target")
 	}
 }

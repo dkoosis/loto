@@ -98,7 +98,9 @@ func (s *Store) ClaimPrefix(ctx context.Context, rec domain.ClaimRecord, live do
 	if err != nil {
 		return err
 	}
-	blockers, expired := partitionClaims(all, rec, domain.EvalContext{Now: time.Now(), Live: live, CaseFold: s.caseFold})
+	now := time.Now()
+	rec.Worktree = claimWorktree(all, rec, now)
+	blockers, expired := partitionClaims(all, rec, domain.EvalContext{Now: now, Live: live, CaseFold: s.caseFold})
 	if len(blockers) > 0 {
 		return &ClaimConflictError{Blockers: blockers}
 	}
@@ -117,27 +119,47 @@ func (s *Store) ClaimPrefix(ctx context.Context, rec domain.ClaimRecord, live do
 	return commitTxFn(tx)
 }
 
+// claimWorktree is the worktree rec's row will carry. The row is keyed on
+// (path_prefix, owner_uuid) and has no room for two worktrees, so a re-claim
+// from another worktree over the owner's live row widens it to the empty
+// worktree (every worktree) rather than moving it and leaving the first
+// worktree's territory open to a peer. The partition then runs against the
+// widened row, so a peer's claim in any worktree blocks it. An expired row
+// protects nothing and takes rec's worktree.
+func claimWorktree(all []domain.ClaimRecord, rec domain.ClaimRecord, now time.Time) string {
+	for i := range all {
+		ex := &all[i]
+		if ex.PathPrefix == rec.PathPrefix && ex.OwnerUUID == rec.OwnerUUID &&
+			ex.ExpiresAt.After(now) && ex.Worktree != rec.Worktree {
+			return ""
+		}
+	}
+	return rec.Worktree
+}
+
 // partitionClaims splits the rows overlapping rec.PathPrefix into live
 // blockers and expired-reclaim candidates. Same-owner rows never land in
 // either bucket — a same-owner overlap never blocks, and the exact row
 // refreshes via upsert. Blockers come back sorted prefix then created_at.
 //
-// The staleness test is ec.ClaimIsStale, the SAME predicate `check --gate`
-// consumes — not ClaimRecord.Expired, which reads TTL alone (loto-9acu). One
+// The blocker test is ec.Refuses, the one conflict rule (docs/write-gate.md),
+// so a claim in another worktree neither blocks nor is reclaimed here. Its
+// liveness leg is ec.ClaimIsStale, the SAME predicate `check --gate` consumes — not ClaimRecord.Expired, which reads TTL alone (loto-9acu). One
 // predicate over both surfaces is the point: a claim the gate treats as
 // reclaimable must not still be refused here, and the drift between them was
 // the bug tzmv.9 set out to close.
 func partitionClaims(all []domain.ClaimRecord, rec domain.ClaimRecord, ec domain.EvalContext) (blockers, expired []domain.ClaimRecord) {
 	for i := range all {
 		ex := &all[i]
-		if !ec.PrefixCovers(ex.PathPrefix, rec.PathPrefix) || ex.OwnerUUID == rec.OwnerUUID {
+		h := ec.ClaimHold(*ex)
+		if !ec.Covers(rec.Worktree, rec.PathPrefix, h) || ex.OwnerUUID == rec.OwnerUUID {
 			continue
 		}
-		if ec.ClaimIsStale(*ex) {
-			expired = append(expired, *ex)
+		if ec.Refuses(rec.OwnerUUID, rec.Worktree, rec.PathPrefix, h) {
+			blockers = append(blockers, *ex)
 			continue
 		}
-		blockers = append(blockers, *ex)
+		expired = append(expired, *ex)
 	}
 	sort.Slice(blockers, func(i, j int) bool {
 		if blockers[i].PathPrefix != blockers[j].PathPrefix {
@@ -151,7 +173,8 @@ func partitionClaims(all []domain.ClaimRecord, rec domain.ClaimRecord, ec domain
 // insertOrRefreshClaim upserts the caller's claim row. ON CONFLICT targets the
 // (path_prefix, owner_uuid) PK so a same-owner re-claim refreshes TTL/intent
 // in place; created_at is deliberately NOT updated — the original reservation
-// time survives a refresh (mirrors insertOrRefreshLock).
+// time survives a refresh (mirrors insertOrRefreshLock). c.Worktree comes
+// from claimWorktree.
 func insertOrRefreshClaim(ctx context.Context, tx *sql.Tx, c domain.ClaimRecord) error {
 	_, err := tx.ExecContext(ctx, `
 INSERT INTO claims(path_prefix, owner_uuid, session_uuid, intent, created_at, expires_at, host, worktree)
@@ -270,7 +293,7 @@ func selectClaimPrefixesTx(ctx context.Context, tx *sql.Tx, where string, args [
 	return prefixes, rows.Err()
 }
 
-const claimCols = `path_prefix,owner_uuid,session_uuid,intent,created_at,expires_at,host`
+const claimCols = `path_prefix,owner_uuid,session_uuid,intent,created_at,expires_at,host,worktree`
 
 // ListClaims returns every claim row, expired included — staleness is a
 // display-time judgment (status filters via Expired), mirroring ListLocks.
@@ -298,7 +321,7 @@ func scanClaimsRows(rows *sql.Rows) ([]domain.ClaimRecord, error) {
 		var c domain.ClaimRecord
 		var owner, session string
 		var createdNs, expiresNs int64
-		if err := rows.Scan(&c.PathPrefix, &owner, &session, &c.Intent, &createdNs, &expiresNs, &c.Host); err != nil {
+		if err := rows.Scan(&c.PathPrefix, &owner, &session, &c.Intent, &createdNs, &expiresNs, &c.Host, &c.Worktree); err != nil {
 			return nil, err
 		}
 		c.OwnerUUID = domain.AgentUUID(owner)

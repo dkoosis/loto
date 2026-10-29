@@ -86,3 +86,54 @@ func hookCostSawLockedBytes(t *testing.T, want int) {
 		t.Fatalf("want %s in the last timing row: %q", row, out.String())
 	}
 }
+
+// TestHook_EditDecidesUnder10msAt200Holds is loto-njgz's benchmark clause: with
+// 200 holds in the store, an Edit pre-hook's admission decides in under 10ms.
+// Decide reads only the rows on the edited path (store.LocksAt), so the cost
+// does not grow with the hold count. The Edit lands on a peer's hold, so every
+// call decides and none takes a lock. Same perf-tag and batch rules as above.
+func TestHook_EditDecidesUnder10msAt200Holds(t *testing.T) {
+	if raceEnabled || testing.Short() {
+		t.Skip("wall-clock bound; -race and -short runs do not measure the hook")
+	}
+	repo := withTempProject(t)
+	pinAgent(t)
+	const holds = 200
+	lock := make([]string, 0, 1+holds+2)
+	lock = append(lock, tcCmdLock)
+	for i := range holds {
+		name := fmt.Sprintf("held-%03d.txt", i)
+		if err := os.WriteFile(filepath.Join(repo, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		lock = append(lock, name)
+	}
+	lock = append(lock, tcFlagIntent, tcIntentTest)
+	if code := Run(lock, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("seed holds: exit %d", code)
+	}
+	t.Setenv("LOTO_AGENT_ID", "")
+	pinAgent(t) // a second actor, editing the first one's hold
+	rt, done := hookStoreRead(t)
+	defer done()
+	target := filepath.Join(repo, "held-100.txt")
+
+	const batches, calls = 3, 51
+	var medians []time.Duration
+	for range batches {
+		took := make([]time.Duration, 0, calls)
+		for range calls {
+			start := time.Now()
+			if _, blocker := hookAdmit(t.Context(), rt, target, ""); blocker == nil {
+				t.Fatal("the peer's hold did not refuse the Edit")
+			}
+			took = append(took, time.Since(start))
+		}
+		slices.Sort(took)
+		medians = append(medians, took[calls/2])
+		if took[calls/2] < 10*time.Millisecond {
+			return
+		}
+	}
+	t.Errorf("Edit admission p50 per batch = %v, want one < 10ms", medians)
+}

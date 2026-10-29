@@ -1113,7 +1113,7 @@ func syncDecide(diffs []syncDiff, locks []domain.LockRecord, claims []domain.Cla
 
 // syncConflictFor checks, in order, whether path is covered by a live lease
 // (any owner, beacons included), a live territory claim (no owner
-// carve-out — ClaimCovers called with an empty uuid per plan-review
+// carve-out — Refuses called with an empty actor per plan-review
 // P1-1), or any candidate-claim row (liveness irrelevant — durable by
 // design, a dead one is doctor's reclaim job, not sync's).
 //
@@ -1145,21 +1145,19 @@ func syncLapsedReason(v domain.Liveness) string {
 }
 
 func syncConflictFor(path string, locks []domain.LockRecord, claims []domain.ClaimRecord, cands []domain.CandidateClaim, ec domain.EvalContext) (reason, holder string, conflict bool) {
-	for i := range locks {
-		l := &locks[i]
-		if !ec.IsStale(*l) {
-			return syncReasonLeased, string(l.OwnerUUID), true
-		}
-		if v, probed := ec.HolderLiveness(*l); probed && v != domain.LivenessDead {
-			return syncLapsedReason(v), string(l.OwnerUUID), true
-		}
+	// Sync overwrites bytes on behalf of no actor, so every live hold covering
+	// path refuses it (Refuses with an empty actor); a lapsed one still holds
+	// the bytes back while its holder may be writing them (loto-0o0j, 3dhl).
+	if reason, holder, ok := syncLockConflictFor(path, locks, ec); ok {
+		return reason, holder, true
 	}
 	for i := range claims {
 		c := &claims[i]
-		if !ec.ClaimTerritoryCovers(*c, path, "") {
+		h := ec.ClaimHold(*c)
+		if !ec.Covers(ec.MyWorktree, path, h) {
 			continue
 		}
-		if !ec.ClaimIsStale(*c) {
+		if ec.Refuses("", ec.MyWorktree, path, h) {
 			return syncReasonTerritoryClaim, string(c.OwnerUUID), true
 		}
 		// Lapsed, so the RESERVATION is gone and the next claim may take the
@@ -1171,6 +1169,24 @@ func syncConflictFor(path string, locks []domain.LockRecord, claims []domain.Cla
 	}
 	if len(cands) > 0 {
 		return syncReasonCandidateClaim, cands[0].CandidateID, true
+	}
+	return "", "", false
+}
+
+// syncLockConflictFor is syncConflictFor's lease leg.
+func syncLockConflictFor(path string, locks []domain.LockRecord, ec domain.EvalContext) (reason, holder string, conflict bool) {
+	for i := range locks {
+		l := &locks[i]
+		h := ec.LockHold(*l)
+		if ec.Refuses("", ec.MyWorktree, path, h) {
+			return syncReasonLeased, string(l.OwnerUUID), true
+		}
+		if !ec.Covers(ec.MyWorktree, path, h) {
+			continue
+		}
+		if v, probed := ec.HolderLiveness(*l); probed && v != domain.LivenessDead {
+			return syncLapsedReason(v), string(l.OwnerUUID), true
+		}
 	}
 	return "", "", false
 }
