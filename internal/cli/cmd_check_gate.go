@@ -82,10 +82,7 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 	}
 	for i := range claims {
 		c := &claims[i]
-		// ClaimCoversTarget settles overlap + foreign + TTL; ec.ClaimIsStale adds
-		// the owner-liveness leg so the path-scoped gate and the repo-wide
-		// gateDecideAny apply one standard of "live" to claims (loto-tzmv.9).
-		if ec.IsKin(c.OwnerUUID) || !ec.ClaimCovers(*c, t.Canonical, myUUID) || ec.ClaimIsStale(*c) {
+		if !ec.Refuses(domain.AgentUUID(myUUID), ec.MyWorktree, t.Canonical, ec.ClaimHold(*c)) {
 			continue
 		}
 		key := "claim|" + t.Canonical + "|" + c.PathPrefix + "|" + string(c.OwnerUUID)
@@ -103,10 +100,7 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 
 // gateLockDenies reports whether lock l is foreign live coverage of t.
 func gateLockDenies(t domain.Target, l *domain.LockRecord, myUUID string, ec domain.EvalContext) bool {
-	// Kin rows (ec.Kin — the parent identity behind a subagent stamp) are
-	// this caller's own, same as myUUID (loto-wofb).
-	return ec.SameTarget(t, l.Target) && string(l.OwnerUUID) != myUUID && !ec.IsKin(l.OwnerUUID) && !ec.IsStale(*l) &&
-		domain.SameWorktree(ec.MyWorktree, l.Worktree)
+	return ec.Refuses(domain.AgentUUID(myUUID), ec.MyWorktree, t.Canonical, ec.LockHold(*l))
 }
 
 // gateDecideAny is gateDecide's path-free sibling (ccp-vx4w): "does any

@@ -243,7 +243,7 @@ stress: ## Concurrent-agent conformance gauntlet (build-tag stress)
 	go test -tags=stress -race -run TestStress -count=1 -timeout=2m ./...
 
 perf: ## Wall-clock bounds (build-tag perf; host-dependent, so never in check or CI)
-	go test -tags=perf -run TestHook_PrePostMedianUnder50msAt300KB -count=1 -v ./internal/cli
+	go test -tags=perf -run 'TestHook_PrePostMedianUnder50msAt300KB|TestHook_EditDecidesUnder10msAt200Holds' -count=1 -v ./internal/cli
 
 vuln: ## Scan for known vulnerabilities (fo-rendered)
 	@if ! command -v govulncheck >/dev/null 2>&1; then \

@@ -517,15 +517,31 @@ func hookRowsDecide(rows []domain.LockRecord, me, sib domain.AgentUUID, ec domai
 			return true, nil
 		}
 	}
+	return false, hookBlocker(rows, me, sib, ec)
+}
+
+// hookBlocker is Decide over the rows on one path (store.LocksAt, so rows[0]
+// names the target): the first live row of
+// another actor in this worktree, or nil. The sibling this call runs for is
+// dropped first: its beacon was minted for this very write (see hookAdmit),
+// until loto-hof2 folds beacons into the hold.
+func hookBlocker(rows []domain.LockRecord, me, sib domain.AgentUUID, ec domain.EvalContext) *domain.LockRecord {
+	if len(rows) == 0 {
+		return nil
+	}
+	idx := make([]int, 0, len(rows))
+	holds := make([]domain.Hold, 0, len(rows))
 	for i := range rows {
-		r := &rows[i]
-		if ec.IsStale(*r) || r.OwnerUUID == me || ec.IsKin(r.OwnerUUID) || (sib != "" && r.OwnerUUID == sib) ||
-			!domain.SameWorktree(ec.MyWorktree, r.Worktree) {
+		if sib != "" && rows[i].OwnerUUID == sib {
 			continue
 		}
-		return false, r
+		idx = append(idx, i)
+		holds = append(holds, ec.LockHold(rows[i]))
 	}
-	return false, nil
+	if j := ec.Decide(me, ec.MyWorktree, rows[0].Target.Canonical, holds); j >= 0 {
+		return &rows[idx[j]]
+	}
+	return nil
 }
 
 // hookTakeLock is I2's `L(f) := s` half: the lock the pre-hook takes on the
@@ -567,14 +583,7 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, kin []domai
 		// admission would not have yielded to (mine, my kin's, my current
 		// sibling's), or a refusal would blame the very beacon minted for this
 		// write.
-		for i := range held {
-			if held[i].OwnerUUID == me || ec.IsKin(held[i].OwnerUUID) || ec.IsStale(held[i]) || (sib != "" && held[i].OwnerUUID == sib) ||
-				!domain.SameWorktree(ec.MyWorktree, held[i].Worktree) {
-				continue
-			}
-			return "", &held[i]
-		}
-		return "", nil
+		return "", hookBlocker(held, me, sib, ec)
 	}
 	return t.Canonical, nil
 }

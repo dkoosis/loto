@@ -36,7 +36,7 @@ type EvalContext struct {
 	// is the point of stamping (loto-xwod). Empty = only exact-owner is self.
 	Kin []AgentUUID
 	// CaseFold is true when this repo's checkout is on a case-folding
-	// filesystem, and it widens SameTarget/PrefixCovers/ClaimCovers below to
+	// filesystem, and it widens SameTarget/PrefixCovers (and so Refuses) to
 	// compare keys ignoring case (loto-8soe). The CLI mints every new key
 	// already folded (cli.foldTargetKey), so this changes nothing for rows
 	// written by this binary — it is what lets a row minted by an OLDER loto,
@@ -227,23 +227,13 @@ func (c EvalContext) RemainingTTL(l LockRecord) time.Duration {
 }
 
 // Conflicts reports whether an incoming acquire `incoming` is blocked by existing
-// holder `existing`. Shared+shared on the same target coexist; an exclusive lease on
-// either side conflicts. Same-owner holders never conflict (re-acquire is an
-// upsert), and neither does a Kin holder (see EvalContext.Kin). A stale
-// holder never conflicts — the caller is expected to have reclaimed it, but
-// this guards the predicate independently (loto-k5el.2).
+// holder `existing`: Refuses, the one conflict rule, plus shared mode, where
+// shared+shared on the same target coexist until loto-hof2 retires it.
+// Same-owner and Kin holders never conflict (re-acquire is an upsert), and a
+// stale holder never does (loto-k5el.2).
 func (c EvalContext) Conflicts(incoming, existing LockRecord) bool {
-	if existing.OwnerUUID == incoming.OwnerUUID || c.IsKin(existing.OwnerUUID) {
+	if incoming.EffectiveMode() == ModeShared && existing.EffectiveMode() == ModeShared {
 		return false
 	}
-	if !c.SameTarget(incoming.Target, existing.Target) {
-		return false
-	}
-	if !SameWorktree(incoming.Worktree, existing.Worktree) {
-		return false
-	}
-	if c.IsStale(existing) {
-		return false
-	}
-	return incoming.EffectiveMode() == ModeExclusive || existing.EffectiveMode() == ModeExclusive
+	return c.Refuses(incoming.OwnerUUID, incoming.Worktree, incoming.Target.Canonical, c.LockHold(existing))
 }

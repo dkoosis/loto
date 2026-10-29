@@ -1129,7 +1129,7 @@ func TestSyncDecide_LapsedClaimWithLiveHolder(t *testing.T) {
 	})
 
 	// An UNEXPIRED claim still blocks on the old reason — the split of
-	// ClaimCovers into ClaimTerritoryCovers + expiry must not change this leg.
+	// the claim leg into Covers + Refuses must not change this leg.
 	t.Run("claim still live -> territory-claim", func(t *testing.T) {
 		live := []domain.ClaimRecord{
 			{PathPrefix: syncPrefixWT, OwnerUUID: syncOwner, ExpiresAt: now.Add(time.Hour)},

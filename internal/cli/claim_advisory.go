@@ -36,7 +36,7 @@ func foreignClaimAdvisoriesFor(rt *runtime, targets []domain.Target, now time.Ti
 // collectForeignClaimAdvisories returns one advisory per (target, covering
 // live foreign claim), deduped and deterministically sorted by
 // (Target, Owner, Prefix). Empty when no claim covers any target. Shares
-// EvalContext.ClaimCovers with check --gate's gateDecide — same predicate,
+// EvalContext.Refuses with check --gate's gateDecide — same predicate,
 // two dispositions (deny vs advisory). ec carries the clock AND the
 // filesystem's case class, so the advisory cannot go quiet on a row the gate
 // would deny (loto-8soe).
@@ -46,7 +46,7 @@ func collectForeignClaimAdvisories(targets []domain.Target, claims []domain.Clai
 	for _, t := range targets {
 		for i := range claims {
 			c := &claims[i]
-			if !ec.ClaimCovers(*c, t.Canonical, myUUID) {
+			if !ec.Refuses(domain.AgentUUID(myUUID), ec.MyWorktree, t.Canonical, ec.ClaimHold(*c)) {
 				continue
 			}
 			key := t.Canonical + "|" + c.PathPrefix + "|" + string(c.OwnerUUID)
