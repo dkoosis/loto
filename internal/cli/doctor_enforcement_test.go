@@ -521,7 +521,7 @@ func TestDoctorEnforcement_TreeHookPluginWiring(t *testing.T) {
 				}
 			}
 			inst, _ := json.Marshal(map[string]any{"plugins": map[string]any{
-				"loto@m": []map[string]string{{"installPath": installed}}}})
+				"loto@m": []map[string]string{{"scope": "user", "installPath": installed}}}})
 			set, _ := json.Marshal(map[string]any{"enabledPlugins": map[string]bool{"loto@m": tc.enabled}})
 			if err := os.WriteFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"), inst, 0o644); err != nil {
 				t.Fatal(err)

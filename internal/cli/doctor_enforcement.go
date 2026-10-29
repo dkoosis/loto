@@ -162,7 +162,7 @@ func settingsFilesToRead(repoTop string) []string {
 
 // enabledLotoPluginHooks returns the hooks.json of each installed loto plugin
 // (installed_plugins.json's installPath, so only the installed version) that
-// the user's settings.json enables. A cached but disabled or superseded copy
+// the user's settings.json enables, user scope only. A cached but disabled or superseded copy
 // is never read: doctor must not go green for hooks Claude Code does not load.
 func enabledLotoPluginHooks(home string) []string {
 	var enabled struct {
@@ -170,6 +170,7 @@ func enabledLotoPluginHooks(home string) []string {
 	}
 	var installed struct {
 		Plugins map[string][]struct {
+			Scope       string `json:"scope"`
 			InstallPath string `json:"installPath"`
 		} `json:"plugins"`
 	}
@@ -187,7 +188,7 @@ func enabledLotoPluginHooks(home string) []string {
 			continue
 		}
 		for _, e := range entries {
-			if e.InstallPath != "" {
+			if e.Scope == "user" && e.InstallPath != "" { // project/local installs belong to other repos
 				out = append(out, filepath.Join(e.InstallPath, "hooks", "hooks.json"))
 			}
 		}
