@@ -30,7 +30,7 @@ func foreignClaimAdvisoriesFor(rt *runtime, targets []domain.Target, now time.Ti
 		return nil
 	}
 	return collectForeignClaimAdvisories(targets, claims, rt.Agent.UUID,
-		domain.EvalContext{Now: now, CaseFold: rt.CaseFold})
+		domain.EvalContext{Now: now, CaseFold: rt.CaseFold, MyWorktree: rt.RepoTop})
 }
 
 // collectForeignClaimAdvisories returns one advisory per (target, covering
