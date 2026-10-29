@@ -4,20 +4,21 @@
 # that tried otherwise had 12 false refusals for 1 prevented incident. This is
 # the shell half of that check; internal/cli/hook_tooth_test.go is the Go half.
 #
-# A hook body is .claude/settings.json (its inline hook commands) or any file
+# A hook body is .claude/settings.json or settings.local.json (their inline
+# hook commands) or any file
 # under hooks/, .githooks/, .claude/hooks/ or scripts/, at any depth and with
 # or without an extension, except a *_test.sh (hooks/hooks.json runs scripts
 # from scripts/). Each is grepped for the tool
 # input's command field: read straight off tool_input, dotted or bracketed
-# (.tool_input.command, d["tool_input"]["command"]), or, in a file that
+# (.tool_input.command, .tool_input."command", d["tool_input"]["command"]), or, in a file that
 # touches tool_input at all, a command field read anywhere
 # (.tool_input | .command, ti = d["tool_input"]; ti.get("command")).
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 Q='["'"'"']'
-PATTERN="tool_input$Q?\\]?[[:space:]]*(\\.|\\[[[:space:]]*$Q)command"
-FIELD="\\.command([^[:alnum:]_]|\$)|\\[[[:space:]]*$Q""command$Q[[:space:]]*\\]|get\\([[:space:]]*$Q""command$Q"
+PATTERN="tool_input$Q?\\]?[[:space:]]*(\\.$Q?|\\[[[:space:]]*$Q)command"
+FIELD="\\.$Q?command([^[:alnum:]_]|\$)|\\[[[:space:]]*$Q""command$Q[[:space:]]*\\]|get\\([[:space:]]*$Q""command$Q"
 
 # hook_bodies ROOT prints each hook body under ROOT, one per line.
 hook_bodies() {
@@ -25,7 +26,9 @@ hook_bodies() {
   for d in hooks .githooks .claude/hooks; do
     [ -d "$root/$d" ] && find "$root/$d" -type f
   done
-  [ -f "$root/.claude/settings.json" ] && echo "$root/.claude/settings.json"
+  for f in settings.json settings.local.json; do
+    [ -f "$root/.claude/$f" ] && echo "$root/.claude/$f"
+  done
   [ -d "$root/scripts" ] && find "$root/scripts" -type f ! -name '*_test.sh'
   return 0
 }
@@ -56,10 +59,12 @@ printf '%s\n' 'ti = d["tool_input"]' 'cmd = ti.get("command")' >"$WORK/scripts/s
 printf '%s\n' 'jq -r .tool_input.command' >"$WORK/scripts/lint-locked"
 printf '%s\n' "jq -r '.tool_input.command'" >"$WORK/scripts/sub/nested.sh"
 printf '%s\n' "jq -r '.tool_input | .commands'" >"$WORK/scripts/plural.sh"
+printf '%s\n' "jq -r '.tool_input.\"command\"'" >"$WORK/scripts/quoted.sh"
+printf '%s\n' '{"hooks": {"PreToolUse": [{"command": "jq -r .tool_input.command"}]}}' >"$WORK/.claude/settings.local.json"
 printf '%s\n' 'jq -r .tool_input.command' >"$WORK/scripts/gate_test.sh"
 printf '%s\n' '{"hooks": [{"command": "bash x.sh"}]}' >"$WORK/hooks/hooks.json"
 got="$(readers "$WORK" | sort | tr '\n' ' ')"
-want=".claude/hooks/stamp.py .claude/settings.json .githooks/hooks.d/x hooks/piped.sh hooks/pre.sh scripts/gate.sh scripts/lint-locked scripts/split.py.sh scripts/sub/nested.sh "
+want=".claude/hooks/stamp.py .claude/settings.json .claude/settings.local.json .githooks/hooks.d/x hooks/piped.sh hooks/pre.sh scripts/gate.sh scripts/lint-locked scripts/quoted.sh scripts/split.py.sh scripts/sub/nested.sh "
 if [ "$got" != "$want" ]; then
   echo "✗ hook_command_read: fixture readers = '$got', want '$want'"
   fail=1
