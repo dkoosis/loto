@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"loto/internal/domain"
+	"loto/internal/identity"
 	"loto/internal/render"
 	"loto/internal/store"
 )
@@ -411,7 +412,14 @@ func unlockAll(rt *runtime, onlyIntent string, stdout, stderr io.Writer) int {
 	// owner alone, then deletes the peer's lock. Same for the warning, which
 	// could observe one intent from a pre-release ListLocks while the sweep
 	// took two. One SELECT-and-DELETE under the op-flock answers both.
-	rel, err := rt.Store.ReleaseBySession(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), "", onlyIntent)
+	//
+	// An explicit LOTO_AGENT_ID is not a process: lanes may share it, so its
+	// sweep keeps to this session, as before loto-e1ku.
+	var sessionFilter domain.SessionUUID
+	if identity.PinnedByAgentID() && rt.SessionPinned {
+		sessionFilter = rt.SessionUUID
+	}
+	rel, err := rt.Store.ReleaseBySession(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), sessionFilter, onlyIntent)
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3

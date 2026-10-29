@@ -63,3 +63,19 @@ func TestEnsureActorFromSessionRecord(t *testing.T) {
 		t.Fatalf("no process known: owner = %v (err %v), want the session id", a, err)
 	}
 }
+
+// A claude started from a session's Bash inherits that session's LOTO_PID;
+// its own CLAUDE_PID names its actor, not its parent's.
+func TestEnsureActorPrefersClaudePID(t *testing.T) {
+	clearIdentityEnv(t)
+	stubProcStart(t, 4242, true)
+	parent := ensureAs(t, "sess-child", os.Getpid())
+	t.Setenv("CLAUDE_PID", strconv.Itoa(os.Getpid()+1))
+	child, err := Ensure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.UUID == parent {
+		t.Fatalf("child with its own CLAUDE_PID resolved to the inherited LOTO_PID's actor %s", parent)
+	}
+}

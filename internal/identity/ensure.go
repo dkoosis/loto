@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 )
 
 var (
@@ -92,8 +93,13 @@ func ensureEnv() (*Agent, error) {
 // is how a hook spawned without the session's env still names the same
 // actor. With neither, or with no start time to keep a recycled pid apart,
 // the process is unknown and the owner is sid itself.
+//
+// ‡ CLAUDE_PID before LOTO_PID, the reverse of sessionPID. Claude Code sets
+// CLAUDE_PID for each process it spawns, while LOTO_PID is a Bash export that
+// a claude started from that Bash inherits: read first, it would hand the
+// child's hooks its parent's actor.
 func actorOwner(sid, host string) string {
-	p := callerProc()
+	p := actorProc()
 	if p.pid <= 0 || p.procStart == 0 {
 		if rec, ok := readSession(sid); ok {
 			p = procIdent{pid: rec.PID, procStart: rec.ProcStart}
@@ -103,6 +109,21 @@ func actorOwner(sid, host string) string {
 		return sid
 	}
 	return deriveUUID(host, fmt.Sprintf("%d/%d", p.pid, p.procStart))
+}
+
+// actorProc is callerProc with Claude Code's own pid first (see actorOwner).
+func actorProc() procIdent {
+	if n, err := strconv.Atoi(os.Getenv("CLAUDE_PID")); err == nil && n > 0 {
+		procStart, _ := procStartFn(n)
+		return procIdent{pid: n, procStart: procStart}
+	}
+	return callerProc()
+}
+
+// PinnedByAgentID reports whether LOTO_AGENT_ID names the owner outright. That
+// owner is not a process, so one id may span many sessions (sd-xhap).
+func PinnedByAgentID() bool {
+	return envIdentityBinding() == bindingAgentIDExplicit
 }
 
 // envIdentityBinding classifies the identity precedence purely
