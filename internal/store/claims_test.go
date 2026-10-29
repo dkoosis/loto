@@ -512,3 +512,26 @@ func TestClaimPrefix_ReclaimOfExpiredRowTakesTheNewWorktree(t *testing.T) {
 		t.Fatalf("claims=%+v; want one row in %s", all, tcClaimOtherWT)
 	}
 }
+
+// TestClaimPrefix_WideningBlocksOnAPeerInAThirdWorktree: a peer holds pkg in
+// worktree C. The owner's claims in A and B each pass alone, but the second
+// would widen the row over C too, so the peer's claim blocks it.
+func TestClaimPrefix_WideningBlocksOnAPeerInAThirdWorktree(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	peer := mkClaim(tcPkgStore, "peer", time.Hour)
+	peer.Worktree = "/repo/.claude/worktrees/c"
+	a := mkClaim(tcPkgStore, tcAlice, time.Hour)
+	a.Worktree = tcRepoTop
+	for _, c := range []domain.ClaimRecord{peer, a} {
+		if err := s.ClaimPrefix(ctx, c, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := mkClaim(tcPkgStore, tcAlice, time.Hour)
+	b.Worktree = tcClaimOtherWT
+	var conflict *ClaimConflictError
+	if err := s.ClaimPrefix(ctx, b, nil); !errors.As(err, &conflict) {
+		t.Fatalf("err=%v; want ClaimConflictError naming the peer in C", err)
+	}
+}
