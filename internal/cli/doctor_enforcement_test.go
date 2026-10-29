@@ -490,6 +490,7 @@ func TestDoctorEnforcement_TreeHookPluginWiring(t *testing.T) {
 	}{
 		{"enabled and current", true, true, "✓ tree_hooks registered events=3"},
 		{"disabled", false, true, "✗ tree_hooks missing="},
+		{"repo local settings disable it", true, true, "✗ tree_hooks missing="},
 		{"installed copy lacks hooks", true, false, "✗ tree_hooks missing="},
 	}
 	for _, tc := range cases {
@@ -528,6 +529,16 @@ func TestDoctorEnforcement_TreeHookPluginWiring(t *testing.T) {
 			}
 			if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), set, 0o644); err != nil {
 				t.Fatal(err)
+			}
+			if tc.name == "repo local settings disable it" {
+				// withTempProject's cwd is the repo; its local settings override the user's
+				wd, _ := os.Getwd()
+				top := strings.TrimSpace(gitOutT(t, wd, "rev-parse", "--show-toplevel"))
+				_ = os.MkdirAll(filepath.Join(top, ".claude"), 0o755)
+				off, _ := json.Marshal(map[string]any{"enabledPlugins": map[string]bool{"loto@m": false}})
+				if err := os.WriteFile(filepath.Join(top, ".claude", "settings.local.json"), off, 0o644); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if out := runOK(t, tcCmdDoctor); !strings.Contains(out, tc.want) {
 				t.Errorf("want %q in %q", tc.want, out)

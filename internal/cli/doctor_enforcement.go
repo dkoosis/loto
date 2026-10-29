@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -150,7 +151,7 @@ func settingsFilesToRead(repoTop string) []string {
 	var out []string
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		out = append(out, filepath.Join(home, ".claude", "settings.json"))
-		out = append(out, enabledLotoPluginHooks(home)...)
+		out = append(out, enabledLotoPluginHooks(home, repoTop)...)
 	}
 	if repoTop != "" {
 		matches, _ := filepath.Glob(filepath.Join(repoTop, ".claude", "settings*.json"))
@@ -164,7 +165,7 @@ func settingsFilesToRead(repoTop string) []string {
 // (installed_plugins.json's installPath, so only the installed version) that
 // the user's settings.json enables, user scope only. A cached but disabled or superseded copy
 // is never read: doctor must not go green for hooks Claude Code does not load.
-func enabledLotoPluginHooks(home string) []string {
+func enabledLotoPluginHooks(home, repoTop string) []string {
 	var enabled struct {
 		EnabledPlugins map[string]bool `json:"enabledPlugins"`
 	}
@@ -174,11 +175,24 @@ func enabledLotoPluginHooks(home string) []string {
 			InstallPath string `json:"installPath"`
 		} `json:"plugins"`
 	}
-	b, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
-	if err != nil || json.Unmarshal(b, &enabled) != nil {
-		return nil
+	// Later files override earlier ones, as in Claude Code: user, then the
+	// repo's settings.json, then settings.local.json.
+	layers := []string{filepath.Join(home, ".claude", "settings.json")}
+	if repoTop != "" {
+		layers = append(layers,
+			filepath.Join(repoTop, ".claude", "settings.json"),
+			filepath.Join(repoTop, ".claude", "settings.local.json"))
 	}
-	b, err = os.ReadFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"))
+	enabled.EnabledPlugins = map[string]bool{}
+	for _, f := range layers {
+		var layer struct {
+			EnabledPlugins map[string]bool `json:"enabledPlugins"`
+		}
+		if lb, lerr := os.ReadFile(f); lerr == nil && json.Unmarshal(lb, &layer) == nil {
+			maps.Copy(enabled.EnabledPlugins, layer.EnabledPlugins)
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"))
 	if err != nil || json.Unmarshal(b, &installed) != nil {
 		return nil
 	}
