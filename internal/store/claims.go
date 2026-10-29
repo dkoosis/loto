@@ -122,22 +122,24 @@ func (s *Store) ClaimPrefix(ctx context.Context, rec domain.ClaimRecord, live do
 // either bucket — a same-owner overlap never blocks, and the exact row
 // refreshes via upsert. Blockers come back sorted prefix then created_at.
 //
-// The staleness test is ec.ClaimIsStale, the SAME predicate `check --gate`
-// consumes — not ClaimRecord.Expired, which reads TTL alone (loto-9acu). One
+// The blocker test is ec.Refuses, the one conflict rule (docs/write-gate.md),
+// so a claim in another worktree neither blocks nor is reclaimed here. Its
+// liveness leg is ec.ClaimIsStale, the SAME predicate `check --gate` consumes — not ClaimRecord.Expired, which reads TTL alone (loto-9acu). One
 // predicate over both surfaces is the point: a claim the gate treats as
 // reclaimable must not still be refused here, and the drift between them was
 // the bug tzmv.9 set out to close.
 func partitionClaims(all []domain.ClaimRecord, rec domain.ClaimRecord, ec domain.EvalContext) (blockers, expired []domain.ClaimRecord) {
 	for i := range all {
 		ex := &all[i]
-		if !ec.PrefixCovers(ex.PathPrefix, rec.PathPrefix) || ex.OwnerUUID == rec.OwnerUUID {
+		h := ec.ClaimHold(*ex)
+		if !ec.Covers(rec.Worktree, rec.PathPrefix, h) || ex.OwnerUUID == rec.OwnerUUID {
 			continue
 		}
-		if ec.ClaimIsStale(*ex) {
-			expired = append(expired, *ex)
+		if ec.Refuses(rec.OwnerUUID, rec.Worktree, rec.PathPrefix, h) {
+			blockers = append(blockers, *ex)
 			continue
 		}
-		blockers = append(blockers, *ex)
+		expired = append(expired, *ex)
 	}
 	sort.Slice(blockers, func(i, j int) bool {
 		if blockers[i].PathPrefix != blockers[j].PathPrefix {

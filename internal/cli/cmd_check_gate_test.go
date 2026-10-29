@@ -382,11 +382,23 @@ func TestGateDecideAny(t *testing.T) {
 			},
 			want: 2,
 		},
+		{
+			// loto-njgz: a tree move applies the one conflict rule, so a
+			// peer's claim in another worktree does not refuse it.
+			name: "a foreign claim in another worktree does not deny",
+			claims: []domain.ClaimRecord{
+				{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "foe claim", Worktree: "/elsewhere", ExpiresAt: now.Add(time.Hour)},
+			},
+			want: 0,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ec := gateEC(now)
 			ec.Live = c.live
+			if ec.MyWorktree == "" {
+				ec.MyWorktree = "/here"
+			}
 			rows := gateDecideAny(c.locks, c.claims, gateMyUUID, c.session, ec)
 			if len(rows) != c.want {
 				t.Fatalf("gateDecideAny() = %d rows, want %d: %+v", len(rows), c.want, rows)

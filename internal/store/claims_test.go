@@ -431,3 +431,24 @@ func TestPartitionClaims_StalenessMatchesTheGate(t *testing.T) {
 		t.Fatalf("expired = %+v, want 2 (alice by TTL, dave by liveness)", expired)
 	}
 }
+
+// TestPartitionClaims_OtherWorktreeNeitherBlocksNorIsReclaimed: loto claim
+// applies the one conflict rule, so a peer's claim on the same prefix in
+// another worktree does not refuse this one, and is not reclaimed by it
+// (loto-njgz, docs/write-gate.md #372).
+func TestPartitionClaims_OtherWorktreeNeitherBlocksNorIsReclaimed(t *testing.T) {
+	now := time.Now()
+	ec := domain.EvalContext{Now: now}
+	all := []domain.ClaimRecord{
+		{PathPrefix: "pkg", OwnerUUID: "peer", Worktree: "/repo/.claude/worktrees/b", ExpiresAt: now.Add(time.Hour)},
+		{PathPrefix: "pkg", OwnerUUID: "gone", Worktree: "/repo/.claude/worktrees/b", ExpiresAt: now.Add(-time.Hour)},
+	}
+	rec := domain.ClaimRecord{PathPrefix: "pkg", OwnerUUID: "me", Worktree: "/repo", ExpiresAt: now.Add(time.Hour)}
+	if blockers, expired := partitionClaims(all, rec, ec); len(blockers) != 0 || len(expired) != 0 {
+		t.Errorf("another worktree's claims: blockers=%+v expired=%+v, want none", blockers, expired)
+	}
+	rec.Worktree = "/repo/.claude/worktrees/b"
+	if blockers, expired := partitionClaims(all, rec, ec); len(blockers) != 1 || len(expired) != 1 {
+		t.Errorf("same worktree: blockers=%d expired=%d, want 1 and 1", len(blockers), len(expired))
+	}
+}

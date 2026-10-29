@@ -117,7 +117,9 @@ func gateDecideAny(locks []domain.LockRecord, claims []domain.ClaimRecord, myUUI
 	var rows []render.GateDenyRow
 	for i := range locks {
 		l := &locks[i]
-		if string(l.OwnerUUID) == myUUID || ec.IsStale(*l) || !domain.SameWorktree(ec.MyWorktree, l.Worktree) {
+		// "." covers every target: any live hold of another actor in this
+		// worktree refuses the move (docs/write-gate.md, ref transitions).
+		if !ec.Refuses(domain.AgentUUID(myUUID), ec.MyWorktree, ".", ec.LockHold(*l)) {
 			continue
 		}
 		// A beacon minted by a SIBLING of this same Claude session does not
@@ -145,7 +147,7 @@ func gateDecideAny(locks []domain.LockRecord, claims []domain.ClaimRecord, myUUI
 		// loto-tzmv.9: claims get the SAME liveness standard locks get above.
 		// Filtering on Expired alone let a crashed session's claim deny every
 		// tree-move in the repo for its full 2h TTL, with no reclaim path.
-		if string(c.OwnerUUID) == myUUID || ec.ClaimIsStale(*c) {
+		if !ec.Refuses(domain.AgentUUID(myUUID), ec.MyWorktree, ".", ec.ClaimHold(*c)) {
 			continue
 		}
 		rows = append(rows, render.GateDenyRow{
