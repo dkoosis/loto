@@ -183,15 +183,7 @@ func enabledLotoPluginHooks(home, repoTop string) []string {
 			filepath.Join(repoTop, ".claude", "settings.json"),
 			filepath.Join(repoTop, ".claude", "settings.local.json"))
 	}
-	enabled.EnabledPlugins = map[string]bool{}
-	for _, f := range layers {
-		var layer struct {
-			EnabledPlugins map[string]bool `json:"enabledPlugins"`
-		}
-		if lb, lerr := os.ReadFile(f); lerr == nil && json.Unmarshal(lb, &layer) == nil {
-			maps.Copy(enabled.EnabledPlugins, layer.EnabledPlugins)
-		}
-	}
+	enabled.EnabledPlugins = mergedEnabledPlugins(layers)
 	b, err := os.ReadFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"))
 	if err != nil || json.Unmarshal(b, &installed) != nil {
 		return nil
@@ -208,6 +200,21 @@ func enabledLotoPluginHooks(home, repoTop string) []string {
 		}
 	}
 	sort.Strings(out)
+	return out
+}
+
+// mergedEnabledPlugins folds the enabledPlugins maps of layers in order; a
+// later file wins.
+func mergedEnabledPlugins(layers []string) map[string]bool {
+	out := map[string]bool{}
+	for _, f := range layers {
+		var layer struct {
+			EnabledPlugins map[string]bool `json:"enabledPlugins"`
+		}
+		if b, err := os.ReadFile(f); err == nil && json.Unmarshal(b, &layer) == nil {
+			maps.Copy(out, layer.EnabledPlugins)
+		}
+	}
 	return out
 }
 

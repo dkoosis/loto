@@ -480,6 +480,9 @@ func TestDoctorEnforcement_AllSevenGreen(t *testing.T) {
 
 // A plugin's tree hooks count only when the plugin is installed AND enabled;
 // a cached copy that is disabled or superseded must not turn the row green.
+const tcPluginKey = "loto@m"
+const tcTreeMissing = "✗ tree_hooks missing="
+
 func TestDoctorEnforcement_TreeHookPluginWiring(t *testing.T) {
 	const wrapped = "bash ${CLAUDE_PLUGIN_ROOT}/scripts/tree-hook.sh "
 	cases := []struct {
@@ -489,9 +492,9 @@ func TestDoctorEnforcement_TreeHookPluginWiring(t *testing.T) {
 		want    string
 	}{
 		{"enabled and current", true, true, "✓ tree_hooks registered events=3"},
-		{"disabled", false, true, "✗ tree_hooks missing="},
-		{"repo local settings disable it", true, true, "✗ tree_hooks missing="},
-		{"installed copy lacks hooks", true, false, "✗ tree_hooks missing="},
+		{"disabled", false, true, tcTreeMissing},
+		{"repo local settings disable it", true, true, tcTreeMissing},
+		{"installed copy lacks hooks", true, false, tcTreeMissing},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -522,8 +525,8 @@ func TestDoctorEnforcement_TreeHookPluginWiring(t *testing.T) {
 				}
 			}
 			inst, _ := json.Marshal(map[string]any{"plugins": map[string]any{
-				"loto@m": []map[string]string{{"scope": "user", "installPath": installed}}}})
-			set, _ := json.Marshal(map[string]any{"enabledPlugins": map[string]bool{"loto@m": tc.enabled}})
+				tcPluginKey: []map[string]string{{"scope": "user", "installPath": installed}}}})
+			set, _ := json.Marshal(map[string]any{"enabledPlugins": map[string]bool{tcPluginKey: tc.enabled}})
 			if err := os.WriteFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"), inst, 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -535,7 +538,7 @@ func TestDoctorEnforcement_TreeHookPluginWiring(t *testing.T) {
 				wd, _ := os.Getwd()
 				top := strings.TrimSpace(gitOutT(t, wd, "rev-parse", "--show-toplevel"))
 				_ = os.MkdirAll(filepath.Join(top, ".claude"), 0o755)
-				off, _ := json.Marshal(map[string]any{"enabledPlugins": map[string]bool{"loto@m": false}})
+				off, _ := json.Marshal(map[string]any{"enabledPlugins": map[string]bool{tcPluginKey: false}})
 				if err := os.WriteFile(filepath.Join(top, ".claude", "settings.local.json"), off, 0o644); err != nil {
 					t.Fatal(err)
 				}
