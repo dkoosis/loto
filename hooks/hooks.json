@@ -9,6 +9,16 @@
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/gate-file-lock.sh"
           }
         ]
+      },
+      {
+        "matcher": "^(?!Read$|Grep$|Glob$).*$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/tree-hook.sh pre",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "SessionEnd": [
@@ -17,6 +27,30 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/tool-session-end.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(?!Read$|Grep$|Glob$).*$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/tree-hook.sh post",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "^(?!Read$|Grep$|Glob$).*$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/tree-hook.sh post",
+            "timeout": 10
           }
         ]
       }

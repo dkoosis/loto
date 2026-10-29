@@ -477,3 +477,75 @@ func TestDoctorEnforcement_AllSevenGreen(t *testing.T) {
 		t.Errorf("doctor's enforcement rows must be byte-identical across runs on unchanged state:\n first  %q\n second %q", first, second)
 	}
 }
+
+// A plugin's tree hooks count only when the plugin is installed AND enabled;
+// a cached copy that is disabled or superseded must not turn the row green.
+const tcPluginKey = "loto@m"
+const tcTreeMissing = "✗ tree_hooks missing="
+
+func TestDoctorEnforcement_TreeHookPluginWiring(t *testing.T) {
+	const wrapped = "bash ${CLAUDE_PLUGIN_ROOT}/scripts/tree-hook.sh "
+	cases := []struct {
+		name    string
+		enabled bool
+		current bool // the installPath copy carries the hooks
+		want    string
+	}{
+		{"enabled and current", true, true, "✓ tree_hooks registered events=3"},
+		{"disabled", false, true, tcTreeMissing},
+		{"repo local settings disable it", true, true, tcTreeMissing},
+		{"installed copy lacks hooks", true, false, tcTreeMissing},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withTempProject(t)
+			pinAgent(t)
+			home := os.Getenv("HOME")
+			cache := filepath.Join(home, ".claude", "plugins", "cache", "m", "loto")
+			cur, old := filepath.Join(cache, "2.0.0"), filepath.Join(cache, "1.0.0")
+			sf := settingsFile{Hooks: map[string][]settingsMatcherGroup{}}
+			for _, ev := range treeHookEvents {
+				sf.Hooks[ev.name] = []settingsMatcherGroup{{Matcher: TreeHookMatcher,
+					Hooks: []settingsCommand{{Type: "command", Command: wrapped + ev.verb}}}}
+			}
+			hooks, _ := json.Marshal(sf)
+			installed := cur
+			for _, d := range []string{cur, old} {
+				if err := os.MkdirAll(filepath.Join(d, "hooks"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// the superseded copy always carries hooks; only the installed one counts
+			if err := os.WriteFile(filepath.Join(old, "hooks", "hooks.json"), hooks, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.current {
+				if err := os.WriteFile(filepath.Join(cur, "hooks", "hooks.json"), hooks, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			inst, _ := json.Marshal(map[string]any{"plugins": map[string]any{
+				tcPluginKey: []map[string]string{{"scope": "user", "installPath": installed}}}})
+			set, _ := json.Marshal(map[string]any{"enabledPlugins": map[string]bool{tcPluginKey: tc.enabled}})
+			if err := os.WriteFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"), inst, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), set, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "repo local settings disable it" {
+				// withTempProject's cwd is the repo; its local settings override the user's
+				wd, _ := os.Getwd()
+				top := strings.TrimSpace(gitOutT(t, wd, "rev-parse", "--show-toplevel"))
+				_ = os.MkdirAll(filepath.Join(top, ".claude"), 0o755)
+				off, _ := json.Marshal(map[string]any{"enabledPlugins": map[string]bool{tcPluginKey: false}})
+				if err := os.WriteFile(filepath.Join(top, ".claude", "settings.local.json"), off, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if out := runOK(t, tcCmdDoctor); !strings.Contains(out, tc.want) {
+				t.Errorf("want %q in %q", tc.want, out)
+			}
+		})
+	}
+}
