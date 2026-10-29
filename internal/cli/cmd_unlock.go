@@ -440,6 +440,7 @@ func unlockAll(rt *runtime, onlyIntent string, stdout, stderr io.Writer) int {
 	scope := store.WorktreeScope{Own: rt.Worktree}
 	if root {
 		scope.Nested = nestedCheckoutKeys(rt.Ctx, rt.RepoTop)
+		scope.Gone = goneCheckout(rt.Ctx, rt.RepoTop)
 	}
 	rel, err := rt.Store.ReleaseBySession(rt.Ctx, domain.AgentUUID(rt.Agent.UUID), sessionFilter, onlyIntent, scope)
 	if err != nil {

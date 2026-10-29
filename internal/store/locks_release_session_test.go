@@ -693,3 +693,16 @@ func TestReleaseBySession_NestedOffStillRefusesSubagentRows(t *testing.T) {
 		t.Fatalf("Nested off must refuse the subagent row; ambiguous=%+v results=%+v", rel.Ambiguous, rel.Results)
 	}
 }
+
+// TestWorktreeScope_GoneKeyIsReached: a removed subagent checkout's key is no
+// longer listed by git, so Nested misses it; Gone lets the root's sweep take
+// its rows rather than wedge on them (loto-hu8o). A live sibling stays out.
+func TestWorktreeScope_GoneKeyIsReached(t *testing.T) {
+	scope := WorktreeScope{Own: tcWorktreeMain, Gone: func(k string) bool { return k == tcWorktreeAgentA }}
+	if !scope.Reaches(tcWorktreeAgentA) {
+		t.Errorf("a gone checkout's key must be reached")
+	}
+	if scope.Reaches(tcWorktreeAgentB) {
+		t.Errorf("a live sibling's key must not be reached")
+	}
+}

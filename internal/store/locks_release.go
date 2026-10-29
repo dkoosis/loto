@@ -411,11 +411,18 @@ type WorktreeScope struct {
 	// Nested are the keys of the checkouts strictly inside Own's tree whose
 	// rows the sweep also takes. Empty takes none.
 	Nested []string
+	// Gone, when set, names a key whose checkout no longer exists (removed
+	// or pruned): nobody can run a sweep there, so the root's sweep takes
+	// its rows too, as the path-prefix test did before keys (loto-hu8o).
+	Gone func(key string) bool
 }
 
 // Reaches reports whether a row stamped from worktree belongs to the caller.
 func (w WorktreeScope) Reaches(worktree string) bool {
-	return domain.SameWorktree(w.Own, worktree) || slices.Contains(w.Nested, worktree)
+	if domain.SameWorktree(w.Own, worktree) || slices.Contains(w.Nested, worktree) {
+		return true
+	}
+	return w.Gone != nil && worktree != "" && w.Gone(worktree)
 }
 
 // SessionRelease is what one ReleaseBySession transaction actually did.
