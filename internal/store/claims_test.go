@@ -448,12 +448,67 @@ func TestPartitionClaims_OtherWorktreeNeitherBlocksNorIsReclaimed(t *testing.T) 
 		{PathPrefix: tcClaimPkg, OwnerUUID: "peer", Worktree: tcClaimOtherWT, ExpiresAt: now.Add(time.Hour)},
 		{PathPrefix: tcClaimPkg, OwnerUUID: "gone", Worktree: tcClaimOtherWT, ExpiresAt: now.Add(-time.Hour)},
 	}
-	rec := domain.ClaimRecord{PathPrefix: tcClaimPkg, OwnerUUID: "me", Worktree: "/repo", ExpiresAt: now.Add(time.Hour)}
+	rec := domain.ClaimRecord{PathPrefix: tcClaimPkg, OwnerUUID: "me", Worktree: tcRepoTop, ExpiresAt: now.Add(time.Hour)}
 	if blockers, expired := partitionClaims(all, rec, ec); len(blockers) != 0 || len(expired) != 0 {
 		t.Errorf("another worktree's claims: blockers=%+v expired=%+v, want none", blockers, expired)
 	}
 	rec.Worktree = tcClaimOtherWT
 	if blockers, expired := partitionClaims(all, rec, ec); len(blockers) != 1 || len(expired) != 1 {
 		t.Errorf("same worktree: blockers=%d expired=%d, want 1 and 1", len(blockers), len(expired))
+	}
+}
+
+// TestClaimPrefix_ReclaimFromSecondWorktreeKeepsTheFirst: one owner claims a
+// prefix in worktree A, then again in B. The row cannot name both, so it
+// widens to every worktree; moving it to B would leave A open to a peer.
+func TestClaimPrefix_ReclaimFromSecondWorktreeKeepsTheFirst(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	a := mkClaim(tcPkgStore, tcAlice, time.Hour)
+	a.Worktree = tcRepoTop
+	if err := s.ClaimPrefix(ctx, a, nil); err != nil {
+		t.Fatal(err)
+	}
+	b := mkClaim(tcPkgStore, tcAlice, time.Hour)
+	b.Worktree = tcClaimOtherWT
+	if err := s.ClaimPrefix(ctx, b, nil); err != nil {
+		t.Fatal(err)
+	}
+	all, err := s.ListClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].Worktree != "" {
+		t.Fatalf("claims=%+v; want one row widened to worktree \"\"", all)
+	}
+	ec := domain.EvalContext{Now: time.Now()}
+	for _, wt := range []string{tcRepoTop, tcClaimOtherWT} {
+		if !ec.Refuses("peer", wt, tcPkgStore+"/a.go", ec.ClaimHold(all[0])) {
+			t.Errorf("peer write in %s admitted; the claim must refuse it", wt)
+		}
+	}
+}
+
+// TestClaimPrefix_ReclaimOfExpiredRowTakesTheNewWorktree: an expired row
+// protects nothing, so a re-claim from another worktree moves it there.
+func TestClaimPrefix_ReclaimOfExpiredRowTakesTheNewWorktree(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	old := mkClaim(tcPkgStore, tcAlice, -time.Minute)
+	old.Worktree = tcRepoTop
+	if err := s.ClaimPrefix(ctx, old, nil); err != nil {
+		t.Fatal(err)
+	}
+	b := mkClaim(tcPkgStore, tcAlice, time.Hour)
+	b.Worktree = tcClaimOtherWT
+	if err := s.ClaimPrefix(ctx, b, nil); err != nil {
+		t.Fatal(err)
+	}
+	all, err := s.ListClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].Worktree != tcClaimOtherWT {
+		t.Fatalf("claims=%+v; want one row in %s", all, tcClaimOtherWT)
 	}
 }

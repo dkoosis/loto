@@ -153,7 +153,10 @@ func partitionClaims(all []domain.ClaimRecord, rec domain.ClaimRecord, ec domain
 // insertOrRefreshClaim upserts the caller's claim row. ON CONFLICT targets the
 // (path_prefix, owner_uuid) PK so a same-owner re-claim refreshes TTL/intent
 // in place; created_at is deliberately NOT updated — the original reservation
-// time survives a refresh (mirrors insertOrRefreshLock).
+// time survives a refresh (mirrors insertOrRefreshLock). The row has no room
+// for two worktrees, so a live re-claim from a second worktree widens the
+// row to the empty worktree (every worktree) rather than moving it and leaving the first
+// worktree's territory open to a peer; an expired row takes the new worktree.
 func insertOrRefreshClaim(ctx context.Context, tx *sql.Tx, c domain.ClaimRecord) error {
 	_, err := tx.ExecContext(ctx, `
 INSERT INTO claims(path_prefix, owner_uuid, session_uuid, intent, created_at, expires_at, host, worktree)
@@ -163,7 +166,9 @@ ON CONFLICT(path_prefix, owner_uuid) DO UPDATE SET
   expires_at=excluded.expires_at,
   session_uuid=excluded.session_uuid,
   host=excluded.host,
-  worktree=excluded.worktree`,
+  worktree=CASE
+    WHEN claims.worktree = excluded.worktree OR claims.expires_at <= excluded.created_at THEN excluded.worktree
+    ELSE '' END`,
 		c.PathPrefix, string(c.OwnerUUID), string(c.SessionUUID),
 		c.Intent, c.CreatedAt.UnixNano(), c.ExpiresAt.UnixNano(), c.Host, c.Worktree,
 	)
@@ -272,7 +277,7 @@ func selectClaimPrefixesTx(ctx context.Context, tx *sql.Tx, where string, args [
 	return prefixes, rows.Err()
 }
 
-const claimCols = `path_prefix,owner_uuid,session_uuid,intent,created_at,expires_at,host`
+const claimCols = `path_prefix,owner_uuid,session_uuid,intent,created_at,expires_at,host,worktree`
 
 // ListClaims returns every claim row, expired included — staleness is a
 // display-time judgment (status filters via Expired), mirroring ListLocks.
@@ -300,7 +305,7 @@ func scanClaimsRows(rows *sql.Rows) ([]domain.ClaimRecord, error) {
 		var c domain.ClaimRecord
 		var owner, session string
 		var createdNs, expiresNs int64
-		if err := rows.Scan(&c.PathPrefix, &owner, &session, &c.Intent, &createdNs, &expiresNs, &c.Host); err != nil {
+		if err := rows.Scan(&c.PathPrefix, &owner, &session, &c.Intent, &createdNs, &expiresNs, &c.Host, &c.Worktree); err != nil {
 			return nil, err
 		}
 		c.OwnerUUID = domain.AgentUUID(owner)
