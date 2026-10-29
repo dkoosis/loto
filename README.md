@@ -79,7 +79,7 @@ Output is Claude-optimized KV — one record per line, fixed glyphs (`✓` /
 |------|-----------|--------------|--------|
 | Tag (record-tier) | `locks` row with non-zero, unexpired `expires_at` | row + TTL (lazy GC) | shipped |
 | Enforcement (chmod) | strip-write on acquire; restore on release | filesystem mode bits | retired (loto-zssw) |
-| Harness gate | PreToolUse hook (`loto hook pre`) refuses an Edit, Write, MultiEdit or NotebookEdit over a peer's held path; Bash is not gated, and its writes fall to H2 detection (docs/write-gate.md) | `locks` + `claims` rows | shipped; wired in `~/.claude/settings.json` — a fresh clone of *this* repo gets no PreToolUse hook |
+| Harness gate | PreToolUse hook (`loto hook pre`) refuses an Edit, Write, MultiEdit or NotebookEdit over a peer's held path; Bash is not gated, and its writes fall to H2 detection (docs/write-gate.md) | `locks` + `claims` rows | shipped in the `loto@sdlc` Claude Code plugin (`hooks/hooks.json` → `scripts/tree-hook.sh pre`) — a fresh clone of *this* repo gets no PreToolUse hook |
 | Op-flock (internal) | flock on `lock-op.flock`, held only during an op | flock | shipped |
 | File flock (foreground) | flock(2) exclusive held by the editing process | flock | deferred |
 | Global lock | flock(2) on a project-wide handle | flock | deferred |
