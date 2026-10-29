@@ -118,6 +118,16 @@ func TestGoneCheckout_RemovedLinkedWorktreeIsGone(t *testing.T) {
 	if !gone("worktrees/wt") {
 		t.Errorf("a pruned checkout is gone")
 	}
+	// A link git records relative to the admin dir must not read as gone.
+	rel := filepath.Join(top, "wt2")
+	run("worktree", "add", "-q", rel)
+	adminLink := filepath.Join(top, ".git", "worktrees", "wt2", "gitdir")
+	if err := os.WriteFile(adminLink, []byte("../../../wt2/.git\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if gone("worktrees/wt2") {
+		t.Errorf("a live checkout with a relative gitdir link is not gone")
+	}
 	if gone("main") || gone("") || gone("worktrees/../x") {
 		t.Errorf("main, empty and malformed keys are never gone")
 	}

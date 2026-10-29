@@ -197,8 +197,12 @@ func goneCheckout(ctx context.Context, repoTop string) func(string) bool {
 		if err != nil {
 			return false
 		}
+		link := filepath.Clean(strings.TrimSpace(string(b)))
+		if !filepath.IsAbs(link) {
+			link = filepath.Join(admin, link) // git can record the link relative to the admin dir
+		}
 		//nolint:gosec // G703: the path is git's own gitdir record, only stat'd for existence, never opened or written.
-		_, err = os.Stat(strings.TrimSpace(string(b)))
+		_, err = os.Stat(link)
 		return os.IsNotExist(err)
 	}
 }
