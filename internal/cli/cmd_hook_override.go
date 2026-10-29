@@ -19,8 +19,14 @@ import (
 // hookOverrideGuardPostCheckout and hookOverrideGuardReferenceTransaction are
 // the only guard names this command accepts — spelled the way the hooks.d
 // directory names them, so the events table reads the same vocabulary as the
-// tree it audits. pre-commit left with the staged-lock gate (loto-ojq3).
+// tree it audits.
+//
+// hookOverrideGuardPreCommitRetired named the staged-lock gate, gone with
+// loto-ojq3. sdlc's global pre-commit hook still calls it from its inline
+// copy of that gate; it exits 0 and records nothing, so the stale caller
+// prints no usage error.
 const (
+	hookOverrideGuardPreCommitRetired     = "pre-commit"
 	hookOverrideGuardPostCheckout         = "post-checkout"
 	hookOverrideGuardReferenceTransaction = "reference-transaction"
 )
@@ -44,6 +50,8 @@ func cmdHookOverride(ctx context.Context, args []string, stdout, stderr io.Write
 		return 0
 	}
 	switch guard {
+	case hookOverrideGuardPreCommitRetired:
+		return 0
 	case hookOverrideGuardPostCheckout, hookOverrideGuardReferenceTransaction:
 	default:
 		fmt.Fprintf(stderr, "✗ unknown guard %q\n", guard)

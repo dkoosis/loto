@@ -71,10 +71,25 @@ func TestHookOverride_UnknownGuardIsUsageError(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 
-	// pre-commit is unknown now: the staged-lock gate it named is gone (loto-ojq3).
-	for _, guard := range []string{"some-other-guard", "pre-commit"} {
-		if _, _, code := executeCommand("hook", "override", guard); code != 2 {
-			t.Errorf("unknown guard %q: exit %d, want 2", guard, code)
+	if _, _, code := executeCommand("hook", "override", "some-other-guard"); code != 2 {
+		t.Errorf("unknown guard: exit %d, want 2", code)
+	}
+}
+
+// TestHookOverride_RetiredPreCommitIsQuiet (loto-ojq3): the staged-lock gate
+// is gone, but sdlc's global hook still names it. It exits 0 with nothing on
+// stderr and records no row.
+func TestHookOverride_RetiredPreCommitIsQuiet(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+
+	_, stderr, code := executeCommand("hook", "override", "pre-commit")
+	if code != 0 || stderr != "" {
+		t.Fatalf("retired pre-commit guard: exit %d stderr %q, want 0 and nothing", code, stderr)
+	}
+	for _, ev := range readAllEvents(t) {
+		if ev.Kind == store.EventGuardOverride {
+			t.Fatalf("retired guard must not write a row, got %+v", ev)
 		}
 	}
 }

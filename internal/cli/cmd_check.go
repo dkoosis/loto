@@ -83,6 +83,7 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 	staged := fs.Bool("staged", false, "read paths from git diff --cached")
 	gateFlag := fs.Bool("gate", false, "read-only deny gate: exit 1 if a foreign live claim or lock/beacon covers any path; never acquires, refreshes, or writes")
 	branch := fs.String("branch", "", "check a BRANCH instead of paths: exit 1 if another checkout has it and its owner is not provably gone")
+	held := fs.Bool("held", false, "retired (loto-ojq3): exits 0; commits are not gated")
 	moved := fs.Bool("moved", false, "advisory only: given two HEADs, print a ⚠ row for each path the move changed that a live peer holds; always exits 0")
 	worktree := fs.String("worktree", "", "check a worktree PATH instead of paths: exit 1 if another live session is working at or inside it, locks or not; exit 3 if a live session there cannot be placed")
 	cwdUnknown := fs.Bool("cwd-unknown", false, "the caller's working directory is not knowable here (e.g. mcp__trixi__agent_shell): refuse relative paths instead of resolving them against the wrong base")
@@ -90,6 +91,16 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 		return nil, "", "", false, 2, true
 	}
 
+	// loto-ojq3: the staged-lock gate is gone; a commit is not a write
+	// decision (docs/write-gate.md). Its two legs, --held and --gate --staged,
+	// answer ✓ and exit 0 for a caller that still runs them: sdlc's global
+	// pre-commit hook carries an inline copy of the gate, and an unknown flag
+	// or a refusal there would nag or block every commit. stdout, because that
+	// hook prints a leg's stdout only when the leg refuses.
+	if *held || (*gateFlag && *staged) {
+		fmt.Fprintln(stdout, "✓ staged-gate=retired: a commit carries what the write gate admitted")
+		return nil, "", "", false, 0, true
+	}
 	if rc, handled := checkAltSurface(ctx, fs, altSurfaceArgs{
 		branchTyped: flagWasSet(fs, "branch"), branch: *branch,
 		worktreeTyped: flagWasSet(fs, "worktree"), worktree: *worktree,

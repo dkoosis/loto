@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -824,5 +825,43 @@ func TestGateCLI_ParentLockAllowsStampedSibling(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "kind=lock") {
 		t.Errorf("expected lock-kind deny row: %q", out.String())
+	}
+}
+
+// TestGateCLI_StagedGateIsRetired (loto-ojq3): a commit is not a write
+// decision, so the staged-lock gate's two legs exit 0 even with a peer's live
+// claim over the staged path. The path gate still denies the same path.
+func TestGateCLI_StagedGateIsRetired(t *testing.T) {
+	repo := withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice claim failed")
+	}
+	staged := tcPrefixStore + "/staged.go"
+	if err := os.MkdirAll(filepath.Join(repo, tcPrefixStore), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, staged), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "add", staged).CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v: %s", err, out)
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	for _, args := range [][]string{
+		{tcCmdCheck, tcFlagGate, tcFlagStaged},
+		{tcCmdCheck, "--held", tcFlagStaged},
+	} {
+		var out, errOut bytes.Buffer
+		code := Run(args, &out, &errOut)
+		if code != 0 || out.String() != "✓ staged-gate=retired: a commit carries what the write gate admitted\n" || errOut.Len() != 0 {
+			t.Errorf("%v: exit %d stdout %q stderr %q, want 0, the retired line, no stderr", args, code, out.String(), errOut.String())
+		}
+	}
+	if code := Run([]string{tcCmdCheck, tcFlagGate, staged}, &bytes.Buffer{}, &bytes.Buffer{}); code != 1 {
+		t.Errorf("the path gate must still deny a peer's claim, got exit %d", code)
 	}
 }
