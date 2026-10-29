@@ -72,8 +72,9 @@ func WorktreeKey(top string) string {
 // release — rather than inert rows no checkout would ever match.
 //
 // A rewrite that collides with a row already keyed (same target and owner,
-// one path and one key naming one checkout) keeps that row and drops the
-// stamped one. Claims key on (path_prefix, owner_uuid) alone, so they cannot
+// one path and one key naming one checkout, or two removed checkouts both
+// becoming "") keeps that row, moves the stamped one's tags onto it, and
+// drops the stamped one. Claims key on (path_prefix, owner_uuid) alone, so they cannot
 // collide.
 func ensureHoldsKeyedByAdminDir(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	paths, err := stampedCheckoutPaths(ctx, db)
@@ -88,6 +89,9 @@ func ensureHoldsKeyedByAdminDir(ctx context.Context, db sqlExecQuerier, apply bo
 		if _, err := db.ExecContext(ctx, `UPDATE OR IGNORE locks SET worktree = ? WHERE worktree = ?`, key, p); err != nil {
 			return false, err
 		}
+		if _, err := db.ExecContext(ctx, rehomeCollidedTags, key, p, key); err != nil {
+			return false, err
+		}
 		if _, err := db.ExecContext(ctx, `DELETE FROM locks WHERE worktree = ?`, p); err != nil {
 			return false, err
 		}
@@ -97,6 +101,22 @@ func ensureHoldsKeyedByAdminDir(ctx context.Context, db sqlExecQuerier, apply bo
 	}
 	return false, nil
 }
+
+// rehomeCollidedTags points the tags of each lock row a rekey is about to
+// drop (still stamped with the path after UPDATE OR IGNORE) at the row that
+// kept the key, so a pending note survives the collision (as loto-in0v's
+// repair did, PR #376). Tags key their host on (target, owner, created_at).
+const rehomeCollidedTags = `
+UPDATE tags SET lock_created_at = (
+  SELECT k.created_at FROM locks k
+   WHERE k.target_canonical = tags.target_canonical AND k.owner_uuid = tags.lock_owner_uuid AND k.worktree = ?)
+ WHERE EXISTS (
+  SELECT 1 FROM locks d
+   WHERE d.worktree = ? AND d.target_canonical = tags.target_canonical
+     AND d.owner_uuid = tags.lock_owner_uuid AND d.created_at = tags.lock_created_at)
+   AND EXISTS (
+  SELECT 1 FROM locks k
+   WHERE k.target_canonical = tags.target_canonical AND k.owner_uuid = tags.lock_owner_uuid AND k.worktree = ?)`
 
 // stampedCheckoutPaths lists the distinct absolute paths still stamped on a
 // lock or claim row. A key ("main", "worktrees/<name>") is never absolute.
