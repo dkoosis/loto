@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "loto hook pre",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/tree-hook.sh pre",
             "timeout": 10
           }
         ]
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "loto hook post",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/tree-hook.sh post",
             "timeout": 10
           }
         ]
@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "loto hook post",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/tree-hook.sh post",
             "timeout": 10
           }
         ]

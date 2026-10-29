@@ -143,14 +143,16 @@ type settingsCommand struct {
 
 // settingsFilesToRead lists the settings files Claude Code actually loads for
 // hook registration, in load order: the user's global settings, then every
-// settings*.json the repo carries (settings.json, settings.local.json). A
-// plugin's own hooks.json is deliberately not read here — it is not one of
-// "the settings files Claude Code actually loads" for this purpose, and
-// today it still carries the pre-redesign gate-file-lock.sh wiring.
+// settings*.json the repo carries (settings.json, settings.local.json), then
+// the installed loto plugin's hooks.json, which wires the tree hooks through
+// scripts/tree-hook.sh (same "hooks" shape as a settings file).
 func settingsFilesToRead(repoTop string) []string {
 	var out []string
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		out = append(out, filepath.Join(home, ".claude", "settings.json"))
+		plugin, _ := filepath.Glob(filepath.Join(home, ".claude", "plugins", "cache", "*", "loto", "*", "hooks", "hooks.json"))
+		sort.Strings(plugin)
+		out = append(out, plugin...)
 	}
 	if repoTop != "" {
 		matches, _ := filepath.Glob(filepath.Join(repoTop, ".claude", "settings*.json"))
@@ -166,12 +168,13 @@ func settingsFilesToRead(repoTop string) []string {
 // diagnostic input, not an error this leg can act on.
 func treeHookPresent(files []string, event treeHookEvent) bool {
 	want := "loto hook " + event.verb
+	wrapped := "tree-hook.sh " + event.verb // the plugin's fail-open wrapper
 	for _, path := range files {
 		sf, ok := readSettingsFile(path)
 		if !ok {
 			continue
 		}
-		if groupsInvokeCommand(sf.Hooks[event.name], want) {
+		if groupsInvokeCommand(sf.Hooks[event.name], want) || groupsInvokeCommand(sf.Hooks[event.name], wrapped) {
 			return true
 		}
 	}
