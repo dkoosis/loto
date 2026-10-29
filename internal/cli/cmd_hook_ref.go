@@ -641,9 +641,8 @@ func refVerdict(ctx context.Context, refusals []refRefusal, live map[string]stru
 }
 
 // refCheckoutWideClaim reports whether this caller holds the live
-// checkout-wide claim. Kin counts: a subagent stamped by the dispatch hook
-// resolves to its parent's owner (§3), so a lane's fan-out is covered by the
-// claim the lane took.
+// checkout-wide claim. A subagent is its parent's actor (docs/write-gate.md),
+// so a lane's fan-out is covered by the claim the lane took.
 //
 // ‡ Both reads fail OPEN — an unreadable claims table or an unresolvable
 // parent answers "the override is held", not "refuse". They are the same
@@ -658,14 +657,6 @@ func refCheckoutWideClaim(rt *runtime, stderr io.Writer) (bool, string) {
 		return true, "unknown"
 	}
 	mine := map[string]struct{}{rt.Agent.UUID: {}}
-	kin, kerr := parentKin(rt.Ctx)
-	if kerr != nil {
-		fmt.Fprintf(stderr, "⚠ kin=unresolved ref-guard=fail-open err=%q\n", kerr)
-		return true, "unknown"
-	}
-	for _, k := range kin {
-		mine[string(k)] = struct{}{}
-	}
 	now := time.Now()
 	for i := range claims {
 		c := claims[i]

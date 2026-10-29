@@ -91,12 +91,25 @@ func withTempProject(t *testing.T) string {
 func pinAgent(t *testing.T) *identity.Agent {
 	t.Helper()
 	os.Unsetenv("LOTO_AGENT_ID")
+	a := mintSessionOwner(t)
+	t.Setenv("LOTO_AGENT_ID", a.UUID)
+	return a
+}
+
+// mintSessionOwner pins a fresh CLAUDE_CODE_SESSION_ID and resolves its owner
+// with LOTO_PID unset, so each call yields a distinct owner even when a test
+// has pinned LOTO_PID to a live process (one pid is one actor, loto-e1ku).
+func mintSessionOwner(t *testing.T) *identity.Agent {
+	t.Helper()
 	t.Setenv("CLAUDE_CODE_SESSION_ID", identity.NewUUID())
+	if pid, had := os.LookupEnv("LOTO_PID"); had {
+		os.Unsetenv("LOTO_PID")
+		defer os.Setenv("LOTO_PID", pid) //nolint:usetesting // restore the value t.Setenv set; its own cleanup still runs after
+	}
 	a, err := identity.Ensure(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("LOTO_AGENT_ID", a.UUID)
 	return a
 }
 
@@ -109,12 +122,7 @@ const tcIntentAliceClaim = "alice-claim"
 func threeAgents(t *testing.T) (alice, bob, carol *identity.Agent) {
 	t.Helper()
 	alice, bob = twoAgents(t)
-	t.Setenv("CLAUDE_CODE_SESSION_ID", identity.NewUUID())
-	c, err := identity.Ensure(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return alice, bob, c
+	return alice, bob, mintSessionOwner(t)
 }
 
 func TestLockHappyPath(t *testing.T) {
@@ -135,17 +143,7 @@ func TestLockHappyPath(t *testing.T) {
 func twoAgents(t *testing.T) (alice, bob *identity.Agent) {
 	t.Helper()
 	os.Unsetenv("LOTO_AGENT_ID")
-	t.Setenv("CLAUDE_CODE_SESSION_ID", identity.NewUUID())
-	a, err := identity.Ensure(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CLAUDE_CODE_SESSION_ID", identity.NewUUID())
-	b, err := identity.Ensure(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return a, b
+	return mintSessionOwner(t), mintSessionOwner(t)
 }
 
 func TestLockConflictBetweenAgents(t *testing.T) {

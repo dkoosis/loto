@@ -85,7 +85,7 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 		// ClaimCoversTarget settles overlap + foreign + TTL; ec.ClaimIsStale adds
 		// the owner-liveness leg so the path-scoped gate and the repo-wide
 		// gateDecideAny apply one standard of "live" to claims (loto-tzmv.9).
-		if ec.IsKin(c.OwnerUUID) || !ec.ClaimCovers(*c, t.Canonical, myUUID) || ec.ClaimIsStale(*c) {
+		if !ec.ClaimCovers(*c, t.Canonical, myUUID) || ec.ClaimIsStale(*c) {
 			continue
 		}
 		key := "claim|" + t.Canonical + "|" + c.PathPrefix + "|" + string(c.OwnerUUID)
@@ -103,9 +103,7 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 
 // gateLockDenies reports whether lock l is foreign live coverage of t.
 func gateLockDenies(t domain.Target, l *domain.LockRecord, myUUID string, ec domain.EvalContext) bool {
-	// Kin rows (ec.Kin — the parent identity behind a subagent stamp) are
-	// this caller's own, same as myUUID (loto-wofb).
-	return ec.SameTarget(t, l.Target) && string(l.OwnerUUID) != myUUID && !ec.IsKin(l.OwnerUUID) && !ec.IsStale(*l) &&
+	return ec.SameTarget(t, l.Target) && string(l.OwnerUUID) != myUUID && !ec.IsStale(*l) &&
 		domain.SameWorktree(ec.MyWorktree, l.Worktree)
 }
 
@@ -236,14 +234,6 @@ func runCheckGate(ctx context.Context, paths []string, base, repoTop string, std
 	// memoized: gateDecide evaluates the predicate per (target × record), so a
 	// wide staged set would otherwise re-probe one holder hundreds of times.
 	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.RepoTop}
-	// A stamped sibling also owns its parent's rows — its Bash-side locks and
-	// claims were taken unstamped (loto-wofb). Resolution failure here is the
-	// same infra class as an unreachable store: say so, fail open.
-	kin, err := parentKin(ctx)
-	if err != nil {
-		return gateInfraUnreachable(stderr, err)
-	}
-	ec.Kin = kin
 	rows := gateDecide(targets, locks, claims, rt.Agent.UUID, ec)
 	// Resurfaced on BOTH verdicts, and never as one: an unresolved violation
 	// is not a reason to block this tool call — it is a reason the NEXT
@@ -257,14 +247,4 @@ func runCheckGate(ctx context.Context, paths []string, base, repoTop string, std
 	}
 	render.EmitGateDeny(stdout, rows)
 	return 1
-}
-
-// parentKin resolves the Kin set for this process: the parent identity a
-// LOTO_SUBAGENT_ID stamp hides, or nothing (identity.EnsureParent).
-func parentKin(ctx context.Context) ([]domain.AgentUUID, error) {
-	parent, ok, err := identity.EnsureParent(ctx)
-	if err != nil || !ok || parent == nil {
-		return nil, err
-	}
-	return []domain.AgentUUID{domain.AgentUUID(parent.UUID)}, nil
 }

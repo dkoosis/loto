@@ -225,11 +225,6 @@ func movedPeerRows(ctx context.Context, repoTop string, paths []string, stderr i
 		// error: report what did resolve rather than refusing the advisory.
 		fmt.Fprintf(stderr, "⚠ unresolved=%d moved=partial\n", len(invalid))
 	}
-	kin, err := parentKin(ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "⚠ kin=unresolved moved=fail-open err=%q\n", err)
-		return nil, false
-	}
-	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, Kin: kin, MyWorktree: rt.RepoTop}
+	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.RepoTop}
 	return collapseMovedRows(gateDecide(targets, locks, claims, rt.Agent.UUID, ec)), true
 }

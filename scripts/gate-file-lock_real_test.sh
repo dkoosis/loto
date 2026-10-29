@@ -11,7 +11,9 @@ HOOK="$ROOT/scripts/gate-file-lock.sh"
 WORK="$(mktemp -d)"
 sleep 600 &
 HOLDER_PID=$!
-trap 'kill "$HOLDER_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
+sleep 600 &
+PEER_PID=$!
+trap 'kill "$HOLDER_PID" "$PEER_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 mkdir -p "$WORK/bin"
 (cd "$ROOT" && go build -o "$WORK/bin/loto" ./cmd/loto) || { echo "✗ build failed"; exit 1; }
@@ -26,8 +28,14 @@ echo a >a.go && echo b >pkg/b.go && git add . &&
   git -c user.email=t@t -c user.name=t -c core.hooksPath=/dev/null commit -qm "test: fixture"
 
 # Both sessions are live: their whoami records name a running pid, so a lock
-# reads liveness=alive and plain `loto check` blocks on it.
-as() { local sid="$1"; shift; CLAUDE_CODE_SESSION_ID="$sid" LOTO_PID="$HOLDER_PID" "$@"; }
+# reads liveness=alive and plain `loto check` blocks on it. Each runs in its
+# own process: the actor is the process, so two session ids on one pid would
+# be one actor (loto-e1ku).
+as() {
+  local sid="$1" pid="$HOLDER_PID"; shift
+  [ "$sid" = sessG ] && pid="$PEER_PID"
+  CLAUDE_CODE_SESSION_ID="$sid" LOTO_PID="$pid" "$@"
+}
 as sessA loto whoami >/dev/null
 as sessG loto whoami >/dev/null
 as sessA loto lock a.go -t "hold" >/dev/null
@@ -51,9 +59,9 @@ sub_edit() { printf '{"session_id":"%s","agent_id":"%s","tool_name":"Edit","cwd"
 bash_cmd() { printf '{"session_id":"%s","tool_name":"Bash","cwd":"%s","tool_input":{"command":"%s"}}' "$1" "$REPO" "$2"; }
 
 # --- a peer's live lock blocks every write shape ---------------------------
-run "root peer's Edit over a live lock is refused, naming the holder" 2 sessG "$(edit sessG a.go)" "blocker=sessA"
-run "root peer's Bash redirect over a live lock is refused" 2 sessG "$(bash_cmd sessG 'echo hi > a.go')" "blocker=sessA"
-run "subagent peer's Edit over a live lock is refused" 2 sessG "$(sub_edit sessG sib1 a.go)" "blocker=sessA"
+run "root peer's Edit over a live lock is refused, naming the holder" 2 sessG "$(edit sessG a.go)" "intent=\"hold\""
+run "root peer's Bash redirect over a live lock is refused" 2 sessG "$(bash_cmd sessG 'echo hi > a.go')" "intent=\"hold\""
+run "subagent peer's Edit over a live lock is refused" 2 sessG "$(sub_edit sessG sib1 a.go)" "intent=\"hold\""
 run "the holder's own Edit is allowed" 0 sessA "$(edit sessA a.go)"
 
 # --- a claim never out-ranks the caller's own lock (sd-cpbj) ---------------

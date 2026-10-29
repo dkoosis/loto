@@ -32,14 +32,13 @@ func newUUID() string {
 	return formatUUID(b)
 }
 
-// deriveUUID maps (session id, subagent stamp) to a stable v4-shaped UUID:
-// the first 16 bytes of SHA-256 over "sid/stamp" with the version and
-// variant bits set. Deterministic, so a sibling re-derives the same owner on
-// every invocation with no cache file to race for (loto-jnid); distinct per
-// stamp, so siblings sharing one session never collapse onto one owner
-// (loto-fs84).
-func deriveUUID(sid, stamp string) string {
-	sum := sha256.Sum256([]byte(sid + "/" + stamp))
+// deriveUUID maps (scope, key) to a stable v4-shaped UUID: the first 16
+// bytes of SHA-256 over "scope/key" with the version and variant bits set.
+// Deterministic, so a process re-derives the same owner on every invocation
+// with no cache file to race for (loto-jnid); actorOwner keys it on (host,
+// pid/proc start).
+func deriveUUID(scope, key string) string {
+	sum := sha256.Sum256([]byte(scope + "/" + key))
 	var b [16]byte
 	copy(b[:], sum[:16])
 	return formatUUID(b)

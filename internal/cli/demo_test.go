@@ -21,7 +21,6 @@ package cli
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -100,11 +99,7 @@ func triCast(t *testing.T) (alice, bob, carol actor) {
 	t.Helper()
 	a, b := cast(t)
 	os.Unsetenv("LOTO_AGENT_ID")
-	t.Setenv("CLAUDE_CODE_SESSION_ID", identity.NewUUID())
-	c, err := identity.Ensure(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	c := mintSessionOwner(t)
 	return a, b, actor{handle: shortID(c.UUID), agent: c}
 }
 

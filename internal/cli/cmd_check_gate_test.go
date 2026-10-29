@@ -630,26 +630,6 @@ func TestGateCLI_SetButEmptyAgentIDFailsOpen(t *testing.T) {
 	assertFailOpenStream(t, &out, &errb, "identity=unpinned gate=fail-open")
 }
 
-// TestGateCLI_MalformedSubagentIDFailsOpen: a traversal-shaped
-// LOTO_SUBAGENT_ID is ignored by identity.Ensure (resolveSubagent falls
-// open), so with no other identity env Ensure would mint a throwaway UUID
-// owning nothing — every foreign row would deny. The gate must treat that id
-// as unpinned and fail open BEFORE store IO (review P1, #211).
-func TestGateCLI_MalformedSubagentIDFailsOpen(t *testing.T) {
-	withTempProject(t)
-	os.Unsetenv("LOTO_AGENT_ID")
-	os.Unsetenv("CLAUDE_CODE_SESSION_ID")
-	t.Setenv("LOTO_SUBAGENT_ID", "../escape")
-	t.Setenv("LOTO_BASE", brokenLOTOBase(t)) // proves no store IO happens
-
-	var out, errb bytes.Buffer
-	code := Run([]string{tcCmdCheck, tcFlagGate, tcTargetA}, &out, &errb)
-	if code != 0 {
-		t.Fatalf("expected exit 0 (malformed subagent id fails open), got %d: %q", code, errb.String())
-	}
-	assertFailOpenStream(t, &out, &errb, "identity=unpinned gate=fail-open")
-}
-
 // TestGateCLI_StoreUnreachableFailsOpen: a pinned identity with a broken
 // LOTO_BASE must fail open exit 3 with the store=unreachable row.
 func TestGateCLI_StoreUnreachableFailsOpen(t *testing.T) {
@@ -663,35 +643,6 @@ func TestGateCLI_StoreUnreachableFailsOpen(t *testing.T) {
 		t.Fatalf("expected exit 3, got %d: %q", code, errb.String())
 	}
 	assertFailOpenStream(t, &out, &errb, "⚠ store=unreachable gate=fail-open")
-}
-
-// TestGateCLI_SymmetricRootDeniedBySubagentClaim: root's session-pinned
-// identity (no LOTO_SUBAGENT_ID) is denied by a sibling subagent's claim
-// like any other peer — symmetric root policy (gate-design.md "Rules").
-func TestGateCLI_SymmetricRootDeniedBySubagentClaim(t *testing.T) {
-	withTempProject(t)
-	root := pinAgent(t) // session-pinned root identity
-
-	// A /team sibling: distinct owner via LOTO_SUBAGENT_ID, claims territory
-	// covering root's target while nominally still under root's LOTO_AGENT_ID
-	// (a subagent inherits the parent's LOTO_AGENT_ID; LOTO_SUBAGENT_ID takes
-	// priority in identity.Ensure regardless — see resolveSubagent).
-	t.Setenv("LOTO_SUBAGENT_ID", "sibling-1")
-	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatal("sibling claim failed")
-	}
-	os.Unsetenv("LOTO_SUBAGENT_ID")
-
-	// Back to root: LOTO_AGENT_ID pinned to root's own UUID, no subagent id.
-	t.Setenv("LOTO_AGENT_ID", root.UUID)
-	var out bytes.Buffer
-	code := Run([]string{tcCmdCheck, tcFlagGate, tcStoreStoreGo}, &out, &bytes.Buffer{})
-	if code != 1 {
-		t.Fatalf("expected root denied by sibling claim, got %d: %q", code, out.String())
-	}
-	if !strings.Contains(out.String(), "kind=claim") {
-		t.Errorf("expected claim-kind deny row: %q", out.String())
-	}
 }
 
 // TestGateCLI_MultiPathDeniesOnAnyBlocked: two paths, only one denied —
@@ -744,87 +695,6 @@ func TestGateCLI_InvalidTargetReturnsExit2(t *testing.T) {
 	}
 	if hostsIdx > globIdx {
 		t.Errorf("invalid rows must sort by path (/etc/hosts before z*.go): %q", s)
-	}
-}
-
-// --- family rule (loto-wofb) ------------------------------------------------
-// A stamped sibling's Bash-side `loto lock`/`claim` rows are owned by its
-// PARENT identity (hooks cannot export env into later tool calls), so the
-// gate must read parent-owned rows as the sibling's own — or a worker is
-// refused by the lock it just took. Sibling rows stay foreign.
-
-func TestGateDecide_ParentLockAllowsStampedSibling(t *testing.T) {
-	now := time.Now()
-	target := domain.Target{Canonical: tcTargetA}
-	locks := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateFoeUUID, Mode: domain.ModeExclusive, Intent: gateIntentMine, ExpiresAt: now.Add(time.Hour)},
-	}
-	ec := gateEC(now)
-	ec.Kin = []domain.AgentUUID{gateFoeUUID}
-	if rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, ec); len(rows) != 0 {
-		t.Fatalf("parent-owned lock must not deny its stamped sibling, got %+v", rows)
-	}
-}
-
-func TestGateDecide_ParentClaimAllowsStampedSibling(t *testing.T) {
-	now := time.Now()
-	target := domain.Target{Canonical: tcTargetA}
-	claims := []domain.ClaimRecord{
-		{PathPrefix: tcTargetA, OwnerUUID: gateFoeUUID, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
-	}
-	ec := gateEC(now)
-	ec.Kin = []domain.AgentUUID{gateFoeUUID}
-	if rows := gateDecide([]domain.Target{target}, nil, claims, gateMyUUID, ec); len(rows) != 0 {
-		t.Fatalf("parent-owned claim must not deny its stamped sibling, got %+v", rows)
-	}
-}
-
-// A parent on record must not widen "mine" past the family: another agent's
-// live exclusive lock still denies.
-func TestGateDecide_ForeignLockStillDeniesWithParent(t *testing.T) {
-	now := time.Now()
-	const parent = "55555555-5555-5555-5555-555555555555"
-	target := domain.Target{Canonical: tcTargetA}
-	locks := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateFoeUUID, Mode: domain.ModeExclusive, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
-	}
-	ec := gateEC(now)
-	ec.Kin = []domain.AgentUUID{parent}
-	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, ec)
-	if len(rows) != 1 || rows[0].HolderUUID != gateFoeUUID {
-		t.Fatalf("foreign lock must still deny a sibling with a parent, got %+v", rows)
-	}
-}
-
-// TestGateCLI_ParentLockAllowsStampedSibling is the loto-wofb end-to-end: the
-// parent locks (unstamped, as a worker's Bash `loto lock` does), the stamped
-// sibling's gate check passes, and a SECOND sibling is still refused by the
-// first one's beacon.
-func TestGateCLI_ParentLockAllowsStampedSibling(t *testing.T) {
-	withTempProject(t)
-	pinAgent(t)
-	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatal("parent lock failed")
-	}
-
-	const sibA, sibB = "a3b8547117dfa76ef", "b1c2d3e4f5a6b7c8"
-	t.Setenv("LOTO_SUBAGENT_ID", sibA)
-	var out, errb bytes.Buffer
-	if code := Run([]string{tcCmdCheck, tcFlagGate, tcTargetA}, &out, &errb); code != 0 {
-		t.Fatalf("stamped sibling must pass the gate on its parent's lock, got %d: %q %q", code, out.String(), errb.String())
-	}
-	if code := Run([]string{"beacon", tcTargetA}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatal("sibling A beacon failed")
-	}
-
-	t.Setenv("LOTO_SUBAGENT_ID", sibB)
-	out.Reset()
-	if code := Run([]string{tcCmdCheck, tcFlagGate, tcTargetA}, &out, &bytes.Buffer{}); code != 1 {
-		t.Fatalf("sibling B must be refused by sibling A's beacon, got %d: %q", code, out.String())
-	}
-	if !strings.Contains(out.String(), "kind=lock") {
-		t.Errorf("expected lock-kind deny row: %q", out.String())
 	}
 }
 
