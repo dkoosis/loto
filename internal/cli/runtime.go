@@ -93,6 +93,7 @@ type runtime struct {
 	HostKnown     bool // false → this machine has no verifiable host id; liveProbe must not compare hosts (loto-u7e)
 	StateDir      string
 	RepoTop       string             // absolute repo toplevel; roots canonical target resolution
+	Worktree      string             // store.WorktreeKey(RepoTop): the key every hold is stamped and scoped by (loto-hu8o)
 	SessionUUID   domain.SessionUUID // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID or CLAUDE_CODE_SESSION_ID
 	SessionPinned bool               // true iff either of those was in env; gates session-scoped semantics
 	AgentPinned   bool               // true iff a non-empty LOTO_AGENT_ID, a usable LOTO_SUBAGENT_ID (SubagentIDPins), or CLAUDE_CODE_SESSION_ID pins an identity; false → Agent is a display-only throwaway (identity.Ephemeral)
@@ -189,8 +190,9 @@ func openRuntimeForRepoTop(ctx context.Context, top string) (*runtime, error) {
 		return nil, err
 	}
 	fold := caseInsensitiveFS(top)
+	wt := store.WorktreeKey(top)
 	s, err := store.OpenContext(ctx, filepath.Join(dir, "loto.db"),
-		store.WithRepoTop(top), store.WithCaseFoldedKeys(fold))
+		store.WithRepoTop(top), store.WithWorktree(wt), store.WithCaseFoldedKeys(fold))
 	if err != nil {
 		return nil, fmt.Errorf("store.Open: %w", err)
 	}
@@ -214,6 +216,7 @@ func openRuntimeForRepoTop(ctx context.Context, top string) (*runtime, error) {
 		HostKnown:     hostKnown,
 		StateDir:      dir,
 		RepoTop:       top,
+		Worktree:      wt,
 		CaseFold:      fold,
 		SessionUUID:   domain.SessionUUID(sid),
 		SessionPinned: pinned,

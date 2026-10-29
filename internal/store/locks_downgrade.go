@@ -96,14 +96,14 @@ func (s *Store) DowngradeLocks(ctx context.Context, targets []domain.Target, own
 // the read is authoritative. Targets owner holds no lock on (in this
 // worktree) are absent from the returned map.
 //
-// worktreeFilter(s.repoTop) scopes it (loto-8z87): under the widened locks PK
+// worktreeFilter(s.worktree) scopes it (loto-8z87): under the widened locks PK
 // the same owner can hold a SIBLING row at the same canonical from another
 // linked worktree, and a downgrade issued from this checkout has no standing
 // over that row.
 func (s *Store) probeOwnerModes(ctx context.Context, owner string, targets []domain.Target) (map[string]string, error) {
 	k := s.keys()
 	ph, canonArgs := k.inTargets(targets)
-	wtCond, wtArgs := worktreeFilter(s.repoTop)
+	wtCond, wtArgs := worktreeFilter(s.worktree)
 	args := append([]any{owner}, wtArgs...)
 	args = append(args, canonArgs...)
 	rows, err := s.db.QueryContext(ctx,
@@ -139,10 +139,10 @@ func (s *Store) commitDowngrades(ctx context.Context, flip []domain.Target, owne
 
 	k := s.keys()
 	ph, canonArgs := k.inTargets(flip)
-	// worktreeFilter(s.repoTop) mirrors probeOwnerModes' scope (loto-8z87): flip
+	// worktreeFilter(s.worktree) mirrors probeOwnerModes' scope (loto-8z87): flip
 	// was decided against that already-scoped read, but the raw UPDATE needs
 	// its own guard against a sibling-worktree row under the same owner.
-	wtCond, wtArgs := worktreeFilter(s.repoTop)
+	wtCond, wtArgs := worktreeFilter(s.worktree)
 	args := append([]any{domain.ModeShared, owner}, wtArgs...)
 	args = append(args, canonArgs...)
 	if _, err := tx.ExecContext(ctx,

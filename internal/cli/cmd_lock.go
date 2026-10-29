@@ -530,7 +530,7 @@ func emitSessionBeaconNotes(w io.Writer, rt *runtime, targets []domain.Target, s
 		for i := range held {
 			r := held[i]
 			if !r.IsBeacon() || r.SessionUUID != session || string(r.OwnerUUID) == rt.Agent.UUID ||
-				!r.ExpiresAt.After(now) || !ec.SameTarget(t, r.Target) || !domain.SameWorktree(rt.RepoTop, r.Worktree) {
+				!r.ExpiresAt.After(now) || !ec.SameTarget(t, r.Target) || !domain.SameWorktree(rt.Worktree, r.Worktree) {
 				continue
 			}
 			r.Target = t
@@ -597,7 +597,7 @@ func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now t
 			ProcStart:   procStartVal,
 			Branch:      branch,
 			Mode:        mode,
-			Worktree:    rt.RepoTop,
+			Worktree:    rt.Worktree,
 			// MayCreate mirrors the CLI-side allowMissing=true above
 			// (loto-i382): the store's own target validation would
 			// otherwise refuse a target this command just accepted.

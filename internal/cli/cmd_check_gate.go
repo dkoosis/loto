@@ -235,7 +235,7 @@ func runCheckGate(ctx context.Context, paths []string, base, repoTop string, std
 
 	// memoized: gateDecide evaluates the predicate per (target × record), so a
 	// wide staged set would otherwise re-probe one holder hundreds of times.
-	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.RepoTop}
+	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
 	// A stamped sibling also owns its parent's rows — its Bash-side locks and
 	// claims were taken unstamped (loto-wofb). Resolution failure here is the
 	// same infra class as an unreachable store: say so, fail open.

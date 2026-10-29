@@ -555,14 +555,14 @@ func TestReleaseBySession_ExpiredForeignRowsNeverWedgeSweep(t *testing.T) {
 	}
 }
 
-// The loto-5dr1 checkouts: a session's main checkout, two Agent subagents'
+// The loto-5dr1 checkouts, by WorktreeKey: a session's main checkout, two Agent subagents'
 // `isolation: worktree` checkouts nested inside it, and a sibling worktree
 // beside it rather than inside it.
 const (
-	tcWorktreeMain   = "/repo"
-	tcWorktreeAgentA = "/repo/.claude/worktrees/agent-a"
-	tcWorktreeAgentB = "/repo/.claude/worktrees/agent-b"
-	tcWorktreeBeside = "/repo-wt-x"
+	tcWorktreeMain   = WorktreeMain
+	tcWorktreeAgentA = "worktrees/agent-a"
+	tcWorktreeAgentB = "worktrees/agent-b"
+	tcWorktreeBeside = "worktrees/wt-x"
 )
 
 // acquireAt takes one session lock stamped from checkout, and returns it.
@@ -599,7 +599,7 @@ func TestReleaseBySession_NestedScopeReleasesOwnSubagentWorktrees(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeMain, Nested: true})
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeMain, Nested: []string{tcWorktreeAgentA, tcWorktreeAgentB}})
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -640,10 +640,13 @@ func TestReleaseBySession_NestedScopeReleasesOwnSubagentWorktrees(t *testing.T) 
 // sibling's (the two are side by side, neither inside the other), nor a
 // checkout beside the main one. Refused whole; every row stays.
 func TestReleaseBySession_NestedScopeNeverReachesASibling(t *testing.T) {
-	for _, tc := range []struct{ name, caller, foreign string }{
-		{"sibling subagent", tcWorktreeAgentA, tcWorktreeAgentB},
-		{"checkout beside main", tcWorktreeMain, tcWorktreeBeside},
-		{"parent from a subagent", tcWorktreeAgentA, tcWorktreeMain},
+	for _, tc := range []struct {
+		name, caller, foreign string
+		nested                []string
+	}{
+		{"sibling subagent", tcWorktreeAgentA, tcWorktreeAgentB, nil},
+		{"checkout beside main", tcWorktreeMain, tcWorktreeBeside, []string{tcWorktreeAgentA, tcWorktreeAgentB}},
+		{"parent from a subagent", tcWorktreeAgentA, tcWorktreeMain, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := mustOpen(t)
@@ -651,7 +654,7 @@ func TestReleaseBySession_NestedScopeNeverReachesASibling(t *testing.T) {
 			own := acquireAt(t, s, "own.go", tc.caller)
 			sib := acquireAt(t, s, "sib.go", tc.foreign)
 
-			rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tc.caller, Nested: true})
+			rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tc.caller, Nested: tc.nested})
 			if err != nil {
 				t.Fatalf("ReleaseBySession: %v", err)
 			}
@@ -688,5 +691,18 @@ func TestReleaseBySession_NestedOffStillRefusesSubagentRows(t *testing.T) {
 	}
 	if len(rel.Ambiguous) != 1 || len(rel.Results) != 0 {
 		t.Fatalf("Nested off must refuse the subagent row; ambiguous=%+v results=%+v", rel.Ambiguous, rel.Results)
+	}
+}
+
+// TestWorktreeScope_GoneKeyIsReached: a removed subagent checkout's key is no
+// longer listed by git, so Nested misses it; Gone lets the root's sweep take
+// its rows rather than wedge on them (loto-hu8o). A live sibling stays out.
+func TestWorktreeScope_GoneKeyIsReached(t *testing.T) {
+	scope := WorktreeScope{Own: tcWorktreeMain, Gone: func(k string) bool { return k == tcWorktreeAgentA }}
+	if !scope.Reaches(tcWorktreeAgentA) {
+		t.Errorf("a gone checkout's key must be reached")
+	}
+	if scope.Reaches(tcWorktreeAgentB) {
+		t.Errorf("a live sibling's key must not be reached")
 	}
 }

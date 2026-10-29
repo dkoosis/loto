@@ -230,8 +230,8 @@ func TestRefresh_AllSkipsSiblingWorktreeRows(t *testing.T) {
 	for _, target := range []string{"", "sibling_only.go"} {
 		// "" copies the held row's own canonical into the sibling worktree.
 		if _, err := db.Exec(`INSERT INTO locks (target_canonical, owner_uuid, worktree, `+cols+`)
-SELECT CASE WHEN ? = '' THEN target_canonical ELSE ? END, owner_uuid, '/elsewhere/sibling-wt', `+cols+`
-  FROM locks WHERE owner_uuid = ? AND worktree <> '/elsewhere/sibling-wt'`, target, target, a.UUID); err != nil {
+SELECT CASE WHEN ? = '' THEN target_canonical ELSE ? END, owner_uuid, 'worktrees/sibling-wt', `+cols+`
+  FROM locks WHERE owner_uuid = ? AND worktree <> 'worktrees/sibling-wt'`, target, target, a.UUID); err != nil {
 			t.Fatalf("seed sibling row: %v", err)
 		}
 	}

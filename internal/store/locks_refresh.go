@@ -102,6 +102,17 @@ func (s *Store) RefreshLocks(ctx context.Context, targets []domain.Target, owner
 // `loto refresh` leaves — the bead's AC greps for this exact token.
 const hookRefreshReason = "hook"
 
+// lockWorktree is the key a hook call's lock refresh scopes to. A call row
+// carries its checkout's path, but locks carry the store's WorktreeKey
+// (loto-hu8o), so the store's own key wins; callWorktree serves a store
+// opened without one.
+func (s *Store) lockWorktree(callWorktree string) string {
+	if s.worktree != "" {
+		return s.worktree
+	}
+	return callWorktree
+}
+
 // refreshCallerLocksTx is refreshOwnLocksBelowHalfTTLTx plus the retention
 // sweep it earns only when it actually wrote something — split out of
 // RecordCallPre so that call stays a single decision point on the hot path
@@ -230,7 +241,7 @@ func refreshOwnLocksBelowHalfTTLTx(ctx context.Context, tx *sql.Tx, k keyMatch, 
 // op-flock makes both redundant today, and both stay so a caller that ever
 // reaches this path unserialized still cannot resurrect a lapsed lease.
 //
-// worktree (s.repoTop, via worktreeFilter) keeps the UPDATE from reaching a
+// worktree (s.worktree, via worktreeFilter) keeps the UPDATE from reaching a
 // SIBLING row the same owner holds on the same canonical in another linked
 // worktree (loto-8z87): `extend` was decided against LocksForOwnerAt, already
 // scoped the same way, but the raw UPDATE has no other way to stay inside it.
@@ -243,7 +254,7 @@ func (s *Store) commitRefreshes(ctx context.Context, extend []domain.Target, own
 
 	k := s.keys()
 	placeholders, canonArgs := k.inTargets(extend)
-	wtCond, wtArgs := worktreeFilter(s.repoTop)
+	wtCond, wtArgs := worktreeFilter(s.worktree)
 	args := append([]any{newExpiry.UnixNano(), owner, now.UnixNano()}, wtArgs...)
 	args = append(args, canonArgs...)
 	if _, err := tx.ExecContext(ctx,

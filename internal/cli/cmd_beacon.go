@@ -265,7 +265,7 @@ func buildBeaconRecords(targets []domain.Target, rt *runtime, now time.Time, ttl
 			PID:         0,
 			Mode:        domain.ModeShared,
 			Beacon:      true,
-			Worktree:    rt.RepoTop,
+			Worktree:    rt.Worktree,
 		})
 	}
 	return recs
