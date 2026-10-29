@@ -72,7 +72,7 @@ func TestHookHelpTeachesContract(t *testing.T) {
 		"loto hook ref prepared < transaction.txt",
 		// The override arm (loto-mh07): a caller wiring it into a guard's own
 		// override branch has to know it never itself refuses.
-		"loto hook override pre-commit",
+		"loto hook override post-checkout",
 		"Always exits 0",
 	} {
 		if !strings.Contains(stdout, want) {

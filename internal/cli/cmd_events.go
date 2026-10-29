@@ -14,8 +14,8 @@ func init() { register("events", cmdEvents) } //nolint:gochecknoinits // command
 const eventsUsageHead = `usage: loto events [--kind <kind>] [--limit <n>]
 
 Print the store's audit rows, oldest first. The read side of every counter
-loto writes — lock acquire/release/break, admission verdicts, the staged-lock
-gate's firings, and the tree hook's per-call timing.
+loto writes — lock acquire/release/break, admission verdicts, guard
+overrides, and the tree hook's per-call timing.
 
 The window is bounded by events retention (1000 rows / 7 days; the gate
 evidence kinds staged_lock_gate_fired, guard_override and ref_admitted keep

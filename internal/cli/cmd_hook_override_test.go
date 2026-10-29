@@ -12,10 +12,9 @@ import (
 // TestHookOverride_RecordsEventNamingGuard is the bead's first and second
 // acceptance criteria (loto-mh07), at the CLI layer rather than through a
 // real git hook: `loto hook override <guard>` leaves one guard_override
-// event naming the guard, for each of the three guards a bypass can name.
+// event naming the guard, for each guard a bypass can name.
 func TestHookOverride_RecordsEventNamingGuard(t *testing.T) {
 	guards := []string{
-		hookOverrideGuardPreCommit,
 		hookOverrideGuardPostCheckout,
 		hookOverrideGuardReferenceTransaction,
 	}
@@ -53,7 +52,7 @@ func TestHookOverride_UnpinnedIdentitySkipsWithoutRecording(t *testing.T) {
 	// No pinAgent(t) — withTempProject already unsets LOTO_AGENT_ID and
 	// CLAUDE_CODE_SESSION_ID, so this call is unpinned.
 
-	_, stderr, code := executeCommand("hook", "override", hookOverrideGuardPreCommit)
+	_, stderr, code := executeCommand("hook", "override", hookOverrideGuardPostCheckout)
 	if code != 0 {
 		t.Fatalf("unpinned: exit %d, want 0; stderr=%q", code, stderr)
 	}
@@ -77,6 +76,24 @@ func TestHookOverride_UnknownGuardIsUsageError(t *testing.T) {
 	}
 }
 
+// TestHookOverride_RetiredPreCommitIsQuiet (loto-ojq3): the staged-lock gate
+// is gone, but sdlc's global hook still names it. It exits 0 with nothing on
+// stderr and records no row.
+func TestHookOverride_RetiredPreCommitIsQuiet(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+
+	_, stderr, code := executeCommand("hook", "override", "pre-commit")
+	if code != 0 || stderr != "" {
+		t.Fatalf("retired pre-commit guard: exit %d stderr %q, want 0 and nothing", code, stderr)
+	}
+	for _, ev := range readAllEvents(t) {
+		if ev.Kind == store.EventGuardOverride {
+			t.Fatalf("retired guard must not write a row, got %+v", ev)
+		}
+	}
+}
+
 func TestHookOverride_WrongArgCountIsUsageError(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
@@ -84,7 +101,7 @@ func TestHookOverride_WrongArgCountIsUsageError(t *testing.T) {
 	if _, _, code := executeCommand("hook", "override"); code != 2 {
 		t.Errorf("no guard: exit %d, want 2", code)
 	}
-	if _, _, code := executeCommand("hook", "override", hookOverrideGuardPreCommit, "extra"); code != 2 {
+	if _, _, code := executeCommand("hook", "override", hookOverrideGuardPostCheckout, "extra"); code != 2 {
 		t.Errorf("extra arg: exit %d, want 2", code)
 	}
 }
@@ -106,7 +123,7 @@ func TestHookOverride_StoreUnwritable_StillExits0(t *testing.T) {
 		t.Fatalf("plant unwritable store: %v", err)
 	}
 
-	_, stderr, code := executeCommand("hook", "override", hookOverrideGuardPreCommit)
+	_, stderr, code := executeCommand("hook", "override", hookOverrideGuardPostCheckout)
 	if code != 0 {
 		t.Fatalf("store unwritable: exit %d, want 0; stderr=%q", code, stderr)
 	}

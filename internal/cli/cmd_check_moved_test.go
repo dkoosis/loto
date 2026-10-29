@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,6 +23,45 @@ const (
 	// silence — the one the hook's own golden asserts it drops.
 	tcMovedClean = "✓ moved-peer-locks count=0\n"
 )
+
+// scrubTime rewrites every `expires_at=<RFC3339>` to `expires_at=<T>` so a
+// golden can assert the rest of the line exactly.
+func scrubTime(s string) string {
+	var b strings.Builder
+	for {
+		before, rest, found := strings.Cut(s, "expires_at=")
+		if !found {
+			b.WriteString(s)
+			return b.String()
+		}
+		b.WriteString(before)
+		b.WriteString("expires_at=<T>")
+		// The timestamp runs to the next space or newline.
+		j := strings.IndexAny(rest, " \n")
+		if j < 0 {
+			return b.String()
+		}
+		s = rest[j:]
+	}
+}
+
+// gitT runs git in dir and fails the test on error.
+func gitT(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// writeT creates dir/name with content.
+func writeT(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // gitOutT runs git in dir and returns trimmed stdout.
 func gitOutT(t *testing.T, dir string, args ...string) string {

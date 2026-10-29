@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -135,41 +136,6 @@ func TestGateDecide_OwnBeaconAllowsWrite(t *testing.T) {
 	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 0 {
 		t.Fatalf("own beacon must not deny own write, got %+v", rows)
-	}
-}
-
-// The commit-time leg is the exception to the rule above, and only it: the
-// session committing its tree is not denied by a beacon its own subagent
-// minted (loto-0z24), exactly as gateDecideAny exempts one for a tree-move.
-func TestGateDecideStaged_SameSessionSiblingBeaconAllowsCommit(t *testing.T) {
-	now := time.Now()
-	target := domain.Target{Canonical: tcTargetA}
-	locks := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession,
-			Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
-	}
-	if rows := gateDecideStaged([]domain.Target{target}, locks, nil, gateMyUUID, gateMySession, gateEC(now)); len(rows) != 0 {
-		t.Fatalf("own session's sibling beacon must not deny the session's commit, got %+v", rows)
-	}
-	// Narrow: another session's beacon still denies, and so does a sibling's
-	// real exclusive lock.
-	other := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateFoeUUID, SessionUUID: "44444444-4444-4444-4444-444444444444",
-			Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
-	}
-	if rows := gateDecideStaged([]domain.Target{target}, other, nil, gateMyUUID, gateMySession, gateEC(now)); len(rows) != 1 {
-		t.Fatalf("another session's beacon must deny the commit, got %+v", rows)
-	}
-	excl := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession,
-			Mode: domain.ModeExclusive, Intent: "sibling lock", ExpiresAt: now.Add(time.Hour)},
-	}
-	if rows := gateDecideStaged([]domain.Target{target}, excl, nil, gateMyUUID, gateMySession, gateEC(now)); len(rows) != 1 {
-		t.Fatalf("a sibling's exclusive lock must deny the commit, got %+v", rows)
-	}
-	// An empty session matches nothing.
-	if rows := gateDecideStaged([]domain.Target{target}, locks, nil, gateMyUUID, "", gateEC(now)); len(rows) != 1 {
-		t.Fatalf("empty ownSession must exempt nothing, got %+v", rows)
 	}
 }
 
@@ -859,5 +825,43 @@ func TestGateCLI_ParentLockAllowsStampedSibling(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "kind=lock") {
 		t.Errorf("expected lock-kind deny row: %q", out.String())
+	}
+}
+
+// TestGateCLI_StagedGateIsRetired (loto-ojq3): a commit is not a write
+// decision, so the staged-lock gate's two legs exit 0 even with a peer's live
+// claim over the staged path. The path gate still denies the same path.
+func TestGateCLI_StagedGateIsRetired(t *testing.T) {
+	repo := withTempProject(t)
+	alice, bob := twoAgents(t)
+
+	t.Setenv("LOTO_AGENT_ID", alice.UUID)
+	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice claim failed")
+	}
+	staged := tcPrefixStore + "/staged.go"
+	if err := os.MkdirAll(filepath.Join(repo, tcPrefixStore), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, staged), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "add", staged).CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v: %s", err, out)
+	}
+
+	t.Setenv("LOTO_AGENT_ID", bob.UUID)
+	for _, args := range [][]string{
+		{tcCmdCheck, tcFlagGate, tcFlagStaged},
+		{tcCmdCheck, "--held", tcFlagStaged},
+	} {
+		var out, errOut bytes.Buffer
+		code := Run(args, &out, &errOut)
+		if code != 0 || out.String() != "✓ staged-gate=retired: a commit carries what the write gate admitted\n" || errOut.Len() != 0 {
+			t.Errorf("%v: exit %d stdout %q stderr %q, want 0, the retired line, no stderr", args, code, out.String(), errOut.String())
+		}
+	}
+	if code := Run([]string{tcCmdCheck, tcFlagGate, staged}, &bytes.Buffer{}, &bytes.Buffer{}); code != 1 {
+		t.Errorf("the path gate must still deny a peer's claim, got exit %d", code)
 	}
 }

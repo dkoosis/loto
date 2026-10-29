@@ -57,9 +57,8 @@ the live-session set alone (enforcement-design.md §10 tooth 1, §5 I1).
         taking the checkout-wide claim, or LOTO_GUARD_OVERRIDE=1 — recorded
         itself, once, right where the refusal would otherwise fire (loto-mh07).
   override <guard>
-        records that LOTO_GUARD_OVERRIDE=1 bypassed <guard> — pre-commit or
-        post-checkout — so an override spike can be counted the way
-        staged_lock_gate_fired counts firings (loto-mh07). Called from the
+        records that LOTO_GUARD_OVERRIDE=1 bypassed <guard> — post-checkout —
+        so an override spike can be counted (loto-mh07). Called from the
         shell dispatcher's own override branch, in place of skipping loto
         entirely; reference-transaction's own override is recorded inside
         'ref' instead, not through this subcommand, because git calls that
@@ -79,7 +78,7 @@ examples:
   loto hook pre  < event.json
   loto hook post < event.json
   loto hook ref prepared < transaction.txt
-  loto hook override pre-commit
+  loto hook override post-checkout
 `
 
 // hookTReportDefault is the window after which a call with no post is marked
@@ -465,12 +464,10 @@ func hookAdmit(ctx context.Context, rt *runtime, filePath, agentID string) (decl
 	// in no fixed order: without this the beacon landing first refused the
 	// very write it was minted for (loto-0z24). Narrow on purpose — that one
 	// sibling, and its rows are not AUTHORIZATION I hold either: I still take
-	// my own exclusive lock beside them, which is what heldByMe reads at the
-	// parent's commit. A DIFFERENT sibling's beacon is still foreign, so
-	// siblings keep serializing on a shared path; and the beacon is left
-	// standing, because it is what a later sibling's stamped `check --gate`
-	// refuses on. At the parent's commit the gate leg exempts a same-session
-	// beacon (gateDecideAny).
+	// my own exclusive lock beside them. A DIFFERENT sibling's beacon is still
+	// foreign, so siblings keep serializing on a shared path; and the beacon is
+	// left standing, because it is what a later sibling's stamped `check --gate`
+	// refuses on.
 	var sib domain.AgentUUID
 	if owner, ok := identity.SubagentOwner(agentID); ok {
 		sib = domain.AgentUUID(owner)
@@ -498,8 +495,8 @@ func hookAdmit(ctx context.Context, rt *runtime, filePath, agentID string) (decl
 // (the loto-fs84 hole, one layer up).
 //
 // ‡ A beacon of mine or my kin's is NOT that authorization (loto-9zcq):
-// heldByMe does not credit beacons, so stopping on one left the path with
-// no exclusive lock and the staged-lock gate flagged its author's commit.
+// a beacon is not an exclusive lock, so stopping on one left the path with
+// no exclusive lock under its author.
 // Fall through and take the lock; an exclusive row upgrades over the
 // owner's beacon at the store.
 //
@@ -605,7 +602,7 @@ func hookObserve(ctx context.Context, rt *runtime, declared string, gitStatus gi
 
 	// git prints each path exactly as it sits on disk; a lock's key has
 	// already gone through foldTargetKey (loto-f8m8). Folding here too, the
-	// same way resolveStagedPaths folds a git-produced token (base=repoTop:
+	// same way `check --staged` folds a git-produced token (base=repoTop:
 	// porcelain output is repo-root-relative from any cwd in the checkout, so
 	// the token is repo-root-relative by construction), is what keeps one file on a case-folding filesystem
 	// from filing under two path_canonical spellings — one read as locked by a

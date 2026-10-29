@@ -111,8 +111,7 @@ func TestCheckGate_CwdUnknownRefusesRelativePath(t *testing.T) {
 // (Codex #247): --staged paths come from `git diff --cached` run with
 // cmd.Dir = repoTop, so their base is the repo root by construction and does
 // not depend on the caller's cwd. Refusing them would make
-// `--cwd-unknown --staged` reject every nonempty commit — the pre-commit hook's
-// exact call shape.
+// `--cwd-unknown --staged` reject every nonempty staged set.
 func TestCheckCwdUnknown_StagedPathsAreNotRefused(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)
@@ -125,7 +124,7 @@ func TestCheckCwdUnknown_StagedPathsAreNotRefused(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	code := Run([]string{tcCmdCheck, tcFlagGate, tcFlagCwdUnknown, tcFlagStaged}, &out, &bytes.Buffer{})
+	code := Run([]string{tcCmdCheck, tcFlagCwdUnknown, tcFlagStaged}, &out, &bytes.Buffer{})
 	if strings.Contains(out.String(), "unresolvable") {
 		t.Fatalf("staged paths carry a known base and must not be refused: %q", out.String())
 	}

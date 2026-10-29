@@ -26,15 +26,15 @@ type checkConflict struct {
 // altSurfaceArgs carries the parsed flags that decide whether `check` is
 // being asked one of the questions its path machinery cannot answer.
 type altSurfaceArgs struct {
-	branchTyped                           bool
-	branch                                string
-	worktreeTyped                         bool
-	worktree                              string
-	held, moved, gate, staged, cwdUnknown bool
+	branchTyped                     bool
+	branch                          string
+	worktreeTyped                   bool
+	worktree                        string
+	moved, gate, staged, cwdUnknown bool
 }
 
 // checkAltSurface dispatches `check`'s non-path questions — --branch, --worktree,
-// --held, --moved — before any repo resolution or store IO, the way --gate
+// --moved — before any repo resolution or store IO, the way --gate
 // branches before openRuntime. handled=false means none applied and the
 // caller carries on down the ordinary path check.
 //
@@ -44,7 +44,7 @@ type altSurfaceArgs struct {
 // "✓ no paths" — a green light to publish, handed out because the caller's
 // shell expanded to nothing. It refuses instead.
 func checkAltSurface(ctx context.Context, fs *flag.FlagSet, a altSurfaceArgs, stdout, stderr io.Writer) (rc int, handled bool) {
-	others := fs.NArg() > 0 || a.staged || a.gate || a.cwdUnknown || a.held || a.moved
+	others := fs.NArg() > 0 || a.staged || a.gate || a.cwdUnknown || a.moved
 	if a.branchTyped {
 		if others || a.worktreeTyped {
 			fmt.Fprintln(stderr, "✗ --branch takes no paths and no other check flag")
@@ -61,11 +61,14 @@ func checkAltSurface(ctx context.Context, fs *flag.FlagSet, a altSurfaceArgs, st
 		}
 		return runCheckWorktree(ctx, a.worktree, stdout, stderr), true
 	}
-	if a.held || a.moved {
-		return routeHeldOrMoved(ctx, heldMovedArgs{
-			held: a.held, moved: a.moved, gate: a.gate, staged: a.staged,
-			cwdUnknown: a.cwdUnknown, args: fs.Args(),
-		}, stdout, stderr), true
+	// --moved's operands are two HEADs rather than paths; combining it with
+	// --gate or --staged is a caller who means another question.
+	if a.moved {
+		if a.gate || a.staged {
+			fmt.Fprintln(stderr, "✗ --moved takes two HEADs, no other check flag")
+			return 2, true
+		}
+		return runCheckMoved(ctx, fs.Args(), stdout, stderr), true
 	}
 	return 0, false
 }
@@ -74,26 +77,36 @@ func checkAltSurface(ctx context.Context, fs *flag.FlagSet, a altSurfaceArgs, st
 // paths, and applies the pre-resolution refusals that must fire before any
 // store IO. done=true means the caller must return rc immediately — the
 // preflight already emitted whatever the user sees.
-func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) (paths []string, base string, repoTop string, gate, isStaged bool, rc int, done bool) {
+func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) (paths []string, base string, repoTop string, gate bool, rc int, done bool) {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	staged := fs.Bool("staged", false, "read paths from git diff --cached")
 	gateFlag := fs.Bool("gate", false, "read-only deny gate: exit 1 if a foreign live claim or lock/beacon covers any path; never acquires, refreshes, or writes")
 	branch := fs.String("branch", "", "check a BRANCH instead of paths: exit 1 if another checkout has it and its owner is not provably gone")
-	held := fs.Bool("held", false, "report every path NOT locked by this session (the commit gate's question, the inverse of --gate); ships advisory — ⚠ rows and exit 0 — and LOTO_GATE_MODE=block turns the same rows into ✗ and exit 1")
+	held := fs.Bool("held", false, "retired (loto-ojq3): exits 0; commits are not gated")
 	moved := fs.Bool("moved", false, "advisory only: given two HEADs, print a ⚠ row for each path the move changed that a live peer holds; always exits 0")
 	worktree := fs.String("worktree", "", "check a worktree PATH instead of paths: exit 1 if another live session is working at or inside it, locks or not; exit 3 if a live session there cannot be placed")
 	cwdUnknown := fs.Bool("cwd-unknown", false, "the caller's working directory is not knowable here (e.g. mcp__trixi__agent_shell): refuse relative paths instead of resolving them against the wrong base")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
-		return nil, "", "", false, false, 2, true
+		return nil, "", "", false, 2, true
 	}
 
+	// loto-ojq3: the staged-lock gate is gone; a commit is not a write
+	// decision (docs/write-gate.md). Its two legs, --held and --gate --staged,
+	// answer ✓ and exit 0 for a caller that still runs them: sdlc's global
+	// pre-commit hook carries an inline copy of the gate, and an unknown flag
+	// or a refusal there would nag or block every commit. stdout, because that
+	// hook prints a leg's stdout only when the leg refuses.
+	if *held || (*gateFlag && *staged) {
+		fmt.Fprintln(stdout, "✓ staged-gate=retired: a commit carries what the write gate admitted")
+		return nil, "", "", false, 0, true
+	}
 	if rc, handled := checkAltSurface(ctx, fs, altSurfaceArgs{
 		branchTyped: flagWasSet(fs, "branch"), branch: *branch,
 		worktreeTyped: flagWasSet(fs, "worktree"), worktree: *worktree,
-		held: *held, moved: *moved, gate: *gateFlag, staged: *staged, cwdUnknown: *cwdUnknown,
+		moved: *moved, gate: *gateFlag, staged: *staged, cwdUnknown: *cwdUnknown,
 	}, stdout, stderr); handled {
-		return nil, "", "", false, false, rc, true
+		return nil, "", "", false, rc, true
 	}
 
 	// Resolve repoTop before shelling out to git so `git diff --cached` runs
@@ -113,11 +126,11 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 
 	paths, code := loadCheckTargets(ctx, repoTop, *staged, fs.Args(), stderr)
 	if code != 0 {
-		return nil, base, repoTop, *gateFlag, *staged, code, true
+		return nil, base, repoTop, *gateFlag, code, true
 	}
 	if len(paths) == 0 {
 		fmt.Fprintln(stdout, "✓ no paths")
-		return nil, base, repoTop, *gateFlag, *staged, 0, true
+		return nil, base, repoTop, *gateFlag, 0, true
 	}
 
 	// loto-tzmv.10: refuse before resolving, never guess. Scoped to paths the
@@ -128,14 +141,14 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 	// See refuseUnresolvableRelative.
 	if *cwdUnknown && !*staged {
 		if rc, refused := refuseUnresolvableRelative(stdout, paths); refused {
-			return nil, base, repoTop, *gateFlag, *staged, rc, true
+			return nil, base, repoTop, *gateFlag, rc, true
 		}
 	}
-	return paths, base, repoTop, *gateFlag, *staged, 0, false
+	return paths, base, repoTop, *gateFlag, 0, false
 }
 
 func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	paths, base, repoTop, gate, staged, rc, done := checkPreflight(ctx, args, stdout, stderr)
+	paths, base, repoTop, gate, rc, done := checkPreflight(ctx, args, stdout, stderr)
 	if done {
 		return rc
 	}
@@ -149,7 +162,7 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// stays byte-identical (hard rule, plan "Plain loto check ... behavior
 	// must stay byte-identical").
 	if gate {
-		return runCheckGate(ctx, paths, base, repoTop, staged, stdout, stderr)
+		return runCheckGate(ctx, paths, base, repoTop, stdout, stderr)
 	}
 
 	rt, err := openRuntime(ctx)

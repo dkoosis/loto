@@ -148,7 +148,7 @@ func reportWorktreeField(eventWorktree, curWorktree string) string {
 // control character — a git-provenance path is admitted with one
 // (domain.Provenance), and a linked worktree's directory name inherits
 // whatever the filesystem allows — so the escape has to happen here, at the
-// point of print, matching rowPath's precedent (cmd_check_held.go). An
+// point of print. An
 // ordinary field is untouched, so every existing golden stays byte-identical.
 func escapeRowField(s string) string {
 	if domain.HasControl(s) {
