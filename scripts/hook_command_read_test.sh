@@ -4,9 +4,10 @@
 # that tried otherwise had 12 false refusals for 1 prevented incident. This is
 # the shell half of that check; internal/cli/hook_tooth_test.go is the Go half.
 #
-# A hook body is any file under hooks/, .githooks/ or scripts/, at any depth
-# and with or without an extension, except a *_test.sh (hooks/hooks.json runs
-# scripts from scripts/). Each is grepped for the tool
+# A hook body is .claude/settings.json (its inline hook commands) or any file
+# under hooks/, .githooks/, .claude/hooks/ or scripts/, at any depth and with
+# or without an extension, except a *_test.sh (hooks/hooks.json runs scripts
+# from scripts/). Each is grepped for the tool
 # input's command field: read straight off tool_input, dotted or bracketed
 # (.tool_input.command, d["tool_input"]["command"]), or, in a file that
 # touches tool_input at all, a command field read anywhere
@@ -21,9 +22,10 @@ FIELD="\\.command([^[:alnum:]_]|\$)|\\[[[:space:]]*$Q""command$Q[[:space:]]*\\]|
 # hook_bodies ROOT prints each hook body under ROOT, one per line.
 hook_bodies() {
   local root=$1
-  for d in hooks .githooks; do
+  for d in hooks .githooks .claude/hooks; do
     [ -d "$root/$d" ] && find "$root/$d" -type f
   done
+  [ -f "$root/.claude/settings.json" ] && echo "$root/.claude/settings.json"
   [ -d "$root/scripts" ] && find "$root/scripts" -type f ! -name '*_test.sh'
   return 0
 }
@@ -43,7 +45,9 @@ fail=0
 # The check must go red on a reader, in each place a hook body lives.
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-mkdir -p "$WORK/hooks" "$WORK/.githooks/hooks.d" "$WORK/scripts/sub"
+mkdir -p "$WORK/hooks" "$WORK/.githooks/hooks.d" "$WORK/scripts/sub" "$WORK/.claude/hooks"
+printf '%s\n' 'ti = d.get("tool_input") or {}' 'c = ti.get("command")' >"$WORK/.claude/hooks/stamp.py"
+printf '%s\n' '{"hooks": {"PreToolUse": [{"command": "jq -r .tool_input.command"}]}}' >"$WORK/.claude/settings.json"
 printf '%s\n' 'cmd=$(jq -r ".tool_input.command")' >"$WORK/scripts/gate.sh"
 printf '%s\n' 'd["tool_input"]["command"]' >"$WORK/.githooks/hooks.d/x"
 printf '%s\n' "jq '.tool_input[\"command\"]'" >"$WORK/hooks/pre.sh"
@@ -55,7 +59,7 @@ printf '%s\n' "jq -r '.tool_input | .commands'" >"$WORK/scripts/plural.sh"
 printf '%s\n' 'jq -r .tool_input.command' >"$WORK/scripts/gate_test.sh"
 printf '%s\n' '{"hooks": [{"command": "bash x.sh"}]}' >"$WORK/hooks/hooks.json"
 got="$(readers "$WORK" | sort | tr '\n' ' ')"
-want=".githooks/hooks.d/x hooks/piped.sh hooks/pre.sh scripts/gate.sh scripts/lint-locked scripts/split.py.sh scripts/sub/nested.sh "
+want=".claude/hooks/stamp.py .claude/settings.json .githooks/hooks.d/x hooks/piped.sh hooks/pre.sh scripts/gate.sh scripts/lint-locked scripts/split.py.sh scripts/sub/nested.sh "
 if [ "$got" != "$want" ]; then
   echo "✗ hook_command_read: fixture readers = '$got', want '$want'"
   fail=1
