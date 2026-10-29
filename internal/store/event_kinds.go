@@ -50,12 +50,7 @@ const (
 	EventCandidateRejected = "candidate_rejected"
 	// EventStagedGateFired was the firing counter behind `loto check --held`
 	// (loto-7oik). The gate is gone (loto-ojq3) and nothing writes the kind;
-	// it stays so the events CHECK constraint and old rows still read. One row per firing — not per path — so counting rows of
-	// this kind answers "how often would this gate have refused a commit",
-	// which is the evidence the advisory-first rollout is gathering before
-	// the gate's default is reconsidered. No Target, same reason
-	// EventGateBypass has none: a firing is a commit-scoped fact, and the
-	// per-path detail rides in Detail as JSON. ActorUUID names the committer.
+	// it stays so the events CHECK constraint and old rows still read.
 	EventStagedGateFired = "staged_lock_gate_fired"
 	// I1's two counters (loto-ea8y.4, enforcement-design §10b row 1). They
 	// answer one question — "is the three-shape denylist refusing the right

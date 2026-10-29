@@ -464,11 +464,10 @@ func hookAdmit(ctx context.Context, rt *runtime, filePath, agentID string) (decl
 	// in no fixed order: without this the beacon landing first refused the
 	// very write it was minted for (loto-0z24). Narrow on purpose — that one
 	// sibling, and its rows are not AUTHORIZATION I hold either: I still take
-	// my own exclusive lock beside them. A DIFFERENT sibling's beacon is still foreign, so
-	// siblings keep serializing on a shared path; and the beacon is left
-	// standing, because it is what a later sibling's stamped `check --gate`
-	// refuses on. At the parent's commit the gate leg exempts a same-session
-	// beacon (gateDecideAny).
+	// my own exclusive lock beside them. A DIFFERENT sibling's beacon is still
+	// foreign, so siblings keep serializing on a shared path; and the beacon is
+	// left standing, because it is what a later sibling's stamped `check --gate`
+	// refuses on.
 	var sib domain.AgentUUID
 	if owner, ok := identity.SubagentOwner(agentID); ok {
 		sib = domain.AgentUUID(owner)

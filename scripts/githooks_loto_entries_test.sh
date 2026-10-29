@@ -22,12 +22,10 @@ postcheckout=$repo/.githooks/hooks.d/post-checkout/10-loto-moved-locks
 fails=0
 ran=0
 
-for entry in "$postcheckout"; do
-	if [ ! -x "$entry" ]; then
-		echo "✗ githooks_loto_entries_test.sh: $entry is missing or not executable" >&2
-		exit 2
-	fi
-done
+if [ ! -x "$postcheckout" ]; then
+	echo "✗ githooks_loto_entries_test.sh: $postcheckout is missing or not executable" >&2
+	exit 2
+fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/loto-entries-test.XXXXXX") || {
 	echo "✗ githooks_loto_entries_test.sh: mktemp failed" >&2

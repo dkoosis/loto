@@ -216,9 +216,6 @@ func TestDoctorGuard_ForeignHooksPath(t *testing.T) {
 	if !strings.Contains(out, "✗ guard=tree-move-guard unreachable reason=absent detail="+filepath.Join(foreign, "post-checkout")) {
 		t.Errorf("expected absent row naming the resolved hook path: %q", out)
 	}
-	if !strings.Contains(out, "✗ guard=tree-move-guard unreachable reason=absent detail="+filepath.Join(foreign, "post-checkout")) {
-		t.Errorf("expected absent row for the other guard too: %q", out)
-	}
 	// Rule 1 (enforcement-design.md §10.3): global core.hooksPath not owned by
 	// loto's dispatcher. This row IS rule 1 — no separate leg reimplements it
 	// (bead Givens: "doctor already reports hooksPath-foreign; extend, do not
@@ -458,9 +455,6 @@ func TestDoctorGuard_ForeignHooksPathForwards(t *testing.T) {
 	if !strings.Contains(out, "✓ guard=tree-move-guard reachable entry=.githooks/hooks.d/post-checkout/10-loto-post-checkout") {
 		t.Errorf("expected tree-move-guard reachable row through the forwarder: %q", out)
 	}
-	if !strings.Contains(out, "✓ guard=tree-move-guard reachable entry=.githooks/hooks.d/post-checkout/10-loto-post-checkout") {
-		t.Errorf("expected tree-move-guard reachable row through the forwarder: %q", out)
-	}
 	if !strings.Contains(out, "✓ guard=ref-transaction-guard reachable entry=.githooks/hooks.d/reference-transaction/10-loto-reference-transaction") {
 		t.Errorf("expected ref-transaction-guard reachable row through the forwarder: %q", out)
 	}
@@ -569,9 +563,6 @@ func TestDoctorGuard_InheritedGlobalHooksPath(t *testing.T) {
 	out := runOK(t, tcCmdDoctor)
 	if !strings.Contains(out, "✗ guard=tree-move-guard unreachable reason=absent detail="+filepath.Join(foreign, "post-checkout")) {
 		t.Errorf("expected absent row naming the resolved global path: %q", out)
-	}
-	if !strings.Contains(out, "✗ guard=tree-move-guard unreachable reason=absent detail="+filepath.Join(foreign, "post-checkout")) {
-		t.Errorf("expected absent row for the other guard too: %q", out)
 	}
 	if !strings.Contains(out, "```bash\nmake hooks\n```") {
 		t.Errorf("expected a bash fix block under the ✗ rows: %q", out)
