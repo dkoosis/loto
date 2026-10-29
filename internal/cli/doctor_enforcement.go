@@ -150,15 +150,49 @@ func settingsFilesToRead(repoTop string) []string {
 	var out []string
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		out = append(out, filepath.Join(home, ".claude", "settings.json"))
-		plugin, _ := filepath.Glob(filepath.Join(home, ".claude", "plugins", "cache", "*", "loto", "*", "hooks", "hooks.json"))
-		sort.Strings(plugin)
-		out = append(out, plugin...)
+		out = append(out, enabledLotoPluginHooks(home)...)
 	}
 	if repoTop != "" {
 		matches, _ := filepath.Glob(filepath.Join(repoTop, ".claude", "settings*.json"))
 		sort.Strings(matches)
 		out = append(out, matches...)
 	}
+	return out
+}
+
+// enabledLotoPluginHooks returns the hooks.json of each installed loto plugin
+// (installed_plugins.json's installPath, so only the installed version) that
+// the user's settings.json enables. A cached but disabled or superseded copy
+// is never read: doctor must not go green for hooks Claude Code does not load.
+func enabledLotoPluginHooks(home string) []string {
+	var enabled struct {
+		EnabledPlugins map[string]bool `json:"enabledPlugins"`
+	}
+	var installed struct {
+		Plugins map[string][]struct {
+			InstallPath string `json:"installPath"`
+		} `json:"plugins"`
+	}
+	b, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil || json.Unmarshal(b, &enabled) != nil {
+		return nil
+	}
+	b, err = os.ReadFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"))
+	if err != nil || json.Unmarshal(b, &installed) != nil {
+		return nil
+	}
+	var out []string
+	for name, entries := range installed.Plugins {
+		if !strings.HasPrefix(name, "loto@") || !enabled.EnabledPlugins[name] {
+			continue
+		}
+		for _, e := range entries {
+			if e.InstallPath != "" {
+				out = append(out, filepath.Join(e.InstallPath, "hooks", "hooks.json"))
+			}
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 
