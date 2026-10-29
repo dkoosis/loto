@@ -18,7 +18,7 @@ trap 'kill "$HOLDER_PID" "$PEER_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/bin"
 (cd "$ROOT" && go build -o "$WORK/bin/loto" ./cmd/loto) || { echo "✗ build failed"; exit 1; }
 export PATH="$WORK/bin:$PATH" LOTO_BASE="$WORK/base" TMPDIR="$WORK"
-unset LOTO_AGENT_ID LOTO_SUBAGENT_ID
+unset LOTO_AGENT_ID LOTO_SUBAGENT_ID CLAUDE_PID CLAUDE_CODE_MESSAGING_SOCKET
 
 REPO="$WORK/repo"
 mkdir -p "$REPO/pkg"
