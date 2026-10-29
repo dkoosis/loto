@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestWorktreeMove_KeepsHoldLiveAndOwned is loto-hu8o's AC: a hold's
@@ -57,4 +58,35 @@ func TestWorktreeMove_KeepsHoldLiveAndOwned(t *testing.T) {
 	if code := Run([]string{tcCmdLock, tcTargetB, tcFlagIntent, "after"}, io.Discard, io.Discard); code != 0 {
 		t.Errorf("b.go must be free after the release")
 	}
+}
+
+// TestHookPre_RefreshesAKeyedLock: the pre hook's call row carries the
+// checkout's path, but locks carry its WorktreeKey; an Edit of a held file
+// must still renew that lock's lease (pre-push review on loto-hu8o).
+func TestHookPre_RefreshesAKeyedLock(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	runOK(t, tcCmdLock, tcTargetA, tcFlagIntent, tcIntentTest, tcFlagTTL, "5m")
+	before := ownLockExpiry(t)
+
+	if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Edit", "call-refresh", filepath.Join(repo, tcTargetA), "")); code != 0 {
+		t.Fatalf("pre: exit=%d err=%q", code, errOut)
+	}
+	if after := ownLockExpiry(t); !after.After(before.Add(10 * time.Minute)) {
+		t.Fatalf("an Edit of a held file must renew its lease: before=%s after=%s", before, after)
+	}
+}
+
+func ownLockExpiry(t *testing.T) time.Time {
+	t.Helper()
+	rt, done := hookStoreRead(t)
+	defer done()
+	locks, err := rt.Store.ListLocks(rt.Ctx)
+	if err != nil || len(locks) != 1 {
+		t.Fatalf("want one lock, got %+v err=%v", locks, err)
+	}
+	if locks[0].Worktree != rt.Worktree {
+		t.Fatalf("lock keyed %q, want this checkout's key %q", locks[0].Worktree, rt.Worktree)
+	}
+	return locks[0].ExpiresAt
 }

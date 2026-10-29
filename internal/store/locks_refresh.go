@@ -102,6 +102,17 @@ func (s *Store) RefreshLocks(ctx context.Context, targets []domain.Target, owner
 // `loto refresh` leaves — the bead's AC greps for this exact token.
 const hookRefreshReason = "hook"
 
+// lockWorktree is the key a hook call's lock refresh scopes to. A call row
+// carries its checkout's path, but locks carry the store's WorktreeKey
+// (loto-hu8o), so the store's own key wins; callWorktree serves a store
+// opened without one.
+func (s *Store) lockWorktree(callWorktree string) string {
+	if s.worktree != "" {
+		return s.worktree
+	}
+	return callWorktree
+}
+
 // refreshCallerLocksTx is refreshOwnLocksBelowHalfTTLTx plus the retention
 // sweep it earns only when it actually wrote something — split out of
 // RecordCallPre so that call stays a single decision point on the hot path

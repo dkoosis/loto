@@ -361,7 +361,7 @@ VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
 	// RecordCallPre already runs on every write-capable tool call and already
 	// holds this transaction, so folding the refresh in here is what keeps it
 	// to one UPDATE and no second round trip.
-	if err := refreshCallerLocksTx(ctx, tx, s.keys(), string(call.OwnerUUID), call.Worktree, declaredPaths(obs), call.TPre); err != nil {
+	if err := refreshCallerLocksTx(ctx, tx, s.keys(), string(call.OwnerUUID), s.lockWorktree(call.Worktree), declaredPaths(obs), call.TPre); err != nil {
 		return false, err
 	}
 
@@ -461,7 +461,7 @@ func (s *Store) postPathsTx(ctx context.Context, tx *sql.Tx, callID string, owne
 			return PostOutcome{}, err
 		}
 	}
-	if err := refreshCallerLocksTx(ctx, tx, s.keys(), string(owner), worktree, out.Changed, tPost); err != nil {
+	if err := refreshCallerLocksTx(ctx, tx, s.keys(), string(owner), s.lockWorktree(worktree), out.Changed, tPost); err != nil {
 		return PostOutcome{}, err
 	}
 	return out, nil

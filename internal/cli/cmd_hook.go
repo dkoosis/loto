@@ -310,8 +310,9 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 	// addressee's own next call.
 	hookDeliver(rt, me, now, stdout, stderr)
 
-	// Step 4 — record. Worktree is rt.RepoTop, the same checkout-root identity
-	// every other table in this store already scopes to (loto-v6xx): dirty
+	// Step 4 — record. Worktree is rt.RepoTop, the checkout-root identity the
+	// call and path tables scope to (loto-v6xx); the locks this call refreshes
+	// are keyed by rt.Worktree, which the store applies itself (loto-hu8o): dirty
 	// unlocked paths use epoch 0 in every checkout, so path_seq / path_observed
 	// / the spanner query all need it to tell two worktrees' independent files
 	// apart at one repo-relative canonical.
