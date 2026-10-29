@@ -39,7 +39,7 @@ Seven copies of the write decision diverged (review 2026-10-07):
 `gateDecideWith`/`gateLockDenies` (check --gate), `hookRowsDecide` (pre-hook),
 `EvalContext.Conflicts` (lock acquire), `computeCheckConflicts` (check),
 `syncConflictFor` (sync), `peerLockCovers` (check --held), `gate.Admit`
-(submit), plus `handle_deny` in `scripts/gate-file-lock.sh`. Each asks "is
+(submit), plus `handle_deny` in `scripts/gate-file-lock.sh` (deleted by loto-j88z). Each asks "is
 this holder me, kin or a peer" from five attributes: session id, subagent
 stamp, pid, worktree and branch. The model keeps two: actor and worktree.
 `Decide` reads only the holds that cover one target or lie beneath it, in one
@@ -85,7 +85,7 @@ D = derived from the model. X = dropped: the case cannot arise, or its code goes
 dk ratified the model; each bead below is open to build.
 
 - loto-njgz: one `Decide` replaces the seven copies.
-- loto-j88z: delete the Bash command parser.
+- loto-j88z: delete the Bash command parser. Built in #410.
 - loto-hof2: fold beacons and claims into the hold; retire shared mode and
   `loto downgrade`, since the hold is exclusive.
 - loto-e1ku: the actor is the process.

@@ -119,17 +119,28 @@ type hookEvent struct {
 	CWD       string        `json:"cwd"`
 	ToolInput hookToolInput `json:"tool_input"`
 	// AgentID is the harness's per-subagent id: distinct per /team sibling,
-	// absent at root. It is the stamp gate-file-lock.sh puts in
-	// LOTO_SUBAGENT_ID for the beacon it mints on this same call, so it is
-	// what lets admission recognise that beacon as its own (loto-0z24).
+	// absent at root. It is the stamp a beacon minted for this call carries in
+	// LOTO_SUBAGENT_ID, so it is what lets admission recognise that beacon as
+	// its own (loto-0z24). No hook mints one since gate-file-lock.sh went
+	// (loto-j88z); loto-hof2 folds beacons into the hold.
 	AgentID string `json:"agent_id"`
 }
 
-// hookToolInput carries exactly one field, and the reason it is safe to read
-// is that it is structured: the harness put a path there, no parser guessed it
-// out of a command line.
+// hookToolInput carries only the write target, and the reason it is safe to
+// read is that it is structured: the harness put a path there, no parser
+// guessed it out of a command line. NotebookEdit names its target
+// notebook_path; every other Edit-family tool names it file_path.
 type hookToolInput struct {
-	FilePath string `json:"file_path"`
+	FilePath     string `json:"file_path"`
+	NotebookPath string `json:"notebook_path"`
+}
+
+// target is the path the Edit-family call writes.
+func (ti hookToolInput) target() string {
+	if ti.FilePath != "" {
+		return ti.FilePath
+	}
+	return ti.NotebookPath
 }
 
 // hookEditFamily are the tools whose write target the harness states outright,
@@ -285,9 +296,9 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 	// Step 3 — admission, BEFORE the observation, so a path this call just
 	// took reads as its own at pre (§5 I2).
 	declared := ""
-	if isHookEditFamily(ev.ToolName) && ev.ToolInput.FilePath != "" {
+	if target := ev.ToolInput.target(); isHookEditFamily(ev.ToolName) && target != "" {
 		var blocker *domain.LockRecord
-		declared, blocker = hookAdmit(ctx, rt, ev.ToolInput.FilePath, ev.AgentID)
+		declared, blocker = hookAdmit(ctx, rt, target, ev.AgentID)
 		if blocker != nil {
 			render.EmitHookRefusal(stderr, blocker.Target.Canonical,
 				string(blocker.OwnerUUID), blocker.Intent, blocker.ExpiresAt)
@@ -460,9 +471,9 @@ func hookAdmit(ctx context.Context, rt *runtime, filePath, agentID string) (decl
 		return "", nil
 	}
 	// The rows of the sibling this call runs for are not foreign, for this
-	// admission only. gate-file-lock.sh mints its beacon stamped with the
-	// event's agent_id, so a derived id owns it, not me, and the two hooks run
-	// in no fixed order: without this the beacon landing first refused the
+	// admission only. A beacon minted for this call (gate-file-lock.sh did,
+	// until loto-j88z) is stamped with the event's agent_id, so a derived id
+	// owns it, not me, and the two hooks run in no fixed order: without this the beacon landing first refused the
 	// very write it was minted for (loto-0z24). Narrow on purpose — that one
 	// sibling, and its rows are not AUTHORIZATION I hold either: I still take
 	// my own exclusive lock beside them. A DIFFERENT sibling's beacon is still

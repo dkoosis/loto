@@ -317,6 +317,29 @@ func TestHook_EditAdmission(t *testing.T) {
 		}
 	})
 
+	// NotebookEdit names its target notebook_path, not file_path; admission
+	// must read it, or a peer-held notebook is written past the gate.
+	t.Run("a NotebookEdit over another owner's lock refuses", func(t *testing.T) {
+		withTempProject(t)
+		alice := pinAgent(t)
+		if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+			t.Fatalf("alice lock: exit %d", code)
+		}
+		t.Setenv("LOTO_AGENT_ID", "")
+		pinAgent(t)
+
+		payload := fmt.Sprintf(
+			`{"session_id":"s-1","tool_name":"NotebookEdit","tool_use_id":"call-nb","cwd":"/tmp","tool_input":{"notebook_path":%q}}`,
+			tcTargetA)
+		_, errOut, code := runHookEvent(t, tcHookPre, payload)
+		if code != 2 {
+			t.Fatalf("want exit 2 on a peer-held notebook, got %d err=%q", code, errOut)
+		}
+		if !strings.Contains(errOut, alice.UUID) {
+			t.Errorf("the refusal must name the holder: %q", errOut)
+		}
+	})
+
 	t.Run("an unlocked path is taken and declared", func(t *testing.T) {
 		withTempProject(t)
 		me := pinAgent(t)
