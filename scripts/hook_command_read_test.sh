@@ -6,13 +6,16 @@
 #
 # A hook body is any file under hooks/ or .githooks/, or a non-test script
 # under scripts/ (hooks/hooks.json runs those). Each is grepped for the tool
-# input's command field, in jq's dotted form or a bracketed one
-# (.tool_input["command"], d["tool_input"]["command"]).
+# input's command field: read straight off tool_input, dotted or bracketed
+# (.tool_input.command, d["tool_input"]["command"]), or, in a file that
+# touches tool_input at all, a command field read anywhere
+# (.tool_input | .command, ti = d["tool_input"]; ti.get("command")).
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 Q='["'"'"']'
 PATTERN="tool_input$Q?\\]?[[:space:]]*(\\.|\\[[[:space:]]*$Q)command"
+FIELD="\\.command\\b|\\[[[:space:]]*$Q""command$Q[[:space:]]*\\]|get\\([[:space:]]*$Q""command$Q"
 
 # hook_bodies ROOT prints each hook body under ROOT, one per line.
 hook_bodies() {
@@ -30,7 +33,10 @@ hook_bodies() {
 # readers ROOT prints each hook body under ROOT that reads the command string.
 readers() {
   hook_bodies "$1" | while IFS= read -r f; do
-    grep -Eq "$PATTERN" "$f" && echo "${f#"$1"/}"
+    if grep -Eq "$PATTERN" "$f" ||
+      { grep -q tool_input "$f" && grep -Eq "$FIELD" "$f"; }; then
+      echo "${f#"$1"/}"
+    fi
   done
 }
 
@@ -43,9 +49,12 @@ mkdir -p "$WORK/hooks" "$WORK/.githooks/hooks.d" "$WORK/scripts"
 printf '%s\n' 'cmd=$(jq -r ".tool_input.command")' >"$WORK/scripts/gate.sh"
 printf '%s\n' 'd["tool_input"]["command"]' >"$WORK/.githooks/hooks.d/x"
 printf '%s\n' "jq '.tool_input[\"command\"]'" >"$WORK/hooks/pre.sh"
+printf '%s\n' "jq -r '.tool_input | .command'" >"$WORK/hooks/piped.sh"
+printf '%s\n' 'ti = d["tool_input"]' 'cmd = ti.get("command")' >"$WORK/scripts/split.py.sh"
 printf '%s\n' 'jq -r .tool_input.command' >"$WORK/scripts/gate_test.sh"
+printf '%s\n' '{"hooks": [{"command": "bash x.sh"}]}' >"$WORK/hooks/hooks.json"
 got="$(readers "$WORK" | sort | tr '\n' ' ')"
-want=".githooks/hooks.d/x hooks/pre.sh scripts/gate.sh "
+want=".githooks/hooks.d/x hooks/piped.sh hooks/pre.sh scripts/gate.sh scripts/split.py.sh "
 if [ "$got" != "$want" ]; then
   echo "✗ hook_command_read: fixture readers = '$got', want '$want'"
   fail=1
