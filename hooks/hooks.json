@@ -2,15 +2,6 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/gate-file-lock.sh"
-          }
-        ]
-      },
-      {
         "matcher": "^(?!Read$|Grep$|Glob$).*$",
         "hooks": [
           {

@@ -119,9 +119,10 @@ type hookEvent struct {
 	CWD       string        `json:"cwd"`
 	ToolInput hookToolInput `json:"tool_input"`
 	// AgentID is the harness's per-subagent id: distinct per /team sibling,
-	// absent at root. It is the stamp gate-file-lock.sh puts in
-	// LOTO_SUBAGENT_ID for the beacon it mints on this same call, so it is
-	// what lets admission recognise that beacon as its own (loto-0z24).
+	// absent at root. It is the stamp a beacon minted for this call carries in
+	// LOTO_SUBAGENT_ID, so it is what lets admission recognise that beacon as
+	// its own (loto-0z24). No hook mints one since gate-file-lock.sh went
+	// (loto-j88z); loto-hof2 folds beacons into the hold.
 	AgentID string `json:"agent_id"`
 }
 
@@ -460,9 +461,9 @@ func hookAdmit(ctx context.Context, rt *runtime, filePath, agentID string) (decl
 		return "", nil
 	}
 	// The rows of the sibling this call runs for are not foreign, for this
-	// admission only. gate-file-lock.sh mints its beacon stamped with the
-	// event's agent_id, so a derived id owns it, not me, and the two hooks run
-	// in no fixed order: without this the beacon landing first refused the
+	// admission only. A beacon minted for this call (gate-file-lock.sh did,
+	// until loto-j88z) is stamped with the event's agent_id, so a derived id
+	// owns it, not me, and the two hooks run in no fixed order: without this the beacon landing first refused the
 	// very write it was minted for (loto-0z24). Narrow on purpose — that one
 	// sibling, and its rows are not AUTHORIZATION I hold either: I still take
 	// my own exclusive lock beside them. A DIFFERENT sibling's beacon is still
