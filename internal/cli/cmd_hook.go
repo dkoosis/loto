@@ -126,11 +126,21 @@ type hookEvent struct {
 	AgentID string `json:"agent_id"`
 }
 
-// hookToolInput carries exactly one field, and the reason it is safe to read
-// is that it is structured: the harness put a path there, no parser guessed it
-// out of a command line.
+// hookToolInput carries only the write target, and the reason it is safe to
+// read is that it is structured: the harness put a path there, no parser
+// guessed it out of a command line. NotebookEdit names its target
+// notebook_path; every other Edit-family tool names it file_path.
 type hookToolInput struct {
-	FilePath string `json:"file_path"`
+	FilePath     string `json:"file_path"`
+	NotebookPath string `json:"notebook_path"`
+}
+
+// target is the path the Edit-family call writes.
+func (ti hookToolInput) target() string {
+	if ti.FilePath != "" {
+		return ti.FilePath
+	}
+	return ti.NotebookPath
 }
 
 // hookEditFamily are the tools whose write target the harness states outright,
@@ -286,9 +296,9 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 	// Step 3 — admission, BEFORE the observation, so a path this call just
 	// took reads as its own at pre (§5 I2).
 	declared := ""
-	if isHookEditFamily(ev.ToolName) && ev.ToolInput.FilePath != "" {
+	if target := ev.ToolInput.target(); isHookEditFamily(ev.ToolName) && target != "" {
 		var blocker *domain.LockRecord
-		declared, blocker = hookAdmit(ctx, rt, ev.ToolInput.FilePath, ev.AgentID)
+		declared, blocker = hookAdmit(ctx, rt, target, ev.AgentID)
 		if blocker != nil {
 			render.EmitHookRefusal(stderr, blocker.Target.Canonical,
 				string(blocker.OwnerUUID), blocker.Intent, blocker.ExpiresAt)
