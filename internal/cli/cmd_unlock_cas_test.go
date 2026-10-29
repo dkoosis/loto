@@ -244,8 +244,9 @@ func TestUnlockForce_ExpectHolder_WithAllRefused(t *testing.T) {
 // it, so it is named on the first line and on no later one.
 func TestSplitBreakLines_NamesOnlyTheCallersHolders(t *testing.T) {
 	const (
-		agentA = "/repo/.claude/worktrees/agent-a"
-		agentB = "/repo/.claude/worktrees/agent-b"
+		agentA = "worktrees/agent-a"
+		agentB = "worktrees/agent-b"
+		pathA  = "/repo/.claude/worktrees/agent-a"
 		owner  = domain.AgentUUID("owner-a")
 		legacy = domain.AgentUUID("legacy")
 	)
@@ -258,9 +259,11 @@ func TestSplitBreakLines_NamesOnlyTheCallersHolders(t *testing.T) {
 	expect := holdRefList{
 		{Owner: owner, Epoch: 5}, {Owner: owner, Epoch: 6}, {Owner: legacy, Epoch: 1},
 	}
-	got := splitBreakLines(rows, []string{agentA, agentB}, expect, domain.Target{Canonical: tcTargetA}, "done")
+	got := splitBreakLines(rows, []string{agentA, agentB}, expect, domain.Target{Canonical: tcTargetA}, "done", map[string]string{agentA: pathA})
+	// A key with a listed checkout runs from its path; one without, from the
+	// key as written.
 	want := []string{
-		`(cd '` + agentA + `' && loto unlock 'a.go' --force -t 'done' --expect-holder 'legacy@1' --expect-holder 'owner-a@5')`,
+		`(cd '` + pathA + `' && loto unlock 'a.go' --force -t 'done' --expect-holder 'legacy@1' --expect-holder 'owner-a@5')`,
 		`(cd '` + agentB + `' && loto unlock 'a.go' --force -t 'done' --expect-holder 'owner-a@6')`,
 	}
 	if !slices.Equal(got, want) {

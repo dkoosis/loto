@@ -44,7 +44,7 @@ func (s *Store) withLockBatchTx(ctx context.Context, targets []domain.Target, li
 	if err != nil {
 		return err
 	}
-	scopeToWorktree(existing, s.repoTop)
+	scopeToWorktree(existing, s.worktree)
 
 	now := time.Now()
 	if err := fn(tx, existing, domain.EvalContext{Now: now, Live: live, CaseFold: s.caseFold}, now); err != nil {
@@ -58,17 +58,17 @@ func (s *Store) withLockBatchTx(ctx context.Context, targets []domain.Target, li
 }
 
 // scopeToWorktree drops, in place, every row whose Worktree names a checkout
-// other than repoTop (loto-3eq6). The store is shared by every linked
+// other than worktree (loto-3eq6). The store is shared by every linked
 // worktree of one repo, so such a row is a different file on disk: a release
 // or `unlock --force` issued from this checkout has no standing over it, and
 // must neither delete it nor let it veto (PR #372 review). An unset side
 // matches anything (domain.SameWorktree), so a legacy row and a store opened
 // without a repo top keep today's reach.
-func scopeToWorktree(existing map[string][]domain.LockRecord, repoTop string) {
+func scopeToWorktree(existing map[string][]domain.LockRecord, worktree string) {
 	for k, rows := range existing {
 		kept := rows[:0]
 		for i := range rows {
-			if domain.SameWorktree(repoTop, rows[i].Worktree) {
+			if domain.SameWorktree(worktree, rows[i].Worktree) {
 				kept = append(kept, rows[i])
 			}
 		}

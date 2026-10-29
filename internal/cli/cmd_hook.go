@@ -472,7 +472,7 @@ func hookAdmit(ctx context.Context, rt *runtime, filePath, agentID string) (decl
 	if owner, ok := identity.SubagentOwner(agentID); ok {
 		sib = domain.AgentUUID(owner)
 	}
-	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), Kin: kin, CaseFold: rt.CaseFold, MyWorktree: rt.RepoTop}
+	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), Kin: kin, CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
 	me := domain.AgentUUID(rt.Agent.UUID)
 	if held, blocker := hookRowsDecide(rows, me, sib, ec); held {
 		return t.Canonical, nil
@@ -552,7 +552,7 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, kin []domai
 		// A Write that creates its file is the case I2 most needs to admit
 		// (statFileTargetReason above already allows it); the store must too.
 		MayCreate: true,
-		Worktree:  rt.RepoTop,
+		Worktree:  rt.Worktree,
 	}
 	storeKin := kin
 	if sib != "" {
@@ -591,7 +591,7 @@ func hookObserve(ctx context.Context, rt *runtime, declared string, gitStatus gi
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.RepoTop}
+	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
 	holders := hookLiveHolders(locks, ec)
 
 	status, err := gitStatus()

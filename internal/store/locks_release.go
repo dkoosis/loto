@@ -96,16 +96,16 @@ func (s *Store) applyOwnedReleasesTx(ctx context.Context, tx *sql.Tx, owned []st
 	// resolve to set acked_at; if we DELETE first the tags would orphan instead,
 	// losing the audit ack (edge #6 distinguishes release-ack from break-orphan).
 	//
-	// ‡ worktree-scoped (loto-8z87): s.repoTop names THIS store's own checkout.
+	// ‡ worktree-scoped (loto-8z87): s.worktree names THIS store's own checkout.
 	// existing (loaded by withLockBatchTx) is already scoped to it via
 	// scopeToWorktree, so `owned` never names a foreign-worktree canonical —
 	// but with the widened PK, one owner can hold a SIBLING row at the same
 	// canonical from another worktree, and the raw DELETE/UPDATE below must not
 	// reach past its own worktree to find it.
-	if err := ackTagsForReleaseTx(ctx, tx, s.keys(), owned, byAgent, s.repoTop); err != nil {
+	if err := ackTagsForReleaseTx(ctx, tx, s.keys(), owned, byAgent, s.worktree); err != nil {
 		return err
 	}
-	if err := deleteOwnedTx(ctx, tx, s.keys(), owned, byAgent, s.repoTop); err != nil {
+	if err := deleteOwnedTx(ctx, tx, s.keys(), owned, byAgent, s.worktree); err != nil {
 		return err
 	}
 	// Emit lock_released events in the same tx (atomic with the row deletes).
@@ -359,7 +359,7 @@ func sessionReleaseResults(canonicals []sessionTarget, scope WorktreeScope) []Re
 // releaseSessionTargetsTx acks tags, deletes the agent's host locks and emits
 // their release events for the matched rows, inside ReleaseBySession's tx.
 // Each delete is scoped to one worktree the same way ReleaseLocks scopes on
-// s.repoTop (loto-8z87): sessionAmbiguityTx already refused the whole sweep
+// s.worktree (loto-8z87): sessionAmbiguityTx already refused the whole sweep
 // when a canonical carried a foreign, LIVE row, but `canonicals` can still
 // carry a same-owner row from another worktree when scope.Own == "" (git
 // lookup failed) or the foreign row was already stale — the raw DELETE below
@@ -402,19 +402,20 @@ func (s *Store) releaseSessionTargetsTx(ctx context.Context, tx *sql.Tx, canonic
 // structurally for them, not only on the caller's word that it is the root.
 // A subagent sharing the root's own checkout has only that word (see
 // cmd_unlock.go unlockAll).
+//
+// Rows carry a WorktreeKey, not a path (loto-hu8o), so nesting is judged by
+// the caller from `git worktree list` and handed in as keys.
 type WorktreeScope struct {
-	// Own is the caller's checkout toplevel. "" skips the worktree check.
+	// Own is the caller's WorktreeKey. "" skips the worktree check.
 	Own string
-	// Nested also takes rows stamped from a checkout strictly inside Own.
-	Nested bool
+	// Nested are the keys of the checkouts strictly inside Own's tree whose
+	// rows the sweep also takes. Empty takes none.
+	Nested []string
 }
 
 // Reaches reports whether a row stamped from worktree belongs to the caller.
 func (w WorktreeScope) Reaches(worktree string) bool {
-	if domain.SameWorktree(w.Own, worktree) {
-		return true
-	}
-	return w.Nested && domain.WorktreeNestedUnder(worktree, w.Own)
+	return domain.SameWorktree(w.Own, worktree) || slices.Contains(w.Nested, worktree)
 }
 
 // SessionRelease is what one ReleaseBySession transaction actually did.

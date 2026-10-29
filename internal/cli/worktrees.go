@@ -3,8 +3,11 @@ package cli
 import (
 	"context"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
+
+	"loto/internal/store"
 )
 
 // worktreeRec is one record from `git worktree list --porcelain`: where a
@@ -113,4 +116,55 @@ func gitWorktrees(ctx context.Context, repoTop string) ([]worktreeRec, error) {
 		return nil, err
 	}
 	return parseWorktreePorcelain(string(out)), nil
+}
+
+// checkoutsByKey maps each checkout of repoTop's repo from its
+// store.WorktreeKey to its path. A hold carries the key (loto-hu8o); a fix
+// that says `cd <checkout>` needs the path. own always maps to repoTop, so
+// the caller's own checkout is named even when git cannot list the rest.
+func checkoutsByKey(ctx context.Context, repoTop, own string) map[string]string {
+	out := map[string]string{}
+	if recs, err := gitWorktrees(ctx, repoTop); err == nil {
+		for i := range recs {
+			if k := store.WorktreeKey(recs[i].Path); k != "" {
+				out[k] = recs[i].Path
+			}
+		}
+	}
+	if own != "" {
+		out[own] = repoTop
+	}
+	return out
+}
+
+// checkoutPath names the checkout keyed key by its path, or by the key itself
+// when no listed checkout carries it.
+func checkoutPath(paths map[string]string, key string) string {
+	if p, ok := paths[key]; ok {
+		return p
+	}
+	return key
+}
+
+// nestedCheckoutKeys lists, sorted, the keys of the checkouts strictly inside
+// repoTop's tree: the ones Claude Code makes for `isolation: worktree`
+// subagents at <top>/.claude/worktrees/agent-<id> (loto-5dr1). A git failure
+// lists none, the narrower sweep.
+func nestedCheckoutKeys(ctx context.Context, repoTop string) []string {
+	recs, err := gitWorktrees(ctx, repoTop)
+	if err != nil || repoTop == "" {
+		return nil
+	}
+	prefix := strings.TrimSuffix(repoTop, "/") + "/"
+	var out []string
+	for i := range recs {
+		if !strings.HasPrefix(recs[i].Path, prefix) {
+			continue
+		}
+		if k := store.WorktreeKey(recs[i].Path); k != "" {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out
 }

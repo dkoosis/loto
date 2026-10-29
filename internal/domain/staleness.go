@@ -53,7 +53,7 @@ type EvalContext struct {
 	// accident; it can only fail to widen one, which leaves a legacy row
 	// blocking rather than admitting a peer.
 	CaseFold bool
-	// MyWorktree is the caller's own checkout root (rt.RepoTop), for a
+	// MyWorktree is the caller's own checkout key (rt.Worktree), for a
 	// decision surface that scans lock rows directly rather than building an
 	// incoming LockRecord to hand to Conflicts (gateDecide, gateDecideAny,
 	// hookRowsDecide — loto-3eq6). Compared against a row's LockRecord.Worktree

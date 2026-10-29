@@ -31,8 +31,8 @@ loto lock c.go -t 'root work'
 
 loto unlock --all
 stdout 'count=3'
-stdout '^✓ target=a.go worktree=.claude/worktrees/agent-a$'
-stdout '^✓ target=b.go worktree=.claude/worktrees/agent-b$'
+stdout '^✓ target=a.go worktree=worktrees/agent-a$'
+stdout '^✓ target=b.go worktree=worktrees/agent-b$'
 stdout '^✓ target=c.go$'
 loto status
 ! stdout 'a.go|b.go|c.go'
