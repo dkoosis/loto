@@ -360,8 +360,7 @@ func TestHook_EditAdmission(t *testing.T) {
 	})
 
 	// loto-9zcq: the gate script mints a beacon for the same write the pre-hook
-	// admits, and nothing orders the two. A beacon is not a write claim — the
-	// staged-lock gate does not credit one — so admission over the caller's own
+	// admits, and nothing orders the two. A beacon is not a write claim, so admission over the caller's own
 	// beacon must still leave an exclusive lock behind, or the file reaches a
 	// commit that nobody holds.
 	t.Run("the caller's own beacon is upgraded to an exclusive lock", func(t *testing.T) {
@@ -472,8 +471,8 @@ func TestHook_EditAdmission(t *testing.T) {
 	// loto-9zcq, the cause the 2026-09-09 firing actually had: a Write that
 	// CREATES its file. The store's target validation refused the missing path
 	// for anything but a beacon, hookTakeLock read the error as "no foreign
-	// holder" and admitted the write with no lock, and the staged-lock gate
-	// then flagged the commit of a file nobody held.
+	// holder" and admitted the write with no lock, so the file reached a
+	// commit nobody held.
 	t.Run("a Write that creates its file takes an exclusive lock", func(t *testing.T) {
 		withTempProject(t)
 		me := pinAgent(t)

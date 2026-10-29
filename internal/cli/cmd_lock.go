@@ -31,9 +31,7 @@ func init() { //nolint:gochecknoinits // command registry pattern
 const reasonNotRegularFile = "not-regular-file"
 
 // reasonSymlink is the design.md token for "this path is a symlink" —
-// statFileTargetReason's refusal, echoed verbatim by cmd_check_held.go's
-// unlockableReason so the gate's exemption stays the lock verb's own refusal
-// rather than a second spelling that can drift from it.
+// statFileTargetReason's refusal.
 const reasonSymlink = "symlink"
 
 // reasonGlobNotSupported is the design.md token for domain.ErrTargetIsGlob —

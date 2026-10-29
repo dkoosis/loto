@@ -718,7 +718,6 @@ type guardSpec struct {
 // guardSpecs is the fixed, ordered set of guards this bead reports on. Order
 // is print order, so it is deterministic on its own — no sort needed.
 var guardSpecs = []guardSpec{
-	{hook: "pre-commit", label: "pre-commit-gate"},
 	{hook: "post-checkout", label: "tree-move-guard"},
 	// reference-transaction is I1's guard (loto-ea8y.4/.1), added here rather
 	// than forked: reachability is the same definition — dispatcher plus a

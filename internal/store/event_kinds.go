@@ -48,8 +48,9 @@ const (
 	// all" a query over a list someone has to remember to extend.
 	EventCandidateAccepted = "candidate_accepted"
 	EventCandidateRejected = "candidate_rejected"
-	// EventStagedGateFired is the firing counter behind `loto check --held`
-	// (loto-7oik). One row per firing — not per path — so counting rows of
+	// EventStagedGateFired was the firing counter behind `loto check --held`
+	// (loto-7oik). The gate is gone (loto-ojq3) and nothing writes the kind;
+	// it stays so the events CHECK constraint and old rows still read. One row per firing — not per path — so counting rows of
 	// this kind answers "how often would this gate have refused a commit",
 	// which is the evidence the advisory-first rollout is gathering before
 	// the gate's default is reconsidered. No Target, same reason
@@ -130,14 +131,12 @@ const (
 	EventPostMissing         = "post_missing"
 	EventPostMissingResolved = "post_missing_resolved"
 	// EventGuardOverride is written every time LOTO_GUARD_OVERRIDE=1 bypasses
-	// a git-hook guard (loto-mh07) — pre-commit's staged-lock legs,
-	// post-checkout's moved-lock notice, or the reference-transaction ref
-	// guard. Reason names which guard was bypassed ("pre-commit" |
-	// "post-checkout" | "reference-transaction"); no Target, same reason
-	// EventGateBypass has none — an override is a session-scoped fact, not a
-	// per-path one. It is the second signal promote-staged-lock-gate's
-	// Givens want counted alongside EventStagedGateFired: an override spike
-	// is the operator saying a firing gate was wrong.
+	// a git-hook guard (loto-mh07) — post-checkout's moved-lock notice, or the reference-transaction ref
+	// guard. Reason names which guard was bypassed ("post-checkout" |
+	// "reference-transaction"; "pre-commit" in rows from before loto-ojq3);
+	// no Target, same reason EventGateBypass has none — an override is a
+	// session-scoped fact, not a per-path one. An override spike is the
+	// operator saying a firing gate was wrong.
 	EventGuardOverride = "guard_override"
 )
 

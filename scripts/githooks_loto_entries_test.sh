@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #
-# githooks_loto_entries_test.sh — golden tests for loto's own chain entries:
-# .githooks/hooks.d/pre-commit/10-loto-staged-locks (loto-7oik) and
+# githooks_loto_entries_test.sh — golden tests for loto's own chain entry
 # .githooks/hooks.d/post-checkout/10-loto-moved-locks (loto-ea8y.2).
 #
 # The entries are shell, and what they get wrong is shell-shaped: which
@@ -11,8 +10,7 @@
 #
 # `loto` is a stub on PATH driven by FAKE_*_OUT / FAKE_*_EXIT, so these
 # exercise the ENTRIES against the CLI contract rather than the CLI itself —
-# internal/cli/cmd_check_held_test.go and cmd_check_moved_test.go pin the
-# other side of it.
+# internal/cli/cmd_check_moved_test.go pins the other side of it.
 #
 # Run: make scriptcheck   (or: bash scripts/githooks_loto_entries_test.sh)
 
@@ -20,12 +18,11 @@ set -uo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd "$here/.." && pwd)
-precommit=$repo/.githooks/hooks.d/pre-commit/10-loto-staged-locks
 postcheckout=$repo/.githooks/hooks.d/post-checkout/10-loto-moved-locks
 fails=0
 ran=0
 
-for entry in "$precommit" "$postcheckout"; do
+for entry in "$postcheckout"; do
 	if [ ! -x "$entry" ]; then
 		echo "✗ githooks_loto_entries_test.sh: $entry is missing or not executable" >&2
 		exit 2
@@ -38,20 +35,11 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/loto-entries-test.XXXXXX") || {
 }
 trap 'rm -rf "$tmp"' EXIT
 
-# A `loto` stub. Answers each leg from its own pair of env vars, so one case
-# can make leg 1 pass and leg 2 refuse.
+# A `loto` stub, answering from its own pair of env vars.
 mkdir -p "$tmp/bin"
 cat >"$tmp/bin/loto" <<'STUB'
 #!/usr/bin/env sh
 case "$*" in
-*--gate*)
-	[ -n "${FAKE_GATE_OUT:-}" ] && printf '%s\n' "$FAKE_GATE_OUT"
-	exit "${FAKE_GATE_EXIT:-0}"
-	;;
-*--held*)
-	[ -n "${FAKE_HELD_OUT:-}" ] && printf '%s\n' "$FAKE_HELD_OUT"
-	exit "${FAKE_HELD_EXIT:-0}"
-	;;
 *--moved*)
 	[ -n "${FAKE_MOVED_OUT:-}" ] && printf '%s\n' "$FAKE_MOVED_OUT"
 	exit "${FAKE_MOVED_EXIT:-0}"
@@ -101,7 +89,6 @@ run_entry() {
 
 # reset_fakes clears every stub knob so a case only carries what it sets.
 reset_fakes() {
-	unset FAKE_GATE_OUT FAKE_GATE_EXIT FAKE_HELD_OUT FAKE_HELD_EXIT
 	unset FAKE_MOVED_OUT FAKE_MOVED_EXIT LOTO_GUARD_OVERRIDE
 	export PATH=$withloto
 }
@@ -131,23 +118,6 @@ export FAKE_MOVED_EXIT=3
 run_entry "$postcheckout" abc123 def456 1
 check moved-nonzero-loto-still-exits-0 0 '' '' "$STATUS" "$OUT" "$ERR"
 
-# loto-ugsr: an exit-0 run whose only finding is a gate=not-protected row must
-# still reach the committer. A commit made up entirely of paths loto cannot lock
-# — a symlink, a submodule pointer, a deletion — exits 0 under a "✓ held"
-# header, so the old `"⚠ unheld"*` prefix match dropped the one line saying the
-# gate protected nothing.
-held_notes=$'✓ held count=1\nℹ path=link.go state=unlockable reason=symlink gate=not-protected'
-reset_fakes
-export FAKE_GATE_EXIT=0 FAKE_HELD_OUT="$held_notes" FAKE_HELD_EXIT=0
-run_entry "$precommit"
-check precommit-forwards-not-protected-rows-on-exit-0 0 '' "$held_notes" "$STATUS" "$OUT" "$ERR"
-
-# The clean case stays silent: a fully-held commit must not grow a new line.
-reset_fakes
-export FAKE_GATE_EXIT=0 FAKE_HELD_OUT='✓ held count=3' FAKE_HELD_EXIT=0
-run_entry "$precommit"
-check precommit-clean-held-run-stays-quiet 0 '' '' "$STATUS" "$OUT" "$ERR"
-
 reset_fakes
 export PATH=$noloto
 run_entry "$postcheckout" abc123 def456 1
@@ -157,92 +127,6 @@ reset_fakes
 export LOTO_GUARD_OVERRIDE=1 FAKE_MOVED_OUT="$moved_warn"
 run_entry "$postcheckout" abc123 def456 1
 check moved-override-is-silent 0 '' '' "$STATUS" "$OUT" "$ERR"
-
-# ══ pre-commit/10-loto-staged-locks ═══════════════════════════════════════
-
-reset_fakes
-export FAKE_GATE_EXIT=0 FAKE_HELD_OUT='✓ held count=2' FAKE_HELD_EXIT=0
-run_entry "$precommit"
-check precommit-both-legs-pass 0 '' '' "$STATUS" "$OUT" "$ERR"
-
-# Leg 1 (a peer holds a staged path) refuses, and leg 2 never runs.
-gate_deny=$'✗ blocked count=1\n✗ path=a.go kind=lock blocker=u1 intent="edit" expires_at=2026-09-07T00:00:00Z'
-reset_fakes
-export FAKE_GATE_OUT="$gate_deny" FAKE_GATE_EXIT=1 FAKE_HELD_OUT='never' FAKE_HELD_EXIT=1
-run_entry "$precommit"
-want=$gate_deny$'\npre-commit: refused — staged paths include a peer\'s live lock/claim\npre-commit: override with LOTO_GUARD_OVERRIDE=1 git commit ...'
-check precommit-leg1-refusal-short-circuits 1 '' "$want" "$STATUS" "$OUT" "$ERR"
-
-# Leg 2 (loto-7oik) under LOTO_GATE_MODE=block: a staged path this session
-# does not hold. The entry has no opinion about which mode is the default —
-# `loto check --held` owns that — so both legs of the fork are stubbed here by
-# exit code, and internal/cli/cmd_check_held_test.go pins which one ships.
-held_deny=$'✗ unheld count=1 unlocked=1 peer=0 staged=2\n✗ path=b.go state=unlocked\n```bash\nloto lock \'b.go\' -t "<bead>: intent"  # take what you are about to commit\n```'
-reset_fakes
-export FAKE_GATE_EXIT=0 FAKE_HELD_OUT="$held_deny" FAKE_HELD_EXIT=1
-run_entry "$precommit"
-want=$held_deny$'\npre-commit: refused — staged paths this session does not hold a lock on\npre-commit: override with LOTO_GUARD_OVERRIDE=1 git commit ...'
-check precommit-leg2-refuses-unheld-paths 1 '' "$want" "$STATUS" "$OUT" "$ERR"
-
-# The shipped default: leg 2 exits 0 with ⚠ rows. The commit proceeds AND the
-# rows still reach the committer — a counter nobody can see would make the
-# advisory period pointless.
-held_warn=$'⚠ unheld count=1 unlocked=1 peer=0 staged=2\n⚠ path=b.go state=unlocked\n```bash\nloto lock \'b.go\' -t "<bead>: intent"  # take what you are about to commit\n```'
-reset_fakes
-export FAKE_GATE_EXIT=0 FAKE_HELD_OUT="$held_warn" FAKE_HELD_EXIT=0
-run_entry "$precommit"
-check precommit-warn-mode-advises-and-proceeds 0 '' "$held_warn" "$STATUS" "$OUT" "$ERR"
-
-# A store loto cannot reach (exit 3) proceeds — the gate never becomes the
-# outage. Silent here on purpose: `loto` already wrote its fail-open notice to
-# stderr, which this entry never captures.
-reset_fakes
-export FAKE_GATE_EXIT=0 FAKE_HELD_EXIT=3
-run_entry "$precommit"
-check precommit-fails-open-on-infra 0 '' '' "$STATUS" "$OUT" "$ERR"
-
-# ── the unrecognized exit, decided rather than fallen into (loto-pgio) ─────
-#
-# 0, 1 and 3 are the exits this entry knows. Anything else is a check that did
-# not complete. It proceeds — the gate ships advisory, and a hook that refuses
-# on its own confusion is worse than the thing it guards — but it says so, with
-# the exit code and whatever the command printed. Proceeding SILENTLY on an
-# exit nobody understood is how a guard bypass survives: exit 2 used to land in
-# the fail-open bucket by accident, so one staged file with an odd name turned
-# the ownership check off for the whole commit and nothing said a word.
-held_invalid=$'✗ invalid count=1\n✗ path=weird reason=not-a-path'
-reset_fakes
-export FAKE_GATE_EXIT=0 FAKE_HELD_OUT="$held_invalid" FAKE_HELD_EXIT=2
-run_entry "$precommit"
-want=$held_invalid$'\n⚠ pre-commit: loto check --held exited 2 — staged-lock check did not complete; commit proceeds unchecked'
-check precommit-unknown-held-exit-reports-and-proceeds 0 '' "$want" "$STATUS" "$OUT" "$ERR"
-
-# Any other unrecognized exit, with nothing on stdout: still one line, still
-# not silence.
-reset_fakes
-export FAKE_GATE_EXIT=0 FAKE_HELD_EXIT=9
-run_entry "$precommit"
-want='⚠ pre-commit: loto check --held exited 9 — staged-lock check did not complete; commit proceeds unchecked'
-check precommit-unknown-held-exit-9-is-not-silent 0 '' "$want" "$STATUS" "$OUT" "$ERR"
-
-# Leg 1 gets the same rule: its exits are 0, 1 and 3, and anything else is
-# reported rather than swallowed.
-gate_invalid=$'✗ invalid count=1\n✗ path=weird reason=not-a-path'
-reset_fakes
-export FAKE_GATE_OUT="$gate_invalid" FAKE_GATE_EXIT=2 FAKE_HELD_EXIT=0
-run_entry "$precommit"
-want=$gate_invalid$'\n⚠ pre-commit: loto check --gate exited 2 — peer-lock check did not complete; commit proceeds unchecked'
-check precommit-unknown-gate-exit-reports-and-proceeds 0 '' "$want" "$STATUS" "$OUT" "$ERR"
-
-reset_fakes
-export PATH=$noloto
-run_entry "$precommit"
-check precommit-fails-open-without-loto 0 '' '' "$STATUS" "$OUT" "$ERR"
-
-reset_fakes
-export LOTO_GUARD_OVERRIDE=1 FAKE_GATE_EXIT=1 FAKE_HELD_EXIT=1
-run_entry "$precommit"
-check precommit-override-skips-both-legs 0 '' 'pre-commit: LOTO_GUARD_OVERRIDE=1 — skipping loto staged-lock guard' "$STATUS" "$OUT" "$ERR"
 
 if [ "$fails" -ne 0 ]; then
 	printf '\n✗ loto chain entries: %d of %d checks failed\n' "$fails" "$ran"

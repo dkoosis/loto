@@ -45,9 +45,7 @@ type movedRow struct {
 // git 2.9, so a rename reports the DESTINATION alone and a peer's lock on the
 // source is never examined (measured on git 2.55.0; loto-l9ve). --no-renames
 // reports the delete and the add separately, which is what the advisory owes
-// its reader. `--held` keeps -M for the opposite reason: there a rename's two
-// sides are one intent that both need locking, and the destination row has to
-// be able to name its source.
+// its reader.
 // isZeroOID reports whether ref is git's null-object sentinel — all-zero hex
 // digits, 40 characters for a sha1 repo or 64 for sha256. post-checkout
 // passes this as $1 (the previous HEAD) when there is none: a worktree's

@@ -18,8 +18,7 @@ const trOwner1 = "owner-1"
 // (loto-1h6x): a linked worktree's directory name is whatever the filesystem
 // allows, including an ASCII control character. Printed verbatim it would
 // split the one-row-per-line report the PreToolUse hook and `loto status`
-// are parsed from; escapeRowField's %q-quoting (the rowPath precedent,
-// cmd_check_held.go) keeps the row to one line.
+// are parsed from; escapeRowField's %q-quoting keeps the row to one line.
 func TestEmitReports_ControlCharWorktreeStaysOneLine(t *testing.T) {
 	evilWorktree := "/tmp/wt\nrogue"
 	if !domain.HasControl(evilWorktree) {

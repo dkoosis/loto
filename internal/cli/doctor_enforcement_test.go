@@ -443,7 +443,7 @@ func TestDoctorEnforcement_NestedWorktreeAdvisory(t *testing.T) {
 func TestDoctorEnforcement_AllSevenGreen(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)
-	writeHookFixture(t, repo, "pre-commit", "post-checkout", "reference-transaction")
+	writeHookFixture(t, repo, "post-checkout", "reference-transaction")
 	setHooksPath(t, repo, ".githooks")
 	writeTreeHookSettings(t)
 	same := filepath.Join(repo, "loto-same")
@@ -455,7 +455,6 @@ func TestDoctorEnforcement_AllSevenGreen(t *testing.T) {
 
 	first := runOK(t, tcCmdDoctor)
 	for _, want := range []string{
-		"✓ guard=pre-commit-gate reachable",
 		"✓ guard=tree-move-guard reachable",
 		"✓ guard=ref-transaction-guard reachable",
 		"✓ tree_hooks registered events=3",
