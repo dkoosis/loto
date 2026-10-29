@@ -1,5 +1,16 @@
 # Boot
-updated: 2026-09-13
+updated: 2026-10-29
+
+## handoff 2026-10-29 16:10
+- #410 (loto-j88z) waits on dk's review; may need a one-line rebase
+  (plugin.json version) now that #415 took 0.1.13.
+- #414 (loto-e1ku) open; an agent was still finishing its findings at /clear.
+  `sdlc merge 414` says what it needs.
+- After #410 merges, build loto-u3km (liveness half; the worktree-key half
+  shipped in #415), loto-qbw4, loto-kxxs, loto-f7b5 and loto-f1n5 in ONE PR,
+  with `@codex review`. Then loto-hof2 is unblocked.
+- loto-d0cb is claimed by dk's account; the sweep could not take it.
+- Mechanical rebases/ships → sonnet agents; opus only for findings/design.
 
 ## lane: FullFalcon
 branch: main
