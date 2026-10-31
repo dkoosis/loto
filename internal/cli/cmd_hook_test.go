@@ -851,8 +851,8 @@ func TestHookPre_FailOpenTellsTheModelOnce(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit=%d err=%q", code, errOut)
 	}
-	if got := hookContext(t, stdout); !strings.Contains(got, "did not run") || !strings.Contains(got, "tool_use_id") {
-		t.Errorf("additionalContext must say the hook did not run and why: %q", got)
+	if got := hookContext(t, stdout); !strings.Contains(got, "not checked") || !strings.Contains(got, "tool_use_id") {
+		t.Errorf("additionalContext must say what is unchecked and why: %q", got)
 	}
 
 	stdout, errOut, code = runHookEvent(t, tcHookPre, noCall)
@@ -872,15 +872,41 @@ func TestHookPre_FailOpenTellsTheModelOnce(t *testing.T) {
 	// main thread when the subagent is the first to fail.
 	const subCall = `{"session_id":"s-open","agent_id":"a-1","tool_name":"Bash","tool_input":{}}`
 	stdout, _, _ = runHookEvent(t, tcHookPre, subCall)
-	if got := hookContext(t, stdout); !strings.Contains(got, "did not run") {
+	if got := hookContext(t, stdout); !strings.Contains(got, "not checked") {
 		t.Errorf("a subagent's first failure must tell it: %q", got)
 	}
 	const subFirst = `{"session_id":"s-sub","agent_id":"a-1","tool_name":"Bash","tool_input":{}}`
 	const mainNext = `{"session_id":"s-sub","tool_name":"Bash","tool_input":{}}`
 	_, _, _ = runHookEvent(t, tcHookPre, subFirst)
 	stdout, _, _ = runHookEvent(t, tcHookPre, mainNext)
-	if got := hookContext(t, stdout); !strings.Contains(got, "did not run") {
+	if got := hookContext(t, stdout); !strings.Contains(got, "not checked") {
 		t.Errorf("a subagent hearing first must leave the main thread's notice: %q", got)
+	}
+}
+
+// A failure after admission must not claim the gate is off: it ran for this call.
+func TestHookFailOpen_AfterAdmissionSaysLocksWereChecked(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	var model, errOut bytes.Buffer
+	if code := hookFailOpen(&model, &errOut, &hookEvent{SessionID: "s"}, hookEffectUnrecorded, "observe: %v", "boom"); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if got := model.String(); !strings.Contains(got, "Locks were still checked") || strings.Contains(got, "not checked") {
+		t.Errorf("the notice must say locks were checked: %q", got)
+	}
+}
+
+// A marker that cannot be written must not silence the notice.
+func TestHookFirstNotice_UnwritableMarkerStillTells(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", file)
+	for range 2 {
+		if !hookFirstNotice("s", "", "m") {
+			t.Fatal("an unwritable marker must repeat the notice, not silence it")
+		}
 	}
 }
 

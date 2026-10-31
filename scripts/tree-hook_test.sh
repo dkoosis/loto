@@ -14,7 +14,7 @@ fail=0
 # run <session> <verb> <path-prefix> [agent]: sets out, err, rc from one hook call.
 run() {
   out=$(printf '{"session_id":"%s","tool_name":"Bash","tool_use_id":"c","agent_id":"%s"}\n' "$1" "${4:-}" |
-    TMPDIR="$WORK/tmp" PATH="${3:+$3:}/usr/bin:/bin" /bin/bash "$HOOK" "$2" 2>"$WORK/stderr")
+    TMPDIR="${HOOK_TMP:-$WORK/tmp}" PATH="${3:+$3:}/usr/bin:/bin" /bin/bash "$HOOK" "$2" 2>"$WORK/stderr")
   rc=$?
   err=$(cat "$WORK/stderr")
 }
@@ -73,6 +73,17 @@ check "missing: subagent hears" $? "stdout=$out"
 run s-sub pre ""
 is_context_json "$out" "loto is not on PATH"
 check "missing: main thread still hears" $? "stdout=$out"
+
+# A marker that cannot be written repeats the notice rather than silencing it.
+: >"$WORK/not-a-dir"
+HOOK_TMP="$WORK/not-a-dir"
+run s-unwritable pre ""
+is_context_json "$out" "loto is not on PATH"
+check "unwritable marker: first" $? "stdout=$out"
+run s-unwritable pre ""
+is_context_json "$out" "loto is not on PATH"
+check "unwritable marker: repeats" $? "stdout=$out"
+unset HOOK_TMP
 
 # Post is not PreToolUse: silent, and it does not spend the session's notice.
 run s-post post ""

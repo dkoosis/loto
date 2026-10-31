@@ -211,13 +211,21 @@ func hookSkip(stderr io.Writer, format string, a ...any) int {
 // call, and a line that repeats hundreds of times is a line the model learns to
 // skip. Per thread, keyed by session and agent id: a subagent shares its parent's
 // session id, and hearing it first must not leave the main thread untold.
-func hookFailOpen(model, stderr io.Writer, ev *hookEvent, format string, a ...any) int {
+//
+// effect says what the failure costs, which depends on how far pre got: admission
+// runs before the observation, so a failure after it leaves the gate working.
+func hookFailOpen(model, stderr io.Writer, ev *hookEvent, effect, format string, a ...any) int {
 	msg := fmt.Sprintf(format, a...)
 	if hookFirstNotice(ev.SessionID, ev.AgentID, msg) {
-		fmt.Fprintf(model, "⚠ loto hook pre did not run: %s. Edit and Write calls are not checked against peers' locks while this lasts.\n", msg)
+		fmt.Fprintf(model, "⚠ loto hook pre failed: %s. %s\n", msg, effect)
 	}
 	return hookSkip(stderr, "%s", msg)
 }
+
+const (
+	hookEffectUnchecked  = "Edit and Write calls are not checked against peers' locks while this lasts."
+	hookEffectUnrecorded = "Locks were still checked, but this call went unrecorded, so a peer's change to the tree may go unreported."
+)
 
 // hookFirstNotice reports whether this thread has not yet told the model msg.
 // The marker file's O_EXCL create is the once. With no session to key on, or a
@@ -276,7 +284,7 @@ func runHook(ctx context.Context, pre bool, stdout, stderr io.Writer) int {
 	var ev hookEvent
 	skip := func(format string, a ...any) int {
 		if pre {
-			return hookFailOpen(stdout, stderr, &ev, format, a...)
+			return hookFailOpen(stdout, stderr, &ev, hookEffectUnchecked, format, a...)
 		}
 		return hookSkip(stderr, format, a...)
 	}
@@ -386,7 +394,7 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 
 	obs, statusPaths, lockedBytes, err := hookObserve(ctx, rt, declared, status, stderr)
 	if err != nil {
-		return hookFailOpen(stdout, stderr, &ev, "observe: %v", err)
+		return hookFailOpen(stdout, stderr, &ev, hookEffectUnrecorded, "observe: %v", err)
 	}
 
 	// Step 2 — drift, over the observation step 4 is about to record.
@@ -418,7 +426,7 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 		Worktree:    rt.RepoTop,
 	}, obs)
 	if err != nil {
-		return hookFailOpen(stdout, stderr, &ev, "record pre: %v", err)
+		return hookFailOpen(stdout, stderr, &ev, hookEffectUnrecorded, "record pre: %v", err)
 	}
 	if !recorded {
 		return 0 // a repeated pre; the first observation stands

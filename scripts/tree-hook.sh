@@ -30,8 +30,12 @@ notice_once() {
   if [ -n "$session_id" ]; then
     dir="${TMPDIR:-/tmp}/loto-hook-notice"
     mkdir -p "$dir" 2>/dev/null
+    marker="$dir/${session_id//[^A-Za-z0-9_-]/_}.${agent_id//[^A-Za-z0-9_-]/_}.$1"
     # O_EXCL via noclobber: the first caller creates it, the rest are refused.
-    (set -o noclobber; : >"$dir/${session_id//[^A-Za-z0-9_-]/_}.${agent_id//[^A-Za-z0-9_-]/_}.$1") 2>/dev/null || exit 0
+    # A marker that cannot be written repeats the notice: better than a silent gate.
+    if ! (set -o noclobber; : >"$marker") 2>/dev/null && [ -e "$marker" ]; then
+      exit 0
+    fi
   fi
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"%s"}}\n' "$2"
   exit 0
