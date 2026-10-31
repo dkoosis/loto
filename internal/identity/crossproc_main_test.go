@@ -147,6 +147,13 @@ func TestMain(m *testing.M) {
 	if role := os.Getenv(crossProcRoleEnv); role != "" {
 		os.Exit(runCrossProcRole(role))
 	}
+	// The process witnesses identity.actorOwner reads (loto-e1ku): a run
+	// inside Claude Code inherits its session's pid and socket, and every
+	// session id a test pins would then resolve to that one actor. Unset, a
+	// test resolves as CI does; one that needs an actor sets them itself.
+	for _, k := range []string{"LOTO_PID", "CLAUDE_PID", "CLAUDE_CODE_MESSAGING_SOCKET"} {
+		_ = os.Unsetenv(k)
+	}
 	fallback, err := os.MkdirTemp("", "loto-identity-testhome-*")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain: mkdir fallback HOME:", err)

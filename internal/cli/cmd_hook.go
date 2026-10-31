@@ -118,11 +118,9 @@ type hookEvent struct {
 	ToolUseID string        `json:"tool_use_id"`
 	CWD       string        `json:"cwd"`
 	ToolInput hookToolInput `json:"tool_input"`
-	// AgentID is the harness's per-subagent id: distinct per /team sibling,
-	// absent at root. It is the stamp a beacon minted for this call carries in
-	// LOTO_SUBAGENT_ID, so it is what lets admission recognise that beacon as
-	// its own (loto-0z24). No hook mints one since gate-file-lock.sh went
-	// (loto-j88z); loto-hof2 folds beacons into the hold.
+	// AgentID is the harness's per-subagent id, absent at root. It names no
+	// owner: a subagent is its parent's actor (docs/write-gate.md). It only
+	// keeps a subagent's call from re-recording the parent's checkout.
 	AgentID string `json:"agent_id"`
 }
 
@@ -298,7 +296,7 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 	declared := ""
 	if target := ev.ToolInput.target(); isHookEditFamily(ev.ToolName) && target != "" {
 		var blocker *domain.LockRecord
-		declared, blocker = hookAdmit(ctx, rt, target, ev.AgentID)
+		declared, blocker = hookAdmit(rt, target)
 		if blocker != nil {
 			render.EmitHookRefusal(stderr, blocker.Target.Canonical,
 				string(blocker.OwnerUUID), blocker.Intent, blocker.ExpiresAt)
@@ -449,7 +447,7 @@ func hookAddRecordedPaths(rt *runtime, callID string, obs []store.HookPathState,
 // A path that does not resolve into this repo is neither admitted nor refused:
 // the tree hooks observe the checkout the session runs in, and a write outside
 // it is out of frame (§11, "one more loss, named").
-func hookAdmit(ctx context.Context, rt *runtime, filePath, agentID string) (declared string, blocker *domain.LockRecord) {
+func hookAdmit(rt *runtime, filePath string) (declared string, blocker *domain.LockRecord) {
 	// resolveGitTarget, not resolveCLITarget: the harness put this path in a
 	// structured field, so no shell ever touched it and the shell-token
 	// spelling rule would only reject legitimate names (domain.Provenance).
@@ -466,47 +464,29 @@ func hookAdmit(ctx context.Context, rt *runtime, filePath, agentID string) (decl
 	if err != nil {
 		return "", nil
 	}
-	kin, err := parentKin(ctx)
-	if err != nil {
-		return "", nil
-	}
-	// The rows of the sibling this call runs for are not foreign, for this
-	// admission only. A beacon minted for this call (gate-file-lock.sh did,
-	// until loto-j88z) is stamped with the event's agent_id, so a derived id
-	// owns it, not me, and the two hooks run in no fixed order: without this the beacon landing first refused the
-	// very write it was minted for (loto-0z24). Narrow on purpose — that one
-	// sibling, and its rows are not AUTHORIZATION I hold either: I still take
-	// my own exclusive lock beside them. A DIFFERENT sibling's beacon is still
-	// foreign, so siblings keep serializing on a shared path; and the beacon is
-	// left standing, because it is what a later sibling's stamped `check --gate`
-	// refuses on.
-	var sib domain.AgentUUID
-	if owner, ok := identity.SubagentOwner(agentID); ok {
-		sib = domain.AgentUUID(owner)
-	}
-	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), Kin: kin, CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
+	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
 	me := domain.AgentUUID(rt.Agent.UUID)
-	if held, blocker := hookRowsDecide(rows, me, sib, ec); held {
+	if held, blocker := hookRowsDecide(rows, me, ec); held {
 		return t.Canonical, nil
 	} else if blocker != nil {
 		return "", blocker
 	}
 	// L(f) = ⊥. Take it, and let the store's compare-and-set be the arbiter of
 	// the race between this read and the write.
-	return hookTakeLock(rt, t, me, kin, ec, sib)
+	return hookTakeLock(rt, t, me, ec)
 }
 
 // hookRowsDecide reads the rows already on the path for hookAdmit: held=true
-// when a row of mine or my kin's already authorizes the write; a non-nil
+// when a row of mine already authorizes the write; a non-nil
 // blocker when a live foreign row refuses it; neither when the path is free
 // to take.
 //
-// L(f) = s. A row of the caller's own — or its parent's, which a stamped
-// subagent's Bash-side `loto lock` wrote — is authorization already held,
-// and re-deciding it here would refuse a worker on territory it just took
-// (the loto-fs84 hole, one layer up).
+// L(f) = s. A row of the caller's actor is authorization already held. A
+// subagent is its parent's actor (docs/write-gate.md, loto-e1ku), so its write
+// over its parent's lock is admitted here, and another actor's is refused
+// below.
 //
-// ‡ A beacon of mine or my kin's is NOT that authorization (loto-9zcq):
+// ‡ A beacon of mine is NOT that authorization (loto-9zcq):
 // a beacon is not an exclusive lock, so stopping on one left the path with
 // no exclusive lock under its author.
 // Fall through and take the lock; an exclusive row upgrades over the
@@ -514,44 +494,36 @@ func hookAdmit(ctx context.Context, rt *runtime, filePath, agentID string) (decl
 //
 // L(f) = s' ≠ s. Any live foreign row refuses, beacon or lease alike: a
 // beacon means an agent is writing here right now, which is the case I2
-// exists to serialize. My own, my kin's and my current sibling's rows are
-// not foreign.
+// exists to serialize. My own rows are not foreign.
 //
 // ‡ A row from a DIFFERENT worktree is never held-by-me and never a blocker
 // (loto-3eq6, domain.SameWorktree): the store is shared across every linked
 // worktree of one repo, so a row at the same repo-relative canonical but a
 // different LockRecord.Worktree names a different file on disk — mine in
 // another checkout, or a peer's, either way not this write's concern.
-func hookRowsDecide(rows []domain.LockRecord, me, sib domain.AgentUUID, ec domain.EvalContext) (held bool, blocker *domain.LockRecord) {
+func hookRowsDecide(rows []domain.LockRecord, me domain.AgentUUID, ec domain.EvalContext) (held bool, blocker *domain.LockRecord) {
 	for i := range rows {
-		if (rows[i].OwnerUUID == me || ec.IsKin(rows[i].OwnerUUID)) && !rows[i].IsBeacon() &&
+		if rows[i].OwnerUUID == me && !rows[i].IsBeacon() &&
 			domain.SameWorktree(ec.MyWorktree, rows[i].Worktree) {
 			return true, nil
 		}
 	}
-	return false, hookBlocker(rows, me, sib, ec)
+	return false, hookBlocker(rows, me, ec)
 }
 
 // hookBlocker is Decide over the rows on one path (store.LocksAt, so rows[0]
-// names the target): the first live row of
-// another actor in this worktree, or nil. The sibling this call runs for is
-// dropped first: its beacon was minted for this very write (see hookAdmit),
-// until loto-hof2 folds beacons into the hold.
-func hookBlocker(rows []domain.LockRecord, me, sib domain.AgentUUID, ec domain.EvalContext) *domain.LockRecord {
+// names the target): the first live row of another actor in this worktree,
+// or nil. Subagents resolve to the same actor as their parent.
+func hookBlocker(rows []domain.LockRecord, me domain.AgentUUID, ec domain.EvalContext) *domain.LockRecord {
 	if len(rows) == 0 {
 		return nil
 	}
-	idx := make([]int, 0, len(rows))
 	holds := make([]domain.Hold, 0, len(rows))
 	for i := range rows {
-		if sib != "" && rows[i].OwnerUUID == sib {
-			continue
-		}
-		idx = append(idx, i)
 		holds = append(holds, ec.LockHold(rows[i]))
 	}
 	if j := ec.Decide(me, ec.MyWorktree, rows[0].Target.Canonical, holds); j >= 0 {
-		return &rows[idx[j]]
+		return &rows[j]
 	}
 	return nil
 }
@@ -559,14 +531,7 @@ func hookBlocker(rows []domain.LockRecord, me, sib domain.AgentUUID, ec domain.E
 // hookTakeLock is I2's `L(f) := s` half: the lock the pre-hook takes on the
 // caller's behalf when the path is unlocked. A lost race re-reads rather than
 // guessing, so a refusal names the owner who actually holds the path now.
-//
-// sib is the derived owner of the subagent this call runs for (zero at root).
-// It is passed to the store as kin so my exclusive row may sit beside that
-// sibling's beacon, the way a stamped `loto beacon` passes the parent so the
-// beacon may sit beside mine (locks_acquire.go); the beacon itself is left
-// standing (see hookAdmit). It is NOT in ec.Kin: the sibling's rows are not
-// authorization I hold, only rows I do not have to yield to.
-func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, kin []domain.AgentUUID, ec domain.EvalContext, sib domain.AgentUUID) (string, *domain.LockRecord) {
+func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, ec domain.EvalContext) (string, *domain.LockRecord) {
 	now := time.Now()
 	rec := domain.LockRecord{
 		Target:      t,
@@ -582,20 +547,12 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, kin []domai
 		MayCreate: true,
 		Worktree:  rt.Worktree,
 	}
-	storeKin := kin
-	if sib != "" {
-		storeKin = slices.Concat(kin, []domain.AgentUUID{sib})
-	}
-	if _, err := rt.Store.AcquireLocks(rt.Ctx, []domain.LockRecord{rec}, memoLiveProbe(rt.liveProbe()), storeKin...); err != nil {
+	if _, err := rt.Store.AcquireLocks(rt.Ctx, []domain.LockRecord{rec}, memoLiveProbe(rt.liveProbe())); err != nil {
 		held, lerr := rt.Store.LocksAt(rt.Ctx, t)
 		if lerr != nil {
 			return "", nil
 		}
-		// A lost race names the holder who actually won it — never a row this
-		// admission would not have yielded to (mine, my kin's, my current
-		// sibling's), or a refusal would blame the very beacon minted for this
-		// write.
-		return "", hookBlocker(held, me, sib, ec)
+		return "", hookBlocker(held, me, ec)
 	}
 	return t.Canonical, nil
 }

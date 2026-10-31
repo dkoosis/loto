@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -146,29 +145,6 @@ func checkoutPath(paths map[string]string, key string) string {
 		return p
 	}
 	return key
-}
-
-// nestedCheckoutKeys lists, sorted, the keys of the checkouts strictly inside
-// repoTop's tree: the ones Claude Code makes for `isolation: worktree`
-// subagents at <top>/.claude/worktrees/agent-<id> (loto-5dr1). A git failure
-// lists none, the narrower sweep.
-func nestedCheckoutKeys(ctx context.Context, repoTop string) []string {
-	recs, err := gitWorktrees(ctx, repoTop)
-	if err != nil || repoTop == "" {
-		return nil
-	}
-	prefix := strings.TrimSuffix(repoTop, "/") + "/"
-	var out []string
-	for i := range recs {
-		if !strings.HasPrefix(recs[i].Path, prefix) {
-			continue
-		}
-		if k := store.WorktreeKey(recs[i].Path); k != "" {
-			out = append(out, k)
-		}
-	}
-	slices.Sort(out)
-	return out
 }
 
 // goneCheckout returns a test for a key whose linked checkout no longer

@@ -24,6 +24,10 @@ const (
 // lock instantly reclaimable (loto-t1tq); the caller degrades to TTL-only
 // (loto-j1bo).
 func stampPID() (pid int, src pidSource) {
+	// A nested claude inherits LOTO_PID; its own CLAUDE_PID names its actor.
+	if n, err := strconv.Atoi(os.Getenv("CLAUDE_PID")); err == nil && n > 0 {
+		return n, pidDurable
+	}
 	s := os.Getenv("LOTO_PID")
 	if s == "" {
 		return 0, pidUnset

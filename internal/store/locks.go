@@ -101,7 +101,7 @@ type ReleaseResult struct {
 	Owner string
 	Mode  string // mode of the released row; "" → exclusive (loto-k5el.2)
 	// Worktree is set only on a row a session sweep released from a checkout
-	// other than the caller's own (WorktreeScope.Nested, loto-5dr1).
+	// other than the caller's own (loto-e1ku).
 	Worktree string
 }
 

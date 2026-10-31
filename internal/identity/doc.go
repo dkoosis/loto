@@ -14,19 +14,17 @@
 //
 // Resolution order (Ensure):
 //
-//  1. LOTO_SUBAGENT_ID=<stamp> with a session id present: the owner is a UUID
-//     derived from (session id, stamp), so /team siblings that inherit one
-//     session diverge into distinct owners (loto-fs84). A stamp with no
-//     session id, or a malformed stamp, is ignored — fail-open by contract,
-//     the stamp is never load-bearing (see resolveSubagent).
-//  2. LOTO_AGENT_ID=<uuid>: an explicit pin, shape-validated. Nothing on disk
+//  1. LOTO_AGENT_ID=<uuid>: an explicit pin, shape-validated. Nothing on disk
 //     is consulted; the value is the owner.
-//  3. LOTO_AGENT_ID="" (explicit empty): an ephemeral in-memory owner. Fleet
+//  2. LOTO_AGENT_ID="" (explicit empty): an ephemeral in-memory owner. Fleet
 //     dispatchers export this for throwaway processes.
-//  4. CLAUDE_CODE_SESSION_ID=<sid>: the owner IS the session id. Every
-//     shell-out from one Claude Code session shares it, so every lock a
-//     session takes is owned by one id with no cache to keep in sync.
-//  5. Nothing set: Ensure returns ErrUnpinned. Authority-bearing verbs refuse;
+//  3. CLAUDE_CODE_SESSION_ID=<sid>: the owner is the actor, the Claude Code
+//     process behind the session: a UUID derived from (host, pid, process
+//     start time), read from env or the session record (actorOwner). Its
+//     subagents and every session id /clear gives it are the same owner, so
+//     nothing tells a subagent's write from its parent's (docs/write-gate.md).
+//     With no process known the owner is the session id.
+//  4. Nothing set: Ensure returns ErrUnpinned. Authority-bearing verbs refuse;
 //     read-only verbs substitute Ephemeral() for display. Non-Claude-Code
 //     callers (codex, `claude -p`, a raw shell) are not supported yet.
 //

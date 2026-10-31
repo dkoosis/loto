@@ -88,24 +88,11 @@ func resolveBeaconGroups(groups []beaconGroup, stderr io.Writer) (resolved []res
 // because the supervisor had snapshotted it by hand. loto's whole value
 // proposition is that this cannot happen.
 //
-// identity.resolveSubagent already derives a stable per-sibling identity from the
-// stamped LOTO_SUBAGENT_ID, so siblings arrive here as distinct owners. What was
-// missing is a row for them to collide on: agents write through Edit/Write, not
-// through `loto lock`, so absent a beacon there is nothing in the store to see.
+// Since loto-e1ku a subagent is its parent's actor (docs/write-gate.md), so a
+// beacon no longer tells siblings apart; it is what another actor's write
+// collides on, since agents write through Edit/Write, not `loto lock`.
 //
-// ‡ Shared mode, deliberately. Two siblings' beacons must NOT conflict at
-// acquire — B's write is refused by the GATE reading A's beacon, one step
-// earlier and with a better message, and if minting itself could fail on a peer
-// the gate would be handing out denials from inside the hook's fail-open path.
-// An exclusive lock still conflicts with a beacon (domain.Conflicts truth
-// table), which is what denies a sibling's `loto lock` at lock time rather than
-// at write time.
-//
-// ‡ openRuntime, NOT openRuntimeGC. This runs on the PreToolUse hot path, once
-// per gated write. openRuntimeGC walks every ~/.loto/session/*.json, which cost
-// 1.1s against a 15.5k-file directory — the exact scan loto-6pn6 took off the
-// gate path. Beacons are self-expiring by TTL, so they accrete nothing that GC
-// would need to collect.
+// Shared mode remains until loto-hof2 folds beacons into exclusive holds.
 func cmdBeacon(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("beacon", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -202,16 +189,7 @@ func acquireBeaconGroup(ctx context.Context, rg resolvedBeaconGroup, now time.Ti
 	defer rt.Close()
 
 	recs := buildBeaconRecords(rg.targets, rt, now, ttl)
-	// Under a subagent stamp the parent's exclusive lock is kin, not a blocker:
-	// a worker locks from Bash (unstamped → parent-owned) and then writes through
-	// the hook (stamped). Refusing the beacon here would leave two siblings on
-	// one parent-locked file unserialized — the loto-fs84 hole, one layer up.
-	kin, err := parentKin(ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return 3
-	}
-	acquired, err := rt.Store.AcquireLocks(rt.Ctx, recs, memoLiveProbe(rt.liveProbe()), kin...)
+	acquired, err := rt.Store.AcquireLocks(rt.Ctx, recs, memoLiveProbe(rt.liveProbe()))
 	if err != nil {
 		return emitBeaconErr(err, stdout, stderr)
 	}

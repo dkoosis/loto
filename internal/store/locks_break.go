@@ -136,8 +136,9 @@ func applyBreakChangesTx(ctx context.Context, tx *sql.Tx, b breakBatch) ([]Break
 			return nil, err
 		}
 	}
+	wtCond, wtArgs := worktreeFilter(b.worktree)
 	for owner, canonicals := range deleteByOwner {
-		if err := deleteOwnedTx(ctx, tx, keysFor(b.ec), canonicals, owner, b.worktree); err != nil {
+		if err := deleteOwnedTx(ctx, tx, keysFor(b.ec), canonicals, owner, wtCond, wtArgs); err != nil {
 			return nil, err
 		}
 	}

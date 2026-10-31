@@ -96,7 +96,7 @@ type runtime struct {
 	Worktree      string             // store.WorktreeKey(RepoTop): the key every hold is stamped and scoped by (loto-hu8o)
 	SessionUUID   domain.SessionUUID // per-session id, distinct from Agent.UUID; sourced from LOTO_SESSION_ID or CLAUDE_CODE_SESSION_ID
 	SessionPinned bool               // true iff either of those was in env; gates session-scoped semantics
-	AgentPinned   bool               // true iff a non-empty LOTO_AGENT_ID, a usable LOTO_SUBAGENT_ID (SubagentIDPins), or CLAUDE_CODE_SESSION_ID pins an identity; false → Agent is a display-only throwaway (identity.Ephemeral)
+	AgentPinned   bool               // true iff a non-empty LOTO_AGENT_ID or CLAUDE_CODE_SESSION_ID pins an identity; false → Agent is a display-only throwaway (identity.Ephemeral)
 	// CaseFold: this checkout is on a case-folding filesystem, probed ONCE per
 	// invocation (loto-8soe). It is the same answer foldTargetKey mints keys
 	// with, handed to the store and to every EvalContext the CLI builds, so

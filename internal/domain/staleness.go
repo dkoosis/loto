@@ -1,7 +1,6 @@
 package domain
 
 import (
-	"slices"
 	"time"
 )
 
@@ -26,15 +25,6 @@ type HolderLiveProbe func(l LockRecord) Liveness
 type EvalContext struct {
 	Now  time.Time
 	Live HolderLiveProbe
-	// Kin are owner UUIDs whose rows count as the caller's OWN for conflict
-	// purposes: today, the parent identity a LOTO_SUBAGENT_ID stamp hides
-	// (identity.EnsureParent, loto-wofb). A stamped sibling's Bash-side
-	// `loto lock`/`claim` rows are owned by that parent — hooks cannot export
-	// env into later tool calls — so a beacon or gate check that read them as
-	// foreign would refuse a worker on the territory it just took. A SIBLING's
-	// rows are never kin: distinct stamp, distinct uuid, and serializing those
-	// is the point of stamping (loto-xwod). Empty = only exact-owner is self.
-	Kin []AgentUUID
 	// CaseFold is true when this repo's checkout is on a case-folding
 	// filesystem, and it widens SameTarget/PrefixCovers (and so Refuses) to
 	// compare keys ignoring case (loto-8soe). The CLI mints every new key
@@ -60,11 +50,6 @@ type EvalContext struct {
 	// via SameWorktree. Zero value "" widens rather than narrows, matching
 	// every other ambient field here.
 	MyWorktree string
-}
-
-// IsKin reports whether owner u counts as the caller's own for conflicts.
-func (c EvalContext) IsKin(u AgentUUID) bool {
-	return slices.Contains(c.Kin, u)
 }
 
 // IsStale returns true if the lock is past its TTL OR the holder is provably
@@ -229,7 +214,7 @@ func (c EvalContext) RemainingTTL(l LockRecord) time.Duration {
 // Conflicts reports whether an incoming acquire `incoming` is blocked by existing
 // holder `existing`: Refuses, the one conflict rule, plus shared mode, where
 // shared+shared on the same target coexist until loto-hof2 retires it.
-// Same-owner and Kin holders never conflict (re-acquire is an upsert), and a
+// Same-owner holders never conflict (re-acquire is an upsert), and a
 // stale holder never does (loto-k5el.2).
 func (c EvalContext) Conflicts(incoming, existing LockRecord) bool {
 	if incoming.EffectiveMode() == ModeShared && existing.EffectiveMode() == ModeShared {
