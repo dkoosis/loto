@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"loto/internal/domain"
 	"loto/internal/identity"
@@ -884,15 +885,29 @@ func TestHookPre_FailOpenTellsTheModelOnce(t *testing.T) {
 	}
 }
 
-// A failure after admission must not claim the gate is off: it ran for this call.
-func TestHookFailOpen_AfterAdmissionSaysLocksWereChecked(t *testing.T) {
+// A store that fails during admission lets the write go unchecked, so the model
+// must hear that, and no notice may claim the locks were checked.
+func TestHookPre_FailedLockCheckTellsTheModel(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
 	t.Setenv("TMPDIR", t.TempDir())
-	var model, errOut bytes.Buffer
-	if code := hookFailOpen(&model, &errOut, &hookEvent{SessionID: "s"}, hookEffectUnrecorded, "observe: %v", "boom"); code != 0 {
-		t.Fatalf("exit %d", code)
+	rt, err := openRuntime(context.Background())
+	if err != nil {
+		t.Fatalf("open runtime: %v", err)
 	}
-	if got := model.String(); !strings.Contains(got, "Locks were still checked") || strings.Contains(got, "not checked") {
-		t.Errorf("the notice must say locks were checked: %q", got)
+	_ = rt.Close() // every store read now fails
+	ctx := context.Background()
+	ev := hookEvent{SessionID: "s", ToolName: "Edit", ToolUseID: "e-1", ToolInput: hookToolInput{FilePath: tcTargetA}}
+	var model, errOut bytes.Buffer
+	if code := hookPre(ctx, rt, ev, time.Now(), startGitStatusPaths(ctx, ""), &model, &errOut); code != 0 {
+		t.Fatalf("exit %d, want fail open: %q", code, errOut.String())
+	}
+	got := model.String()
+	if !strings.Contains(got, "lock check:") || !strings.Contains(got, "not checked") {
+		t.Errorf("the model must hear the write went unchecked: %q", got)
+	}
+	if strings.Contains(got, "still checked") {
+		t.Errorf("no notice may claim the locks were checked: %q", got)
 	}
 }
 

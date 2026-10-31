@@ -212,8 +212,7 @@ func hookSkip(stderr io.Writer, format string, a ...any) int {
 // skip. Per thread, keyed by session and agent id: a subagent shares its parent's
 // session id, and hearing it first must not leave the main thread untold.
 //
-// effect says what the failure costs, which depends on how far pre got: admission
-// runs before the observation, so a failure after it leaves the gate working.
+// effect says what the failure costs, which depends on the step that failed.
 func hookFailOpen(model, stderr io.Writer, ev *hookEvent, effect, format string, a ...any) int {
 	msg := fmt.Sprintf(format, a...)
 	if hookFirstNotice(ev.SessionID, ev.AgentID, msg) {
@@ -224,7 +223,7 @@ func hookFailOpen(model, stderr io.Writer, ev *hookEvent, effect, format string,
 
 const (
 	hookEffectUnchecked  = "Edit and Write calls are not checked against peers' locks while this lasts."
-	hookEffectUnrecorded = "Locks were still checked, but this call went unrecorded, so a peer's change to the tree may go unreported."
+	hookEffectUnrecorded = "This call went unrecorded, so a peer's change to the tree may go unreported."
 )
 
 // hookFirstNotice reports whether this thread has not yet told the model msg.
@@ -384,7 +383,11 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 	declared := ""
 	if target := ev.ToolInput.target(); isHookEditFamily(ev.ToolName) && target != "" {
 		var blocker *domain.LockRecord
-		declared, blocker = hookAdmit(ctx, rt, target, ev.AgentID)
+		var err error
+		declared, blocker, err = hookAdmit(ctx, rt, target, ev.AgentID)
+		if err != nil { // the write goes ahead unchecked: fail open, and say so
+			hookFailOpen(stdout, stderr, &ev, hookEffectUnchecked, "lock check: %v", err)
+		}
 		if blocker != nil {
 			render.EmitHookRefusal(stderr, blocker.Target.Canonical,
 				string(blocker.OwnerUUID), blocker.Intent, blocker.ExpiresAt)
@@ -533,31 +536,32 @@ func hookAddRecordedPaths(rt *runtime, callID string, obs []store.HookPathState,
 }
 
 // hookAdmit is I2. It returns the declared path when the write is admitted,
-// or the live foreign lock that refuses it.
+// or the live foreign lock that refuses it, or the error that kept it from
+// finding out, in which case the write goes ahead unchecked.
 //
 // A path that does not resolve into this repo is neither admitted nor refused:
 // the tree hooks observe the checkout the session runs in, and a write outside
 // it is out of frame (§11, "one more loss, named").
-func hookAdmit(ctx context.Context, rt *runtime, filePath, agentID string) (declared string, blocker *domain.LockRecord) {
+func hookAdmit(ctx context.Context, rt *runtime, filePath, agentID string) (declared string, blocker *domain.LockRecord, err error) {
 	// resolveGitTarget, not resolveCLITarget: the harness put this path in a
 	// structured field, so no shell ever touched it and the shell-token
 	// spelling rule would only reject legitimate names (domain.Provenance).
 	t, err := resolveGitTarget(nil, callerBase(), rt.RepoTop, filePath)
 	if err != nil {
-		return "", nil
+		return "", nil, nil // out of frame, not a failure
 	}
 	// allowMissing: a Write that CREATES the file is the case I2 most needs
 	// to admit (loto-z5nb, the same reason `loto beacon` tolerates ENOENT).
 	if reason := statFileTargetReason(rt.RepoTop, t.Canonical, true); reason != "" {
-		return "", nil
+		return "", nil, nil
 	}
 	rows, err := rt.Store.LocksAt(rt.Ctx, t)
 	if err != nil {
-		return "", nil
+		return "", nil, err
 	}
 	kin, err := parentKin(ctx)
 	if err != nil {
-		return "", nil
+		return "", nil, err
 	}
 	// The rows of the sibling this call runs for are not foreign, for this
 	// admission only. A beacon minted for this call (gate-file-lock.sh did,
@@ -576,9 +580,9 @@ func hookAdmit(ctx context.Context, rt *runtime, filePath, agentID string) (decl
 	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), Kin: kin, CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
 	me := domain.AgentUUID(rt.Agent.UUID)
 	if held, blocker := hookRowsDecide(rows, me, sib, ec); held {
-		return t.Canonical, nil
+		return t.Canonical, nil, nil
 	} else if blocker != nil {
-		return "", blocker
+		return "", blocker, nil
 	}
 	// L(f) = ⊥. Take it, and let the store's compare-and-set be the arbiter of
 	// the race between this read and the write.
@@ -655,7 +659,7 @@ func hookBlocker(rows []domain.LockRecord, me, sib domain.AgentUUID, ec domain.E
 // beacon may sit beside mine (locks_acquire.go); the beacon itself is left
 // standing (see hookAdmit). It is NOT in ec.Kin: the sibling's rows are not
 // authorization I hold, only rows I do not have to yield to.
-func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, kin []domain.AgentUUID, ec domain.EvalContext, sib domain.AgentUUID) (string, *domain.LockRecord) {
+func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, kin []domain.AgentUUID, ec domain.EvalContext, sib domain.AgentUUID) (string, *domain.LockRecord, error) {
 	now := time.Now()
 	rec := domain.LockRecord{
 		Target:      t,
@@ -678,15 +682,15 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, kin []domai
 	if _, err := rt.Store.AcquireLocks(rt.Ctx, []domain.LockRecord{rec}, memoLiveProbe(rt.liveProbe()), storeKin...); err != nil {
 		held, lerr := rt.Store.LocksAt(rt.Ctx, t)
 		if lerr != nil {
-			return "", nil
+			return "", nil, lerr
 		}
 		// A lost race names the holder who actually won it — never a row this
 		// admission would not have yielded to (mine, my kin's, my current
 		// sibling's), or a refusal would blame the very beacon minted for this
 		// write.
-		return "", hookBlocker(held, me, sib, ec)
+		return "", hookBlocker(held, me, sib, ec), nil
 	}
-	return t.Canonical, nil
+	return t.Canonical, nil, nil
 }
 
 // hookObserve reads the state §5 I3 step 4 records: every path with a live

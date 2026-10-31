@@ -124,7 +124,7 @@ func TestHook_EditDecidesUnder10msAt200Holds(t *testing.T) {
 		took := make([]time.Duration, 0, calls)
 		for range calls {
 			start := time.Now()
-			if _, blocker := hookAdmit(t.Context(), rt, target, ""); blocker == nil {
+			if _, blocker, _ := hookAdmit(t.Context(), rt, target, ""); blocker == nil {
 				t.Fatal("the peer's hold did not refuse the Edit")
 			}
 			took = append(took, time.Since(start))
