@@ -548,7 +548,7 @@ func hookAdmit(ctx context.Context, rt *runtime, filePath, agentID string) (decl
 	// spelling rule would only reject legitimate names (domain.Provenance).
 	t, err := resolveGitTarget(nil, callerBase(), rt.RepoTop, filePath)
 	if err != nil {
-		return "", nil, nil // out of frame, not a failure
+		return "", nil, nil //nolint:nilerr // a path outside this repo is out of frame, not a failure
 	}
 	// allowMissing: a Write that CREATES the file is the case I2 most needs
 	// to admit (loto-z5nb, the same reason `loto beacon` tolerates ENOENT).
