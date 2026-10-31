@@ -4,6 +4,7 @@ const (
 	tcTargetA        = "a.go"
 	tcTargetB        = "b.go"
 	tcTargetC        = "c.go"
+	tcSubagentA      = "agent-a1" // a harness agent_id, as a subagent's call carries it
 	tcCmdLock        = "lock"
 	tcCmdUnlock      = "unlock"
 	tcCmdStatus      = "status"

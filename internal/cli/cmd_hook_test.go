@@ -3,11 +3,15 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"loto/internal/domain"
 	"loto/internal/identity"
@@ -21,6 +25,13 @@ const (
 	// tcCall41 is §10a test 9's unposted call, named as the spec names it.
 	tcCall41 = "call-41"
 )
+
+// hookSubagentEventJSON is hookEventJSON for a call made by a subagent.
+func hookSubagentEventJSON(tool, toolUseID, filePath, agentID string) string {
+	return fmt.Sprintf(
+		`{"session_id":"s-1","tool_name":%q,"tool_use_id":%q,"cwd":"/tmp","agent_id":%q,"tool_input":{"file_path":%q}}`,
+		tool, toolUseID, agentID, filePath)
+}
 
 // hookEventJSON builds a harness event. command is written into tool_input
 // alongside file_path precisely so the tests can prove loto never reads it —
@@ -44,6 +55,24 @@ func runHookEvent(t *testing.T, phase, payload string) (stdout, stderr string, c
 	var out, errBuf bytes.Buffer
 	code = Run([]string{tcHookCmd, phase}, &out, &errBuf)
 	return out.String(), errBuf.String(), code
+}
+
+// hookContext parses a pre hook's stdout as the one JSON object Claude Code
+// delivers to the model, and returns its additionalContext.
+func hookContext(t *testing.T, stdout string) string {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(stdout))
+	var out hookOutput
+	if err := dec.Decode(&out); err != nil {
+		t.Fatalf("stdout is not hook JSON: %v: %q", err, stdout)
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		t.Fatalf("stdout holds more than one JSON object: %q", stdout)
+	}
+	if out.HookSpecificOutput.HookEventName != "PreToolUse" {
+		t.Errorf("hookEventName = %q: %q", out.HookSpecificOutput.HookEventName, stdout)
+	}
+	return out.HookSpecificOutput.AdditionalContext
 }
 
 // hookStoreRead opens the same store the CLI just wrote to.
@@ -281,9 +310,12 @@ func TestHook_EditAdmission(t *testing.T) {
 		t.Setenv("LOTO_AGENT_ID", "")
 		pinAgent(t) // a second owner in the same checkout
 
-		_, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Edit", "call-refused", tcTargetA, ""))
+		stdout, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Edit", "call-refused", tcTargetA, ""))
 		if code != 2 {
 			t.Fatalf("want exit 2 on a peer's lock, got %d err=%q", code, errOut)
+		}
+		if stdout != "" {
+			t.Errorf("a refusal speaks on stderr only: %q", stdout)
 		}
 		if !strings.Contains(errOut, alice.UUID) {
 			t.Errorf("the refusal must name the holder: %q", errOut)
@@ -633,11 +665,12 @@ func TestHookDeliver_NamesTheEventWorktreeWhenDifferent(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("pre in A: exit=%d err=%q", code, errOut)
 	}
-	if !strings.Contains(stdout, "reports count=1") {
-		t.Fatalf("A's pre must deliver the report filed in B: %q", stdout)
+	delivered := hookContext(t, stdout)
+	if !strings.Contains(delivered, "reports count=1") {
+		t.Fatalf("A's pre must deliver the report filed in B: %q", delivered)
 	}
-	if !strings.Contains(stdout, "worktree="+eventWorktree) {
-		t.Errorf("the delivered row must name B's worktree %q: %q", eventWorktree, stdout)
+	if !strings.Contains(delivered, "worktree="+eventWorktree) {
+		t.Errorf("the delivered row must name B's worktree %q: %q", eventWorktree, delivered)
 	}
 }
 
@@ -670,10 +703,202 @@ func TestHookDeliver_SameWorktreeRendersUnchanged(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("second pre in B: exit=%d err=%q", code, errOut)
 	}
-	if !strings.Contains(stdout, "reports count=1") {
-		t.Fatalf("B's own next pre must deliver the report: %q", stdout)
+	delivered := hookContext(t, stdout)
+	if !strings.Contains(delivered, "reports count=1") {
+		t.Fatalf("B's own next pre must deliver the report: %q", delivered)
 	}
-	if strings.Contains(stdout, "worktree=") {
-		t.Errorf("a same-worktree delivery must render unchanged, no worktree= field: %q", stdout)
+	if strings.Contains(delivered, "worktree=") {
+		t.Errorf("a same-worktree delivery must render unchanged, no worktree= field: %q", delivered)
+	}
+}
+
+// TestHookPre_ReportReachesTheModel is mn-wois.12: Claude Code drops a
+// PreToolUse hook's plain stdout, so a waiting report goes out as
+// additionalContext JSON, and a call with nothing to report prints nothing.
+func TestHookPre_ReportReachesTheModel(t *testing.T) {
+	_, wt := siblingCheckouts(t)
+	target := tcTargetB
+	if err := os.WriteFile(filepath.Join(wt, target), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(wt)
+	if code := Run([]string{tcCmdLock, target, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock: exit %d", code)
+	}
+
+	stdout, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "c-1", "", ""))
+	if code != 0 || stdout != "" {
+		t.Fatalf("pre with no report waiting: exit=%d stdout=%q err=%q, want exit 0 and empty stdout", code, stdout, errOut)
+	}
+
+	if err := os.WriteFile(filepath.Join(wt, target), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, errOut, code := runHookEvent(t, tcHookPost, hookEventJSON("Bash", "c-1", "", "")); code != 0 {
+		t.Fatalf("post: exit=%d err=%q", code, errOut)
+	}
+
+	stdout, errOut, code = runHookEvent(t, tcHookPre, hookEventJSON("Bash", "c-2", "", ""))
+	if code != 0 {
+		t.Fatalf("pre with a report waiting: exit=%d err=%q", code, errOut)
+	}
+	if got := hookContext(t, stdout); !strings.Contains(got, "reports count=1") {
+		t.Errorf("additionalContext must hold the report: %q", got)
+	}
+}
+
+// TestHookPre_FailOpenTellsTheModelOnce: a pre that cannot act tells the model
+// once per session, while stderr keeps the line on every call.
+func TestHookPre_FailOpenTellsTheModelOnce(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	t.Setenv("TMPDIR", t.TempDir())
+	const noCall = `{"session_id":"s-open","tool_name":"Bash","tool_input":{}}`
+
+	stdout, errOut, code := runHookEvent(t, tcHookPre, noCall)
+	if code != 0 {
+		t.Fatalf("exit=%d err=%q", code, errOut)
+	}
+	if got := hookContext(t, stdout); !strings.Contains(got, "not checked") || !strings.Contains(got, "tool_use_id") {
+		t.Errorf("additionalContext must say what is unchecked and why: %q", got)
+	}
+
+	stdout, errOut, code = runHookEvent(t, tcHookPre, noCall)
+	if code != 0 || stdout != "" {
+		t.Errorf("second call of the session: exit=%d stdout=%q, want exit 0 and empty stdout", code, stdout)
+	}
+	if !strings.Contains(errOut, "tool_use_id") {
+		t.Errorf("stderr keeps the line on every call: %q", errOut)
+	}
+
+	stdout, _, _ = runHookEvent(t, tcHookPost, noCall)
+	if stdout != "" {
+		t.Errorf("post is not PreToolUse and writes no JSON: %q", stdout)
+	}
+
+	// A subagent shares its parent's session id and still hears it; so does the
+	// main thread when the subagent is the first to fail.
+	const subCall = `{"session_id":"s-open","agent_id":"a-1","tool_name":"Bash","tool_input":{}}`
+	stdout, _, _ = runHookEvent(t, tcHookPre, subCall)
+	if got := hookContext(t, stdout); !strings.Contains(got, "not checked") {
+		t.Errorf("a subagent's first failure must tell it: %q", got)
+	}
+	const subFirst = `{"session_id":"s-sub","agent_id":"a-1","tool_name":"Bash","tool_input":{}}`
+	const mainNext = `{"session_id":"s-sub","tool_name":"Bash","tool_input":{}}`
+	_, _, _ = runHookEvent(t, tcHookPre, subFirst)
+	stdout, _, _ = runHookEvent(t, tcHookPre, mainNext)
+	if got := hookContext(t, stdout); !strings.Contains(got, "not checked") {
+		t.Errorf("a subagent hearing first must leave the main thread's notice: %q", got)
+	}
+}
+
+// A store that fails during admission lets the write go unchecked, so the model
+// must hear that, and no notice may claim the locks were checked.
+func TestHookPre_FailedLockCheckTellsTheModel(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	t.Setenv("TMPDIR", t.TempDir())
+	rt, err := openRuntime(context.Background())
+	if err != nil {
+		t.Fatalf("open runtime: %v", err)
+	}
+	_ = rt.Close() // every store read now fails
+	ctx := context.Background()
+	ev := hookEvent{SessionID: "s", ToolName: "Edit", ToolUseID: "e-1", ToolInput: hookToolInput{FilePath: tcTargetA}}
+	var model, errOut bytes.Buffer
+	if code := hookPre(ctx, rt, ev, time.Now(), startGitStatusPaths(ctx, ""), &model, &errOut); code != 0 {
+		t.Fatalf("exit %d, want fail open: %q", code, errOut.String())
+	}
+	got := model.String()
+	if !strings.Contains(got, "lock check on "+tcTargetA+":") || !strings.Contains(got, "no lock on its path") {
+		t.Errorf("the model must hear the write has no lock: %q", got)
+	}
+	if strings.Contains(got, "still checked") {
+		t.Errorf("no notice may claim the locks were checked: %q", got)
+	}
+}
+
+// An acquire refused for a reason no lock row names (here a candidate claim)
+// admits the write with no lock, so the model must hear that too.
+func TestHookPre_RefusedAcquireTellsTheModel(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	t.Setenv("TMPDIR", t.TempDir())
+	seedClaim(t, "cand-live", tcTargetA)
+	// seedClaim's own lock would authorize the write; only the claim may remain.
+	if code := Run([]string{tcCmdUnlock, tcTargetA, "-t", tcIntentDone}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("unlock: exit %d", code)
+	}
+
+	stdout, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Edit", "e-2", tcTargetA, ""))
+	if code != 0 {
+		t.Fatalf("exit=%d err=%q", code, errOut)
+	}
+	if got := hookContext(t, stdout); !strings.Contains(got, "lock check on "+tcTargetA+":") || !strings.Contains(got, "no lock on its path") {
+		t.Errorf("the model must hear the write has no lock: %q", got)
+	}
+	if got := hookContext(t, stdout); strings.Contains(got, "not checked") {
+		t.Errorf("one refused path must not read as the whole gate off: %q", got)
+	}
+}
+
+// A marker that cannot be written must not silence the notice.
+func TestHookFirstNotice_UnwritableMarkerStillTells(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", file)
+	for range 2 {
+		if !hookFirstNotice("s", "", "m") {
+			t.Fatal("an unwritable marker must repeat the notice, not silence it")
+		}
+	}
+}
+
+// TestHookPre_SubagentLeavesTheReportForTheMainThread: a subagent runs under its
+// parent's owner, so its call must not take the report the main thread is owed.
+func TestHookPre_SubagentLeavesTheReportForTheMainThread(t *testing.T) {
+	_, wt := siblingCheckouts(t)
+	target := tcTargetB
+	if err := os.WriteFile(filepath.Join(wt, target), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(wt)
+	if code := Run([]string{tcCmdLock, target, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock: exit %d", code)
+	}
+	if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "d-1", "", "")); code != 0 {
+		t.Fatalf("pre: exit=%d err=%q", code, errOut)
+	}
+	if err := os.WriteFile(filepath.Join(wt, target), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, errOut, code := runHookEvent(t, tcHookPost, hookEventJSON("Bash", "d-1", "", "")); code != 0 {
+		t.Fatalf("post: exit=%d err=%q", code, errOut)
+	}
+
+	stdout, errOut, code := runHookEvent(t, tcHookPre, hookSubagentEventJSON("Bash", "d-2", "", tcSubagentA))
+	if code != 0 || stdout != "" {
+		t.Fatalf("subagent pre: exit=%d stdout=%q err=%q, want exit 0 and empty stdout", code, stdout, errOut)
+	}
+	stdout, errOut, code = runHookEvent(t, tcHookPre, hookEventJSON("Bash", "d-3", "", ""))
+	if code != 0 {
+		t.Fatalf("main pre: exit=%d err=%q", code, errOut)
+	}
+	if got := hookContext(t, stdout); !strings.Contains(got, "reports count=1") {
+		t.Errorf("the main thread's next call must get the report: %q", got)
+	}
+}
+
+// TestHookPre_OutsideAGitRepoIsSilent: with no tree to gate, the model has
+// nothing to learn, however many calls the session makes.
+func TestHookPre_OutsideAGitRepoIsSilent(t *testing.T) {
+	pinAgent(t)
+	t.Setenv("TMPDIR", t.TempDir())
+	t.Chdir(t.TempDir())
+	stdout, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "n-1", "", ""))
+	if code != 0 || stdout != "" {
+		t.Errorf("exit=%d stdout=%q err=%q, want exit 0 and empty stdout", code, stdout, errOut)
 	}
 }

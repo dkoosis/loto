@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"os/exec"
@@ -170,7 +173,7 @@ func cmdHook(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	switch sub {
 	case hookSubPre:
-		return runHook(ctx, true, stdout, stderr)
+		return runHookPre(ctx, stdout, stderr)
 	case hookSubPost:
 		return runHook(ctx, false, stdout, stderr)
 	case "ref":
@@ -194,27 +197,106 @@ func cmdHook(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // that returns nonzero on an unreadable event, an unpinned identity or a store
 // that will not open turns one broken precondition into a session that cannot
 // run any tool at all — the outage the gate is forbidden to become. The
-// warning is on stderr, where the harness surfaces it, so the failure is
-// visible rather than silent.
+// warning goes on stderr, which the harness keeps in the transcript and does
+// not show the model; hookFailOpen is the half that reaches the model.
 func hookSkip(stderr io.Writer, format string, a ...any) int {
 	fmt.Fprintf(stderr, "⚠ hook: "+format+"\n", a...)
 	return 0
 }
 
+// hookFailOpen is hookSkip for `loto hook pre`: the thread also learns, once per
+// failure, that this call went ungated. Once, because this runs on every tool
+// call, and a line that repeats hundreds of times is a line the model learns to
+// skip. Per thread, keyed by session and agent id: a subagent shares its parent's
+// session id, and hearing it first must not leave the main thread untold.
+//
+// effect says what the failure costs, which depends on the step that failed.
+func hookFailOpen(model, stderr io.Writer, ev *hookEvent, effect, format string, a ...any) int {
+	msg := fmt.Sprintf(format, a...)
+	if hookFirstNotice(ev.SessionID, ev.AgentID, msg) {
+		fmt.Fprintf(model, "⚠ loto hook pre failed: %s. %s\n", msg, effect)
+	}
+	return hookSkip(stderr, "%s", msg)
+}
+
+const (
+	hookEffectUnchecked  = "Edit and Write calls are not checked against peers' locks while this lasts."
+	hookEffectNoLock     = "This write goes ahead with no lock on its path, and a peer's lock on it may not have been seen."
+	hookEffectUnrecorded = "This call went unrecorded, so a peer's change to the tree may go unreported."
+)
+
+// hookFirstNotice reports whether this thread has not yet told the model msg.
+// The marker file's O_EXCL create is the once. With no session to key on, or a
+// marker that cannot be written, it says yes: a repeat beats a silent gate.
+func hookFirstNotice(session, agent, msg string) bool {
+	if session == "" {
+		return true
+	}
+	dir := filepath.Join(os.TempDir(), "loto-hook-notice")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return true
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(session + "\x00" + agent + "\x00" + msg))
+	f, err := os.OpenFile(filepath.Join(dir, strconv.FormatUint(h.Sum64(), 16)), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return !errors.Is(err, os.ErrExist)
+	}
+	_ = f.Close()
+	return true
+}
+
+// runHookPre runs the pre hook and hands what it has for the model to the
+// harness in the one form the harness delivers. Claude Code drops a PreToolUse
+// hook's plain stdout and its stderr at exit 0; only additionalContext JSON or
+// exit 2 reaches the model. Nothing for the model means empty stdout.
+func runHookPre(ctx context.Context, stdout, stderr io.Writer) int {
+	var forModel bytes.Buffer
+	code := runHook(ctx, true, &forModel, stderr)
+	if forModel.Len() == 0 {
+		return code
+	}
+	var out hookOutput
+	out.HookSpecificOutput.HookEventName = "PreToolUse"
+	out.HookSpecificOutput.AdditionalContext = strings.TrimRight(forModel.String(), "\n")
+	enc := json.NewEncoder(stdout)
+	enc.SetEscapeHTML(false) // a path holding & stays readable
+	if err := enc.Encode(out); err != nil {
+		fmt.Fprintf(stderr, "⚠ hook: write context: %v\n", err)
+	}
+	return code
+}
+
+// hookOutput is the JSON Claude Code reads from a PreToolUse hook's stdout.
+type hookOutput struct {
+	HookSpecificOutput struct {
+		HookEventName     string `json:"hookEventName"`
+		AdditionalContext string `json:"additionalContext"`
+	} `json:"hookSpecificOutput"`
+}
+
+// runHook runs one phase. For pre, stdout takes the text meant for the model
+// (runHookPre wraps it); post writes nothing there.
 func runHook(ctx context.Context, pre bool, stdout, stderr io.Writer) int {
 	started := time.Now()
 	var ev hookEvent
+	skip := func(format string, a ...any) int {
+		if pre {
+			return hookFailOpen(stdout, stderr, &ev, hookEffectUnchecked, format, a...)
+		}
+		return hookSkip(stderr, format, a...)
+	}
 	if err := json.NewDecoder(hookStdin).Decode(&ev); err != nil {
-		return hookSkip(stderr, "unreadable event on stdin: %v", err)
+		return skip("unreadable event on stdin: %v", err)
 	}
 	if ev.ToolUseID == "" {
-		return hookSkip(stderr, "event carries no tool_use_id; a call record has nothing to be keyed to")
+		return skip("event carries no tool_use_id; a call record has nothing to be keyed to")
 	}
 	// Checked before the runtime opens: an unpinned caller gets a throwaway
 	// owner from identity.Ephemeral, and a call record owned by a uuid that
 	// exists for one process is worse than no record (loto-pody).
 	if !identity.PinnedByEnv() {
-		return hookSkip(stderr, "%v", errIdentityUnpinned)
+		return skip("%v", errIdentityUnpinned)
 	}
 	// git status is the costliest fork a hook makes, and it needs nothing
 	// openRuntime opens, so it runs alongside openRuntime's own rev-parse fork
@@ -227,8 +309,12 @@ func runHook(ctx context.Context, pre bool, stdout, stderr io.Writer) int {
 	// must not pay the session GC sweep (loto-6pn6, same reason `loto beacon`
 	// takes this door).
 	rt, err := openRuntime(ctx)
-	if err != nil {
+	if errors.Is(err, errNotInGitRepo) {
+		// No tree here to gate, so the model has nothing to learn.
 		return hookSkip(stderr, "%v", err)
+	}
+	if err != nil {
+		return skip("%v", err)
 	}
 	defer rt.Close()
 	hookNoteCheckout(rt, ev, stderr)
@@ -296,7 +382,11 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 	declared := ""
 	if target := ev.ToolInput.target(); isHookEditFamily(ev.ToolName) && target != "" {
 		var blocker *domain.LockRecord
-		declared, blocker = hookAdmit(rt, target)
+		var err error
+		declared, blocker, err = hookAdmit(rt, target)
+		if err != nil { // the write goes ahead unchecked: fail open, and say so
+			hookFailOpen(stdout, stderr, &ev, hookEffectNoLock, "lock check on %s: %v", target, err)
+		}
 		if blocker != nil {
 			render.EmitHookRefusal(stderr, blocker.Target.Canonical,
 				string(blocker.OwnerUUID), blocker.Intent, blocker.ExpiresAt)
@@ -306,7 +396,7 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 
 	obs, statusPaths, lockedBytes, err := hookObserve(ctx, rt, declared, status, stderr)
 	if err != nil {
-		return hookSkip(stderr, "observe: %v", err)
+		return hookFailOpen(stdout, stderr, &ev, hookEffectUnrecorded, "observe: %v", err)
 	}
 
 	// Step 2 — drift, over the observation step 4 is about to record.
@@ -316,8 +406,12 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 	}
 	// Step 1 — deliver. Reports addressed to this owner are handed over once
 	// and marked delivered; `loto status` carries the rest until their
-	// addressee's own next call.
-	hookDeliver(rt, me, now, stdout, stderr)
+	// addressee's own next call. A subagent's call delivers nothing: it runs under
+	// its parent's owner, so delivery would mark the main thread's report done and
+	// show it to the subagent instead (the same reason as hookNoteCheckout).
+	if ev.AgentID == "" {
+		hookDeliver(rt, me, now, stdout, stderr)
+	}
 
 	// Step 4 — record. Worktree is rt.RepoTop, the checkout-root identity the
 	// call and path tables scope to (loto-v6xx); the locks this call refreshes
@@ -334,23 +428,22 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 		Worktree:    rt.RepoTop,
 	}, obs)
 	if err != nil {
-		return hookSkip(stderr, "record pre: %v", err)
+		return hookFailOpen(stdout, stderr, &ev, hookEffectUnrecorded, "record pre: %v", err)
 	}
 	if !recorded {
 		return 0 // a repeated pre; the first observation stands
 	}
 	hookEmitTiming(rt, ev.ToolUseID, "pre", time.Since(started), statusPaths, lockedBytes, stderr)
-	fmt.Fprintf(stdout, "✓ recorded call=%s phase=pre paths=%d\n", ev.ToolUseID, len(obs))
 	return 0
 }
 
 // hookDeliver is I3 step 1's delivery half: hand this owner every report
 // waiting for it and mark each delivered, so the next call does not repeat it.
 //
-// ‡ Best-effort, and on STDOUT. A report the harness never shows the agent is
-// a report that did not happen, and stdout is where the hook's other line
-// already goes; a delivery failure must never turn into a nonzero exit, which
-// would stop the tool call over a message (the exit-code rule in hookSkip).
+// ‡ Best-effort, and for the model: stdout here is what runHookPre turns into
+// additionalContext. A report the harness never shows the agent is a report
+// that did not happen; a delivery failure must never turn into a nonzero exit,
+// which would stop the tool call over a message (the exit-code rule in hookSkip).
 func hookDeliver(rt *runtime, me domain.AgentUUID, now time.Time, stdout, stderr io.Writer) {
 	delivered, err := rt.Store.DeliverReports(rt.Ctx, me, now)
 	if err != nil {
@@ -442,34 +535,35 @@ func hookAddRecordedPaths(rt *runtime, callID string, obs []store.HookPathState,
 }
 
 // hookAdmit is I2. It returns the declared path when the write is admitted,
-// or the live foreign lock that refuses it.
+// or the live foreign lock that refuses it, or the error that kept it from
+// finding out, in which case the write goes ahead unchecked.
 //
 // A path that does not resolve into this repo is neither admitted nor refused:
 // the tree hooks observe the checkout the session runs in, and a write outside
 // it is out of frame (§11, "one more loss, named").
-func hookAdmit(rt *runtime, filePath string) (declared string, blocker *domain.LockRecord) {
+func hookAdmit(rt *runtime, filePath string) (declared string, blocker *domain.LockRecord, err error) {
 	// resolveGitTarget, not resolveCLITarget: the harness put this path in a
 	// structured field, so no shell ever touched it and the shell-token
 	// spelling rule would only reject legitimate names (domain.Provenance).
 	t, err := resolveGitTarget(nil, callerBase(), rt.RepoTop, filePath)
 	if err != nil {
-		return "", nil
+		return "", nil, nil //nolint:nilerr // a path outside this repo is out of frame, not a failure
 	}
 	// allowMissing: a Write that CREATES the file is the case I2 most needs
 	// to admit (loto-z5nb, the same reason `loto beacon` tolerates ENOENT).
 	if reason := statFileTargetReason(rt.RepoTop, t.Canonical, true); reason != "" {
-		return "", nil
+		return "", nil, nil
 	}
 	rows, err := rt.Store.LocksAt(rt.Ctx, t)
 	if err != nil {
-		return "", nil
+		return "", nil, err
 	}
 	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
 	me := domain.AgentUUID(rt.Agent.UUID)
 	if held, blocker := hookRowsDecide(rows, me, ec); held {
-		return t.Canonical, nil
+		return t.Canonical, nil, nil
 	} else if blocker != nil {
-		return "", blocker
+		return "", blocker, nil
 	}
 	// L(f) = ⊥. Take it, and let the store's compare-and-set be the arbiter of
 	// the race between this read and the write.
@@ -531,7 +625,7 @@ func hookBlocker(rows []domain.LockRecord, me domain.AgentUUID, ec domain.EvalCo
 // hookTakeLock is I2's `L(f) := s` half: the lock the pre-hook takes on the
 // caller's behalf when the path is unlocked. A lost race re-reads rather than
 // guessing, so a refusal names the owner who actually holds the path now.
-func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, ec domain.EvalContext) (string, *domain.LockRecord) {
+func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, ec domain.EvalContext) (string, *domain.LockRecord, error) {
 	now := time.Now()
 	rec := domain.LockRecord{
 		Target:      t,
@@ -550,11 +644,17 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, ec domain.E
 	if _, err := rt.Store.AcquireLocks(rt.Ctx, []domain.LockRecord{rec}, memoLiveProbe(rt.liveProbe())); err != nil {
 		held, lerr := rt.Store.LocksAt(rt.Ctx, t)
 		if lerr != nil {
-			return "", nil
+			return "", nil, lerr
 		}
-		return "", hookBlocker(held, me, ec)
+		// A row of mine won: the write is authorized. No row to name means the
+		// acquire failed for its own reason, and the write goes unchecked.
+		authorized, blocker := hookRowsDecide(held, me, ec)
+		if blocker != nil || authorized {
+			return "", blocker, nil
+		}
+		return "", nil, err
 	}
-	return t.Canonical, nil
+	return t.Canonical, nil, nil
 }
 
 // hookObserve reads the state §5 I3 step 4 records: every path with a live
