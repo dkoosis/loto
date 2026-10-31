@@ -102,10 +102,11 @@ func (s *Store) applyOwnedReleasesTx(ctx context.Context, tx *sql.Tx, owned []st
 	// but with the widened PK, one owner can hold a SIBLING row at the same
 	// canonical from another worktree, and the raw DELETE/UPDATE below must not
 	// reach past its own worktree to find it.
-	if err := ackTagsForReleaseTx(ctx, tx, s.keys(), owned, byAgent, s.worktree); err != nil {
+	wtCond, wtArgs := worktreeFilter(s.worktree)
+	if err := ackTagsForReleaseTx(ctx, tx, s.keys(), owned, byAgent, wtCond, wtArgs); err != nil {
 		return err
 	}
-	if err := deleteOwnedTx(ctx, tx, s.keys(), owned, byAgent, s.worktree); err != nil {
+	if err := deleteOwnedTx(ctx, tx, s.keys(), owned, byAgent, wtCond, wtArgs); err != nil {
 		return err
 	}
 	// Emit lock_released events in the same tx (atomic with the row deletes).
@@ -206,14 +207,13 @@ func vetoingHolder(holders []domain.LockRecord, ec domain.EvalContext) string {
 // tags instead of acking them (would still get GC'd by doctor, but the audit
 // would lose the explicit ack timestamp).
 //
-// worktree scopes the host-lock subquery to the caller's own checkout, via
-// worktreeFilter (loto-8z87). Under the widened PK a same-owner SIBLING row
+// wtCond and wtArgs scope the host-lock subquery to the selected checkout
+// (loto-8z87). Under the widened PK a same-owner SIBLING row
 // from another worktree can share this exact (target, owner) pair; without
 // the scope its created_at could satisfy the tuple match and ack a tag that
 // belongs to the sibling's still-live lock.
-func ackTagsForReleaseTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals []string, byAgent, worktree string) error {
+func ackTagsForReleaseTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals []string, byAgent, wtCond string, wtArgs []any) error {
 	placeholders, args := k.inStrings(canonicals)
-	wtCond, wtArgs := worktreeFilter(worktree)
 	args = append(append([]any{time.Now().UnixNano()}, args...), byAgent)
 	args = append(args, wtArgs...)
 	// ‡ Every leg keys under k, the tuple's target member included: a tag this
@@ -234,14 +234,12 @@ func ackTagsForReleaseTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals
 // in the on-disk spelling — without it `loto unlock foo.go` deleted nothing
 // and still reported success (loto-8soe).
 //
-// worktree scopes the delete to the caller's own checkout, via worktreeFilter
-// (loto-8z87). Under the widened PK (target_canonical, owner_uuid, worktree)
+// wtCond and wtArgs scope the delete to the selected checkout (loto-8z87). Under the widened PK (target_canonical, owner_uuid, worktree)
 // the same owner can hold a SIBLING row on the same canonical from another
 // linked worktree; a bare owner+canonical DELETE would take both, undoing the
 // PK widening's whole point the moment anything actually released.
-func deleteOwnedTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals []string, byAgent, worktree string) error {
+func deleteOwnedTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals []string, byAgent, wtCond string, wtArgs []any) error {
 	placeholders, args := k.inStrings(canonicals)
-	wtCond, wtArgs := worktreeFilter(worktree)
 	args = append(args, byAgent)
 	args = append(args, wtArgs...)
 	_, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE `+k.col("target_canonical")+` IN (`+placeholders+`) AND owner_uuid = ? AND `+wtCond, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
@@ -347,11 +345,14 @@ func (s *Store) releaseSessionTargetsTx(ctx context.Context, tx *sql.Tx, canonic
 	}
 	for _, wt := range slices.Sorted(maps.Keys(byWorktree)) {
 		paths := byWorktree[wt]
+		// These are rows selected by session and intent, not a caller's
+		// compatibility scope. Empty is an exact legacy key, never a wildcard.
+		wtCond, wtArgs := "worktree = ?", []any{wt}
 		// Ack tags before deleting host locks (same ordering as ReleaseLocks).
-		if err := ackTagsForReleaseTx(ctx, tx, s.keys(), paths, byAgent, wt); err != nil {
+		if err := ackTagsForReleaseTx(ctx, tx, s.keys(), paths, byAgent, wtCond, wtArgs); err != nil {
 			return err
 		}
-		if err := deleteOwnedTx(ctx, tx, s.keys(), paths, byAgent, wt); err != nil {
+		if err := deleteOwnedTx(ctx, tx, s.keys(), paths, byAgent, wtCond, wtArgs); err != nil {
 			return err
 		}
 	}

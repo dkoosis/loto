@@ -93,6 +93,64 @@ func TestReleaseBySession_ScopedToSession(t *testing.T) {
 	}
 }
 
+// Legacy empty worktree keys participate in compatibility reads, but a sweep
+// must delete exactly the rows selected by its session or intent filter.
+func TestReleaseBySession_ExactWorktreePreservesFilteredRows(t *testing.T) {
+	for _, selectedWorktree := range []string{"", "worktrees/side"} {
+		for _, filter := range []string{"session", "intent"} {
+			t.Run(selectedWorktree+"/"+filter, func(t *testing.T) {
+				s := mustOpen(t)
+				ctx := context.Background()
+				peerWorktree := ""
+				if selectedWorktree == "" {
+					peerWorktree = "worktrees/side"
+				}
+				selected := mkFileLockSessionWorktree(t, "a.go", tcAlice, "session-1", "", selectedWorktree, time.Hour)
+				selected.Intent = "selected"
+				peer := selected
+				peer.Worktree = peerWorktree
+				peer.SessionUUID = "session-2"
+				peer.Intent = "keep"
+				// Current acquires adopt legacy rows. Seed both keys first,
+				// then recreate the legacy row left by an older binary.
+				const legacyFixture = "worktrees/legacy-fixture"
+				if selected.Worktree == "" {
+					selected.Worktree = legacyFixture
+				} else {
+					peer.Worktree = legacyFixture
+				}
+				if _, err := s.AcquireLocks(ctx, []domain.LockRecord{selected, peer}, liveProbe); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.db.ExecContext(ctx, `UPDATE locks SET worktree = '' WHERE worktree = ?`, legacyFixture); err != nil {
+					t.Fatal(err)
+				}
+				var session domain.SessionUUID
+				intent := ""
+				if filter == "session" {
+					session = selected.SessionUUID
+				} else {
+					intent = selected.Intent
+				}
+				rel, err := s.ReleaseBySession(ctx, tcAlice, session, intent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(rel.Results) != 1 {
+					t.Fatalf("released %d rows, want 1", len(rel.Results))
+				}
+				left, err := s.ListLocks(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(left) != 1 || left[0].Worktree != peerWorktree || left[0].SessionUUID != peer.SessionUUID || left[0].Intent != peer.Intent {
+					t.Fatalf("filtered-out row must survive: %+v", left)
+				}
+			})
+		}
+	}
+}
+
 // TestReleaseBySession_AgentScoped verifies that when sessionUUID is empty,
 // ReleaseBySession releases all locks owned by the agent regardless of session.
 func TestReleaseBySession_AgentScoped(t *testing.T) {

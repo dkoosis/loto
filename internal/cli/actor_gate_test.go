@@ -95,3 +95,26 @@ func TestUnlockAllReleasesActorInEveryWorktree(t *testing.T) {
 		t.Fatalf("unlock --all left %d claims, want 0: %+v", len(claims), claims)
 	}
 }
+
+func TestWhoamiPreservesActorWithoutPIDEnv(t *testing.T) {
+	withTempProject(t)
+	asActor(t, "sess-recorded", os.Getpid())
+	for _, args := range [][]string{{cmdWhoamiName}, {tcCmdLock, tcTargetA, "-t", "recorded actor"}} {
+		if code := Run(args, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+			t.Fatalf("%v: exit %d", args, code)
+		}
+	}
+	t.Setenv("LOTO_PID", "")
+	for _, args := range [][]string{{cmdWhoamiName}, {tcCmdUnlock, "--all"}} {
+		var out, errOut bytes.Buffer
+		if code := Run(args, &out, &errOut); code != 0 {
+			t.Fatalf("%v without PID env: exit %d: %s", args, code, errOut.String())
+		}
+	}
+	rt, done := hookStoreRead(t)
+	defer done()
+	left, err := rt.Store.ListLocks(rt.Ctx)
+	if err != nil || len(left) != 0 {
+		t.Fatalf("locks after whoami and unlock without PID env = %+v, err %v", left, err)
+	}
+}

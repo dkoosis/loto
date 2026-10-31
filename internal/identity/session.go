@@ -79,6 +79,16 @@ func RecordSession(a *Agent, repoTop string) (*SessionRecord, error) {
 	// seam makes that literal — a test can put a platform with no readable
 	// start-time on both sides at once.
 	procStart, _ := procStartFn(pid) // 0,false → 0 → unknown
+	// whoami can run without the env that originally recorded this actor.
+	// Preserve its witnesses rather than replacing known identity with zeroes.
+	if pid <= 0 {
+		if old, ok := readSession(sid); ok && old.UUID == a.UUID && old.Host == a.Host {
+			pid, procStart = old.PID, old.ProcStart
+			if socket == "" {
+				socket = old.Socket
+			}
+		}
+	}
 	rec := &SessionRecord{
 		SessionID:  sid,
 		UUID:       a.UUID,
