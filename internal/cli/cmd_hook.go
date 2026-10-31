@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"os/exec"
@@ -172,7 +175,7 @@ func cmdHook(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	switch sub {
 	case hookSubPre:
-		return runHook(ctx, true, stdout, stderr)
+		return runHookPre(ctx, stdout, stderr)
 	case hookSubPost:
 		return runHook(ctx, false, stdout, stderr)
 	case "ref":
@@ -196,27 +199,97 @@ func cmdHook(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // that returns nonzero on an unreadable event, an unpinned identity or a store
 // that will not open turns one broken precondition into a session that cannot
 // run any tool at all — the outage the gate is forbidden to become. The
-// warning is on stderr, where the harness surfaces it, so the failure is
-// visible rather than silent.
+// warning goes on stderr, which the harness keeps in the transcript and does
+// not show the model; hookFailOpen is the half that reaches the model.
 func hookSkip(stderr io.Writer, format string, a ...any) int {
 	fmt.Fprintf(stderr, "⚠ hook: "+format+"\n", a...)
 	return 0
 }
 
+// hookFailOpen is hookSkip for `loto hook pre`: the session also learns, once
+// per session and failure, that this call went ungated. Once, because this runs
+// on every tool call, and a line that repeats hundreds of times is a line the
+// model learns to skip.
+func hookFailOpen(model, stderr io.Writer, session, format string, a ...any) int {
+	msg := fmt.Sprintf(format, a...)
+	if hookFirstNotice(session, msg) {
+		fmt.Fprintf(model, "⚠ loto hook pre did not run: %s. Edit and Write calls are not checked against peers' locks while this lasts.\n", msg)
+	}
+	return hookSkip(stderr, "%s", msg)
+}
+
+// hookFirstNotice reports whether this session has not yet told the model msg.
+// The marker file's O_EXCL create is the once. With no session to key on, or a
+// marker that cannot be written, it says yes: a repeat beats a silent gate.
+func hookFirstNotice(session, msg string) bool {
+	if session == "" {
+		return true
+	}
+	dir := filepath.Join(os.TempDir(), "loto-hook-notice")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return true
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(session + "\x00" + msg))
+	f, err := os.OpenFile(filepath.Join(dir, strconv.FormatUint(h.Sum64(), 16)), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return !errors.Is(err, os.ErrExist)
+	}
+	_ = f.Close()
+	return true
+}
+
+// runHookPre runs the pre hook and hands what it has for the model to the
+// harness in the one form the harness delivers. Claude Code drops a PreToolUse
+// hook's plain stdout and its stderr at exit 0; only additionalContext JSON or
+// exit 2 reaches the model. Nothing for the model means empty stdout.
+func runHookPre(ctx context.Context, stdout, stderr io.Writer) int {
+	var forModel bytes.Buffer
+	code := runHook(ctx, true, &forModel, stderr)
+	if forModel.Len() == 0 {
+		return code
+	}
+	var out hookOutput
+	out.HookSpecificOutput.HookEventName = "PreToolUse"
+	out.HookSpecificOutput.AdditionalContext = strings.TrimRight(forModel.String(), "\n")
+	enc := json.NewEncoder(stdout)
+	enc.SetEscapeHTML(false) // a path holding & stays readable
+	if err := enc.Encode(out); err != nil {
+		fmt.Fprintf(stderr, "⚠ hook: write context: %v\n", err)
+	}
+	return code
+}
+
+// hookOutput is the JSON Claude Code reads from a PreToolUse hook's stdout.
+type hookOutput struct {
+	HookSpecificOutput struct {
+		HookEventName     string `json:"hookEventName"`
+		AdditionalContext string `json:"additionalContext"`
+	} `json:"hookSpecificOutput"`
+}
+
+// runHook runs one phase. For pre, stdout takes the text meant for the model
+// (runHookPre wraps it); post writes nothing there.
 func runHook(ctx context.Context, pre bool, stdout, stderr io.Writer) int {
 	started := time.Now()
 	var ev hookEvent
+	skip := func(format string, a ...any) int {
+		if pre {
+			return hookFailOpen(stdout, stderr, ev.SessionID, format, a...)
+		}
+		return hookSkip(stderr, format, a...)
+	}
 	if err := json.NewDecoder(hookStdin).Decode(&ev); err != nil {
-		return hookSkip(stderr, "unreadable event on stdin: %v", err)
+		return skip("unreadable event on stdin: %v", err)
 	}
 	if ev.ToolUseID == "" {
-		return hookSkip(stderr, "event carries no tool_use_id; a call record has nothing to be keyed to")
+		return skip("event carries no tool_use_id; a call record has nothing to be keyed to")
 	}
 	// Checked before the runtime opens: an unpinned caller gets a throwaway
 	// owner from identity.Ephemeral, and a call record owned by a uuid that
 	// exists for one process is worse than no record (loto-pody).
 	if !identity.PinnedByEnv() {
-		return hookSkip(stderr, "%v", errIdentityUnpinned)
+		return skip("%v", errIdentityUnpinned)
 	}
 	// git status is the costliest fork a hook makes, and it needs nothing
 	// openRuntime opens, so it runs alongside openRuntime's own rev-parse fork
@@ -229,8 +302,12 @@ func runHook(ctx context.Context, pre bool, stdout, stderr io.Writer) int {
 	// must not pay the session GC sweep (loto-6pn6, same reason `loto beacon`
 	// takes this door).
 	rt, err := openRuntime(ctx)
-	if err != nil {
+	if errors.Is(err, errNotInGitRepo) {
+		// No tree here to gate, so the model has nothing to learn.
 		return hookSkip(stderr, "%v", err)
+	}
+	if err != nil {
+		return skip("%v", err)
 	}
 	defer rt.Close()
 	hookNoteCheckout(rt, ev, stderr)
@@ -308,7 +385,7 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 
 	obs, statusPaths, lockedBytes, err := hookObserve(ctx, rt, declared, status, stderr)
 	if err != nil {
-		return hookSkip(stderr, "observe: %v", err)
+		return hookFailOpen(stdout, stderr, ev.SessionID, "observe: %v", err)
 	}
 
 	// Step 2 — drift, over the observation step 4 is about to record.
@@ -336,23 +413,22 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 		Worktree:    rt.RepoTop,
 	}, obs)
 	if err != nil {
-		return hookSkip(stderr, "record pre: %v", err)
+		return hookFailOpen(stdout, stderr, ev.SessionID, "record pre: %v", err)
 	}
 	if !recorded {
 		return 0 // a repeated pre; the first observation stands
 	}
 	hookEmitTiming(rt, ev.ToolUseID, "pre", time.Since(started), statusPaths, lockedBytes, stderr)
-	fmt.Fprintf(stdout, "✓ recorded call=%s phase=pre paths=%d\n", ev.ToolUseID, len(obs))
 	return 0
 }
 
 // hookDeliver is I3 step 1's delivery half: hand this owner every report
 // waiting for it and mark each delivered, so the next call does not repeat it.
 //
-// ‡ Best-effort, and on STDOUT. A report the harness never shows the agent is
-// a report that did not happen, and stdout is where the hook's other line
-// already goes; a delivery failure must never turn into a nonzero exit, which
-// would stop the tool call over a message (the exit-code rule in hookSkip).
+// ‡ Best-effort, and for the model: stdout here is what runHookPre turns into
+// additionalContext. A report the harness never shows the agent is a report
+// that did not happen; a delivery failure must never turn into a nonzero exit,
+// which would stop the tool call over a message (the exit-code rule in hookSkip).
 func hookDeliver(rt *runtime, me domain.AgentUUID, now time.Time, stdout, stderr io.Writer) {
 	delivered, err := rt.Store.DeliverReports(rt.Ctx, me, now)
 	if err != nil {

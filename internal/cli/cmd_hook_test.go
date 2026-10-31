@@ -3,7 +3,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,6 +68,24 @@ func runHookEvent(t *testing.T, phase, payload string) (stdout, stderr string, c
 	var out, errBuf bytes.Buffer
 	code = Run([]string{tcHookCmd, phase}, &out, &errBuf)
 	return out.String(), errBuf.String(), code
+}
+
+// hookContext parses a pre hook's stdout as the one JSON object Claude Code
+// delivers to the model, and returns its additionalContext.
+func hookContext(t *testing.T, stdout string) string {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(stdout))
+	var out hookOutput
+	if err := dec.Decode(&out); err != nil {
+		t.Fatalf("stdout is not hook JSON: %v: %q", err, stdout)
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		t.Fatalf("stdout holds more than one JSON object: %q", stdout)
+	}
+	if out.HookSpecificOutput.HookEventName != "PreToolUse" {
+		t.Errorf("hookEventName = %q: %q", out.HookSpecificOutput.HookEventName, stdout)
+	}
+	return out.HookSpecificOutput.AdditionalContext
 }
 
 // hookStoreRead opens the same store the CLI just wrote to.
@@ -302,9 +323,12 @@ func TestHook_EditAdmission(t *testing.T) {
 		t.Setenv("LOTO_AGENT_ID", "")
 		pinAgent(t) // a second owner in the same checkout
 
-		_, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Edit", "call-refused", tcTargetA, ""))
+		stdout, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Edit", "call-refused", tcTargetA, ""))
 		if code != 2 {
 			t.Fatalf("want exit 2 on a peer's lock, got %d err=%q", code, errOut)
+		}
+		if stdout != "" {
+			t.Errorf("a refusal speaks on stderr only: %q", stdout)
 		}
 		if !strings.Contains(errOut, alice.UUID) {
 			t.Errorf("the refusal must name the holder: %q", errOut)
@@ -733,11 +757,12 @@ func TestHookDeliver_NamesTheEventWorktreeWhenDifferent(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("pre in A: exit=%d err=%q", code, errOut)
 	}
-	if !strings.Contains(stdout, "reports count=1") {
-		t.Fatalf("A's pre must deliver the report filed in B: %q", stdout)
+	delivered := hookContext(t, stdout)
+	if !strings.Contains(delivered, "reports count=1") {
+		t.Fatalf("A's pre must deliver the report filed in B: %q", delivered)
 	}
-	if !strings.Contains(stdout, "worktree="+eventWorktree) {
-		t.Errorf("the delivered row must name B's worktree %q: %q", eventWorktree, stdout)
+	if !strings.Contains(delivered, "worktree="+eventWorktree) {
+		t.Errorf("the delivered row must name B's worktree %q: %q", eventWorktree, delivered)
 	}
 }
 
@@ -770,10 +795,88 @@ func TestHookDeliver_SameWorktreeRendersUnchanged(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("second pre in B: exit=%d err=%q", code, errOut)
 	}
-	if !strings.Contains(stdout, "reports count=1") {
-		t.Fatalf("B's own next pre must deliver the report: %q", stdout)
+	delivered := hookContext(t, stdout)
+	if !strings.Contains(delivered, "reports count=1") {
+		t.Fatalf("B's own next pre must deliver the report: %q", delivered)
 	}
-	if strings.Contains(stdout, "worktree=") {
-		t.Errorf("a same-worktree delivery must render unchanged, no worktree= field: %q", stdout)
+	if strings.Contains(delivered, "worktree=") {
+		t.Errorf("a same-worktree delivery must render unchanged, no worktree= field: %q", delivered)
+	}
+}
+
+// TestHookPre_ReportReachesTheModel is mn-wois.12: Claude Code drops a
+// PreToolUse hook's plain stdout, so a waiting report goes out as
+// additionalContext JSON, and a call with nothing to report prints nothing.
+func TestHookPre_ReportReachesTheModel(t *testing.T) {
+	_, wt := siblingCheckouts(t)
+	target := tcTargetB
+	if err := os.WriteFile(filepath.Join(wt, target), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(wt)
+	if code := Run([]string{tcCmdLock, target, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock: exit %d", code)
+	}
+
+	stdout, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "c-1", "", ""))
+	if code != 0 || stdout != "" {
+		t.Fatalf("pre with no report waiting: exit=%d stdout=%q err=%q, want exit 0 and empty stdout", code, stdout, errOut)
+	}
+
+	if err := os.WriteFile(filepath.Join(wt, target), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, errOut, code := runHookEvent(t, tcHookPost, hookEventJSON("Bash", "c-1", "", "")); code != 0 {
+		t.Fatalf("post: exit=%d err=%q", code, errOut)
+	}
+
+	stdout, errOut, code = runHookEvent(t, tcHookPre, hookEventJSON("Bash", "c-2", "", ""))
+	if code != 0 {
+		t.Fatalf("pre with a report waiting: exit=%d err=%q", code, errOut)
+	}
+	if got := hookContext(t, stdout); !strings.Contains(got, "reports count=1") {
+		t.Errorf("additionalContext must hold the report: %q", got)
+	}
+}
+
+// TestHookPre_FailOpenTellsTheModelOnce: a pre that cannot act tells the model
+// once per session, while stderr keeps the line on every call.
+func TestHookPre_FailOpenTellsTheModelOnce(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	t.Setenv("TMPDIR", t.TempDir())
+	const noCall = `{"session_id":"s-open","tool_name":"Bash","tool_input":{}}`
+
+	stdout, errOut, code := runHookEvent(t, tcHookPre, noCall)
+	if code != 0 {
+		t.Fatalf("exit=%d err=%q", code, errOut)
+	}
+	if got := hookContext(t, stdout); !strings.Contains(got, "did not run") || !strings.Contains(got, "tool_use_id") {
+		t.Errorf("additionalContext must say the hook did not run and why: %q", got)
+	}
+
+	stdout, errOut, code = runHookEvent(t, tcHookPre, noCall)
+	if code != 0 || stdout != "" {
+		t.Errorf("second call of the session: exit=%d stdout=%q, want exit 0 and empty stdout", code, stdout)
+	}
+	if !strings.Contains(errOut, "tool_use_id") {
+		t.Errorf("stderr keeps the line on every call: %q", errOut)
+	}
+
+	stdout, _, _ = runHookEvent(t, tcHookPost, noCall)
+	if stdout != "" {
+		t.Errorf("post is not PreToolUse and writes no JSON: %q", stdout)
+	}
+}
+
+// TestHookPre_OutsideAGitRepoIsSilent: with no tree to gate, the model has
+// nothing to learn, however many calls the session makes.
+func TestHookPre_OutsideAGitRepoIsSilent(t *testing.T) {
+	pinAgent(t)
+	t.Setenv("TMPDIR", t.TempDir())
+	t.Chdir(t.TempDir())
+	stdout, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "n-1", "", ""))
+	if code != 0 || stdout != "" {
+		t.Errorf("exit=%d stdout=%q err=%q, want exit 0 and empty stdout", code, stdout, errOut)
 	}
 }
