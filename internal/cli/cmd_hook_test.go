@@ -26,15 +26,16 @@ const (
 	tcCall41 = "call-41"
 )
 
-// hookEventJSON builds a harness event. command is written into tool_input
-// alongside file_path precisely so the tests can prove loto never reads it —
-// pass "" to leave the field out entirely.
+// hookSubagentEventJSON is hookEventJSON for a call made by a subagent.
 func hookSubagentEventJSON(tool, toolUseID, filePath, agentID string) string {
 	return fmt.Sprintf(
 		`{"session_id":"s-1","tool_name":%q,"tool_use_id":%q,"cwd":"/tmp","agent_id":%q,"tool_input":{"file_path":%q}}`,
 		tool, toolUseID, agentID, filePath)
 }
 
+// hookEventJSON builds a harness event. command is written into tool_input
+// alongside file_path precisely so the tests can prove loto never reads it —
+// pass "" to leave the field out entirely.
 func hookEventJSON(tool, toolUseID, filePath, command string) string {
 	fields := fmt.Sprintf(`"file_path":%q`, filePath)
 	if command != "" {
