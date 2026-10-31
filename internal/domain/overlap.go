@@ -72,20 +72,6 @@ func SameWorktree(a, b string) bool {
 	return a == b
 }
 
-// WorktreeNestedUnder reports whether child is a checkout strictly inside
-// parent's tree: Claude Code's `isolation: worktree` puts each subagent's
-// checkout at <parent>/.claude/worktrees/agent-<id> (loto-5dr1). Unset on
-// either side is never nested — unknown is not evidence of ownership, the
-// opposite of SameWorktree's conflict-side reading, because this answer
-// WIDENS what a caller may release.
-func WorktreeNestedUnder(child, parent string) bool {
-	parent = strings.TrimSuffix(parent, "/")
-	if child == "" || parent == "" {
-		return false
-	}
-	return strings.HasPrefix(child, parent+"/")
-}
-
 // SameTarget reports whether a and b name the same file under this context's
 // filesystem case class.
 func (c EvalContext) SameTarget(a, b Target) bool {

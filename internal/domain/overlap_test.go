@@ -192,25 +192,3 @@ func TestSameWorktree(t *testing.T) {
 		}
 	}
 }
-
-func TestWorktreeNestedUnder(t *testing.T) {
-	const top = "/repo"
-	for _, tc := range []struct {
-		child, parent string
-		want          bool
-	}{
-		{top + "/.claude/worktrees/agent-a", top, true},
-		{top + "/.claude/worktrees/agent-a", top + "/", true},
-		{top, top, false},
-		{top + "-wt-x", top, false},
-		{top + "/.claude/worktrees/agent-b", top + "/.claude/worktrees/agent-a", false},
-		{top, top + "/.claude/worktrees/agent-a", false},
-		{"", top, false},
-		{top + "/x", "", false},
-		{top + "/x", "/", false},
-	} {
-		if got := WorktreeNestedUnder(tc.child, tc.parent); got != tc.want {
-			t.Errorf("WorktreeNestedUnder(%q, %q) = %v, want %v", tc.child, tc.parent, got, tc.want)
-		}
-	}
-}

@@ -421,7 +421,6 @@ type sessionTarget struct {
 	Mode      string
 	Intent    string
 	Worktree  string
-	ExpiresNs int64 // expires_at, so a TTL-lapsed foreign row reads dead, not ambiguous
 }
 
 // loadSessionTargetsTx returns canonical paths + modes for all locks owned by
@@ -435,7 +434,7 @@ type sessionTarget struct {
 // a delete keyed on target and owner alone then takes the peer's lock — the
 // exact loss --only-intent exists to prevent (loto-lzap).
 func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID, onlyIntent string) ([]sessionTarget, error) {
-	q := `SELECT target_canonical, mode, intent, worktree, expires_at FROM locks WHERE owner_uuid = ?`
+	q := `SELECT target_canonical, mode, intent, worktree FROM locks WHERE owner_uuid = ?`
 	args := []any{byAgent}
 	if sessionUUID != "" {
 		q += andSessionClause
@@ -454,7 +453,7 @@ func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID,
 	var out []sessionTarget
 	for rows.Next() {
 		var c sessionTarget
-		if err := rows.Scan(&c.Canonical, &c.Mode, &c.Intent, &c.Worktree, &c.ExpiresNs); err != nil {
+		if err := rows.Scan(&c.Canonical, &c.Mode, &c.Intent, &c.Worktree); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

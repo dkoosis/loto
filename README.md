@@ -151,18 +151,9 @@ The project slug is derived from `git remote get-url origin` (normalized).
 
 ## session identity
 
-The owner of every lock is the Claude Code session id: `CLAUDE_CODE_SESSION_ID`,
-which Claude Code exports to every shell-out from one session. Nothing is
-minted and nothing is stored to get there — the same id is what `ListAgents`
-and `SendMessage` address, so a blocker report names a peer you can message
-directly. `LOTO_AGENT_ID=<uuid>` pins an explicit owner instead; a caller with
-neither (a bare shell, codex, `claude -p`) can read lock state but is refused
-on every verb that would write an owner.
+The owner of every lock is the Claude Code process: `identity.actorOwner` hashes (host, pid/proc start) into a v4-shaped UUID. A subagent, or the same session after `/clear`, writes under its parent's locks without being refused; a different Claude Code process is still refused. `LOTO_AGENT_ID=<uuid>` pins an explicit owner instead; a caller with neither (a bare shell, codex, `claude -p`) can read lock state but is refused on every verb that would write an owner.
 
-`loto whoami`, run by the SessionStart hook, records the session process's
-pid, start-time and messaging socket at `~/.loto/session/<sid>.json`. That is
-the evidence `loto lock`/`check`/`doctor` use to tell a holder whose session
-is still up from one whose session died, before the TTL backstop.
+`loto whoami`, run by the SessionStart hook, records the session process's pid, start-time and messaging socket at `~/.loto/session/<sid>.json`. That is the evidence `loto lock`/`check`/`doctor` use to tell a holder whose session is still up from one whose session died, before the TTL backstop.
 
 ## before deleting a worktree
 
