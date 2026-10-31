@@ -688,7 +688,13 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, kin []domai
 		// admission would not have yielded to (mine, my kin's, my current
 		// sibling's), or a refusal would blame the very beacon minted for this
 		// write.
-		return "", hookBlocker(held, me, sib, ec), nil
+		// A row of mine or my kin's won: the write is authorized. No row to name
+		// means the acquire failed for its own reason, and the write goes unchecked.
+		authorized, blocker := hookRowsDecide(held, me, sib, ec)
+		if blocker != nil || authorized {
+			return "", blocker, nil
+		}
+		return "", nil, err
 	}
 	return t.Canonical, nil, nil
 }

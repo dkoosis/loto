@@ -911,6 +911,23 @@ func TestHookPre_FailedLockCheckTellsTheModel(t *testing.T) {
 	}
 }
 
+// An acquire refused for a reason no lock row names (here a candidate claim)
+// admits the write with no lock, so the model must hear that too.
+func TestHookPre_RefusedAcquireTellsTheModel(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	t.Setenv("TMPDIR", t.TempDir())
+	seedClaim(t, "cand-live", tcTargetA)
+
+	stdout, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Edit", "e-2", tcTargetA, ""))
+	if code != 0 {
+		t.Fatalf("exit=%d err=%q", code, errOut)
+	}
+	if got := hookContext(t, stdout); !strings.Contains(got, "lock check:") || !strings.Contains(got, "not checked") {
+		t.Errorf("the model must hear the write went unchecked: %q", got)
+	}
+}
+
 // A marker that cannot be written must not silence the notice.
 func TestHookFirstNotice_UnwritableMarkerStillTells(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "not-a-dir")
