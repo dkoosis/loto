@@ -385,7 +385,7 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 		var err error
 		declared, blocker, err = hookAdmit(rt, target)
 		if err != nil { // the write goes ahead unchecked: fail open, and say so
-			hookFailOpen(stdout, stderr, &ev, hookEffectNoLock, "lock check: %v", err)
+			hookFailOpen(stdout, stderr, &ev, hookEffectNoLock, "lock check on %s: %v", target, err)
 		}
 		if blocker != nil {
 			render.EmitHookRefusal(stderr, blocker.Target.Canonical,
