@@ -918,6 +918,10 @@ func TestHookPre_RefusedAcquireTellsTheModel(t *testing.T) {
 	pinAgent(t)
 	t.Setenv("TMPDIR", t.TempDir())
 	seedClaim(t, "cand-live", tcTargetA)
+	// seedClaim's own lock would authorize the write; only the claim may remain.
+	if code := Run([]string{tcCmdUnlock, tcTargetA, "-t", tcIntentDone}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("unlock: exit %d", code)
+	}
 
 	stdout, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Edit", "e-2", tcTargetA, ""))
 	if code != 0 {
