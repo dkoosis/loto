@@ -903,8 +903,8 @@ func TestHookPre_FailedLockCheckTellsTheModel(t *testing.T) {
 		t.Fatalf("exit %d, want fail open: %q", code, errOut.String())
 	}
 	got := model.String()
-	if !strings.Contains(got, "lock check:") || !strings.Contains(got, "not checked") {
-		t.Errorf("the model must hear the write went unchecked: %q", got)
+	if !strings.Contains(got, "lock check:") || !strings.Contains(got, "no lock on its path") {
+		t.Errorf("the model must hear the write has no lock: %q", got)
 	}
 	if strings.Contains(got, "still checked") {
 		t.Errorf("no notice may claim the locks were checked: %q", got)
@@ -927,8 +927,11 @@ func TestHookPre_RefusedAcquireTellsTheModel(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit=%d err=%q", code, errOut)
 	}
-	if got := hookContext(t, stdout); !strings.Contains(got, "lock check:") || !strings.Contains(got, "not checked") {
-		t.Errorf("the model must hear the write went unchecked: %q", got)
+	if got := hookContext(t, stdout); !strings.Contains(got, "lock check:") || !strings.Contains(got, "no lock on its path") {
+		t.Errorf("the model must hear the write has no lock: %q", got)
+	}
+	if got := hookContext(t, stdout); strings.Contains(got, "not checked") {
+		t.Errorf("one refused path must not read as the whole gate off: %q", got)
 	}
 }
 

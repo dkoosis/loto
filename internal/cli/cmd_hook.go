@@ -223,6 +223,7 @@ func hookFailOpen(model, stderr io.Writer, ev *hookEvent, effect, format string,
 
 const (
 	hookEffectUnchecked  = "Edit and Write calls are not checked against peers' locks while this lasts."
+	hookEffectNoLock     = "This write goes ahead with no lock on its path, and a peer's lock on it may not have been seen; other paths are still checked."
 	hookEffectUnrecorded = "This call went unrecorded, so a peer's change to the tree may go unreported."
 )
 
@@ -386,7 +387,7 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 		var err error
 		declared, blocker, err = hookAdmit(ctx, rt, target, ev.AgentID)
 		if err != nil { // the write goes ahead unchecked: fail open, and say so
-			hookFailOpen(stdout, stderr, &ev, hookEffectUnchecked, "lock check: %v", err)
+			hookFailOpen(stdout, stderr, &ev, hookEffectNoLock, "lock check: %v", err)
 		}
 		if blocker != nil {
 			render.EmitHookRefusal(stderr, blocker.Target.Canonical,
