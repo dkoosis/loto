@@ -11,6 +11,13 @@ import (
 // is never stamped as a holder's liveness token. The distinct sources let the
 // degrade warning name the right cause without re-reading the env.
 func TestStampPID(t *testing.T) {
+	t.Run("CLAUDE_PID beats inherited LOTO_PID", func(t *testing.T) {
+		t.Setenv("LOTO_PID", "4242")
+		t.Setenv("CLAUDE_PID", "4343")
+		if pid, src := stampPID(); pid != 4343 || src != pidDurable {
+			t.Fatalf("got (%d,%v), want (4343,pidDurable)", pid, src)
+		}
+	})
 	t.Run("valid LOTO_PID is durable and returned verbatim", func(t *testing.T) {
 		t.Setenv("LOTO_PID", "4242")
 		pid, src := stampPID()

@@ -28,6 +28,8 @@ func fakeLinkedCheckout(t *testing.T, common, name string) string {
 	return top
 }
 
+const tcWorktreeKeyAgent = "worktrees/agent-a"
+
 func TestWorktreeKey(t *testing.T) {
 	primary := t.TempDir()
 	common := filepath.Join(primary, ".git")
@@ -47,7 +49,7 @@ func TestWorktreeKey(t *testing.T) {
 
 	for _, tc := range []struct{ name, top, want string }{
 		{"primary checkout", primary, WorktreeMain},
-		{"linked checkout", linked, tcWorktreeAgentA},
+		{"linked checkout", linked, tcWorktreeKeyAgent},
 		{"submodule's own checkout", submodule, WorktreeMain},
 		{"no checkout there", filepath.Join(primary, "gone"), ""},
 		{"unset", "", ""},
@@ -99,14 +101,14 @@ func TestOpen_KeysPathStampedHoldsByAdminDir(t *testing.T) {
 	for _, l := range locks {
 		got[filepath.Base(l.Target.Canonical)] = l.Worktree
 	}
-	if got["a.go"] != tcWorktreeAgentA || got["b.go"] != "" || len(got) != 2 {
+	if got["a.go"] != tcWorktreeKeyAgent || got["b.go"] != "" || len(got) != 2 {
 		t.Errorf("want a.go keyed by its admin dir and b.go unknown, got %+v", got)
 	}
 	var claimWt string
 	if err := s.db.QueryRowContext(ctx, `SELECT worktree FROM claims`).Scan(&claimWt); err != nil {
 		t.Fatal(err)
 	}
-	if claimWt != tcWorktreeAgentA {
+	if claimWt != tcWorktreeKeyAgent {
 		t.Errorf("want the claim keyed by its admin dir, got %q", claimWt)
 	}
 }

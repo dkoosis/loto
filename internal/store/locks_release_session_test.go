@@ -34,7 +34,7 @@ func TestReleaseBySession_ReleasesLocksAndClaimsAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", WorktreeScope{})
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "")
 	results, claims := rel.Results, rel.ClaimPrefixes
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
@@ -68,7 +68,7 @@ func TestReleaseBySession_ScopedToSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", WorktreeScope{})
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "")
 	results := rel.Results
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
@@ -93,6 +93,64 @@ func TestReleaseBySession_ScopedToSession(t *testing.T) {
 	}
 }
 
+// Legacy empty worktree keys participate in compatibility reads, but a sweep
+// must delete exactly the rows selected by its session or intent filter.
+func TestReleaseBySession_ExactWorktreePreservesFilteredRows(t *testing.T) {
+	for _, selectedWorktree := range []string{"", "worktrees/side"} {
+		for _, filter := range []string{"session", "intent"} {
+			t.Run(selectedWorktree+"/"+filter, func(t *testing.T) {
+				s := mustOpen(t)
+				ctx := context.Background()
+				peerWorktree := ""
+				if selectedWorktree == "" {
+					peerWorktree = "worktrees/side"
+				}
+				selected := mkFileLockSessionWorktree(t, "a.go", tcAlice, "session-1", "", selectedWorktree, time.Hour)
+				selected.Intent = "selected"
+				peer := selected
+				peer.Worktree = peerWorktree
+				peer.SessionUUID = "session-2"
+				peer.Intent = "keep"
+				// Current acquires adopt legacy rows. Seed both keys first,
+				// then recreate the legacy row left by an older binary.
+				const legacyFixture = "worktrees/legacy-fixture"
+				if selected.Worktree == "" {
+					selected.Worktree = legacyFixture
+				} else {
+					peer.Worktree = legacyFixture
+				}
+				if _, err := s.AcquireLocks(ctx, []domain.LockRecord{selected, peer}, liveProbe); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.db.ExecContext(ctx, `UPDATE locks SET worktree = '' WHERE worktree = ?`, legacyFixture); err != nil {
+					t.Fatal(err)
+				}
+				var session domain.SessionUUID
+				intent := ""
+				if filter == "session" {
+					session = selected.SessionUUID
+				} else {
+					intent = selected.Intent
+				}
+				rel, err := s.ReleaseBySession(ctx, tcAlice, session, intent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(rel.Results) != 1 {
+					t.Fatalf("released %d rows, want 1", len(rel.Results))
+				}
+				left, err := s.ListLocks(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(left) != 1 || left[0].Worktree != peerWorktree || left[0].SessionUUID != peer.SessionUUID || left[0].Intent != peer.Intent {
+					t.Fatalf("filtered-out row must survive: %+v", left)
+				}
+			})
+		}
+	}
+}
+
 // TestReleaseBySession_AgentScoped verifies that when sessionUUID is empty,
 // ReleaseBySession releases all locks owned by the agent regardless of session.
 func TestReleaseBySession_AgentScoped(t *testing.T) {
@@ -106,7 +164,7 @@ func TestReleaseBySession_AgentScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "", "", WorktreeScope{})
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "", "")
 	results := rel.Results
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
@@ -136,7 +194,7 @@ func TestReleaseBySession_EmptyResult(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "no-such-session", "", WorktreeScope{})
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "no-such-session", "")
 	results := rel.Results
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
@@ -162,7 +220,7 @@ func TestReleaseBySession_LeavesModeUntouched(t *testing.T) {
 		t.Fatalf("acquire must not touch mode bits, got %o", st.Mode().Perm())
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", WorktreeScope{})
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "")
 	results := rel.Results
 	if err != nil {
 		t.Fatal(err)
@@ -228,7 +286,7 @@ func TestReleaseBySession_OnlyIntent_SelectsAndDeletesInOneTx(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", tcLaneAIntent, WorktreeScope{})
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", tcLaneAIntent)
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -265,7 +323,7 @@ func TestReleaseBySession_OnlyIntent_KeepsClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", tcLaneAIntent, WorktreeScope{})
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", tcLaneAIntent)
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -298,7 +356,7 @@ func TestReleaseBySession_ReportsEveryIntentItSwept(t *testing.T) {
 		}
 	}
 
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", WorktreeScope{})
+	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "")
 	if err != nil {
 		t.Fatalf("ReleaseBySession: %v", err)
 	}
@@ -316,393 +374,12 @@ func TestReleaseBySession_ReportsEveryIntentItSwept(t *testing.T) {
 	}
 }
 
-const (
-	tcWorktreeA = "/wt/fixer-a"
-	tcWorktreeB = "/wt/fixer-b"
-)
-
 // mkFileLockSessionWorktree is mkFileLockSession plus branch and checkout
-// stamps, for the loto-19bz ambiguous-identity tests below.
+// stamps.
 func mkFileLockSessionWorktree(t *testing.T, name, agent, session, branch, checkout string, expIn time.Duration) domain.LockRecord {
 	t.Helper()
 	l := mkFileLockSession(t, name, agent, session, expIn)
 	l.Branch = branch
 	l.Worktree = checkout
 	return l
-}
-
-// TestReleaseBySession_ForeignWorktreeRefusesEntireSweep pins loto-19bz's
-// core AC: owner AND session ids collapsed onto one shared value (the bare-CLI
-// case: siblings inheriting one parent Claude Code session's env). "Session A"
-// locks a.go from checkout A; "session B", nothing of its own locked, sweeps
-// from checkout B. The rows cannot be told apart by owner or session, but the
-// worktree stamp proves a.go is another worktree's: refuse, leave it held.
-func TestReleaseBySession_ForeignWorktreeRefusesEntireSweep(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	a := mkFileLockSessionWorktree(t, "a.go", tcAlice, "shared-session", "fixer-a", tcWorktreeA, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeB})
-	if err != nil {
-		t.Fatalf("ReleaseBySession: %v", err)
-	}
-	if len(rel.Ambiguous) != 1 || rel.Ambiguous[0].Canonical != a.Target.Canonical || rel.Ambiguous[0].Worktree != tcWorktreeA || rel.Ambiguous[0].Kind != "lock" {
-		t.Fatalf("want one ambiguous lock naming a.go@%s, got %+v", tcWorktreeA, rel.Ambiguous)
-	}
-	if len(rel.Results) != 0 {
-		t.Errorf("a refused sweep must release nothing, got %+v", rel.Results)
-	}
-	got, err := s.LockAt(ctx, a.Target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got == nil {
-		t.Fatal("session A's lock must survive session B's refused sweep")
-	}
-}
-
-// TestReleaseBySession_SameBranchForeignWorktreeRefuses: two worktrees can
-// share a branch name (or a detached commit); a branch comparison lets that
-// sweep through (Codex #371 P1). The checkout still tells them apart.
-func TestReleaseBySession_SameBranchForeignWorktreeRefuses(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	a := mkFileLockSessionWorktree(t, "a.go", tcAlice, "shared-session", "main", tcWorktreeA, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeB})
-	if err != nil {
-		t.Fatalf("ReleaseBySession: %v", err)
-	}
-	if len(rel.Ambiguous) != 1 || len(rel.Results) != 0 {
-		t.Fatalf("same branch, other checkout must refuse; got ambiguous=%+v results=%+v", rel.Ambiguous, rel.Results)
-	}
-}
-
-// TestReleaseBySession_ClaimOnlyForeignWorktreeRefuses: sibling A holds only a
-// claim; there is no lock row for a lock-only check to see, so the empty-lock
-// path used to commit A's claim delete (Codex #371 P1). The claim's own
-// worktree stamp must refuse the sweep and leave it standing.
-func TestReleaseBySession_ClaimOnlyForeignWorktreeRefuses(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	c := mkClaimSession(tcPkgStore, tcAlice, "shared-session", time.Hour)
-	c.Worktree = tcWorktreeA
-	if err := s.ClaimPrefix(ctx, c, nil); err != nil {
-		t.Fatal(err)
-	}
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeB})
-	if err != nil {
-		t.Fatalf("ReleaseBySession: %v", err)
-	}
-	if len(rel.Ambiguous) != 1 || rel.Ambiguous[0].Kind != "claim" || rel.Ambiguous[0].Canonical != tcPkgStore {
-		t.Fatalf("want one ambiguous claim naming %s, got %+v", tcPkgStore, rel.Ambiguous)
-	}
-	if len(rel.ClaimPrefixes) != 0 {
-		t.Errorf("a refused sweep must not report claims released, got %v", rel.ClaimPrefixes)
-	}
-	claims, err := s.ListClaims(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(claims) != 1 {
-		t.Errorf("the claim must survive a refused sweep, got %+v", claims)
-	}
-}
-
-// TestReleaseBySession_ForeignLockRollsBackOwnClaimsToo proves the refusal is
-// whole-sweep: the caller's own claim is not deleted when a foreign lock
-// refuses the sweep.
-func TestReleaseBySession_ForeignLockRollsBackOwnClaimsToo(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	a := mkFileLockSessionWorktree(t, "a.go", tcAlice, "shared-session", "fixer-a", tcWorktreeA, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	c := mkClaimSession(tcPkgStore, tcAlice, "shared-session", time.Hour)
-	c.Worktree = tcWorktreeB
-	if err := s.ClaimPrefix(ctx, c, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeB})
-	if err != nil {
-		t.Fatalf("ReleaseBySession: %v", err)
-	}
-	if len(rel.Ambiguous) == 0 {
-		t.Fatal("expected the sweep to refuse on the foreign-checkout lock")
-	}
-	claims, err := s.ListClaims(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(claims) != 1 {
-		t.Errorf("the claim must survive a refused sweep, got %+v", claims)
-	}
-}
-
-// TestReleaseBySession_BranchSwitchSameWorktreeSweeps: a lock stamped on one
-// branch, released after a branch switch in the SAME checkout, is the
-// caller's own and must be swept (Codex #371 P1) — the SessionEnd hook's
-// --all would otherwise leave it squatting until TTL.
-func TestReleaseBySession_BranchSwitchSameWorktreeSweeps(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	a := mkFileLockSessionWorktree(t, "a.go", tcAlice, "session-1", "old-branch", tcWorktreeA, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", WorktreeScope{Own: tcWorktreeA})
-	if err != nil {
-		t.Fatalf("ReleaseBySession: %v", err)
-	}
-	if len(rel.Ambiguous) != 0 {
-		t.Fatalf("own checkout must not be flagged ambiguous, got %+v", rel.Ambiguous)
-	}
-	if len(rel.Results) != 1 {
-		t.Fatalf("own-checkout sweep must release the lock, got %+v", rel.Results)
-	}
-}
-
-// TestReleaseBySession_UnknownWorktreeNeverEvidence: a legacy row with no
-// worktree stamp, or a caller whose git lookup failed, is never read as
-// foreign.
-func TestReleaseBySession_UnknownWorktreeNeverEvidence(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	legacy := mkFileLockSessionWorktree(t, "a.go", tcAlice, "session-1", "", "", time.Hour)
-	stamped := mkFileLockSessionWorktree(t, "b.go", tcAlice, "session-1", "", tcWorktreeA, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{legacy, stamped}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	// Unknown caller checkout: nothing is foreign, both release.
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "", WorktreeScope{})
-	if err != nil {
-		t.Fatalf("ReleaseBySession: %v", err)
-	}
-	if len(rel.Ambiguous) != 0 || len(rel.Results) != 2 {
-		t.Fatalf("unknown caller checkout must sweep both; ambiguous=%+v results=%d", rel.Ambiguous, len(rel.Results))
-	}
-}
-
-// expireAll pushes every lock and claim row's lease into the past, the shape
-// a TTL-lapsed row takes before anything reclaims it lazily.
-func expireAll(t *testing.T, s *Store) {
-	t.Helper()
-	past := time.Now().Add(-time.Minute).UnixNano()
-	for _, q := range []string{`UPDATE locks SET expires_at = ?`, `UPDATE claims SET expires_at = ?`} {
-		if _, err := s.db.ExecContext(context.Background(), q, past); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-// TestReleaseBySession_ExpiredForeignRowsNeverWedgeSweep: a sibling
-// worktree's lock and claim whose TTL lapsed are dead, not ambiguous (Codex
-// #371 P1). They must not refuse this worktree's sweep, which still releases
-// its own live lock. The expired foreign claim is swept as cleanup; the
-// expired foreign lock is left for lazy reclaim, because releasing it from
-// here would restore the write bit on THIS worktree's copy of the path.
-func TestReleaseBySession_ExpiredForeignRowsNeverWedgeSweep(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	stale := mkFileLockSessionWorktree(t, "a.go", tcAlice, "shared-session", "", tcWorktreeA, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{stale}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	c := mkClaimSession(tcPkgStore, tcAlice, "shared-session", time.Hour)
-	c.Worktree = tcWorktreeA
-	if err := s.ClaimPrefix(ctx, c, nil); err != nil {
-		t.Fatal(err)
-	}
-	expireAll(t, s)
-	own := mkFileLockSessionWorktree(t, "b.go", tcAlice, "shared-session", "", tcWorktreeB, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{own}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeB})
-	if err != nil {
-		t.Fatalf("ReleaseBySession: %v", err)
-	}
-	if len(rel.Ambiguous) != 0 {
-		t.Fatalf("expired foreign rows must not refuse the sweep, got %+v", rel.Ambiguous)
-	}
-	if len(rel.Results) != 1 || rel.Results[0].Target.Canonical != own.Target.Canonical {
-		t.Errorf("want only own b.go released, got %+v", rel.Results)
-	}
-	if len(rel.ClaimPrefixes) != 1 || rel.ClaimPrefixes[0] != tcPkgStore {
-		t.Errorf("want the expired foreign claim swept as cleanup, got %v", rel.ClaimPrefixes)
-	}
-	got, err := s.LockAt(ctx, stale.Target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got == nil {
-		t.Error("the expired foreign lock must be left for lazy reclaim, not released from another worktree")
-	}
-}
-
-// The loto-5dr1 checkouts, by WorktreeKey: a session's main checkout, two Agent subagents'
-// `isolation: worktree` checkouts nested inside it, and a sibling worktree
-// beside it rather than inside it.
-const (
-	tcWorktreeMain   = WorktreeMain
-	tcWorktreeAgentA = "worktrees/agent-a"
-	tcWorktreeAgentB = "worktrees/agent-b"
-	tcWorktreeBeside = "worktrees/wt-x"
-)
-
-// acquireAt takes one session lock stamped from checkout, and returns it.
-func acquireAt(t *testing.T, s *Store, name, checkout string) domain.LockRecord {
-	t.Helper()
-	l := mkFileLockSessionWorktree(t, name, tcAlice, "shared-session", "", checkout, time.Hour)
-	if _, err := s.AcquireLocks(context.Background(), []domain.LockRecord{l}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	return l
-}
-
-// TestReleaseBySession_NestedScopeReleasesOwnSubagentWorktrees is loto-5dr1's
-// core AC at the store: from the main checkout, one sweep with Nested set
-// releases the session's rows held from every subagent checkout inside it,
-// its own row on the same path included, and names the subagent rows'
-// checkout on their results.
-func TestReleaseBySession_NestedScopeReleasesOwnSubagentWorktrees(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	a := acquireAt(t, s, "a.go", tcWorktreeAgentA)
-	b := acquireAt(t, s, "b.go", tcWorktreeAgentB)
-	own := acquireAt(t, s, "c.go", tcWorktreeMain)
-	// The same path held from a subagent checkout too: two rows, two deletes.
-	ownCopy := own
-	ownCopy.Worktree = tcWorktreeAgentA
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{ownCopy}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	c := mkClaimSession(tcPkgStore, tcAlice, "shared-session", time.Hour)
-	c.Worktree = tcWorktreeAgentB
-	if err := s.ClaimPrefix(ctx, c, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeMain, Nested: []string{tcWorktreeAgentA, tcWorktreeAgentB}})
-	if err != nil {
-		t.Fatalf("ReleaseBySession: %v", err)
-	}
-	if len(rel.Ambiguous) != 0 {
-		t.Fatalf("nested subagent rows are the session's own, got ambiguous %+v", rel.Ambiguous)
-	}
-	if len(rel.Results) != 4 {
-		t.Fatalf("want 4 rows released (a, b, c twice), got %+v", rel.Results)
-	}
-	wts := map[string]string{}
-	for _, r := range rel.Results {
-		wts[r.Target.Canonical+"|"+r.Worktree] = r.Worktree
-	}
-	for _, key := range []string{
-		a.Target.Canonical + "|" + tcWorktreeAgentA,
-		b.Target.Canonical + "|" + tcWorktreeAgentB,
-		own.Target.Canonical + "|",
-		own.Target.Canonical + "|" + tcWorktreeAgentA,
-	} {
-		if _, ok := wts[key]; !ok {
-			t.Errorf("missing release result %q in %+v", key, rel.Results)
-		}
-	}
-	if len(rel.ClaimPrefixes) != 1 {
-		t.Errorf("the subagent checkout's claim is the session's own, got %v", rel.ClaimPrefixes)
-	}
-	locks, err := s.ListLocks(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(locks) != 0 {
-		t.Errorf("every row must be gone, got %+v", locks)
-	}
-}
-
-// TestReleaseBySession_NestedScopeNeverReachesASibling keeps loto-19bz
-// standing under Nested: a sweep from one subagent's checkout cannot reach a
-// sibling's (the two are side by side, neither inside the other), nor a
-// checkout beside the main one. Refused whole; every row stays.
-func TestReleaseBySession_NestedScopeNeverReachesASibling(t *testing.T) {
-	for _, tc := range []struct {
-		name, caller, foreign string
-		nested                []string
-	}{
-		{"sibling subagent", tcWorktreeAgentA, tcWorktreeAgentB, nil},
-		{"checkout beside main", tcWorktreeMain, tcWorktreeBeside, []string{tcWorktreeAgentA, tcWorktreeAgentB}},
-		{"parent from a subagent", tcWorktreeAgentA, tcWorktreeMain, nil},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s := mustOpen(t)
-			ctx := context.Background()
-			own := acquireAt(t, s, "own.go", tc.caller)
-			sib := acquireAt(t, s, "sib.go", tc.foreign)
-
-			rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tc.caller, Nested: tc.nested})
-			if err != nil {
-				t.Fatalf("ReleaseBySession: %v", err)
-			}
-			if len(rel.Ambiguous) != 1 || rel.Ambiguous[0].Canonical != sib.Target.Canonical || rel.Ambiguous[0].Worktree != tc.foreign {
-				t.Fatalf("want the one foreign row named, got %+v", rel.Ambiguous)
-			}
-			if len(rel.Results) != 0 {
-				t.Errorf("a refused sweep releases nothing, got %+v", rel.Results)
-			}
-			for _, l := range []domain.LockRecord{own, sib} {
-				got, err := s.LocksAt(ctx, l.Target)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if len(got) != 1 {
-					t.Errorf("%s must survive the refused sweep, got %+v", l.Target.Canonical, got)
-				}
-			}
-		})
-	}
-}
-
-// TestReleaseBySession_NestedOffStillRefusesSubagentRows: without Nested (a
-// subagent's shell, or an unpinned session), a nested checkout's row is
-// foreign as before.
-func TestReleaseBySession_NestedOffStillRefusesSubagentRows(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-	acquireAt(t, s, "a.go", tcWorktreeAgentA)
-
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "shared-session", "", WorktreeScope{Own: tcWorktreeMain})
-	if err != nil {
-		t.Fatalf("ReleaseBySession: %v", err)
-	}
-	if len(rel.Ambiguous) != 1 || len(rel.Results) != 0 {
-		t.Fatalf("Nested off must refuse the subagent row; ambiguous=%+v results=%+v", rel.Ambiguous, rel.Results)
-	}
-}
-
-// TestWorktreeScope_GoneKeyIsReached: a removed subagent checkout's key is no
-// longer listed by git, so Nested misses it; Gone lets the root's sweep take
-// its rows rather than wedge on them (loto-hu8o). A live sibling stays out.
-func TestWorktreeScope_GoneKeyIsReached(t *testing.T) {
-	scope := WorktreeScope{Own: tcWorktreeMain, Gone: func(k string) bool { return k == tcWorktreeAgentA }}
-	if !scope.Reaches(tcWorktreeAgentA) {
-		t.Errorf("a gone checkout's key must be reached")
-	}
-	if scope.Reaches(tcWorktreeAgentB) {
-		t.Errorf("a live sibling's key must not be reached")
-	}
 }

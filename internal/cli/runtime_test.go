@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,40 +18,29 @@ import (
 
 // TestPinnedByEnv locks the loto-s3l alignment: identity.PinnedByEnv must mean
 // exactly "identity.Ensure resolves a real, lock-owning identity" — the negation
-// of "Ensure mints a throwaway". A set-but-EMPTY LOTO_AGENT_ID and a traversal-
-// shaped LOTO_SUBAGENT_ID both fall through to a throwaway in Ensure, so both
-// read as UNPINNED here. Previously a blank agent id (LookupEnv set=true) and any
-// non-empty subagent id wrongly pinned, feeding release --all a throwaway UUID →
+// of "Ensure mints a throwaway". A set-but-EMPTY LOTO_AGENT_ID falls through to a
+// throwaway in Ensure, so it reads as UNPINNED here. Previously a blank agent id
+// (LookupEnv set=true) wrongly pinned, feeding release --all a throwaway UUID →
 // the loto-pody false-success. Post-loto-ai5 this predicate lives beside Ensure
 // and dispatches on the SAME classifier, so it can't drift from resolution.
-const (
-	tcSessID  = "sess-1"    // representative CLAUDE_CODE_SESSION_ID value
-	tcSibling = "sibling-1" // representative LOTO_SUBAGENT_ID stamp
-)
+const tcSessID = "sess-1" // representative CLAUDE_CODE_SESSION_ID value
 
 func TestPinnedByEnv(t *testing.T) {
 	set := func(s string) *string { return &s } // present-with-value; nil = truly unset
 	cases := []struct {
-		name       string
-		agentID    *string // nil → LOTO_AGENT_ID unset; set("") → present-but-empty (the fleet-dispatcher ephemeral)
-		subagentID string
-		sessionID  string
-		want       bool
+		name      string
+		agentID   *string // nil → LOTO_AGENT_ID unset; set("") → present-but-empty (the fleet-dispatcher ephemeral)
+		sessionID string
+		want      bool
 	}{
-		{"unset-agent-id-unpinned", nil, "", "", false},
-		{"blank-agent-id-unpinned", set(""), "", "", false},
-		{"agent-id-pins", set("agent-x"), "", "", true},
-		{"malformed-subagent-unpinned", nil, "../escape", "", false},
-		{"valid-subagent-pins", nil, tcSibling, tcSessID, true},
-		// A stamp derives its owner FROM the session id, so without one there
-		// is nothing to derive from and it falls open (loto-jnid).
-		{"subagent-without-session-unpinned", nil, tcSibling, "", false},
-		{"session-id-pins", nil, "", tcSessID, true},
+		{"unset-agent-id-unpinned", nil, "", false},
+		{"blank-agent-id-unpinned", set(""), "", false},
+		{"agent-id-pins", set("agent-x"), "", true},
+		{"session-id-pins", nil, tcSessID, true},
 		// Ensure branches on LOTO_AGENT_ID set-ness BEFORE the session id, so a
 		// set-but-empty agent id → throwaway even when a session id is present.
 		// The predicate must not let the session leg rescue it (loto-s3l P1).
-		{"blank-agent-id-shadows-session", set(""), "", tcSessID, false},
-		{"valid-subagent-beats-blank-agent-id", set(""), tcSibling, tcSessID, true},
+		{"blank-agent-id-shadows-session", set(""), tcSessID, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -61,7 +49,6 @@ func TestPinnedByEnv(t *testing.T) {
 			} else {
 				t.Setenv("LOTO_AGENT_ID", *tc.agentID)
 			}
-			t.Setenv("LOTO_SUBAGENT_ID", tc.subagentID)
 			t.Setenv("CLAUDE_CODE_SESSION_ID", tc.sessionID)
 			if got := identity.PinnedByEnv(); got != tc.want {
 				t.Errorf("identity.PinnedByEnv() = %v, want %v", got, tc.want)
@@ -233,46 +220,6 @@ func TestLockRefusesUnpinned(t *testing.T) {
 	}
 	if strings.Contains(status.String(), tcTargetA) {
 		t.Errorf("a refused lock must not leave a row behind: %q", status.String())
-	}
-}
-
-// TestLockOwnerIsTheSessionID pins the ownership contract (loto-jnid): a lock
-// taken under one CLAUDE_CODE_SESSION_ID is owned by that id verbatim, a
-// second session is refused, and `loto check` names the holder by it.
-func TestLockOwnerIsTheSessionID(t *testing.T) {
-	withTempProject(t)
-	unsetEnvForTest(t, "LOTO_AGENT_ID")
-	unsetEnvForTest(t, "LOTO_SUBAGENT_ID")
-	const (
-		sessA = "aaaaaaaa-0000-4000-8000-00000000000a"
-		sessB = "bbbbbbbb-0000-4000-8000-00000000000b"
-	)
-	t.Setenv("CLAUDE_CODE_SESSION_ID", sessA)
-	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid())) // a live holder, so check hard-blocks
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("session A lock exit %d", code)
-	}
-
-	t.Setenv("CLAUDE_CODE_SESSION_ID", sessB)
-	var out bytes.Buffer
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &out, &bytes.Buffer{}); code != 1 {
-		t.Fatalf("session B lock exit %d, want 1 (conflict); out=%q", code, out.String())
-	}
-	if !strings.Contains(out.String(), "blocker="+sessA) {
-		t.Errorf("conflict row must name the holder by session id %q: %q", sessA, out.String())
-	}
-	out.Reset()
-	if code := Run([]string{"check", tcTargetA}, &out, &bytes.Buffer{}); code != 1 {
-		t.Fatalf("check exit %d, want 1; out=%q", code, out.String())
-	}
-	if !strings.Contains(out.String(), sessA) {
-		t.Errorf("check must name the holder by session id %q: %q", sessA, out.String())
-	}
-
-	// Re-entrant from the owning session: the same id is the same owner.
-	t.Setenv("CLAUDE_CODE_SESSION_ID", sessA)
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("session A re-lock exit %d, want 0 (re-entrant)", code)
 	}
 }
 

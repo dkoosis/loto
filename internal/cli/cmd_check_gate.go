@@ -113,28 +113,13 @@ func gateLockDenies(t domain.Target, l *domain.LockRecord, myUUID string, ec dom
 // not Classify==Alive) and the same wave carve-out (myUUID excluded) —
 // deliberately reuses gateDecide's semantics rather than drifting a second
 // definition of "foreign" and "live".
-func gateDecideAny(locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, mySession domain.SessionUUID, ec domain.EvalContext) []render.GateDenyRow {
+func gateDecideAny(locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ec domain.EvalContext) []render.GateDenyRow {
 	var rows []render.GateDenyRow
 	for i := range locks {
 		l := &locks[i]
 		// "." covers every target: any live hold of another actor in this
 		// worktree refuses the move (docs/write-gate.md, ref transitions).
 		if !ec.Refuses(domain.AgentUUID(myUUID), ec.MyWorktree, ".", ec.LockHold(*l)) {
-			continue
-		}
-		// A beacon minted by a SIBLING of this same Claude session does not
-		// refuse this session's tree-move (loto-xwod). Subagents of one session
-		// are distinct loto owners by design — that is exactly what lets one
-		// sibling's beacon deny another sibling's WRITE — but they are one
-		// session as far as `git checkout` is concerned, and a session has to be
-		// able to move the tree it is working in.
-		//
-		// Narrow on purpose: only beacons, and only same-session ones. A
-		// sibling's real exclusive lock still refuses the move, because a
-		// checkout under declared uncommitted territory is the 2026-08-14
-		// incident itself. An empty mySession (no CLAUDE_CODE_SESSION_ID, direct
-		// CLI use) matches nothing rather than everything.
-		if l.IsBeacon() && mySession != "" && l.SessionUUID == mySession {
 			continue
 		}
 		rows = append(rows, render.GateDenyRow{
@@ -232,14 +217,6 @@ func runCheckGate(ctx context.Context, paths []string, base, repoTop string, std
 	// memoized: gateDecide evaluates the predicate per (target × record), so a
 	// wide staged set would otherwise re-probe one holder hundreds of times.
 	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
-	// A stamped sibling also owns its parent's rows — its Bash-side locks and
-	// claims were taken unstamped (loto-wofb). Resolution failure here is the
-	// same infra class as an unreachable store: say so, fail open.
-	kin, err := parentKin(ctx)
-	if err != nil {
-		return gateInfraUnreachable(stderr, err)
-	}
-	ec.Kin = kin
 	rows := gateDecide(targets, locks, claims, rt.Agent.UUID, ec)
 	// Resurfaced on BOTH verdicts, and never as one: an unresolved violation
 	// is not a reason to block this tool call — it is a reason the NEXT
@@ -253,14 +230,4 @@ func runCheckGate(ctx context.Context, paths []string, base, repoTop string, std
 	}
 	render.EmitGateDeny(stdout, rows)
 	return 1
-}
-
-// parentKin resolves the Kin set for this process: the parent identity a
-// LOTO_SUBAGENT_ID stamp hides, or nothing (identity.EnsureParent).
-func parentKin(ctx context.Context) ([]domain.AgentUUID, error) {
-	parent, ok, err := identity.EnsureParent(ctx)
-	if err != nil || !ok || parent == nil {
-		return nil, err
-	}
-	return []domain.AgentUUID{domain.AgentUUID(parent.UUID)}, nil
 }

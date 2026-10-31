@@ -9,50 +9,6 @@ import (
 	"testing"
 )
 
-// TestUnlockAll_ScopedToSession exercises the loto-81n fix: SessionEnd
-// release (unlock --all) must not drop locks held by sibling sessions of
-// the same agent. Two LOTO_SESSION_IDs share one LOTO_AGENT_ID; --all in
-// session-1 must leave session-2's lock intact.
-func TestUnlockAll_ScopedToSession(t *testing.T) {
-	withTempProject(t)
-	pinAgent(t) // sets LOTO_AGENT_ID to a single agent across all Run() calls below
-
-	// Session 1 locks a.go.
-	t.Setenv("LOTO_SESSION_ID", "session-one")
-	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, "s1 work"}, io.Discard, io.Discard); code != 0 {
-		t.Fatalf("session-1 lock a.go: exit %d", code)
-	}
-
-	// Session 2 locks internal/store/store.go (same agent, different session).
-	t.Setenv("LOTO_SESSION_ID", "session-two")
-	if code := Run([]string{tcCmdLock, tcStoreStoreGo, tcFlagIntent, "s2 work"}, io.Discard, io.Discard); code != 0 {
-		t.Fatalf("session-2 lock store.go: exit %d", code)
-	}
-
-	// Back to session-1: --all should release only session-1's holdings.
-	t.Setenv("LOTO_SESSION_ID", "session-one")
-	var out bytes.Buffer
-	if code := Run([]string{tcCmdUnlock, tcFlagAll, "-t", "session-1 end"}, &out, io.Discard); code != 0 {
-		t.Fatalf("session-1 unlock --all: exit %d, out=%s", code, out.String())
-	}
-	if !strings.Contains(out.String(), "count=1") {
-		t.Errorf("session-1 should release exactly 1 lock; got: %s", out.String())
-	}
-
-	// Session-2's lock must survive.
-	t.Setenv("LOTO_SESSION_ID", "session-two")
-	out.Reset()
-	if code := Run([]string{tcCmdStatus, tcFlagMine}, &out, io.Discard); code != 0 {
-		t.Fatalf("status --mine: exit %d", code)
-	}
-	if !strings.Contains(out.String(), "store.go") {
-		t.Errorf("session-2's store.go lock should survive session-1's --all; got: %s", out.String())
-	}
-	if strings.Contains(out.String(), "a.go") {
-		t.Errorf("a.go should have been released by session-1's --all; got: %s", out.String())
-	}
-}
-
 // TestUnlockAll_FallbackWhenNoSessionPin covers the no-LOTO_SESSION_ID path:
 // without pinning, --all stays agent-scoped — the safe fallback for direct
 // CLI use where each invocation would otherwise mint a different session id
@@ -105,36 +61,6 @@ func runGitIn(t *testing.T, dir string, args ...string) {
 	}
 }
 
-// TestUnlockAll_AmbiguousIdentityAcrossWorktreesRefuses is loto-19bz's own AC:
-// "session A" locks a.go in one checkout; "session B" — same owner, same
-// session, nothing of its own locked, standing in a sibling worktree — runs
-// `unlock --all`. It must refuse (non-zero, naming the other checkout's lock)
-// rather than release a.go, and `loto status` must still show it.
-func TestUnlockAll_AmbiguousIdentityAcrossWorktreesRefuses(t *testing.T) {
-	_, wt := siblingCheckouts(t)
-	if code := Run([]string{tcCmdLock, tcTargetA, tcFlagIntent, "fixer-a work"}, io.Discard, io.Discard); code != 0 {
-		t.Fatalf("session A lock a.go: exit %d", code)
-	}
-
-	t.Chdir(wt)
-	var out, errBuf bytes.Buffer
-	code := Run([]string{tcCmdUnlock, tcFlagAll, "-t", "fixer-b cleanup"}, &out, &errBuf)
-	if code == 0 {
-		t.Fatalf("session B's --all should refuse, got exit 0: out=%s", out.String())
-	}
-	if !strings.Contains(errBuf.String(), "ambiguous") || !strings.Contains(errBuf.String(), tcTargetA) {
-		t.Errorf("refusal should name the other checkout's a.go; stderr=%q", errBuf.String())
-	}
-
-	out.Reset()
-	if code := Run([]string{tcCmdStatus, tcFlagMine}, &out, io.Discard); code != 0 {
-		t.Fatalf("status --mine: exit %d", code)
-	}
-	if !strings.Contains(out.String(), tcTargetA) {
-		t.Errorf("a.go should still be locked after the refused sweep; got: %s", out.String())
-	}
-}
-
 // TestUnlockAll_BranchSwitchInOwnCheckoutReleases is Codex #371 P1 "use
 // checkout identity instead of branch names": a session that locks, switches
 // branch in the SAME worktree, then runs `unlock --all` (the SessionEnd hook's
@@ -153,34 +79,5 @@ func TestUnlockAll_BranchSwitchInOwnCheckoutReleases(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "count=1") {
 		t.Errorf("want the one lock released; got: %s", out.String())
-	}
-}
-
-// TestUnlockAll_ClaimOnlySiblingInOtherCheckoutRefuses is Codex #371 P1
-// "protect claim-only sibling state": sibling A holds only a territory claim,
-// no lock. Sibling B, in another checkout under the collapsed identity, runs
-// `unlock --all`. The sweep must refuse and leave A's claim standing — a
-// lock-rows-only ambiguity check sees nothing and commits the claim delete.
-func TestUnlockAll_ClaimOnlySiblingInOtherCheckoutRefuses(t *testing.T) {
-	_, wt := siblingCheckouts(t)
-	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", "fixer-a territory"}, io.Discard, io.Discard); code != 0 {
-		t.Fatalf("session A claim: exit %d", code)
-	}
-
-	t.Chdir(wt)
-	var out, errBuf bytes.Buffer
-	if code := Run([]string{tcCmdUnlock, tcFlagAll, "-t", "fixer-b cleanup"}, &out, &errBuf); code == 0 {
-		t.Fatalf("session B's --all should refuse over A's claim, got exit 0: out=%s", out.String())
-	}
-	if !strings.Contains(errBuf.String(), tcPrefixStore) {
-		t.Errorf("refusal should name A's claimed prefix; stderr=%q", errBuf.String())
-	}
-
-	out.Reset()
-	if code := Run([]string{tcCmdStatus}, &out, io.Discard); code != 0 {
-		t.Fatalf("status: exit %d", code)
-	}
-	if !strings.Contains(out.String(), tcPrefixStore) {
-		t.Errorf("A's claim should survive B's refused sweep; got: %s", out.String())
 	}
 }

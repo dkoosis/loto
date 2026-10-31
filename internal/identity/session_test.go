@@ -119,8 +119,8 @@ func TestSessionPID(t *testing.T) {
 		t.Errorf("CLAUDE_PID must beat the socket: %d", got)
 	}
 	t.Setenv("LOTO_PID", "7")
-	if got := sessionPID(""); got != 7 {
-		t.Errorf("LOTO_PID must win: %d", got)
+	if got := sessionPID(""); got != 42 {
+		t.Errorf("CLAUDE_PID must beat inherited LOTO_PID: %d", got)
 	}
 	t.Setenv("LOTO_PID", "garbage")
 	if got := sessionPID(""); got != 42 {

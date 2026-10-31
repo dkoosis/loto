@@ -35,12 +35,11 @@ func (c EvalContext) Covers(worktree, target string, h Hold) bool {
 
 // Refuses is the conflict rule, and the only predicate in loto that decides a
 // write: actor in worktree may not hold or write target while a live hold of
-// another actor in that worktree covers target or is covered by it. Kin (the
-// parent behind a subagent stamp, until loto-e1ku makes the actor the
-// process) count as actor. An empty actor owns nothing, so every live
+// another actor in that worktree covers target or is covered by it.
+// An empty actor owns nothing, so every live
 // covering hold refuses it.
 func (c EvalContext) Refuses(actor AgentUUID, worktree, target string, h Hold) bool {
-	if (actor != "" && h.Actor == actor) || c.IsKin(h.Actor) {
+	if actor != "" && h.Actor == actor {
 		return false
 	}
 	return h.Live && c.Covers(worktree, target, h)

@@ -4,6 +4,7 @@ const (
 	tcTargetA        = "a.go"
 	tcTargetB        = "b.go"
 	tcTargetC        = "c.go"
+	tcSubagentA      = "agent-a1" // a harness agent_id, as a subagent's call carries it
 	tcCmdLock        = "lock"
 	tcCmdUnlock      = "unlock"
 	tcCmdStatus      = "status"
@@ -29,8 +30,6 @@ const (
 	tcFlagShared     = "--shared"
 	tcCmdLane        = "lane"
 	tcCmdBeacon      = "beacon"
-	tcSubagentA      = "agent-a1" // a harness agent_id, as a /team sibling's call carries it
-	tcSubagentB      = "agent-b2" // a second sibling; its beacon is foreign to A
 	tcCmdVerify      = "verify"
 	tcShExit0        = "exit 0" // the no-op verify command, as `sh -c` takes it
 	tcFlagRef        = "--ref"
