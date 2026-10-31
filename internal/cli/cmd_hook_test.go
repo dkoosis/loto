@@ -867,6 +867,56 @@ func TestHookPre_FailOpenTellsTheModelOnce(t *testing.T) {
 	if stdout != "" {
 		t.Errorf("post is not PreToolUse and writes no JSON: %q", stdout)
 	}
+
+	// A subagent shares its parent's session id and still hears it; so does the
+	// main thread when the subagent is the first to fail.
+	const subCall = `{"session_id":"s-open","agent_id":"a-1","tool_name":"Bash","tool_input":{}}`
+	stdout, _, _ = runHookEvent(t, tcHookPre, subCall)
+	if got := hookContext(t, stdout); !strings.Contains(got, "did not run") {
+		t.Errorf("a subagent's first failure must tell it: %q", got)
+	}
+	const subFirst = `{"session_id":"s-sub","agent_id":"a-1","tool_name":"Bash","tool_input":{}}`
+	const mainNext = `{"session_id":"s-sub","tool_name":"Bash","tool_input":{}}`
+	_, _, _ = runHookEvent(t, tcHookPre, subFirst)
+	stdout, _, _ = runHookEvent(t, tcHookPre, mainNext)
+	if got := hookContext(t, stdout); !strings.Contains(got, "did not run") {
+		t.Errorf("a subagent hearing first must leave the main thread's notice: %q", got)
+	}
+}
+
+// TestHookPre_SubagentLeavesTheReportForTheMainThread: a subagent runs under its
+// parent's owner, so its call must not take the report the main thread is owed.
+func TestHookPre_SubagentLeavesTheReportForTheMainThread(t *testing.T) {
+	_, wt := siblingCheckouts(t)
+	target := tcTargetB
+	if err := os.WriteFile(filepath.Join(wt, target), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(wt)
+	if code := Run([]string{tcCmdLock, target, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("lock: exit %d", code)
+	}
+	if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Bash", "d-1", "", "")); code != 0 {
+		t.Fatalf("pre: exit=%d err=%q", code, errOut)
+	}
+	if err := os.WriteFile(filepath.Join(wt, target), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, errOut, code := runHookEvent(t, tcHookPost, hookEventJSON("Bash", "d-1", "", "")); code != 0 {
+		t.Fatalf("post: exit=%d err=%q", code, errOut)
+	}
+
+	stdout, errOut, code := runHookEvent(t, tcHookPre, hookSubagentEventJSON("Bash", "d-2", "", tcSubagentA))
+	if code != 0 || stdout != "" {
+		t.Fatalf("subagent pre: exit=%d stdout=%q err=%q, want exit 0 and empty stdout", code, stdout, errOut)
+	}
+	stdout, errOut, code = runHookEvent(t, tcHookPre, hookEventJSON("Bash", "d-3", "", ""))
+	if code != 0 {
+		t.Fatalf("main pre: exit=%d err=%q", code, errOut)
+	}
+	if got := hookContext(t, stdout); !strings.Contains(got, "reports count=1") {
+		t.Errorf("the main thread's next call must get the report: %q", got)
+	}
 }
 
 // TestHookPre_OutsideAGitRepoIsSilent: with no tree to gate, the model has

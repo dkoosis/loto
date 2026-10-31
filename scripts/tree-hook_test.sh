@@ -11,9 +11,9 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 fail=0
 
-# run <session> <verb> <path-prefix>: sets out, err, rc from one hook call.
+# run <session> <verb> <path-prefix> [agent]: sets out, err, rc from one hook call.
 run() {
-  out=$(printf '{"session_id":"%s","tool_name":"Bash","tool_use_id":"c"}\n' "$1" |
+  out=$(printf '{"session_id":"%s","tool_name":"Bash","tool_use_id":"c","agent_id":"%s"}\n' "$1" "${4:-}" |
     TMPDIR="$WORK/tmp" PATH="${3:+$3:}/usr/bin:/bin" /bin/bash "$HOOK" "$2" 2>"$WORK/stderr")
   rc=$?
   err=$(cat "$WORK/stderr")
@@ -65,6 +65,14 @@ check "missing: once per session" $? "rc=$rc stdout=$out"
 run s-other pre ""
 is_context_json "$out" "loto is not on PATH"
 check "missing: another session" $? "stdout=$out"
+
+# A subagent hearing it first leaves the main thread's notice unspent.
+run s-sub pre "" agent-1
+is_context_json "$out" "loto is not on PATH"
+check "missing: subagent hears" $? "stdout=$out"
+run s-sub pre ""
+is_context_json "$out" "loto is not on PATH"
+check "missing: main thread still hears" $? "stdout=$out"
 
 # Post is not PreToolUse: silent, and it does not spend the session's notice.
 run s-post post ""

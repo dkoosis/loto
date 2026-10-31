@@ -206,22 +206,23 @@ func hookSkip(stderr io.Writer, format string, a ...any) int {
 	return 0
 }
 
-// hookFailOpen is hookSkip for `loto hook pre`: the session also learns, once
-// per session and failure, that this call went ungated. Once, because this runs
-// on every tool call, and a line that repeats hundreds of times is a line the
-// model learns to skip.
-func hookFailOpen(model, stderr io.Writer, session, format string, a ...any) int {
+// hookFailOpen is hookSkip for `loto hook pre`: the thread also learns, once per
+// failure, that this call went ungated. Once, because this runs on every tool
+// call, and a line that repeats hundreds of times is a line the model learns to
+// skip. Per thread, keyed by session and agent id: a subagent shares its parent's
+// session id, and hearing it first must not leave the main thread untold.
+func hookFailOpen(model, stderr io.Writer, ev *hookEvent, format string, a ...any) int {
 	msg := fmt.Sprintf(format, a...)
-	if hookFirstNotice(session, msg) {
+	if hookFirstNotice(ev.SessionID, ev.AgentID, msg) {
 		fmt.Fprintf(model, "⚠ loto hook pre did not run: %s. Edit and Write calls are not checked against peers' locks while this lasts.\n", msg)
 	}
 	return hookSkip(stderr, "%s", msg)
 }
 
-// hookFirstNotice reports whether this session has not yet told the model msg.
+// hookFirstNotice reports whether this thread has not yet told the model msg.
 // The marker file's O_EXCL create is the once. With no session to key on, or a
 // marker that cannot be written, it says yes: a repeat beats a silent gate.
-func hookFirstNotice(session, msg string) bool {
+func hookFirstNotice(session, agent, msg string) bool {
 	if session == "" {
 		return true
 	}
@@ -230,7 +231,7 @@ func hookFirstNotice(session, msg string) bool {
 		return true
 	}
 	h := fnv.New64a()
-	_, _ = h.Write([]byte(session + "\x00" + msg))
+	_, _ = h.Write([]byte(session + "\x00" + agent + "\x00" + msg))
 	f, err := os.OpenFile(filepath.Join(dir, strconv.FormatUint(h.Sum64(), 16)), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return !errors.Is(err, os.ErrExist)
@@ -275,7 +276,7 @@ func runHook(ctx context.Context, pre bool, stdout, stderr io.Writer) int {
 	var ev hookEvent
 	skip := func(format string, a ...any) int {
 		if pre {
-			return hookFailOpen(stdout, stderr, ev.SessionID, format, a...)
+			return hookFailOpen(stdout, stderr, &ev, format, a...)
 		}
 		return hookSkip(stderr, format, a...)
 	}
@@ -385,7 +386,7 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 
 	obs, statusPaths, lockedBytes, err := hookObserve(ctx, rt, declared, status, stderr)
 	if err != nil {
-		return hookFailOpen(stdout, stderr, ev.SessionID, "observe: %v", err)
+		return hookFailOpen(stdout, stderr, &ev, "observe: %v", err)
 	}
 
 	// Step 2 — drift, over the observation step 4 is about to record.
@@ -395,8 +396,12 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 	}
 	// Step 1 — deliver. Reports addressed to this owner are handed over once
 	// and marked delivered; `loto status` carries the rest until their
-	// addressee's own next call.
-	hookDeliver(rt, me, now, stdout, stderr)
+	// addressee's own next call. A subagent's call delivers nothing: it runs under
+	// its parent's owner, so delivery would mark the main thread's report done and
+	// show it to the subagent instead (the same reason as hookNoteCheckout).
+	if ev.AgentID == "" {
+		hookDeliver(rt, me, now, stdout, stderr)
+	}
 
 	// Step 4 — record. Worktree is rt.RepoTop, the checkout-root identity the
 	// call and path tables scope to (loto-v6xx); the locks this call refreshes
@@ -413,7 +418,7 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 		Worktree:    rt.RepoTop,
 	}, obs)
 	if err != nil {
-		return hookFailOpen(stdout, stderr, ev.SessionID, "record pre: %v", err)
+		return hookFailOpen(stdout, stderr, &ev, "record pre: %v", err)
 	}
 	if !recorded {
 		return 0 // a repeated pre; the first observation stands
