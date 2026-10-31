@@ -656,14 +656,13 @@ func refCheckoutWideClaim(rt *runtime, stderr io.Writer) (bool, string) {
 		fmt.Fprintf(stderr, "⚠ claims=unreadable ref-guard=fail-open err=%q\n", err)
 		return true, "unknown"
 	}
-	mine := map[string]struct{}{rt.Agent.UUID: {}}
 	now := time.Now()
 	for i := range claims {
 		c := claims[i]
 		if c.PathPrefix != refCheckoutWidePrefix || c.Expired(now) {
 			continue
 		}
-		if _, ok := mine[string(c.OwnerUUID)]; ok {
+		if string(c.OwnerUUID) == rt.Agent.UUID {
 			return true, string(c.OwnerUUID)
 		}
 	}

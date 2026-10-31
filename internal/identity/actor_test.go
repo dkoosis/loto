@@ -68,6 +68,7 @@ func TestEnsureActorFromSessionRecord(t *testing.T) {
 // its own CLAUDE_PID names its actor, not its parent's.
 func TestEnsureActorPrefersClaudePID(t *testing.T) {
 	clearIdentityEnv(t)
+	t.Setenv("LOTO_BASE", t.TempDir())
 	stubProcStart(t, 4242, true)
 	parent := ensureAs(t, "sess-child", os.Getpid())
 	t.Setenv("CLAUDE_PID", strconv.Itoa(os.Getpid()+1))
@@ -77,5 +78,18 @@ func TestEnsureActorPrefersClaudePID(t *testing.T) {
 	}
 	if child.UUID == parent {
 		t.Fatalf("child with its own CLAUDE_PID resolved to the inherited LOTO_PID's actor %s", parent)
+	}
+	rec, err := RecordSession(child, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.PID != os.Getpid()+1 {
+		t.Fatalf("child record pid = %d, want its CLAUDE_PID %d", rec.PID, os.Getpid()+1)
+	}
+	unsetEnv(t, "CLAUDE_PID")
+	unsetEnv(t, "LOTO_PID")
+	fromRecord, err := Ensure(context.Background())
+	if err != nil || fromRecord.UUID != child.UUID {
+		t.Fatalf("child resolved from its record = %v (err %v), want %s", fromRecord, err, child.UUID)
 	}
 }

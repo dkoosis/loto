@@ -2,9 +2,13 @@ package cli
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+
+	"loto/internal/store"
 )
 
 // worktreeRec is one record from `git worktree list --porcelain`: where a
@@ -113,4 +117,68 @@ func gitWorktrees(ctx context.Context, repoTop string) ([]worktreeRec, error) {
 		return nil, err
 	}
 	return parseWorktreePorcelain(string(out)), nil
+}
+
+// checkoutsByKey maps each checkout of repoTop's repo from its
+// store.WorktreeKey to its path. A hold carries the key (loto-hu8o); a fix
+// that says `cd <checkout>` needs the path. own always maps to repoTop, so
+// the caller's own checkout is named even when git cannot list the rest.
+func checkoutsByKey(ctx context.Context, repoTop, own string) map[string]string {
+	out := map[string]string{}
+	if recs, err := gitWorktrees(ctx, repoTop); err == nil {
+		for i := range recs {
+			if k := store.WorktreeKey(recs[i].Path); k != "" {
+				out[k] = recs[i].Path
+			}
+		}
+	}
+	if own != "" {
+		out[own] = repoTop
+	}
+	return out
+}
+
+// checkoutPath names the checkout keyed key by its path, or by the key itself
+// when no listed checkout carries it.
+func checkoutPath(paths map[string]string, key string) string {
+	if p, ok := paths[key]; ok {
+		return p
+	}
+	return key
+}
+
+// goneCheckout returns a test for a key whose linked checkout no longer
+// exists: its admin dir in the common git dir is missing, or its gitdir file
+// points at a checkout directory that is. A removed `isolation: worktree`
+// subagent checkout leaves rows like this, and `git worktree list` no longer
+// names it. Any git failure reports nothing gone, the narrower sweep.
+func goneCheckout(ctx context.Context, repoTop string) func(string) bool {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--path-format=absolute", "--git-common-dir")
+	cmd.Dir = repoTop
+	out, err := cmd.Output()
+	common := strings.TrimSpace(string(out))
+	if err != nil || common == "" {
+		return nil
+	}
+	return func(key string) bool {
+		name, ok := strings.CutPrefix(key, "worktrees/")
+		if !ok || name == "" || strings.ContainsAny(name, "/\\") || name == ".." {
+			return false
+		}
+		admin := filepath.Join(common, "worktrees", name)
+		if _, err := os.Stat(admin); err != nil {
+			return os.IsNotExist(err)
+		}
+		b, err := os.ReadFile(filepath.Join(admin, "gitdir"))
+		if err != nil {
+			return false
+		}
+		link := filepath.Clean(strings.TrimSpace(string(b)))
+		if !filepath.IsAbs(link) {
+			link = filepath.Join(admin, link) // git can record the link relative to the admin dir
+		}
+		//nolint:gosec // G703: the path is git's own gitdir record, only stat'd for existence, never opened or written.
+		_, err = os.Stat(link)
+		return os.IsNotExist(err)
+	}
 }

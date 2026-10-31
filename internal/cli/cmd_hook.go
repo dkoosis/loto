@@ -124,11 +124,21 @@ type hookEvent struct {
 	AgentID string `json:"agent_id"`
 }
 
-// hookToolInput carries exactly one field, and the reason it is safe to read
-// is that it is structured: the harness put a path there, no parser guessed it
-// out of a command line.
+// hookToolInput carries only the write target, and the reason it is safe to
+// read is that it is structured: the harness put a path there, no parser
+// guessed it out of a command line. NotebookEdit names its target
+// notebook_path; every other Edit-family tool names it file_path.
 type hookToolInput struct {
-	FilePath string `json:"file_path"`
+	FilePath     string `json:"file_path"`
+	NotebookPath string `json:"notebook_path"`
+}
+
+// target is the path the Edit-family call writes.
+func (ti hookToolInput) target() string {
+	if ti.FilePath != "" {
+		return ti.FilePath
+	}
+	return ti.NotebookPath
 }
 
 // hookEditFamily are the tools whose write target the harness states outright,
@@ -284,9 +294,9 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 	// Step 3 — admission, BEFORE the observation, so a path this call just
 	// took reads as its own at pre (§5 I2).
 	declared := ""
-	if isHookEditFamily(ev.ToolName) && ev.ToolInput.FilePath != "" {
+	if target := ev.ToolInput.target(); isHookEditFamily(ev.ToolName) && target != "" {
 		var blocker *domain.LockRecord
-		declared, blocker = hookAdmit(rt, ev.ToolInput.FilePath)
+		declared, blocker = hookAdmit(rt, target)
 		if blocker != nil {
 			render.EmitHookRefusal(stderr, blocker.Target.Canonical,
 				string(blocker.OwnerUUID), blocker.Intent, blocker.ExpiresAt)
@@ -309,8 +319,9 @@ func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, 
 	// addressee's own next call.
 	hookDeliver(rt, me, now, stdout, stderr)
 
-	// Step 4 — record. Worktree is rt.RepoTop, the same checkout-root identity
-	// every other table in this store already scopes to (loto-v6xx): dirty
+	// Step 4 — record. Worktree is rt.RepoTop, the checkout-root identity the
+	// call and path tables scope to (loto-v6xx); the locks this call refreshes
+	// are keyed by rt.Worktree, which the store applies itself (loto-hu8o): dirty
 	// unlocked paths use epoch 0 in every checkout, so path_seq / path_observed
 	// / the spanner query all need it to tell two worktrees' independent files
 	// apart at one repo-relative canonical.
@@ -453,7 +464,7 @@ func hookAdmit(rt *runtime, filePath string) (declared string, blocker *domain.L
 	if err != nil {
 		return "", nil
 	}
-	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.RepoTop}
+	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
 	me := domain.AgentUUID(rt.Agent.UUID)
 	if held, blocker := hookRowsDecide(rows, me, ec); held {
 		return t.Canonical, nil
@@ -497,15 +508,24 @@ func hookRowsDecide(rows []domain.LockRecord, me domain.AgentUUID, ec domain.Eva
 			return true, nil
 		}
 	}
-	for i := range rows {
-		r := &rows[i]
-		if ec.IsStale(*r) || r.OwnerUUID == me ||
-			!domain.SameWorktree(ec.MyWorktree, r.Worktree) {
-			continue
-		}
-		return false, r
+	return false, hookBlocker(rows, me, ec)
+}
+
+// hookBlocker is Decide over the rows on one path (store.LocksAt, so rows[0]
+// names the target): the first live row of another actor in this worktree,
+// or nil. Subagents resolve to the same actor as their parent.
+func hookBlocker(rows []domain.LockRecord, me domain.AgentUUID, ec domain.EvalContext) *domain.LockRecord {
+	if len(rows) == 0 {
+		return nil
 	}
-	return false, nil
+	holds := make([]domain.Hold, 0, len(rows))
+	for i := range rows {
+		holds = append(holds, ec.LockHold(rows[i]))
+	}
+	if j := ec.Decide(me, ec.MyWorktree, rows[0].Target.Canonical, holds); j >= 0 {
+		return &rows[j]
+	}
+	return nil
 }
 
 // hookTakeLock is I2's `L(f) := s` half: the lock the pre-hook takes on the
@@ -525,23 +545,14 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, ec domain.E
 		// A Write that creates its file is the case I2 most needs to admit
 		// (statFileTargetReason above already allows it); the store must too.
 		MayCreate: true,
-		Worktree:  rt.RepoTop,
+		Worktree:  rt.Worktree,
 	}
 	if _, err := rt.Store.AcquireLocks(rt.Ctx, []domain.LockRecord{rec}, memoLiveProbe(rt.liveProbe())); err != nil {
 		held, lerr := rt.Store.LocksAt(rt.Ctx, t)
 		if lerr != nil {
 			return "", nil
 		}
-		// A lost race names the holder who actually won it — never a row this
-		// admission would not have yielded to (mine, or a stale one).
-		for i := range held {
-			if held[i].OwnerUUID == me || ec.IsStale(held[i]) ||
-				!domain.SameWorktree(ec.MyWorktree, held[i].Worktree) {
-				continue
-			}
-			return "", &held[i]
-		}
-		return "", nil
+		return "", hookBlocker(held, me, ec)
 	}
 	return t.Canonical, nil
 }
@@ -558,7 +569,7 @@ func hookObserve(ctx context.Context, rt *runtime, declared string, gitStatus gi
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.RepoTop}
+	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
 	holders := hookLiveHolders(locks, ec)
 
 	status, err := gitStatus()

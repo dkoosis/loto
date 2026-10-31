@@ -69,6 +69,9 @@ func TestUnlockAllReleasesActorInEveryWorktree(t *testing.T) {
 	if code := Run([]string{tcCmdLock, tcTargetA, "-t", "linked"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("lock in linked worktree: exit %d", code)
 	}
+	if code := Run([]string{"claim", "pkg", "-t", "linked claim"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("claim in linked worktree: exit %d", code)
+	}
 
 	t.Chdir(repo)
 	var out, errBuf bytes.Buffer
@@ -83,5 +86,12 @@ func TestUnlockAllReleasesActorInEveryWorktree(t *testing.T) {
 	}
 	if len(left) != 0 {
 		t.Fatalf("unlock --all left %d holds, want 0: %+v", len(left), left)
+	}
+	claims, err := rt.Store.ListClaims(rt.Ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("unlock --all left %d claims, want 0: %+v", len(claims), claims)
 	}
 }

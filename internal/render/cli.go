@@ -325,7 +325,7 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 		switch r.State {
 		case store.StateUnlocked:
 			if r.Worktree != "" {
-				fmt.Fprintf(w, "✓ target=%s worktree=%s\n", path, relToCwd(r.Worktree, cwd))
+				fmt.Fprintf(w, "✓ target=%s worktree=%s\n", path, r.Worktree)
 				continue
 			}
 			fmt.Fprintf(w, "✓ target=%s\n", path)

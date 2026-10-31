@@ -54,9 +54,10 @@ type LockRecord struct {
 	// pid-alive-only (today's behavior).
 	ProcStart int64
 	Branch    string
-	// Worktree is the absolute checkout root (repo top-level) this row was
-	// acquired from — "the worktree root plus the path" the row keys on
-	// (loto-3eq6). The store is SHARED across every linked worktree of one
+	// Worktree is the key of the checkout this row was acquired from: its
+	// admin dir in the common git dir, "main" or "worktrees/<name>"
+	// (store.WorktreeKey, loto-hu8o), which `git worktree move` keeps. It and
+	// the path are what the row keys on (loto-3eq6). The store is SHARED across every linked worktree of one
 	// repo (StateDir keys by origin-remote slug, store.Store.repoTop), so two
 	// worktrees editing the SAME repo-relative canonical are really editing
 	// two independent files on disk; without this a beacon minted in one
@@ -146,7 +147,7 @@ type ClaimRecord struct {
 	CreatedAt   time.Time
 	ExpiresAt   time.Time
 	Host        string
-	// Worktree: the absolute checkout root the claim was taken from, same
+	// Worktree: the key of the checkout the claim was taken from, same
 	// meaning and "" = unknown rule as LockRecord.Worktree (loto-19bz).
 	Worktree string
 }

@@ -21,7 +21,7 @@ import (
 // must not delete a live lease bob holds on the same canonical in worktree B.
 func TestBreakLocks_ForceDoesNotCrossWorktree(t *testing.T) {
 	wtA, wtB := t.TempDir(), t.TempDir()
-	s := mustOpenWithRepoTop(t, wtA)
+	s := mustOpenInCheckout(t, wtA)
 	ctx := context.Background()
 	bob := mkFileLock(t, tcAGo, tcBob, time.Hour)
 	bob.Worktree = wtB
@@ -54,7 +54,7 @@ func TestBreakLocks_ForceStillBreaksSameAndLegacyWorktree(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			wtA := t.TempDir()
-			s := mustOpenWithRepoTop(t, wtA)
+			s := mustOpenInCheckout(t, wtA)
 			ctx := context.Background()
 			bob := mkFileLock(t, tcAGo, tcBob, time.Hour)
 			bob.Worktree = tc.worktree(wtA)
@@ -79,7 +79,7 @@ func TestBreakLocks_ForceStillBreaksSameAndLegacyWorktree(t *testing.T) {
 // a stale row from B reports no-lock and leaves B's row to B.
 func TestReleaseLocks_DoesNotReclaimSiblingWorktreeRow(t *testing.T) {
 	wtA, wtB := t.TempDir(), t.TempDir()
-	s := mustOpenWithRepoTop(t, wtA)
+	s := mustOpenInCheckout(t, wtA)
 	ctx := context.Background()
 	bob := mkFileLock(t, tcAGo, tcBob, time.Hour)
 	bob.Worktree = wtB
@@ -103,7 +103,7 @@ func TestReleaseLocks_DoesNotReclaimSiblingWorktreeRow(t *testing.T) {
 // A has no standing to decide B's row is done.
 func TestAcquireLocks_DoesNotReclaimStaleSiblingWorktreeRow(t *testing.T) {
 	wtA, wtB := t.TempDir(), t.TempDir()
-	s := mustOpenWithRepoTop(t, wtA)
+	s := mustOpenInCheckout(t, wtA)
 	ctx := context.Background()
 	bob := mkFileLock(t, tcAGo, tcBob, time.Hour)
 	bob.Worktree = wtB
@@ -135,7 +135,7 @@ func TestAcquireLocks_DoesNotReclaimStaleSiblingWorktreeRow(t *testing.T) {
 // worktree — not one row whose worktree flips to the latest acquire.
 func TestAcquireLocks_SameOwnerTwoWorktrees_TwoRows(t *testing.T) {
 	wtA, wtB := t.TempDir(), t.TempDir()
-	s := mustOpenWithRepoTop(t, wtA)
+	s := mustOpenInCheckout(t, wtA)
 	ctx := context.Background()
 	a := mkFileLock(t, tcAGo, tcAlice, time.Hour)
 	a.Worktree = wtA
@@ -174,7 +174,7 @@ func TestAcquireLocks_SameOwnerTwoWorktrees_TwoRows(t *testing.T) {
 // the owner-scoped DELETE, which must not reach past its own worktree either.
 func TestReleaseLocks_SameOwnerTwoWorktrees_ScopedToOwnWorktree(t *testing.T) {
 	wtA, wtB := t.TempDir(), t.TempDir()
-	s := mustOpenWithRepoTop(t, wtA)
+	s := mustOpenInCheckout(t, wtA)
 	ctx := context.Background()
 	a := mkFileLock(t, tcAGo, tcAlice, time.Hour)
 	a.Worktree = wtA
@@ -211,7 +211,7 @@ func TestReleaseLocks_SameOwnerTwoWorktrees_ScopedToOwnWorktree(t *testing.T) {
 // worktreeFilter then matches alongside the first.
 func TestAcquireLocks_AdoptsLegacyBlankWorktreeRow(t *testing.T) {
 	wtA := t.TempDir()
-	s := mustOpenWithRepoTop(t, wtA)
+	s := mustOpenInCheckout(t, wtA)
 	ctx := context.Background()
 	legacy := mkFileLock(t, tcAGo, tcAlice, time.Hour)
 	legacy.Worktree = ""
@@ -246,7 +246,7 @@ func TestAcquireLocks_AdoptsLegacyBlankWorktreeRow(t *testing.T) {
 // grant pass B's epoch fence.
 func TestAcquireLocks_SiblingWorktreeIsFreshEpochGrant(t *testing.T) {
 	wtA, wtB := t.TempDir(), t.TempDir()
-	s := mustOpenWithRepoTop(t, wtA)
+	s := mustOpenInCheckout(t, wtA)
 	ctx := context.Background()
 	a := mkFileLock(t, tcAGo, tcAlice, time.Hour)
 	a.Worktree = wtA
@@ -306,4 +306,17 @@ func TestAcquireLocks_AdoptsLegacyBlankWorktreeRowAcrossKeyFold(t *testing.T) {
 	if len(rows) != 1 || rows[0].Worktree != wtA {
 		t.Fatalf("want the legacy Foo.go row adopted into %q as one row, got %+v", wtA, rows)
 	}
+}
+
+// mustOpenInCheckout opens a store rooted at top whose own rows are keyed
+// by top as well: the store compares worktree keys as opaque strings, so a
+// temp dir stands in for both the checkout and its WorktreeKey.
+func mustOpenInCheckout(t *testing.T, top string) *Store {
+	t.Helper()
+	s, err := OpenContext(context.Background(), filepath.Join(t.TempDir(), "loto.db"), WithRepoTop(top), WithWorktree(top))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
 }

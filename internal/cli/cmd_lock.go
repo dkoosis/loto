@@ -541,7 +541,7 @@ func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now t
 			ProcStart:   procStartVal,
 			Branch:      branch,
 			Mode:        mode,
-			Worktree:    rt.RepoTop,
+			Worktree:    rt.Worktree,
 			// MayCreate mirrors the CLI-side allowMissing=true above
 			// (loto-i382): the store's own target validation would
 			// otherwise refuse a target this command just accepted.

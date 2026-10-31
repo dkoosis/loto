@@ -824,6 +824,21 @@ func TestCollectForeignClaimAdvisories_OwnerTieBreak(t *testing.T) {
 	}
 }
 
+// TestCollectForeignClaimAdvisories_OtherWorktreeIsSilent: the advisory warns
+// on exactly the claims the gate refuses, so a peer's claim in another
+// worktree, which the gate admits, raises no advisory (loto-njgz).
+func TestCollectForeignClaimAdvisories_OtherWorktreeIsSilent(t *testing.T) {
+	now := time.Now()
+	target := domain.Target{Canonical: tcStoreStoreGo}
+	claims := []domain.ClaimRecord{
+		{PathPrefix: tcPrefixStore, OwnerUUID: "peer", Worktree: "/repo/.claude/worktrees/b", ExpiresAt: now.Add(time.Hour)},
+	}
+	ec := domain.EvalContext{Now: now, MyWorktree: "/repo"}
+	if rows := collectForeignClaimAdvisories([]domain.Target{target}, claims, "my-uuid", ec); len(rows) != 0 {
+		t.Errorf("a claim in another worktree raised an advisory: %+v", rows)
+	}
+}
+
 // TestLock_StampsHolderBranch pins loto-16cf: acquire stamps the holder's
 // current git branch onto the lock record and status surfaces it as branch=;
 // a detached HEAD records the short SHA instead. Pre-16cf rows (Branch=="")

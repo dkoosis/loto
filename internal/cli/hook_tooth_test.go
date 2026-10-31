@@ -55,11 +55,13 @@ func TestNoHookReadsTheCommandString(t *testing.T) {
 	}
 }
 
-// TestHookToolInputDeclaresOnlyFilePath is leg 2: the struct the harness event
-// decodes into carries exactly one field, and it is the structured file path.
-// A field added here is how the deleted parser would come back, so the shape
-// is asserted rather than trusted.
-func TestHookToolInputDeclaresOnlyFilePath(t *testing.T) {
+// TestHookToolInputDeclaresOnlyStructuredPaths is leg 2: the struct the
+// harness event decodes into carries only the structured write targets,
+// file_path and notebook_path (NotebookEdit's name for it). A field added here
+// is how the deleted parser would come back, so the shape is asserted rather
+// than trusted.
+func TestHookToolInputDeclaresOnlyStructuredPaths(t *testing.T) {
+	want := map[string]string{"FilePath": "`json:\"file_path\"`", "NotebookPath": "`json:\"notebook_path\"`"}
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "cmd_hook.go", nil, 0)
 	if err != nil {
@@ -76,11 +78,19 @@ func TestHookToolInputDeclaresOnlyFilePath(t *testing.T) {
 		if !ok {
 			t.Fatal("hookToolInput is not a struct")
 		}
-		if got := len(st.Fields.List); got != 1 {
-			t.Fatalf("hookToolInput declares %d fields; exactly one (FilePath) is permitted", got)
+		if got := len(st.Fields.List); got != len(want) {
+			t.Fatalf("hookToolInput declares %d fields; exactly FilePath and NotebookPath are permitted", got)
 		}
-		if name := st.Fields.List[0].Names[0].Name; name != "FilePath" {
-			t.Errorf("hookToolInput's only field is %q, want FilePath", name)
+		for _, fld := range st.Fields.List {
+			name := fld.Names[0].Name
+			tag, ok := want[name]
+			if !ok {
+				t.Errorf("hookToolInput declares %q; only FilePath and NotebookPath are permitted", name)
+				continue
+			}
+			if fld.Tag == nil || fld.Tag.Value != tag {
+				t.Errorf("hookToolInput.%s is not tagged %s", name, tag)
+			}
 		}
 		return false
 	})

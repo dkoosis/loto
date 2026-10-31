@@ -82,10 +82,7 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 	}
 	for i := range claims {
 		c := &claims[i]
-		// ClaimCoversTarget settles overlap + foreign + TTL; ec.ClaimIsStale adds
-		// the owner-liveness leg so the path-scoped gate and the repo-wide
-		// gateDecideAny apply one standard of "live" to claims (loto-tzmv.9).
-		if !ec.ClaimCovers(*c, t.Canonical, myUUID) || ec.ClaimIsStale(*c) {
+		if !ec.Refuses(domain.AgentUUID(myUUID), ec.MyWorktree, t.Canonical, ec.ClaimHold(*c)) {
 			continue
 		}
 		key := "claim|" + t.Canonical + "|" + c.PathPrefix + "|" + string(c.OwnerUUID)
@@ -103,8 +100,7 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 
 // gateLockDenies reports whether lock l is foreign live coverage of t.
 func gateLockDenies(t domain.Target, l *domain.LockRecord, myUUID string, ec domain.EvalContext) bool {
-	return ec.SameTarget(t, l.Target) && string(l.OwnerUUID) != myUUID && !ec.IsStale(*l) &&
-		domain.SameWorktree(ec.MyWorktree, l.Worktree)
+	return ec.Refuses(domain.AgentUUID(myUUID), ec.MyWorktree, t.Canonical, ec.LockHold(*l))
 }
 
 // gateDecideAny is gateDecide's path-free sibling (ccp-vx4w): "does any
@@ -117,26 +113,13 @@ func gateLockDenies(t domain.Target, l *domain.LockRecord, myUUID string, ec dom
 // not Classify==Alive) and the same wave carve-out (myUUID excluded) —
 // deliberately reuses gateDecide's semantics rather than drifting a second
 // definition of "foreign" and "live".
-func gateDecideAny(locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, mySession domain.SessionUUID, ec domain.EvalContext) []render.GateDenyRow {
+func gateDecideAny(locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ec domain.EvalContext) []render.GateDenyRow {
 	var rows []render.GateDenyRow
 	for i := range locks {
 		l := &locks[i]
-		if string(l.OwnerUUID) == myUUID || ec.IsStale(*l) || !domain.SameWorktree(ec.MyWorktree, l.Worktree) {
-			continue
-		}
-		// A beacon minted by a SIBLING of this same Claude session does not
-		// refuse this session's tree-move (loto-xwod). Subagents of one session
-		// are distinct loto owners by design — that is exactly what lets one
-		// sibling's beacon deny another sibling's WRITE — but they are one
-		// session as far as `git checkout` is concerned, and a session has to be
-		// able to move the tree it is working in.
-		//
-		// Narrow on purpose: only beacons, and only same-session ones. A
-		// sibling's real exclusive lock still refuses the move, because a
-		// checkout under declared uncommitted territory is the 2026-08-14
-		// incident itself. An empty mySession (no CLAUDE_CODE_SESSION_ID, direct
-		// CLI use) matches nothing rather than everything.
-		if l.IsBeacon() && mySession != "" && l.SessionUUID == mySession {
+		// "." covers every target: any live hold of another actor in this
+		// worktree refuses the move (docs/write-gate.md, ref transitions).
+		if !ec.Refuses(domain.AgentUUID(myUUID), ec.MyWorktree, ".", ec.LockHold(*l)) {
 			continue
 		}
 		rows = append(rows, render.GateDenyRow{
@@ -149,7 +132,7 @@ func gateDecideAny(locks []domain.LockRecord, claims []domain.ClaimRecord, myUUI
 		// loto-tzmv.9: claims get the SAME liveness standard locks get above.
 		// Filtering on Expired alone let a crashed session's claim deny every
 		// tree-move in the repo for its full 2h TTL, with no reclaim path.
-		if string(c.OwnerUUID) == myUUID || ec.ClaimIsStale(*c) {
+		if !ec.Refuses(domain.AgentUUID(myUUID), ec.MyWorktree, ".", ec.ClaimHold(*c)) {
 			continue
 		}
 		rows = append(rows, render.GateDenyRow{
@@ -233,7 +216,7 @@ func runCheckGate(ctx context.Context, paths []string, base, repoTop string, std
 
 	// memoized: gateDecide evaluates the predicate per (target × record), so a
 	// wide staged set would otherwise re-probe one holder hundreds of times.
-	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.RepoTop}
+	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
 	rows := gateDecide(targets, locks, claims, rt.Agent.UUID, ec)
 	// Resurfaced on BOTH verdicts, and never as one: an unresolved violation
 	// is not a reason to block this tool call — it is a reason the NEXT

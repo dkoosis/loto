@@ -96,16 +96,16 @@ func (s *Store) applyOwnedReleasesTx(ctx context.Context, tx *sql.Tx, owned []st
 	// resolve to set acked_at; if we DELETE first the tags would orphan instead,
 	// losing the audit ack (edge #6 distinguishes release-ack from break-orphan).
 	//
-	// ‡ worktree-scoped (loto-8z87): s.repoTop names THIS store's own checkout.
+	// ‡ worktree-scoped (loto-8z87): s.worktree names THIS store's own checkout.
 	// existing (loaded by withLockBatchTx) is already scoped to it via
 	// scopeToWorktree, so `owned` never names a foreign-worktree canonical —
 	// but with the widened PK, one owner can hold a SIBLING row at the same
 	// canonical from another worktree, and the raw DELETE/UPDATE below must not
 	// reach past its own worktree to find it.
-	if err := ackTagsForReleaseTx(ctx, tx, s.keys(), owned, byAgent, s.repoTop); err != nil {
+	if err := ackTagsForReleaseTx(ctx, tx, s.keys(), owned, byAgent, s.worktree); err != nil {
 		return err
 	}
-	if err := deleteOwnedTx(ctx, tx, s.keys(), owned, byAgent, s.repoTop); err != nil {
+	if err := deleteOwnedTx(ctx, tx, s.keys(), owned, byAgent, s.worktree); err != nil {
 		return err
 	}
 	// Emit lock_released events in the same tx (atomic with the row deletes).
@@ -315,11 +315,11 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 	}
 
 	flock.release()
-	return SessionRelease{Results: sessionReleaseResults(canonicals, s.repoTop), ClaimPrefixes: claimPrefixes, Intents: distinctIntents(canonicals)}, nil
+	return SessionRelease{Results: sessionReleaseResults(canonicals, s.worktree), ClaimPrefixes: claimPrefixes, Intents: distinctIntents(canonicals)}, nil
 }
 
 // sessionReleaseResults reports each released row, naming the checkout of a
-// row released from one other than the caller's own, own (loto-5dr1).
+// row released from one other than the caller's own (loto-5dr1).
 func sessionReleaseResults(canonicals []sessionTarget, own string) []ReleaseResult {
 	results := make([]ReleaseResult, len(canonicals))
 	for i, c := range canonicals {
@@ -338,7 +338,7 @@ func sessionReleaseResults(canonicals []sessionTarget, own string) []ReleaseResu
 // releaseSessionTargetsTx acks tags, deletes the agent's host locks and emits
 // their release events for the matched rows, inside ReleaseBySession's tx.
 // Each delete is scoped to the row's own worktree the same way ReleaseLocks
-// scopes on s.repoTop (loto-8z87), so one owner's rows at one path in two
+// scopes on s.worktree (loto-8z87), so one owner's rows at one path in two
 // worktrees are two deletes.
 func (s *Store) releaseSessionTargetsTx(ctx context.Context, tx *sql.Tx, canonicals []sessionTarget, byAgent string) error {
 	byWorktree := map[string][]string{}

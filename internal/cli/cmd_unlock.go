@@ -179,7 +179,7 @@ func breakTargets(rt *runtime, args []string, intent, repoTop string, expect hol
 	}
 	// The checkout the break acts in: the caller's own, unless the CAS names
 	// a holder status shows in exactly one other checkout (loto-5dr1).
-	st, worktree := rt.Store, rt.RepoTop
+	st, worktree := rt.Store, rt.Worktree
 	if len(expect) > 0 && len(targets) == 1 {
 		wt, code := expectedHolderWorktree(rt, targets[0], expect, intent, stderr)
 		if code != 0 {
@@ -246,18 +246,18 @@ func expectedHolderWorktree(rt *runtime, t domain.Target, expect holdRefList, in
 	if err != nil {
 		return "", 0
 	}
-	checkouts := expectedHolderCheckouts(rows, expect, rt.RepoTop)
+	checkouts := expectedHolderCheckouts(rows, expect, rt.Worktree)
 	switch {
 	case len(checkouts) == 0:
 		return "", 0
-	case len(checkouts) == 1 && checkouts[0] == rt.RepoTop:
+	case len(checkouts) == 1 && checkouts[0] == rt.Worktree:
 		return "", 0
 	case len(checkouts) == 1:
 		return checkouts[0], 0
 	}
 	fmt.Fprintf(stderr, "✗ expect-holder-split count=%d: the named holders sit in %d checkouts; break each from its own\n", len(expect), len(checkouts))
 	fmt.Fprintln(stderr, "```bash")
-	for _, line := range splitBreakLines(rows, checkouts, expect, t, intent) {
+	for _, line := range splitBreakLines(rows, checkouts, expect, t, intent, checkoutsByKey(rt.Ctx, rt.RepoTop, rt.Worktree)) {
 		fmt.Fprintln(stderr, line)
 	}
 	fmt.Fprintln(stderr, "```")
@@ -285,7 +285,8 @@ func expectedHolderCheckouts(rows []domain.LockRecord, expect holdRefList, own s
 	return slices.Compact(out)
 }
 
-// splitBreakLines is one break per checkout in others, each naming the
+// splitBreakLines is one break per checkout in others (WorktreeKeys, run
+// from the path paths names for each), each naming the
 // holders the caller named that sit there. Only those: a holder the caller
 // never named is never added, so a row that appeared since the caller read
 // `loto status` still refuses that line with holder-changed, the CAS's
@@ -295,7 +296,7 @@ func expectedHolderCheckouts(rows []domain.LockRecord, expect holdRefList, own s
 // checkout's CAS counts it, and the first break deletes it with its own
 // rows (deleteOwnedTx's filter matches an empty worktree), so a later line
 // still naming it would find it gone and refuse.
-func splitBreakLines(rows []domain.LockRecord, others []string, expect holdRefList, t domain.Target, intent string) []string {
+func splitBreakLines(rows []domain.LockRecord, others []string, expect holdRefList, t domain.Target, intent string, paths map[string]string) []string {
 	out := make([]string, 0, len(others))
 	for n, wt := range others {
 		var refs []domain.HoldRef
@@ -310,7 +311,7 @@ func splitBreakLines(rows []domain.LockRecord, others []string, expect holdRefLi
 		}
 		domain.SortHoldRefs(refs)
 		var b strings.Builder
-		fmt.Fprintf(&b, "(cd %s && loto unlock %s --force -t %s", shellQuote(wt), shellQuote(t.Canonical), shellQuote(intent))
+		fmt.Fprintf(&b, "(cd %s && loto unlock %s --force -t %s", shellQuote(checkoutPath(paths, wt)), shellQuote(t.Canonical), shellQuote(intent))
 		for _, ref := range refs {
 			fmt.Fprintf(&b, " --expect-holder %s", shellQuote(ref.String()))
 		}

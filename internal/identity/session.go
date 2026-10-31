@@ -136,13 +136,13 @@ func RecordCheckout(sid, checkout string) (changed bool, err error) {
 	return true, nil
 }
 
-// sessionPID resolves the long-lived session process id. LOTO_PID is what the
-// SessionStart hook exports and what lock rows are stamped with (cli
-// stampPID); CLAUDE_PID is Claude Code's own spelling; the messaging socket's
+// sessionPID resolves the long-lived session process id. CLAUDE_PID wins over
+// LOTO_PID, which a nested claude can inherit from its parent. The SessionStart
+// hook exports LOTO_PID; the messaging socket's
 // basename ("/tmp/cc-socks/63879.sock") carries the same number and covers a
 // harness that exports neither. 0 means unknown.
 func sessionPID(socket string) int {
-	for _, v := range []string{os.Getenv("LOTO_PID"), os.Getenv("CLAUDE_PID")} {
+	for _, v := range []string{os.Getenv("CLAUDE_PID"), os.Getenv("LOTO_PID")} {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}

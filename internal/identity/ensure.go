@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 )
 
 var (
@@ -26,8 +25,8 @@ type Agent struct {
 }
 
 // Ensure resolves the current agent identity by the contract documented in
-// the package doc. Pure env read — no disk IO, no minting of anything that
-// persists. Returns ErrUnpinned when nothing pins an owner.
+// the package doc. It reads a session record when env has no process;
+// it never mints anything that persists. Returns ErrUnpinned when nothing pins an owner.
 func Ensure(ctx context.Context) (*Agent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -93,13 +92,8 @@ func ensureEnv() (*Agent, error) {
 // is how a hook spawned without the session's env still names the same
 // actor. With neither, or with no start time to keep a recycled pid apart,
 // the process is unknown and the owner is sid itself.
-//
-// ‡ CLAUDE_PID before LOTO_PID, the reverse of sessionPID. Claude Code sets
-// CLAUDE_PID for each process it spawns, while LOTO_PID is a Bash export that
-// a claude started from that Bash inherits: read first, it would hand the
-// child's hooks its parent's actor.
 func actorOwner(sid, host string) string {
-	p := actorProc()
+	p := callerProc()
 	if p.pid <= 0 || p.procStart == 0 {
 		if rec, ok := readSession(sid); ok {
 			p = procIdent{pid: rec.PID, procStart: rec.ProcStart}
@@ -109,15 +103,6 @@ func actorOwner(sid, host string) string {
 		return sid
 	}
 	return deriveUUID(host, fmt.Sprintf("%d/%d", p.pid, p.procStart))
-}
-
-// actorProc is callerProc with Claude Code's own pid first (see actorOwner).
-func actorProc() procIdent {
-	if n, err := strconv.Atoi(os.Getenv("CLAUDE_PID")); err == nil && n > 0 {
-		procStart, _ := procStartFn(n)
-		return procIdent{pid: n, procStart: procStart}
-	}
-	return callerProc()
 }
 
 // PinnedByAgentID reports whether LOTO_AGENT_ID names the owner outright. That

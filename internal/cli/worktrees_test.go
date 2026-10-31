@@ -1,6 +1,12 @@
 package cli
 
-import "testing"
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+)
 
 // The porcelain shape git actually emits, captured from a real repo with one
 // primary checkout and one locked linked worktree.
@@ -78,5 +84,51 @@ func TestLockReasonPID(t *testing.T) {
 				t.Errorf("lockReasonPID(%q) = (%d, %v), want (%d, %v)", tt.reason, got, ok, tt.want, tt.wantOK)
 			}
 		})
+	}
+}
+
+func TestGoneCheckout_RemovedLinkedWorktreeIsGone(t *testing.T) {
+	top := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = top
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x")
+	sub := filepath.Join(top, "wt")
+	run("worktree", "add", "-q", sub)
+	gone := goneCheckout(context.Background(), top)
+	if gone == nil {
+		t.Fatal("goneCheckout returned nil in a repo")
+	}
+	if gone("worktrees/wt") {
+		t.Errorf("a live checkout is not gone")
+	}
+	if err := os.RemoveAll(sub); err != nil {
+		t.Fatal(err)
+	}
+	if !gone("worktrees/wt") {
+		t.Errorf("a checkout whose directory was removed is gone")
+	}
+	run("worktree", "prune")
+	if !gone("worktrees/wt") {
+		t.Errorf("a pruned checkout is gone")
+	}
+	// A link git records relative to the admin dir must not read as gone.
+	rel := filepath.Join(top, "wt2")
+	run("worktree", "add", "-q", rel)
+	adminLink := filepath.Join(top, ".git", "worktrees", "wt2", "gitdir")
+	if err := os.WriteFile(adminLink, []byte("../../../wt2/.git\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if gone("worktrees/wt2") {
+		t.Errorf("a live checkout with a relative gitdir link is not gone")
+	}
+	if gone("main") || gone("") || gone("worktrees/../x") {
+		t.Errorf("main, empty and malformed keys are never gone")
 	}
 }

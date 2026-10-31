@@ -112,7 +112,7 @@ func refreshTargets(rt *runtime, args []string, all bool, stderr io.Writer) ([]d
 	var targets []domain.Target
 	seen := map[string]bool{}
 	for i := range locks {
-		if string(locks[i].OwnerUUID) != rt.Agent.UUID || !domain.SameWorktree(locks[i].Worktree, rt.RepoTop) {
+		if string(locks[i].OwnerUUID) != rt.Agent.UUID || !domain.SameWorktree(locks[i].Worktree, rt.Worktree) {
 			continue
 		}
 		if seen[locks[i].Target.Canonical] {

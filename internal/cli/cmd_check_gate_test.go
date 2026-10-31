@@ -246,12 +246,11 @@ func TestGateDecide_SameOwnerTwoPrefixes_BlockerPathTieBreak(t *testing.T) {
 func TestGateDecideAny(t *testing.T) {
 	now := time.Now()
 	cases := []struct {
-		name    string
-		locks   []domain.LockRecord
-		claims  []domain.ClaimRecord
-		live    domain.HolderLiveProbe // nil = TTL is the sole authority
-		session domain.SessionUUID     // "" = no CLAUDE_CODE_SESSION_ID, direct CLI use
-		want    int
+		name   string
+		locks  []domain.LockRecord
+		claims []domain.ClaimRecord
+		live   domain.HolderLiveProbe // nil = TTL is the sole authority
+		want   int
 	}{
 		{
 			name: "foreign live lock denies",
@@ -314,17 +313,13 @@ func TestGateDecideAny(t *testing.T) {
 			want: 1,
 		},
 		{
-			// loto-xwod: a beacon minted for a SIBLING subagent of this same
-			// Claude session says "an agent of mine is writing here". It must
-			// deny that sibling's peer at write time (gateDecide) without
-			// freezing the session's own `git checkout`.
-			name: "sibling beacon allows this session's tree-move",
+			// Process identity is authoritative even if session ids match.
+			name: "another actor's beacon denies despite a matching session",
 			locks: []domain.LockRecord{
 				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession,
 					Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
-			session: gateMySession,
-			want:    0,
+			want: 1,
 		},
 		{
 			// loto-dm4i: the carve-out keys on the persisted marker, never on the
@@ -337,8 +332,7 @@ func TestGateDecideAny(t *testing.T) {
 				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession,
 					Mode: domain.ModeShared, PID: 0, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
-			session: gateMySession,
-			want:    1,
+			want: 1,
 		},
 		{
 			// The carve-out is beacons only. A sibling's real exclusive lock is a
@@ -349,8 +343,7 @@ func TestGateDecideAny(t *testing.T) {
 				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession,
 					Mode: domain.ModeExclusive, PID: 4242, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
-			session: gateMySession,
-			want:    1,
+			want: 1,
 		},
 		{
 			name: "another session's beacon denies the tree-move",
@@ -358,8 +351,7 @@ func TestGateDecideAny(t *testing.T) {
 				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateFoeSession,
 					Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
-			session: gateMySession,
-			want:    1,
+			want: 1,
 		},
 		{
 			// An empty session id must match nothing rather than everything —
@@ -369,8 +361,7 @@ func TestGateDecideAny(t *testing.T) {
 				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: "",
 					Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
-			session: "",
-			want:    1,
+			want: 1,
 		},
 		{
 			name: "one foreign lock plus one foreign claim denies both",
@@ -382,12 +373,24 @@ func TestGateDecideAny(t *testing.T) {
 			},
 			want: 2,
 		},
+		{
+			// loto-njgz: a tree move applies the one conflict rule, so a
+			// peer's claim in another worktree does not refuse it.
+			name: "a foreign claim in another worktree does not deny",
+			claims: []domain.ClaimRecord{
+				{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: gateIntentFoe, Worktree: "/elsewhere", ExpiresAt: now.Add(time.Hour)},
+			},
+			want: 0,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ec := gateEC(now)
 			ec.Live = c.live
-			rows := gateDecideAny(c.locks, c.claims, gateMyUUID, c.session, ec)
+			if ec.MyWorktree == "" {
+				ec.MyWorktree = "/here"
+			}
+			rows := gateDecideAny(c.locks, c.claims, gateMyUUID, ec)
 			if len(rows) != c.want {
 				t.Fatalf("gateDecideAny() = %d rows, want %d: %+v", len(rows), c.want, rows)
 			}

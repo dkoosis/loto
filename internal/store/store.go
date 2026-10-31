@@ -51,6 +51,12 @@ type Store struct {
 	// StateDir honors ahead of the slug — see cli.StateDir.
 	repoTop string
 
+	// worktree is the checkout's WorktreeKey ("main", "worktrees/<name>"),
+	// the key every lock and claim row is stamped and scoped by (loto-hu8o).
+	// "" scopes nothing: every row matches, the widen-only reading
+	// domain.SameWorktree gives an unknown side.
+	worktree string
+
 	// caseFold: the checkout named by repoTop is on a case-folding filesystem,
 	// so a stored key differing from a caller's key only by case names the SAME
 	// file (loto-8soe). It rides into every EvalContext this package builds and
@@ -79,15 +85,21 @@ func WithRepoTop(top string) OpenOption {
 	return func(s *Store) { s.repoTop = top }
 }
 
-// InWorktree returns a view of s that resolves and scopes rows to another
-// checkout of the same repo: same database handle, repoTop swapped. A
+// WithWorktree tells the store which checkout its own rows belong to: the
+// WorktreeKey every row it scopes is compared against.
+func WithWorktree(key string) OpenOption {
+	return func(s *Store) { s.worktree = key }
+}
+
+// InWorktree returns a view of s that scopes rows to another checkout of the
+// same repo, named by its WorktreeKey: same database handle. A
 // compare-and-swap break names its holder exactly (owner@epoch), and the row
 // it names may sit in a subagent's checkout rather than the caller's
 // (loto-5dr1); a break through this view reaches that checkout's row and no
 // other. The view shares s's handle: close s, never the view.
-func (s *Store) InWorktree(top string) *Store {
+func (s *Store) InWorktree(key string) *Store {
 	v := *s
-	v.repoTop = top
+	v.worktree = key
 	return &v
 }
 
@@ -361,6 +373,7 @@ func schemaStructurallyIntact(ctx context.Context, db *sql.DB) bool {
 // (used by the read-only dry-run gate) and *sql.Tx (used by migrate's apply
 // path) satisfy it, so one ensureFn body serves both callers.
 type sqlExecQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
@@ -409,6 +422,7 @@ var migrationEnsures = []struct {
 	{"add locks.worktree", ensureLocksWorktree},
 	{"add claims.worktree", ensureClaimsWorktree},
 	{"key locks pk on worktree", ensureLocksWorktreeKeyed},
+	{"key holds by admin dir", ensureHoldsKeyedByAdminDir},
 }
 
 // eventsCheckAdmitsEveryKind reports whether the live events DDL's CHECK names
