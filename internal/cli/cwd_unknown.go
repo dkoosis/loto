@@ -19,7 +19,7 @@ import (
 // (normalizeRepoPath returns a relative path unchanged, so Canonicalize treats
 // it as repo-relative). Reproduced 2026-08-14: a peer holds
 // internal/store/locks.go, `loto check locks.go` from the repo root prints
-// "✓ no conflicts", exit 0, and an agent_shell sitting in internal/store is
+// "✓ no conflicts", exit 0, and a persistent shell sitting in internal/store is
 // waved through a `mv locks.go locks_old.go`.
 //
 // ‡ This is NOT fail-open. Fail-open declines to answer; the old behavior
@@ -31,7 +31,7 @@ import (
 //
 // ‡ The resolution rule DIFFERS per tool and the difference is load-bearing.
 // For Bash, the payload cwd plus any leading `cd` in the same command is sound
-// because the process is fresh per call. For agent_shell it is not. One
+// because the process is fresh per call. For a persistent-shell tool it is not. One
 // implementation must not drift across both call sites, which is why the
 // caller declares "cwd unknown" rather than this code sniffing a tool name.
 //
