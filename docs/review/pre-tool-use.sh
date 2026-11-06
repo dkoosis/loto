@@ -6,28 +6,11 @@
 #
 # Two tool shapes are gated:
 #   - Edit/Write/MultiEdit/NotebookEdit — the single path in .tool_input.
-#   - Bash AND mcp__trixi__agent_shell — destructive relocations/deletions
+#   - Bash — destructive relocations/deletions
 #     (mv/cp/rm, git mv/rm) parsed out of .tool_input.command. This closes the
 #     asymmetry where an `Edit` of a peer-held file is refused but a
 #     `bash mv peer/file dest` was not (the mechanism behind
 #     INCIDENT-ferret-t5d, cross-session variant).
-#
-# agent_shell runs arbitrary shell — including git checkout/restore/stash — and
-# names its command field `.tool_input.command`, exactly as Bash does, so ONE
-# scan serves both call sites (loto-tzmv.5; the two-call-sites-one-predicate
-# shape the xgce spike recommended, nug 51f9ac1c006c). Until it was matched
-# here, every write through agent_shell skipped the gate entirely — a second
-# door standing open while the tzmv map builds the first. MCP tool names are
-# valid PreToolUse matchers; settings.json already matches mcp__trixi__get_nug.
-#
-# ‡ agent_shell keeps its OWN persistent cwd, which the hook payload does not
-# carry, so a relative token there has no single meaning. This hook therefore
-# passes `loto check --cwd-unknown` for agent_shell and NOT for Bash, and loto
-# refuses the token instead of resolving it against a base neither side can
-# vouch for (loto-yexz; binary side shipped in #247). Absolute paths are
-# unaffected — they carry their own base. This is the one place in the scan
-# that does not fail open, and deliberately so: the old behavior returned a
-# POSITIVE clean verdict that was false, which is worse than no check at all.
 #
 # The Bash scan is a deliberately CONSERVATIVE tripwire that fails OPEN: it acts
 # only when it can see a destructive verb with a literal path operand that loto
@@ -284,19 +267,7 @@ agent_id="$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)"
 # --- Shell tools: scan destructive ops for peer-held paths. ------------------
 # Bash and agent_shell share the `.tool_input.command` field name, so one scan
 # covers both without a second parser (loto-tzmv.5).
-if [ "$tool" = "Bash" ] || [ "$tool" = "mcp__trixi__agent_shell" ]; then
-  # ‡ The resolution rule differs per tool, and the difference is the whole
-  # point of the flag (docs/DESIGN.md invariant 9). Bash gets a fresh process
-  # per call, so the payload's cwd plus any leading `cd` in the same command is
-  # sound — no flag. agent_shell keeps its own persistent cwd, set by a `cd`
-  # that may have happened three tool calls ago and absent from the payload, so
-  # a relative token there gets refused rather than resolved against a base we
-  # cannot vouch for. Without this line the binary side shipped in #247 is
-  # inert and the false clean stays live (loto-yexz, loto-tzmv.10).
-  if [ "$tool" = "mcp__trixi__agent_shell" ]; then
-    _check_flags="--cwd-unknown"
-  fi
-
+if [ "$tool" = "Bash" ]; then
   cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)"
   if [ -z "$cmd" ] || [ "$cmd" = "null" ]; then
     exit 0

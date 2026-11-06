@@ -1,3 +1,5 @@
+> **Historical record (dk ruled the trixi repo defunct, 2026-11-05).** Every trixi path, bead id and script location below describes the past; nothing here points at a live repo. Do not go there.
+
 # treehouse — prior-art analysis (feeds the `wt-*` fork decision)
 
 > **Purpose.** dk asked "what do you think of this approach?" re

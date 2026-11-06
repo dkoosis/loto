@@ -232,7 +232,7 @@ func TestCheckSurfacesCoveringTerritoryTagOnCleanPath(t *testing.T) {
 }
 
 // TestCheckGateOutputUnchangedByTerritoryTag is D6 as an assertion. `--gate` is
-// the pinned machine surface trixi's PreToolUse hook consumes, and it just went
+// the pinned machine surface the PreToolUse hook consumes, and it just went
 // 24× faster (#235). A note never denies, so it has no verdict to contribute —
 // and the agent that proceeds past the gate then runs `loto lock`, where the
 // note surfaces before a single byte is edited.

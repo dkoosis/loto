@@ -11,7 +11,7 @@ import (
 // caller's working directory is not knowable here, a relative token has no
 // single meaning and MUST NOT be resolved.
 //
-// The concrete failure it closes: mcp__trixi__agent_shell keeps its own
+// The concrete failure it closes: a persistent-shell tool keeps its own
 // persistent cwd, set by a `cd` that may have happened three tool calls ago,
 // and that cwd is absent from the PreToolUse payload. A bare relative token
 // therefore has three candidate bases — the payload's cwd, the shell's actual
@@ -25,7 +25,7 @@ import (
 // ‡ This is NOT fail-open. Fail-open declines to answer; the old behavior
 // returned a POSITIVE clean verdict that was false, which is strictly worse
 // than no check at all because it reads as protection. Refusing is the whole
-// point — the alternatives (ask the trixi daemon for the shell's cwd; mandate
+// point — the alternatives (ask the tool's host for the shell's cwd; mandate
 // absolute paths by convention) were rejected as a hot-path dependency and a
 // rule agents violate silently.
 //

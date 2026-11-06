@@ -222,7 +222,7 @@ func TestDoctor_HolderSeesTrailingFooter(t *testing.T) {
 }
 
 // TestCheck_ExcludedFromTagSurfacing pins `loto check` output as a machine
-// surface (trixi's PreToolUse hook parses it). Adding tags must not change
+// surface (a PreToolUse hook parses it). Adding tags must not change
 // byte-equality with the no-tag baseline.
 func TestCheck_ExcludedFromTagSurfacing(t *testing.T) {
 	withTempProject(t)

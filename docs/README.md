@@ -25,7 +25,7 @@ The bundle for an outside architectural / strategic review — see [MANIFEST.md]
 
 ## also here
 
-- [treehouse-prior-art.md](treehouse-prior-art.md) — prior art survey.
-- [wt-harness-migration-brief.md](wt-harness-migration-brief.md) — worktree harness migration.
+- [treehouse-prior-art.md](treehouse-prior-art.md) — prior art survey (historical).
+- [wt-harness-migration-brief.md](wt-harness-migration-brief.md) — worktree harness migration (historical).
 
 Plans live in the kg (`~/Projects/dk/Project/loto/plans/`), not in this repo. The `superpowers/` plan archive and the `skills/loto.md` snapshot were removed 2026-08-20; both are in git history.

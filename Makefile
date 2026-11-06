@@ -207,7 +207,7 @@ arch: ## Enforce layering (.go-arch-lint.yml)
 # loto-46x1: a PATH/pin mismatch used to print a ⚠ naming the drift and then
 # run the unpinned binary anyway — findings silently drifted from CI's while
 # the gate reported clean. scripts/lint-locked (ported from ferret#160; also
-# GOLANGCILINT in conform-to-sdlc/mnemd/trixi) closes that: on a mismatch it builds
+# GOLANGCILINT in conform-to-sdlc/mnemd) closes that: on a mismatch it builds
 # the PINNED version once (`go run …@vX.Y.Z`, cached under Go's module cache
 # outside this mutex) and execs that instead, so the binary that runs always
 # matches the pin — no separate install step, no manual chmod.
