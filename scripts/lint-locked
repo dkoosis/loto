@@ -54,9 +54,9 @@
 # never a loop. The clean happens while we still hold the mutex, so it cannot
 # yank the cache out from under a concurrent peer.
 #
-# Ported from ferret's scripts/lint-locked (ferret#160), which conform-to-sdlc, mnemd
-# and trixi also run as GOLANGCILINT — keeping the structure identical across
-# the five repos is deliberate; a fix in one belongs in all.
+# Ported from ferret's scripts/lint-locked (ferret#160), which conform-to-sdlc and mnemd
+# also run as GOLANGCILINT — keeping the structure identical across
+# the four repos is deliberate; a fix in one belongs in all.
 #
 # Bead: loto-46x1 (the version-mismatch detect-and-run-the-wrong-binary defect
 # this script exists to close)
@@ -134,7 +134,7 @@ notify() {
 #
 # So: every candidate is asked its version and must match the pin. Nothing that
 # fails to answer, or answers wrong, is trusted. The last resort runs the pinned
-# module through `go run` (the ../itzy model) — version correctness then never
+# module through `go run` — version correctness then never
 # depends on PATH order, on any platform, including a dev Mac where the linux
 # prebuilt cannot even execute.
 #

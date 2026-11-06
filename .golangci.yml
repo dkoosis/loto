@@ -126,8 +126,8 @@ linters:
         - unlambda
     forbidigo:
       # bugclasses rule 5: context.Background() deep in daemon code should
-      # thread the caller/shutdown ctx (strand st-47z, trixi #606,
-      # trixi-bot gg-8rq.3, canapay can-x38). loto is a short-lived CLI, so the
+      # thread the caller/shutdown ctx (strand st-47z,
+      # canapay can-x38). loto is a short-lived CLI, so the
       # ban is scoped in exclusions below to the CLI command roots + git
       # plumbing where a fresh root context is the correct root; the ban still
       # covers the SQLite store, whose detached audit writes carry their own

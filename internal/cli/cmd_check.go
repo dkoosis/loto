@@ -86,7 +86,7 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 	held := fs.Bool("held", false, "retired (loto-ojq3): exits 0; commits are not gated")
 	moved := fs.Bool("moved", false, "advisory only: given two HEADs, print a ⚠ row for each path the move changed that a live peer holds; always exits 0")
 	worktree := fs.String("worktree", "", "check a worktree PATH instead of paths: exit 1 if another live session is working at or inside it, locks or not; exit 3 if a live session there cannot be placed")
-	cwdUnknown := fs.Bool("cwd-unknown", false, "the caller's working directory is not knowable here (e.g. mcp__trixi__agent_shell): refuse relative paths instead of resolving them against the wrong base")
+	cwdUnknown := fs.Bool("cwd-unknown", false, "the caller's working directory is not knowable here (e.g. a persistent-shell tool): refuse relative paths instead of resolving them against the wrong base")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return nil, "", "", false, 2, true
 	}

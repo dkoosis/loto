@@ -368,7 +368,7 @@ not of loto, and the two shell call sites do not agree:
 |---|---|---|
 | direct CLI (`loto lock x.go` typed in a shell) | **the process's own cwd** (`os.Getwd`) | loto was spawned by the shell the caller is standing in, so its cwd IS the caller's |
 | `Bash` | payload cwd + any leading `cd` in the same command | the process is fresh per call, so the payload's cwd is the shell's cwd |
-| `mcp__trixi__agent_shell` | **unresolvable — refuse** | the shell keeps its own persistent cwd, set by a `cd` that may have run three tool calls ago and absent from the payload |
+| a persistent-shell tool | **unresolvable — refuse** | the shell keeps its own persistent cwd, set by a `cd` that may have run three tool calls ago and absent from the payload |
 
 Tokens loto did not get from a caller do not take the caller's base:
 `check --staged` reads its paths from `git diff --cached` run with
@@ -422,7 +422,7 @@ Surfaces (the holder is forced to see):
 | non-holder `lock f` (fail)  | ✓ via EmitConflict| ✓ via EmitConflict |
 
 `loto check` is excluded — its output is a pinned machine surface that
-trixi's PreToolUse hook parses on every `.go` save. Holders pick up tags
+a PreToolUse hook parses on every `.go` save. Holders pick up tags
 via the next `lock` / `unlock` / `status` / `doctor` instead.
 
 Lifecycle (matches `locks_release.go::ackTagsForReleaseTx` + `doctor.go::gcTagsTx`):

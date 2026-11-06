@@ -6,28 +6,11 @@
 #
 # Two tool shapes are gated:
 #   - Edit/Write/MultiEdit/NotebookEdit — the single path in .tool_input.
-#   - Bash AND mcp__trixi__agent_shell — destructive relocations/deletions
+#   - Bash — destructive relocations/deletions
 #     (mv/cp/rm, git mv/rm) parsed out of .tool_input.command. This closes the
 #     asymmetry where an `Edit` of a peer-held file is refused but a
 #     `bash mv peer/file dest` was not (the mechanism behind
 #     INCIDENT-ferret-t5d, cross-session variant).
-#
-# agent_shell runs arbitrary shell — including git checkout/restore/stash — and
-# names its command field `.tool_input.command`, exactly as Bash does, so ONE
-# scan serves both call sites (loto-tzmv.5; the two-call-sites-one-predicate
-# shape the xgce spike recommended, nug 51f9ac1c006c). Until it was matched
-# here, every write through agent_shell skipped the gate entirely — a second
-# door standing open while the tzmv map builds the first. MCP tool names are
-# valid PreToolUse matchers; settings.json already matches mcp__trixi__get_nug.
-#
-# ‡ agent_shell keeps its OWN persistent cwd, which the hook payload does not
-# carry, so a relative token there has no single meaning. This hook therefore
-# passes `loto check --cwd-unknown` for agent_shell and NOT for Bash, and loto
-# refuses the token instead of resolving it against a base neither side can
-# vouch for (loto-yexz; binary side shipped in #247). Absolute paths are
-# unaffected — they carry their own base. This is the one place in the scan
-# that does not fail open, and deliberately so: the old behavior returned a
-# POSITIVE clean verdict that was false, which is worse than no check at all.
 #
 # The Bash scan is a deliberately CONSERVATIVE tripwire that fails OPEN: it acts
 # only when it can see a destructive verb with a literal path operand that loto
@@ -153,20 +136,10 @@ fi
 _check_cache_ttl=5
 _check_cachedir="${TMPDIR:-/tmp}/loto-check-cache"
 
-# Extra flags handed to `loto check` for THIS tool call. Set once at dispatch,
-# below, from the payload's tool_name — see the --cwd-unknown block there.
-# A plain string, not an array: macOS ships bash 3.2, where expanding an empty
-# array under `set -u` is an unbound-variable error. The value is a single
-# space-free token, so the unquoted expansion below is safe.
-_check_flags=""
-
 check_path() {
   local path="${1:-}" dir groot rel out rc key cachefile now last age
   # hot path: pure-bash key + read builtin avoid tr/sed subshells (runs per tool call)
-  # The flags are part of the key: the same token can be clean under Bash's
-  # resolution rule and refused under agent_shell's, so a verdict cached by one
-  # tool must never be served to the other (loto-yexz).
-  key="${_check_flags}${path}"
+  key="$path"
   key="${key//[^A-Za-z0-9._-]/_}"
   cachefile="$_check_cachedir/$key"
   now="$(date +%s)"
@@ -180,10 +153,7 @@ check_path() {
   fi
 
   if [ "${path#/}" != "$path" ]; then
-    # Absolute: the token carries its own base, so the caller's cwd is
-    # irrelevant and --cwd-unknown must NOT be passed — the rel we derive here
-    # is repo-rooted by construction, and refusing it would block every
-    # agent_shell call that spells its paths out in full.
+    # Absolute: the token carries its own base.
     dir="$(dirname "$path")"
     if [ -d "$dir" ] && groot="$(cd "$dir" && git rev-parse --show-toplevel 2>/dev/null)"; then
       rel="$(cd "$dir" && git rev-parse --show-prefix 2>/dev/null)$(basename "$path")"
@@ -194,8 +164,7 @@ check_path() {
       rc=$?
     fi
   else
-    # shellcheck disable=SC2086 # intentional split: empty string must add no arg
-    out="$(loto check $_check_flags "$path" 2>&1)"
+    out="$(loto check "$path" 2>&1)"
     rc=$?
   fi
 
@@ -241,29 +210,13 @@ mint_beacon() {
       return 0
     fi
   fi
-  # Relative token under agent_shell never reaches here — check_path refuses it
-  # first (loto-yexz) — so the payload cwd is a sound base for what remains.
+  # The payload cwd is a sound base for a relative token here: Bash runs a fresh process per call.
   LOTO_SUBAGENT_ID="$agent_id" loto beacon "$path" >/dev/null 2>&1
   return 0
 }
 
 # block PATH OUTPUT — emit the blocker rows to the model and refuse the call.
 block() {
-  # A --cwd-unknown refusal is NOT a peer conflict — loto declined to answer
-  # because the token has no single meaning from here. Naming a holder that
-  # was never consulted would send the agent to force-unlock a file nobody
-  # holds, so the two exits carry different prose (loto-yexz).
-  case "$2" in
-    *relative-path-caller-cwd-unknown*)
-      {
-        echo "✗ loto: blocked — relative path, and this shell's cwd is not in the hook payload."
-        echo "$2"
-        echo ""
-        echo "Options: re-run with an absolute path (\$(git rev-parse --show-toplevel)/$1)."
-      } >&2
-      exit 2
-      ;;
-  esac
   {
     echo "✗ loto: blocked — peer holds this file."
     echo "$2"
@@ -282,21 +235,8 @@ tool="$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null)"
 agent_id="$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)"
 
 # --- Shell tools: scan destructive ops for peer-held paths. ------------------
-# Bash and agent_shell share the `.tool_input.command` field name, so one scan
-# covers both without a second parser (loto-tzmv.5).
-if [ "$tool" = "Bash" ] || [ "$tool" = "mcp__trixi__agent_shell" ]; then
-  # ‡ The resolution rule differs per tool, and the difference is the whole
-  # point of the flag (docs/DESIGN.md invariant 9). Bash gets a fresh process
-  # per call, so the payload's cwd plus any leading `cd` in the same command is
-  # sound — no flag. agent_shell keeps its own persistent cwd, set by a `cd`
-  # that may have happened three tool calls ago and absent from the payload, so
-  # a relative token there gets refused rather than resolved against a base we
-  # cannot vouch for. Without this line the binary side shipped in #247 is
-  # inert and the false clean stays live (loto-yexz, loto-tzmv.10).
-  if [ "$tool" = "mcp__trixi__agent_shell" ]; then
-    _check_flags="--cwd-unknown"
-  fi
-
+# Bash carries the command in `.tool_input.command` (loto-tzmv.5).
+if [ "$tool" = "Bash" ]; then
   cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)"
   if [ -z "$cmd" ] || [ "$cmd" = "null" ]; then
     exit 0
@@ -328,17 +268,7 @@ if [ "$tool" = "Bash" ] || [ "$tool" = "mcp__trixi__agent_shell" ]; then
       case "$tok" in -*|"") continue ;; esac
       # Only check things that exist locally or that at least look like a path
       # (contain a slash). Bare new-dest filenames are skipped — fail open.
-      #
-      # ‡ Under --cwd-unknown that existence test is worse than useless: `-e`
-      # probes the PAYLOAD's cwd, not the shell's, so a bare `locks.go` typed
-      # from an agent_shell sitting in internal/store tests false, has no
-      # slash, and gets skipped before loto is ever consulted. That skip is how
-      # the reproduced false clean survived #247 — the binary refuses the token
-      # correctly, but nothing handed it over. Relative operands of a
-      # destructive verb therefore go straight to check_path here (loto-yexz).
-      if [ -n "$_check_flags" ] && [ "${tok#/}" = "$tok" ]; then
-        : # relative + cwd unknown → always consult loto, it will refuse
-      elif [ ! -e "$tok" ]; then
+      if [ ! -e "$tok" ]; then
         case "$tok" in */*) : ;; *) continue ;; esac
       fi
       out="$(check_path "$tok")"

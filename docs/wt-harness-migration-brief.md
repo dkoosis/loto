@@ -1,3 +1,5 @@
+> **Historical record (dk ruled the trixi repo defunct, 2026-11-05).** Every trixi path, bead id and script location below describes the past; nothing here points at a live repo. Do not go there.
+
 # wt-* Harness — Migration Brief
 
 > **Purpose.** Full picture of the parallel-agent SDLC harness currently living in the **trixi** repo (`~/Projects/trixi/scripts/`), written so dk and a migration agent can understand what's being graduated into **loto** and what breaks when it moves. Source of truth for the extraction. Written 2026-06-01.

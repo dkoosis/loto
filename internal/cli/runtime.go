@@ -275,7 +275,7 @@ func (r *runtime) Close() error {
 //
 // Opted-in commands (lock, unlock, refresh, claim, unclaim, status, doctor)
 // register this via `defer`; check is excluded deliberately — its output is a
-// pinned machine surface for trixi's PreToolUse hook, and it gets its own
+// pinned machine surface for the PreToolUse hook, and it gets its own
 // advisory block instead.
 //
 // ‡ The `defer` placement is what makes the territory half work at all: the
