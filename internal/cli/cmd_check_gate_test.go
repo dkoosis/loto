@@ -234,6 +234,24 @@ func TestGateDecide_SameOwnerTwoPrefixes_BlockerPathTieBreak(t *testing.T) {
 	}
 }
 
+// One owner holding a directory lock and a file lock that both cover a target
+// yields a row for each lock (loto-f7b5), ordered by blocker path.
+func TestGateDecide_SameOwnerTwoLocks_EachBlockerReported(t *testing.T) {
+	now := time.Now()
+	target := domain.Target{Canonical: tcPrefixStore + "/new.go"}
+	locks := []domain.LockRecord{
+		{Target: target, OwnerUUID: gateFoeUUID, Mode: domain.ModeExclusive, Intent: "file", ExpiresAt: now.Add(time.Hour)},
+		{Target: domain.Target{Canonical: tcPrefixStore}, OwnerUUID: gateFoeUUID, Mode: domain.ModeExclusive, Intent: "dir", ExpiresAt: now.Add(time.Hour)},
+	}
+	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows (one per covering lock), got %d: %+v", len(rows), rows)
+	}
+	if rows[0].BlockerPath != tcPrefixStore || rows[1].BlockerPath != target.Canonical {
+		t.Errorf("want blocker-path ascending, got %+v", rows)
+	}
+}
+
 // gateDecideAny unit tests (ccp-vx4w): the repo-wide sibling of gateDecide,
 // for an operation with no path operand — a branch switch. It has NO caller
 // today: `loto guard` was its only one and #318 deleted it; `loto check
