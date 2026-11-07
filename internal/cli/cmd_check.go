@@ -154,8 +154,7 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 
 	// --gate is a distinct read-only decision surface (loto-vr2,
-	// gate-design.md component 4): it consults claims (plain check never
-	// does), denies on any foreign live lock, and
+	// gate-design.md component 4): it denies on any foreign live hold and
 	// fails open on identity/store infra BEFORE opening the store. Branching
 	// here — after path loading, before openRuntime — keeps every line below
 	// this point (the plain-check path) untouched, so plain `loto check`
@@ -183,29 +182,20 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// would silently reclaim must not read as a hard conflict here (loto-9t0q).
 	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe(), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
 
-	// Resolve targets once, up front. Invalid input exits 2 before any claim
-	// read — so the wasted ListClaims/resolve on the error path is gone, and
-	// both the conflict scan and the foreign-claim advisory consume the same
-	// resolved targets (no double resolution). Mirrors runCheckGate's
-	// resolve-then-branch shape (gemini/coderabbit, #214).
+	// Resolve targets once, up front: invalid input exits 2 before any scan.
+	// Mirrors runCheckGate's resolve-then-branch shape (gemini/coderabbit, #214).
 	targets, invalid := resolveCheckTargets(base, repoTop, paths)
 	if len(invalid) > 0 {
 		printCheckInvalid(stdout, invalid)
 		return 2
 	}
 
-	// Foreign-claim advisory (loto-qoq): computed up front so it emits on every
-	// non-error plain-check exit — including the common no-conflict early
-	// return below, which never reaches the bottom of this function.
-	claimAdvisories := foreignClaimAdvisoriesFor(rt, targets, ec.Now)
-	// Territory tags covering the REQUESTED targets (loto-z3y1). Computed here
-	// for the same reason the claim advisory is: the no-conflict early return
-	// below never reaches the bottom of this function, and a note that only
+	// Territory tags covering the REQUESTED targets (loto-z3y1). Computed
+	// here because the no-conflict early return below never reaches the bottom of this function, and a note that only
 	// surfaced on the conflict path would miss every quiet check — which is
 	// most of them. Plain check only: `check --gate` stays byte-identical.
 	territoryNotes := territoryTagsForTargets(liveTerritoryTags(rt, ec.Now), targets, ec.Now)
 	emitAfter := func(code int) int {
-		emitForeignClaimAdvisories(stdout, claimAdvisories)
 		render.EmitTerritoryTagRows(stdout, territoryNotes, "territory-tags", "")
 		return code
 	}
@@ -344,6 +334,11 @@ func printCheckConflicts(stdout io.Writer, rows []checkConflict) bool {
 			fmt.Fprintf(stdout, "✗ path=%s blocker=%s holder_target=%s intent=%q expires_at=%s liveness=alive\n",
 				relPath(r.Path), r.Blocker.OwnerUUID, relPath(r.Blocker.Target.Canonical), r.Blocker.Intent,
 				r.Blocker.ExpiresAt.UTC().Format(time.RFC3339))
+			// tag and unlock refuse the repo root, so a root claim has no fix
+			// to print; holder_target names it.
+			if r.Blocker.Target.Canonical == "." {
+				continue
+			}
 			// Prefer tag+defer: the breadcrumb surfaces in the holder's tag
 			// footer on their next loto command, so they can reach you directly
 			// (SendMessage — the blocker id is the session id it addresses) instead of

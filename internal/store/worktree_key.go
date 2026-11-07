@@ -64,7 +64,7 @@ func WorktreeKey(top string) string {
 	return worktreesDir + "/" + filepath.Base(gitDir)
 }
 
-// ensureHoldsKeyedByAdminDir rewrites every lock and claim row still stamped
+// ensureHoldsKeyedByAdminDir rewrites every hold row still stamped
 // with an absolute checkout path (loto-3eq6 through loto-in0v) to that
 // checkout's WorktreeKey (loto-hu8o). A path that no longer holds a checkout
 // (moved or removed before this ran) cannot be keyed, so its rows become ""
@@ -74,8 +74,7 @@ func WorktreeKey(top string) string {
 // A rewrite that collides with a row already keyed (same target and owner,
 // one path and one key naming one checkout, or two removed checkouts both
 // becoming "") keeps that row, moves the stamped one's tags onto it, and
-// drops the stamped one. Claims key on (path_prefix, owner_uuid) alone, so they cannot
-// collide.
+// drops the stamped one.
 func ensureHoldsKeyedByAdminDir(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	paths, err := stampedCheckoutPaths(ctx, db)
 	if err != nil || len(paths) == 0 {
@@ -93,9 +92,6 @@ func ensureHoldsKeyedByAdminDir(ctx context.Context, db sqlExecQuerier, apply bo
 			return false, err
 		}
 		if _, err := db.ExecContext(ctx, `DELETE FROM locks WHERE worktree = ?`, p); err != nil {
-			return false, err
-		}
-		if _, err := db.ExecContext(ctx, `UPDATE claims SET worktree = ? WHERE worktree = ?`, key, p); err != nil {
 			return false, err
 		}
 	}
@@ -119,10 +115,10 @@ UPDATE tags SET lock_created_at = (
    WHERE k.target_canonical = tags.target_canonical AND k.owner_uuid = tags.lock_owner_uuid AND k.worktree = ?)`
 
 // stampedCheckoutPaths lists the distinct absolute paths still stamped on a
-// lock or claim row. A key ("main", "worktrees/<name>") is never absolute.
+// hold row. A key ("main", "worktrees/<name>") is never absolute.
 func stampedCheckoutPaths(ctx context.Context, db sqlExecQuerier) ([]string, error) {
 	rows, err := db.QueryContext(ctx,
-		`SELECT worktree FROM locks WHERE worktree LIKE '/%' UNION SELECT worktree FROM claims WHERE worktree LIKE '/%'`)
+		`SELECT DISTINCT worktree FROM locks WHERE worktree LIKE '/%'`)
 	if err != nil {
 		return nil, err
 	}

@@ -23,15 +23,15 @@ func init() { register("claim", cmdClaim) } //nolint:gochecknoinits // command r
 // lockUsageHead). The flag list is appended by PrintDefaults.
 const claimUsageHead = `usage: loto claim <path-prefix> -t "why" [--ttl 2h]
 
-Atomically reserve a repo-relative directory prefix as session territory:
-"this package is mine this session" — coarser than a per-file lock. Refused
-while another agent's live claim overlaps the prefix (equal or ancestor/
-descendant by path segment). Re-claiming your own prefix refreshes the TTL.
-Advisory between claimants only: a claim does not block loto lock/check under
-the prefix — still lock files before editing.
+Take an exclusive hold on a repo-relative directory: "this package is mine
+this session" — coarser than a per-file lock, and covering every path
+beneath it, on disk or not. Refused while another agent's live hold is on
+the directory, above it or beneath it (by path segment). Re-claiming your own
+prefix refreshes the TTL. A peer's loto lock or write beneath it is refused
+until it expires or you unclaim it.
 
-"." is the repo root, the widest prefix: it overlaps every other claim, so it
-blocks every peer claimant until it expires or you unclaim it. Reach for it
+"." is the repo root, the widest prefix: it covers every path, so it
+blocks every peer until it expires or you unclaim it. Reach for it
 deliberately — a takeover of the whole checkout — not as a shorthand for "the
 directory I am standing in": a prefix is always repo-root-relative, never
 cwd-relative. loto lock still refuses ".", because a lock names a write-set.
@@ -49,7 +49,7 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprint(stderr, claimUsageHead)
 		flags.PrintDefaults()
 	}
-	ttl := flags.Duration("ttl", 2*time.Hour, "claim TTL (session-scale lease)")
+	ttl := flags.Duration("ttl", 2*time.Hour, "hold TTL (session-scale lease)")
 	intent := flags.String("t", "", "intent (required)")
 	flags.StringVar(intent, "intent", "", "intent (required)")
 	if err := flags.Parse(permuteWith(flags, args)); err != nil {
@@ -75,28 +75,12 @@ func cmdClaim(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
 
-	now := time.Now()
-	rec := domain.ClaimRecord{
-		PathPrefix:  prefix.Canonical,
-		OwnerUUID:   domain.AgentUUID(rt.Agent.UUID),
-		SessionUUID: rt.SessionUUID,
-		Intent:      *intent,
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(*ttl),
-		Host:        rt.Host,
-		Worktree:    rt.Worktree,
-	}
-	// memoLiveProbe: the partition evaluates the predicate once per overlapping
+	// memoLiveProbe: the partition evaluates the predicate once per covering
 	// row, and several rows commonly share one dead owner (Codex #246).
-	if err := rt.Store.ClaimPrefix(rt.Ctx, rec, memoLiveProbe(rt.liveProbe())); err != nil {
-		if cce, ok := errors.AsType[*store.ClaimConflictError](err); ok {
-			render.EmitClaimConflict(stdout, cce)
-			return 1
-		}
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return 3
+	if code := acquireBatch(rt, []domain.Target{prefix}, true, *intent, *ttl, memoLiveProbe(rt.liveProbe()), stdout, stderr); code != 0 {
+		return code
 	}
-	render.EmitClaimSuccess(stdout, rec)
+	now := time.Now()
 	emitNotOnDiskAdvisory(stdout, repoTop, prefix.Canonical)
 	recordRefRefusalOverride(rt, prefix.Canonical, now, stderr)
 	return 0

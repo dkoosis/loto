@@ -87,7 +87,8 @@ dk ratified the model; each bead below is open to build.
 - loto-njgz: one `Decide` replaces the seven copies.
 - loto-j88z: delete the Bash command parser. Built in #410.
 - loto-hof2: fold beacons and claims into the hold; retire shared mode and
-  `loto downgrade`, since the hold is exclusive.
+  `loto downgrade`, since the hold is exclusive. Built in #423 and the two
+  PRs after it.
 - loto-e1ku: the actor is the process.
 - loto-ojq3: remove the staged-lock gate. loto-6itj is closed with it.
 - loto-d0cb survives: a hold stays live while its actor's in-flight call began

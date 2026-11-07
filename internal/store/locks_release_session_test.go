@@ -10,51 +10,6 @@ import (
 	"loto/internal/domain"
 )
 
-// TestReleaseBySession_ReleasesLocksAndClaimsAtomically proves the ei5 fix:
-// ONE ReleaseBySession call clears both the session's locks and its claims in a
-// single transaction (Codex #219 P1 — no second claim tx that could leave claims
-// squatting if the first committed). A sibling session's lock AND claim survive.
-func TestReleaseBySession_ReleasesLocksAndClaimsAtomically(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	la := mkFileLockSession(t, "a.go", tcAlice, "session-1", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{la}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.ClaimPrefix(ctx, mkClaimSession(tcPkgStore, tcAlice, "session-1", time.Hour), nil); err != nil {
-		t.Fatal(err)
-	}
-	// Sibling session-2 territory that must survive.
-	lb := mkFileLockSession(t, "b.go", tcAlice, "session-2", time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{lb}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.ClaimPrefix(ctx, mkClaimSession("internal/render", tcAlice, "session-2", time.Hour), nil); err != nil {
-		t.Fatal(err)
-	}
-
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", "")
-	results, claims := rel.Results, rel.ClaimPrefixes
-	if err != nil {
-		t.Fatalf("ReleaseBySession: %v", err)
-	}
-	if len(results) != 1 || results[0].Target.Canonical != la.Target.Canonical {
-		t.Fatalf("locks released = %v, want just a.go", results)
-	}
-	if len(claims) != 1 || claims[0] != tcPkgStore {
-		t.Fatalf("claims released = %v, want [internal/store]", claims)
-	}
-	// session-2's lock and claim both survive.
-	if got, _ := s.LockAt(ctx, lb.Target); got == nil {
-		t.Error("session-2 lock should survive session-1 release")
-	}
-	remaining, _ := s.ListClaims(ctx)
-	if len(remaining) != 1 || remaining[0].PathPrefix != "internal/render" {
-		t.Errorf("surviving claims = %v, want just session-2's internal/render", remaining)
-	}
-}
-
 // TestReleaseBySession_ScopedToSession verifies that ReleaseBySession only
 // releases locks matching both agent UUID and session UUID — sibling sessions
 // of the same agent are left intact.
@@ -303,39 +258,6 @@ func TestReleaseBySession_OnlyIntent_SelectsAndDeletesInOneTx(t *testing.T) {
 	}
 	if len(left) != 1 || left[0].Target.Canonical != peer.Target.Canonical {
 		t.Errorf("the peer lane's different-intent lock must survive, got %+v", left)
-	}
-}
-
-// TestReleaseBySession_OnlyIntent_KeepsClaims: a filtered release names locks a
-// lane took, not the territory it reserved. Claims carry no intent to match, so
-// sweeping them here would drop the one thing the filter exists to leave
-// standing.
-func TestReleaseBySession_OnlyIntent_KeepsClaims(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	l := mkFileLockSession(t, "a.go", tcAlice, "session-1", time.Hour)
-	l.Intent = tcLaneAIntent
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.ClaimPrefix(ctx, mkClaimSession(tcPkgStore, tcAlice, "session-1", time.Hour), nil); err != nil {
-		t.Fatal(err)
-	}
-
-	rel, err := s.ReleaseBySession(ctx, tcAlice, "session-1", tcLaneAIntent)
-	if err != nil {
-		t.Fatalf("ReleaseBySession: %v", err)
-	}
-	if len(rel.ClaimPrefixes) != 0 {
-		t.Errorf("a filtered release must not touch claims, got %v", rel.ClaimPrefixes)
-	}
-	claims, err := s.ListClaims(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(claims) != 1 {
-		t.Errorf("the claim must survive a filtered release, got %+v", claims)
 	}
 }
 

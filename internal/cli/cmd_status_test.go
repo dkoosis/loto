@@ -53,6 +53,25 @@ func TestStatusSingleTargetFree(t *testing.T) {
 	}
 }
 
+// TestStatusSingleTarget_NamesAClaimAbove: status on a file under a peer's
+// claim reports the claim, as the gate that refuses the write does.
+func TestStatusSingleTarget_NamesAClaimAbove(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	if code := Run([]string{tcCmdClaim, tcPrefixStore, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("claim: exit %d", code)
+	}
+	t.Setenv("LOTO_AGENT_ID", "")
+	pinAgent(t)
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdStatus, tcStoreStoreGo}, &out, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(out.String(), "✗ holder target="+tcPrefixStore+" ") {
+		t.Errorf("want the claim above named: %q", out.String())
+	}
+}
+
 // TestStatusShowsTTLAndLiveness pins loto-k5el.1 SC3: status reports remaining
 // TTL and an owner-liveness verdict per lock.
 func TestStatusShowsTTLAndLiveness(t *testing.T) {
@@ -149,66 +168,6 @@ func TestStatusDeadLockRendersDistinctFromLive(t *testing.T) {
 	}
 	if !strings.Contains(s, "loto doctor --repair") {
 		t.Errorf("status must name the reclaim command: %q", s)
-	}
-}
-
-// TestStatusClaimsSection pins the loto-7af9 status surface: a claims section
-// after locks — explicit "✓ no claims" empty header, live rows with prefix
-// first, expired rows filtered, --mine honored.
-func TestStatusClaimsSection(t *testing.T) {
-	withTempProject(t)
-	pinAgent(t)
-
-	var out bytes.Buffer
-	if code := Run([]string{tcCmdStatus}, &out, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("status exit: %q", out.String())
-	}
-	if !strings.Contains(out.String(), "✓ no claims") {
-		t.Errorf("empty claims section needs explicit header: %q", out.String())
-	}
-
-	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatal("claim failed")
-	}
-	out.Reset()
-	if code := Run([]string{tcCmdStatus}, &out, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("status exit: %q", out.String())
-	}
-	s := out.String()
-	if !strings.Contains(s, "✓ claims count=1") || !strings.Contains(s, "prefix=internal/store") {
-		t.Errorf("claims section missing live row: %q", s)
-	}
-	if !strings.Contains(s, "ttl_remaining=") {
-		t.Errorf("claims row must show ttl_remaining: %q", s)
-	}
-
-	// --mine from a different agent filters the claim out.
-	pinAgent(t)
-	out.Reset()
-	if code := Run([]string{tcCmdStatus, tcFlagMine}, &out, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("status --mine exit: %q", out.String())
-	}
-	if !strings.Contains(out.String(), "✓ no claims") {
-		t.Errorf("--mine must filter another agent's claim: %q", out.String())
-	}
-}
-
-// TestStatusClaimsFiltersExpired pins the TTL display rule: an expired claim
-// row is filtered from status (staleness is display-time; the row itself dies
-// lazily in a later overlapping acquire).
-func TestStatusClaimsFiltersExpired(t *testing.T) {
-	withTempProject(t)
-	pinAgent(t)
-	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest, tcFlagTTL, tcTTL1ms}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatal("claim failed")
-	}
-	time.Sleep(60 * time.Millisecond)
-	var out bytes.Buffer
-	if code := Run([]string{tcCmdStatus}, &out, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("status exit: %q", out.String())
-	}
-	if !strings.Contains(out.String(), "✓ no claims") {
-		t.Errorf("expired claim must be filtered: %q", out.String())
 	}
 }
 

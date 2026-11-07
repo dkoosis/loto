@@ -17,7 +17,7 @@ func init() { register("status", cmdStatus) } //nolint:gochecknoinits // command
 func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	mine := fs.Bool("mine", false, "show only locks and claims owned by my uuid")
+	mine := fs.Bool("mine", false, "show only holds owned by my uuid")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
@@ -47,8 +47,8 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	return statusWholeRepo(stdout, stderr, rt, *mine)
 }
 
-// statusWholeRepo renders the no-target report: locks, claims, territory
-// tags, then any unresolved violations.
+// statusWholeRepo renders the no-target report: holds, territory tags, then
+// any unresolved violations.
 func statusWholeRepo(stdout, stderr io.Writer, rt *runtime, mine bool) int {
 	all, err := rt.Store.ListLocks(rt.Ctx)
 	if err != nil {
@@ -64,24 +64,15 @@ func statusWholeRepo(stdout, stderr io.Writer, rt *runtime, mine bool) int {
 		}
 		return all[i].CreatedAt.Before(all[j].CreatedAt)
 	})
-	locksForeign := printStatusLocks(stdout, rt, all, mine)
-
-	claims, err := rt.Store.ListClaims(rt.Ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return 3
-	}
-	now := time.Now()
-	claimsForeign := printStatusClaims(stdout, rt, claims, mine, now)
-	// The fix block sits right after the two sections it can apply to
-	// (ferret-m3t): a row belonging to someone else is only ever a lock or a
-	// claim row (territory tags carry no self marker — see
-	// printStatusTerritoryTags), and `mine` already means every remaining row
-	// is the caller's own, so *Foreign is always false there — no gate needed.
-	if locksForeign || claimsForeign {
+	// The fix block sits right after the section it applies to (ferret-m3t):
+	// a row belonging to someone else is only ever a hold row (territory tags
+	// carry no self marker — see printStatusTerritoryTags), and `mine` already
+	// means every remaining row is the caller's own, so foreign is always
+	// false there — no gate needed.
+	if printStatusLocks(stdout, rt, all, mine) {
 		emitForeignRowFixBlock(stdout)
 	}
-	printStatusTerritoryTags(stdout, rt, mine, now)
+	printStatusTerritoryTags(stdout, rt, mine, time.Now())
 	printStatusReports(stdout, stderr, rt, mine)
 	// Read-only resurfacing: status reports what the store already knows, it
 	// does not run the sensor. Recording is a whole-tree git diff, and making
@@ -97,7 +88,7 @@ func statusWholeRepo(stdout, stderr io.Writer, rt *runtime, mine bool) int {
 // inbox verb: "what is pinned on this ground" already has a door, and it is
 // the same door that answers "who holds what".
 //
-// ‡ Suppressed at zero, unlike the locks and claims sections. Those print an
+// ‡ Suppressed at zero, unlike the locks section. That prints an
 // explicit empty header because silence there would read as a crash — status
 // is ABOUT holdings. A repo with no notes is the overwhelmingly common case,
 // and a permanent "✓ no territory-tags" line would tax every status call to
@@ -160,51 +151,6 @@ func printLocksSummary(stdout io.Writer, all []domain.LockRecord, ec domain.Eval
 	fmt.Fprintf(stdout, "⚠ locks count=%d held=%d expired=%d — reclaim: loto doctor --repair\n",
 		len(all), len(all)-dead, dead)
 	return dead
-}
-
-// printStatusClaims renders the claims section after locks (loto-7af9): live
-// rows only — Expired is display-time authority; the row itself dies lazily in
-// a later overlapping acquire — sorted prefix then created_at, --mine honored.
-// Explicit empty header per design.md: silence looks like a crash.
-// printStatusClaims returns foreign — whether any printed row belongs to
-// someone other than the caller (ferret-m3t) — on the same terms as
-// printStatusLocks: self=true marks the caller's own rows, suppressed under
-// --mine because every remaining row is already its own there and marking
-// them would move the golden output the AC pins unchanged.
-func printStatusClaims(stdout io.Writer, rt *runtime, all []domain.ClaimRecord, mine bool, now time.Time) (foreign bool) {
-	live := all[:0]
-	for i := range all {
-		if all[i].Expired(now) {
-			continue
-		}
-		if mine && string(all[i].OwnerUUID) != rt.Agent.UUID {
-			continue
-		}
-		live = append(live, all[i])
-	}
-	if len(live) == 0 {
-		fmt.Fprintln(stdout, "✓ no claims")
-		return false
-	}
-	sort.Slice(live, func(i, j int) bool {
-		if live[i].PathPrefix != live[j].PathPrefix {
-			return live[i].PathPrefix < live[j].PathPrefix
-		}
-		return live[i].CreatedAt.Before(live[j].CreatedAt)
-	})
-	fmt.Fprintf(stdout, "✓ claims count=%d\n", len(live))
-	for i := range live {
-		c := &live[i]
-		self, other := rowOwnerMark(string(c.OwnerUUID), rt.Agent.UUID, mine)
-		if other {
-			foreign = true
-		}
-		fmt.Fprintf(stdout, "✓ prefix=%s owner=%s intent=%q held_since=%s ttl_remaining=%s host=%s%s\n",
-			relPath(c.PathPrefix), c.OwnerUUID, c.Intent,
-			c.CreatedAt.UTC().Format(time.RFC3339),
-			fmtTTL(c.ExpiresAt.Sub(now)), c.Host, self)
-	}
-	return foreign
 }
 
 // emitForeignRowFixBlock is the inline fix block design.md §9 requires under
@@ -316,10 +262,9 @@ func fmtTTL(d time.Duration) string {
 }
 
 func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
-	// LocksAt scopes the query to this target (WHERE target_canonical = ?) in
-	// deterministic order — same row set the old full-table ListLocks + Go-side
-	// SameCanonical filter produced, without pulling every lock into memory.
-	overlapping, err := rt.Store.LocksAt(rt.Ctx, t)
+	// HoldsCovering is the gate's read: a hold on this target or a directory
+	// hold above it, in deterministic order. Each row names its own target.
+	overlapping, err := rt.Store.HoldsCovering(rt.Ctx, t)
 	if err != nil {
 		fmt.Fprintf(w, "✗ %v\n", err)
 		return 3

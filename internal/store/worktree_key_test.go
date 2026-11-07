@@ -81,11 +81,6 @@ func TestOpen_KeysPathStampedHoldsByAdminDir(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	c := mkClaim(tcPkgStore, tcAlice, time.Hour)
-	c.Worktree = linked
-	if err := s.ClaimPrefix(ctx, c, nil); err != nil {
-		t.Fatal(err)
-	}
 	s.Close()
 
 	s, err = OpenContext(ctx, dbPath)
@@ -103,12 +98,5 @@ func TestOpen_KeysPathStampedHoldsByAdminDir(t *testing.T) {
 	}
 	if got["a.go"] != tcWorktreeKeyAgent || got["b.go"] != "" || len(got) != 2 {
 		t.Errorf("want a.go keyed by its admin dir and b.go unknown, got %+v", got)
-	}
-	var claimWt string
-	if err := s.db.QueryRowContext(ctx, `SELECT worktree FROM claims`).Scan(&claimWt); err != nil {
-		t.Fatal(err)
-	}
-	if claimWt != tcWorktreeKeyAgent {
-		t.Errorf("want the claim keyed by its admin dir, got %q", claimWt)
 	}
 }

@@ -101,6 +101,24 @@ func TestReconcileScan_LiveLeaseIsNotAViolation(t *testing.T) {
 	}
 }
 
+// A live directory hold covers its files: the claimer's own edit beneath it is
+// not a violation either.
+func TestReconcileScan_LiveDirectoryHoldIsNotAViolation(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{mkHold(tcPkgA, true, tcAlice)}, liveProbe); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.ReconcileScan(ctx, scanOf(gate.Observation{Path: tcPkgA + "/x.go", Fingerprint: tcSHA1}), liveEval())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Recorded) != 0 {
+		t.Fatalf("an edit under a live directory hold must not be a violation, got %+v", res.Recorded)
+	}
+}
+
 // A lapsed lease still names the owner it lapsed FROM — forensic annotation,
 // never attribution: nothing here claims that owner performed the write.
 func TestReconcileScan_ExpiredLeaseRecordsWitnessNotCulprit(t *testing.T) {

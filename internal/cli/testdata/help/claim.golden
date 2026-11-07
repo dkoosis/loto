@@ -1,14 +1,14 @@
 usage: loto claim <path-prefix> -t "why" [--ttl 2h]
 
-Atomically reserve a repo-relative directory prefix as session territory:
-"this package is mine this session" — coarser than a per-file lock. Refused
-while another agent's live claim overlaps the prefix (equal or ancestor/
-descendant by path segment). Re-claiming your own prefix refreshes the TTL.
-Advisory between claimants only: a claim does not block loto lock/check under
-the prefix — still lock files before editing.
+Take an exclusive hold on a repo-relative directory: "this package is mine
+this session" — coarser than a per-file lock, and covering every path
+beneath it, on disk or not. Refused while another agent's live hold is on
+the directory, above it or beneath it (by path segment). Re-claiming your own
+prefix refreshes the TTL. A peer's loto lock or write beneath it is refused
+until it expires or you unclaim it.
 
-"." is the repo root, the widest prefix: it overlaps every other claim, so it
-blocks every peer claimant until it expires or you unclaim it. Reach for it
+"." is the repo root, the widest prefix: it covers every path, so it
+blocks every peer until it expires or you unclaim it. Reach for it
 deliberately — a takeover of the whole checkout — not as a shorthand for "the
 directory I am standing in": a prefix is always repo-root-relative, never
 cwd-relative. loto lock still refuses ".", because a lock names a write-set.
@@ -22,4 +22,4 @@ examples:
   -t string
     	intent (required)
   -ttl duration
-    	claim TTL (session-scale lease) (default 2h0m0s)
+    	hold TTL (session-scale lease) (default 2h0m0s)

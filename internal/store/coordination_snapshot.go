@@ -8,7 +8,7 @@ import (
 
 // WithStableCoordinationState holds the project operation flock while it reads
 // every coordination row relevant to paths and while inspect acts on that
-// snapshot. Lock, territory-claim, and candidate-claim acquisitions use the
+// snapshot. Hold and candidate-claim acquisitions use the
 // same flock, so none can land after these reads and before inspect returns.
 //
 // inspect must not call a Store method that acquires the operation flock. It
@@ -17,7 +17,7 @@ import (
 func (s *Store) WithStableCoordinationState(
 	ctx context.Context,
 	paths []string,
-	inspect func([]domain.LockRecord, []domain.ClaimRecord, []domain.CandidateClaim) error,
+	inspect func([]domain.LockRecord, []domain.CandidateClaim) error,
 ) error {
 	flock, err := acquireOpFlockFn(ctx, s.opFlockPath(), s.stderr)
 	if err != nil {
@@ -29,13 +29,9 @@ func (s *Store) WithStableCoordinationState(
 	if err != nil {
 		return err
 	}
-	claims, err := s.ListClaims(ctx)
-	if err != nil {
-		return err
-	}
 	candidates, err := s.CandidateClaimsForPaths(ctx, paths)
 	if err != nil {
 		return err
 	}
-	return inspect(locks, claims, candidates)
+	return inspect(locks, candidates)
 }

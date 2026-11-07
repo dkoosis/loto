@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"loto/internal/domain"
 	"loto/internal/identity"
 )
 
@@ -612,12 +611,11 @@ func TestAcquireReclaimsExpiredHolder_NoDoctor(t *testing.T) {
 	}
 }
 
-// --- loto-qoq: foreign-claim advisory on the lock success path ---
+// --- a claim is a directory hold: it refuses a peer's lock beneath it ---
 
-// TestLock_UnderForeignClaim_EmitsAdvisory pins the dominant case: locking a
-// target under another agent's live claim succeeds (claims never block lock,
-// cooperative model) and rides a ⚠ advisory after the success rows.
-func TestLock_UnderForeignClaim_EmitsAdvisory(t *testing.T) {
+// TestLock_UnderForeignClaim_Refused: locking a target under another agent's
+// live claim is refused, and the refusal names the claim's owner and intent.
+func TestLock_UnderForeignClaim_Refused(t *testing.T) {
 	withTempProject(t)
 	alice, bob := twoAgents(t)
 
@@ -629,27 +627,18 @@ func TestLock_UnderForeignClaim_EmitsAdvisory(t *testing.T) {
 	t.Setenv("LOTO_AGENT_ID", bob.UUID)
 	var out, errBuf bytes.Buffer
 	code := Run([]string{tcCmdLock, tcStoreStoreGo, "-t", tcIntentTest}, &out, &errBuf)
-	if code != 0 {
-		t.Fatalf("exit %d; out=%q err=%q", code, out.String(), errBuf.String())
+	if code != 1 {
+		t.Fatalf("exit %d, want 1; out=%q err=%q", code, out.String(), errBuf.String())
 	}
 	s := out.String()
-	if !strings.Contains(s, "✓ locked") {
-		t.Errorf("expected success row: %q", s)
-	}
-	if !strings.Contains(s, "⚠ under-claim count=1") {
-		t.Errorf("expected advisory header: %q", s)
-	}
-	if strings.Count(s, "under-claim owner=") != 1 {
-		t.Errorf("expected exactly one advisory row: %q", s)
-	}
-	if !strings.Contains(s, "owner="+alice.UUID) || !strings.Contains(s, `intent="`+tcIntentAliceClaim+`"`) || !strings.Contains(s, "prefix="+tcPrefixStore) {
-		t.Errorf("expected owner/intent/prefix on advisory row: %q", s)
+	if !strings.Contains(s, "✗ blocked") || !strings.Contains(s, alice.UUID[:8]) || !strings.Contains(s, tcIntentAliceClaim) {
+		t.Errorf("want a refusal naming alice's claim: %q", s)
 	}
 }
 
-// TestLock_UnderOwnClaim_NoAdvisory: a claim the locker holds itself must not
-// advise against itself.
-func TestLock_UnderOwnClaim_NoAdvisory(t *testing.T) {
+// TestLock_UnderOwnClaim_Succeeds: a claim the locker holds itself does not
+// refuse its own lock.
+func TestLock_UnderOwnClaim_Succeeds(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
 	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
@@ -660,14 +649,10 @@ func TestLock_UnderOwnClaim_NoAdvisory(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %q", code, out.String())
 	}
-	if strings.Contains(out.String(), "under-claim") {
-		t.Errorf("own claim must not emit advisory: %q", out.String())
-	}
 }
 
-// TestLock_UnderExpiredClaim_NoAdvisory: a lapsed foreign claim must not
-// advise.
-func TestLock_UnderExpiredClaim_NoAdvisory(t *testing.T) {
+// TestLock_UnderExpiredClaim_Succeeds: a lapsed foreign claim does not refuse.
+func TestLock_UnderExpiredClaim_Succeeds(t *testing.T) {
 	withTempProject(t)
 	alice, bob := twoAgents(t)
 
@@ -682,145 +667,6 @@ func TestLock_UnderExpiredClaim_NoAdvisory(t *testing.T) {
 	code := Run([]string{tcCmdLock, tcStoreStoreGo, "-t", tcIntentTest}, &out, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("exit %d: %q", code, out.String())
-	}
-	if strings.Contains(out.String(), "under-claim") {
-		t.Errorf("expired claim must not emit advisory: %q", out.String())
-	}
-}
-
-// TestLock_NoClaims_OutputUnchanged pins the zero-claims case byte-identical
-// to pre-change EmitLockSuccess output — no ⚠ block, no header.
-func TestLock_NoClaims_OutputUnchanged(t *testing.T) {
-	withTempProject(t)
-	pinAgent(t)
-	var out bytes.Buffer
-	code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest}, &out, &bytes.Buffer{})
-	if code != 0 {
-		t.Fatalf("exit %d: %q", code, out.String())
-	}
-	want := fmt.Sprintf("✓ locked count=1\n✓ target=%s\n", tcTargetA)
-	if out.String() != want {
-		t.Errorf("output changed with zero claims:\ngot  %q\nwant %q", out.String(), want)
-	}
-}
-
-// TestLock_TwoForeignClaims_SortedAdvisoryRows: one foreign owner (alice)
-// holding claims at two ancestor prefixes of the same target — same-owner
-// overlapping claims never conflict at claim time (unlike cross-owner
-// overlap, which ClaimPrefix refuses), so this is the CLI-reachable shape of
-// "two foreign claims covering one target" (mirrors gateDecide's own
-// TestGateDecide_SameOwnerTwoPrefixes_BlockerPathTieBreak precedent). Owner
-// is equal on both rows, so this exercises the Prefix tie-break: "internal"
-// sorts before "internal/store".
-func TestLock_TwoForeignClaims_SortedAdvisoryRows(t *testing.T) {
-	withTempProject(t)
-	alice, bob := twoAgents(t)
-
-	t.Setenv("LOTO_AGENT_ID", alice.UUID)
-	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", "deep-claim"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatal("alice deep claim failed")
-	}
-	if code := Run([]string{tcCmdClaim, "internal", "-t", "shallow-claim"}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatal("alice shallow claim failed")
-	}
-
-	t.Setenv("LOTO_AGENT_ID", bob.UUID)
-	var out bytes.Buffer
-	code := Run([]string{tcCmdLock, tcStoreStoreGo, "-t", tcIntentTest}, &out, &bytes.Buffer{})
-	if code != 0 {
-		t.Fatalf("exit %d: %q", code, out.String())
-	}
-	s := out.String()
-	if !strings.Contains(s, "⚠ under-claim count=2") {
-		t.Errorf("expected count=2: %q", s)
-	}
-	shallowIdx := strings.Index(s, "prefix=internal\n")
-	deepIdx := strings.Index(s, "prefix="+tcPrefixStore+"\n")
-	if shallowIdx == -1 || deepIdx == -1 || shallowIdx > deepIdx {
-		t.Errorf("expected prefix-sorted advisory rows (internal before internal/store): %q", s)
-	}
-}
-
-// TestCollectForeignClaimAdvisories_OwnAndForeignClaim_OnlyForeignEmits: a
-// target under both an own claim and a foreign claim must advise on the
-// foreign row only. Exercised directly against the pure collector (not the
-// CLI): two DIFFERENT-owner claims covering the same target both stay live
-// simultaneously only in a fixture — ClaimPrefix would refuse a second
-// cross-owner claim overlapping a still-live foreign one, so this state
-// isn't producible through the lock CLI (P2 boundary, plan test 12).
-func TestCollectForeignClaimAdvisories_OwnAndForeignClaim_OnlyForeignEmits(t *testing.T) {
-	now := time.Now()
-	target := domain.Target{Canonical: tcStoreStoreGo}
-	const meUUID = "aaaaaaaa-0000-0000-0000-000000000000"
-	const foeUUID = "bbbbbbbb-0000-0000-0000-000000000000"
-	claims := []domain.ClaimRecord{
-		{PathPrefix: tcPrefixStore, OwnerUUID: meUUID, Intent: "own-intent", ExpiresAt: now.Add(time.Hour)},
-		{PathPrefix: "internal", OwnerUUID: foeUUID, Intent: "foreign-intent", ExpiresAt: now.Add(time.Hour)},
-	}
-	rows := collectForeignClaimAdvisories([]domain.Target{target}, claims, meUUID, domain.EvalContext{Now: now})
-	if len(rows) != 1 {
-		t.Fatalf("want 1 row (own claim filtered out), got %d: %+v", len(rows), rows)
-	}
-	if rows[0].Owner != foeUUID {
-		t.Errorf("expected foreign row only: %+v", rows[0])
-	}
-}
-
-// TestCollectForeignClaimAdvisories_DedupsDuplicateTarget: loto lock's own
-// validateLockTargets already rejects a duplicate CLI arg as invalid (exit 2)
-// before acquireBatch runs, so "loto lock foo foo" never reaches the
-// advisory collector through the CLI. Exercise the seen-map dedup guard
-// directly against the pure collector instead — mirrors how gateDecide's own
-// dedup tests call the pure function with duplicate input.
-func TestCollectForeignClaimAdvisories_DedupsDuplicateTarget(t *testing.T) {
-	now := time.Now()
-	target := domain.Target{Canonical: tcStoreStoreGo}
-	claims := []domain.ClaimRecord{
-		{PathPrefix: tcPrefixStore, OwnerUUID: "foe-uuid", Intent: "foe", ExpiresAt: now.Add(time.Hour)},
-	}
-	rows := collectForeignClaimAdvisories([]domain.Target{target, target}, claims, "my-uuid", domain.EvalContext{Now: now})
-	if len(rows) != 1 {
-		t.Fatalf("want 1 deduped row for duplicate target input, got %d: %+v", len(rows), rows)
-	}
-}
-
-// TestCollectForeignClaimAdvisories_OwnerTieBreak pins the (Target, Owner,
-// Prefix) sort's Owner tie-break, which the bead's byte-identical-output
-// acceptance criterion depends on. The store rejects two cross-owner claims
-// over one live target, so this shape is CLI-unreachable — exercise it
-// directly against the pure collector (parallel to the dedup/own+foreign
-// tests above), feeding the two owners in reverse order to prove the sort,
-// not the input order, decides the row order.
-func TestCollectForeignClaimAdvisories_OwnerTieBreak(t *testing.T) {
-	now := time.Now()
-	target := domain.Target{Canonical: tcStoreStoreGo}
-	const ownerA = "aaaaaaaa-0000-0000-0000-000000000000"
-	const ownerB = "bbbbbbbb-0000-0000-0000-000000000000"
-	claims := []domain.ClaimRecord{
-		{PathPrefix: tcPrefixStore, OwnerUUID: ownerB, Intent: "b", ExpiresAt: now.Add(time.Hour)},
-		{PathPrefix: tcPrefixStore, OwnerUUID: ownerA, Intent: "a", ExpiresAt: now.Add(time.Hour)},
-	}
-	rows := collectForeignClaimAdvisories([]domain.Target{target}, claims, "my-uuid", domain.EvalContext{Now: now})
-	if len(rows) != 2 {
-		t.Fatalf("want 2 rows, got %d: %+v", len(rows), rows)
-	}
-	if rows[0].Owner != ownerA || rows[1].Owner != ownerB {
-		t.Errorf("want Owner-sorted A before B, got %s then %s", rows[0].Owner, rows[1].Owner)
-	}
-}
-
-// TestCollectForeignClaimAdvisories_OtherWorktreeIsSilent: the advisory warns
-// on exactly the claims the gate refuses, so a peer's claim in another
-// worktree, which the gate admits, raises no advisory (loto-njgz).
-func TestCollectForeignClaimAdvisories_OtherWorktreeIsSilent(t *testing.T) {
-	now := time.Now()
-	target := domain.Target{Canonical: tcStoreStoreGo}
-	claims := []domain.ClaimRecord{
-		{PathPrefix: tcPrefixStore, OwnerUUID: "peer", Worktree: "/repo/.claude/worktrees/b", ExpiresAt: now.Add(time.Hour)},
-	}
-	ec := domain.EvalContext{Now: now, MyWorktree: "/repo"}
-	if rows := collectForeignClaimAdvisories([]domain.Target{target}, claims, "my-uuid", ec); len(rows) != 0 {
-		t.Errorf("a claim in another worktree raised an advisory: %+v", rows)
 	}
 }
 

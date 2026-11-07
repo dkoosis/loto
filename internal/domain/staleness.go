@@ -45,7 +45,7 @@ type EvalContext struct {
 	CaseFold bool
 	// MyWorktree is the caller's own checkout key (rt.Worktree), for a
 	// decision surface that scans lock rows directly rather than building an
-	// incoming LockRecord to hand to Conflicts (gateDecide, gateDecideAny,
+	// incoming LockRecord to hand to Conflicts (gateDecide,
 	// hookRowsDecide — loto-3eq6). Compared against a row's LockRecord.Worktree
 	// via SameWorktree. Zero value "" widens rather than narrows, matching
 	// every other ambient field here.
@@ -87,53 +87,6 @@ func (c EvalContext) HolderLiveness(l LockRecord) (v Liveness, probed bool) {
 		return LivenessUnknown, false
 	}
 	return c.Live(l), true
-}
-
-// ClaimIsStale applies the SAME staleness standard to a claim that IsStale
-// applies to a lock: TTL lapse OR the owner provably dead (loto-tzmv.9).
-// Claims carry no PID or start-time, so the subject handed to the probe is the
-// claim lifted into lock shape — owner, session, host, expiry — with a PID-0
-// sentinel. That keeps the probe's uuid-keyed session oracle in play while the
-// pid fallback correctly reads UNKNOWN, so TTL remains the sole authority
-// exactly when there is no better witness.
-//
-// This is deliberately NOT a second definition of "live": the claim gate
-// previously filtered on Expired alone, so one crashed session's 2h claim
-// froze every tree-move in the repo for its full lease with no reclaim path.
-// One predicate, two record kinds — drift here is the bug.
-func (c EvalContext) ClaimIsStale(cl ClaimRecord) bool {
-	return c.IsStale(claimAsLock(cl))
-}
-
-// claimAsLock lifts a claim into the lock shape the probe and the staleness
-// predicates take as their subject. The PID-0 sentinel is deliberate: a claim
-// carries no PID and no start time, so the pid fallback must read UNKNOWN and
-// leave the uuid-keyed session oracle as the only witness.
-func claimAsLock(cl ClaimRecord) LockRecord {
-	return LockRecord{
-		OwnerUUID:   cl.OwnerUUID,
-		SessionUUID: cl.SessionUUID,
-		Host:        cl.Host,
-		ExpiresAt:   cl.ExpiresAt,
-	}
-}
-
-// ClaimHolderIsLive reports whether the claim's owner is PROVABLY running now,
-// whatever the claim's TTL says. It is HolderLiveness for claims, narrowed to
-// the one verdict that is safe to act on here (loto-3dhl).
-//
-// ‡ The narrowing is the design, and it is why this is not simply
-// HolderLiveness(claimAsLock(cl)). A lock row carries a PID and a start time,
-// so its probe has a local fallback and can return DEAD; refusing an overwrite
-// on UNKNOWN there costs one operator glance at another host and still
-// self-heals. A claim carries neither, so a claim whose session record has
-// aged out probes UNKNOWN forever. Refusing on UNKNOWN would let one crashed
-// agent's lapsed claim block `loto sync` across its whole prefix with no
-// reclaim path — the freeze ClaimIsStale's comment above was written to end.
-// Only ALIVE, a positive witness from the session oracle, holds the bytes back.
-func (c EvalContext) ClaimHolderIsLive(cl ClaimRecord) bool {
-	v, probed := c.HolderLiveness(claimAsLock(cl))
-	return probed && v == LivenessAlive
 }
 
 // Liveness is the display-tier refinement of IsStale: it splits a non-stale

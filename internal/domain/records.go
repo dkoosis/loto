@@ -86,31 +86,12 @@ type LockRecord struct {
 	// the store's target validation refused the missing path and the write was
 	// admitted holding nothing. Request-only: never persisted, never read back.
 	MayCreate bool
-}
-
-// ClaimRecord is a coarse path-prefix territory reservation: "this package is
-// mine this session", distinct from the per-file, per-edit LockRecord
-// (loto-7af9). Claims are TTL-only leases — no PID/liveness fields, no mode;
-// Expired is the sole staleness authority. PathPrefix is a canonical
-// repo-relative directory prefix minted by CanonicalizePrefix.
-type ClaimRecord struct {
-	PathPrefix  string
-	OwnerUUID   AgentUUID
-	SessionUUID SessionUUID
-	Intent      string
-	CreatedAt   time.Time
-	ExpiresAt   time.Time
-	Host        string
-	// Worktree: the key of the checkout the claim was taken from, same
-	// meaning and "" = unknown rule as LockRecord.Worktree (loto-19bz).
-	Worktree string
-}
-
-// Expired reports whether the claim's TTL lease has lapsed at now. Claims
-// strip no write bits and carry no PID, so unlike lock staleness there is no
-// liveness refinement — the lease boundary is the whole story.
-func (c ClaimRecord) Expired(now time.Time) bool {
-	return !now.Before(c.ExpiresAt)
+	// Directory marks a request for a directory hold (`loto claim`): its
+	// target is a path prefix from CanonicalizePrefix that covers every path
+	// beneath it, and need not exist yet, so the store does not validate it as
+	// a file. Request-only: a stored row's coverage is its target, whatever
+	// kind it names (PrefixCovers).
+	Directory bool
 }
 
 // CandidateClaim is a durable, per-path territory hold on behalf of a
@@ -127,7 +108,7 @@ func (c ClaimRecord) Expired(now time.Time) bool {
 //
 // Deliberately carries no TTL. A candidate under review has no natural
 // deadline — review takes as long as it takes — so unlike LockRecord (TTL +
-// liveness) or ClaimRecord (TTL only), this record's SOLE staleness authority
+// liveness), this record's SOLE staleness authority
 // is CandidateClaimIsDead: was the process that minted it provably killed
 // without ever resolving it. See PID/ProcStart below.
 type CandidateClaim struct {
@@ -151,9 +132,8 @@ type CandidateClaim struct {
 // gone — the sole staleness authority for a durable candidate claim (no TTL;
 // see CandidateClaim's doc). Lifted into LockRecord shape to reuse the exact
 // probe every other liveness verdict in this store consults, rather than
-// growing a third "is this holder alive" definition (ClaimIsStale already
-// makes this argument for TTL-bearing claims; the same reasoning applies here
-// one level further — no TTL branch at all, since none exists to lapse). A nil
+// growing a third "is this holder alive" definition (no TTL branch at all,
+// since none exists to lapse). A nil
 // probe or an UNKNOWN verdict both answer false: without a positive DEAD
 // verdict, a claim is never reclaimed out from under a candidate still under
 // review.
@@ -210,7 +190,7 @@ const CandidateClaimReclaimGrace = DegradedModeTTL
 // elsewhere) whose probe comes back UNKNOWN — no session record, no socket,
 // nothing to read — is ALSO abandoned, but only once it is at least
 // CandidateClaimReclaimGrace old: it carries zero evidence either way, and
-// unlike a LockRecord or a ClaimRecord it has no TTL backstop to eventually
+// unlike a LockRecord it has no TTL backstop to eventually
 // self-heal on (CandidateClaim's own doc), so leaving the zero-evidence case
 // entirely un-reclaimed is the bug loto-u2p7 reports — doctor reporting
 // healthy while a dead session's claim blocks `loto lock` on its paths

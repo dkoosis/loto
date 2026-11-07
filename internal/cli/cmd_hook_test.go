@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"loto/internal/domain"
 	"loto/internal/identity"
 	"loto/internal/store"
 )
@@ -324,6 +325,48 @@ func TestHook_EditAdmission(t *testing.T) {
 		defer done()
 		if _, _, ok, err := rt.Store.CallRecord(rt.Ctx, "call-refused"); err != nil || ok {
 			t.Errorf("a refused pre recorded a call: ok=%v err=%v", ok, err)
+		}
+	})
+
+	// A claim is a directory hold: it covers every path beneath it, so a
+	// peer's write there is refused like a write over a file lock.
+	t.Run("another owner's claim refuses a write beneath it", func(t *testing.T) {
+		withTempProject(t)
+		alice := pinAgent(t)
+		if code := Run([]string{tcCmdClaim, tcPrefixStore, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+			t.Fatalf("alice claim: exit %d", code)
+		}
+		t.Setenv("LOTO_AGENT_ID", "")
+		pinAgent(t)
+
+		_, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Write", "call-under-claim", tcStoreStoreGo, ""))
+		if code != 2 {
+			t.Fatalf("want exit 2 under a peer's claim, got %d err=%q", code, errOut)
+		}
+		if !strings.Contains(errOut, alice.UUID) {
+			t.Errorf("the refusal must name the holder: %q", errOut)
+		}
+	})
+
+	// My claim admits my write beneath it and the hook still takes the file
+	// hold, so the violation sensor, which reads file holds, sees it held.
+	t.Run("my claim admits my write beneath it and takes the file hold", func(t *testing.T) {
+		withTempProject(t)
+		me := pinAgent(t)
+		if code := Run([]string{tcCmdClaim, tcPrefixStore, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+			t.Fatalf("claim: exit %d", code)
+		}
+		if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Write", "call-own-claim", tcStoreStoreGo, "")); code != 0 {
+			t.Fatalf("pre under my own claim: exit=%d err=%q", code, errOut)
+		}
+		rt, done := hookStoreRead(t)
+		defer done()
+		held, err := rt.Store.LocksAt(rt.Ctx, domain.Target{Canonical: tcStoreStoreGo})
+		if err != nil {
+			t.Fatalf("locks at: %v", err)
+		}
+		if len(held) != 1 || string(held[0].OwnerUUID) != me.UUID {
+			t.Errorf("want my file hold beneath my claim, got %+v", held)
 		}
 	})
 

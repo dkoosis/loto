@@ -79,9 +79,9 @@ func loadMovedPaths(ctx context.Context, repoTop, oldHead, newHead string) ([]st
 
 // collapseMovedRows turns gateDecide's per-blocker rows into ONE row per
 // path — the shape the bead's Rule asks for ("one ⚠ row per path with the
-// holder"). A lock beats a claim when both cover a path: the lock names the
-// agent actually sitting in the file, which is who the mover has to go talk
-// to. Within a kind the lowest holder uuid wins, so the choice is stable.
+// holder"). A hold on the path itself beats a directory hold above it: it
+// names the agent actually sitting in the file, which is who the mover has to
+// go talk to. Otherwise the lowest holder uuid wins, so the choice is stable.
 func collapseMovedRows(deny []render.GateDenyRow) []movedRow {
 	best := map[string]render.GateDenyRow{}
 	for i := range deny {
@@ -103,8 +103,8 @@ func collapseMovedRows(deny []render.GateDenyRow) []movedRow {
 }
 
 func movedRowBetter(candidate, current render.GateDenyRow) bool {
-	if candidate.Kind != current.Kind {
-		return candidate.Kind == render.GateKindLock
+	if onPath := candidate.BlockerPath == candidate.Path; onPath != (current.BlockerPath == current.Path) {
+		return onPath
 	}
 	return candidate.HolderUUID < current.HolderUUID
 }
@@ -124,7 +124,7 @@ func printMoved(stdout io.Writer, rows []movedRow) {
 		r := &rows[i]
 		var b strings.Builder
 		fmt.Fprintf(&b, "⚠ path=%s kind=%s blocker=%s", relPath(r.Path), r.Kind, r.HolderUUID)
-		if r.Kind == render.GateKindClaim && r.BlockerPath != "" {
+		if r.BlockerPath != "" && r.BlockerPath != r.Path {
 			fmt.Fprintf(&b, " prefix=%s", relPath(r.BlockerPath))
 		}
 		fmt.Fprintf(&b, " intent=%q expires_at=%s", r.Intent, r.ExpiresAt.UTC().Format(time.RFC3339))
@@ -212,9 +212,8 @@ func movedPeerRows(ctx context.Context, repoTop string, paths []string, stderr i
 		return nil, false
 	}
 	defer rt.Close()
-	locks, lerr := rt.Store.ListLocks(rt.Ctx)
-	claims, cerr := rt.Store.ListClaims(rt.Ctx)
-	if lerr != nil || cerr != nil {
+	locks, err := rt.Store.ListLocks(rt.Ctx)
+	if err != nil {
 		fmt.Fprintln(stderr, "⚠ store=unreadable moved=fail-open")
 		return nil, false
 	}
@@ -226,5 +225,5 @@ func movedPeerRows(ctx context.Context, repoTop string, paths []string, stderr i
 		fmt.Fprintf(stderr, "⚠ unresolved=%d moved=partial\n", len(invalid))
 	}
 	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
-	return collapseMovedRows(gateDecide(targets, locks, claims, rt.Agent.UUID, ec)), true
+	return collapseMovedRows(gateDecide(targets, locks, rt.Agent.UUID, ec)), true
 }

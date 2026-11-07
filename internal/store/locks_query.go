@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 
 	"loto/internal/domain"
 )
@@ -126,4 +127,39 @@ func (s *Store) LocksAt(ctx context.Context, t domain.Target) ([]domain.LockReco
 	}
 	defer rows.Close()
 	return scanLocksRows(rows)
+}
+
+// HoldsCovering returns every hold whose target covers t: a hold on t itself,
+// or a directory hold on one of its ancestors up to the repo root ".", in
+// LocksAt's order. One indexed lookup over the ancestor keys, not a scan, so
+// the pre-hook's decision stays one read.
+func (s *Store) HoldsCovering(ctx context.Context, t domain.Target) ([]domain.LockRecord, error) {
+	keys := coveringKeys(t.Canonical)
+	targets := make([]domain.Target, 0, len(keys))
+	for _, k := range keys {
+		targets = append(targets, domain.Target{Canonical: k})
+	}
+	ph, args := s.keys().inTargets(targets)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+lockCols+` FROM locks WHERE `+s.keys().col("target_canonical")+` IN (`+ph+`) ORDER BY created_at ASC, owner_uuid ASC`, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
+		args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanLocksRows(rows)
+}
+
+// coveringKeys is the targets whose hold covers path: path itself, each of
+// its ancestors, and the repo root ".".
+func coveringKeys(path string) []string {
+	keys := []string{path}
+	for p := path; strings.Contains(p, "/"); {
+		p = p[:strings.LastIndexByte(p, '/')]
+		keys = append(keys, p)
+	}
+	if path != "." {
+		keys = append(keys, ".")
+	}
+	return keys
 }

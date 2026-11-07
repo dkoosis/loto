@@ -12,9 +12,8 @@ import (
 	"loto/internal/render"
 )
 
-// gateDecide partitions targets into deny rows: a foreign live claim whose
-// prefix overlaps a target, or a foreign live lock on a target's
-// exact path. Pure — no IO, no clock read beyond ec.Now — so cmdCheck's
+// gateDecide partitions targets into deny rows: a foreign live hold that
+// covers a target (its own path, or a directory above it). Pure — no IO, no clock read beyond ec.Now — so cmdCheck's
 // gate branch (cmd_check.go) and this file's unit tests share one decision
 // surface (gate-design.md component 4). Returns render.GateDenyRow directly
 // (the precedent validateLockTargets/cmd_lock.go sets for a decision
@@ -23,22 +22,20 @@ import (
 // from plain check's computeCheckConflicts (plan "gate semantics vs plain
 // check"):
 //
-//  1. any foreign live lock denies.
-//  2. claims are consulted at all (plain check never reads them);
-//     PrefixOverlaps gives ancestor coverage, so a claim on internal/store
+//  1. any foreign live hold denies; a directory hold on internal/store
 //     denies a not-yet-on-disk internal/store/new.go.
-//  3. the liveness threshold is !IsStale, not Classify==Alive: a PID-0
+//  2. the liveness threshold is !IsStale, not Classify==Alive: a PID-0
 //     hold (LivenessUnknown under Classify) must still deny within its TTL.
 //
 // Output is deterministically sorted path -> kind -> holder UUID -> blocker
 // path (.claude/rules/design.md: same input, byte-identical output). The
-// blocker-path tie-break matters: one owner can hold claims at two ancestor
-// prefixes of one target — same path/kind/holder, distinct rows.
-func gateDecide(targets []domain.Target, locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ec domain.EvalContext) []render.GateDenyRow {
+// blocker-path tie-break matters: one owner can hold two directories above
+// one target — same path/kind/holder, distinct rows.
+func gateDecide(targets []domain.Target, locks []domain.LockRecord, myUUID string, ec domain.EvalContext) []render.GateDenyRow {
 	var rows []render.GateDenyRow
 	seen := map[string]bool{}
 	for _, t := range targets {
-		rows = appendGateDenyForTarget(rows, seen, t, locks, claims, myUUID, ec)
+		rows = appendGateDenyForTarget(rows, seen, t, locks, myUUID, ec)
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Path != rows[j].Path {
@@ -55,15 +52,13 @@ func gateDecide(targets []domain.Target, locks []domain.LockRecord, claims []dom
 	return rows
 }
 
-// appendGateDenyForTarget scans locks then claims for foreign live coverage
-// of t, appending a deny row per distinct (kind, blocker) pair. seen dedupes
-// across repeated targets in the input (a duplicate CLI arg) the same way
-// computeCheckConflicts dedupes plain check's rows. Each key
-// includes the blocker path (l.Target.Canonical, c.PathPrefix): a lock may be
-// a directory, so one owner can hold several locks covering one target, and
-// two foreign claims at different ancestor prefixes are distinct blockers,
-// each owed a row.
-func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t domain.Target, locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ec domain.EvalContext) []render.GateDenyRow {
+// appendGateDenyForTarget scans holds for foreign live coverage of t,
+// appending a deny row per distinct blocker. seen dedupes across repeated
+// targets in the input (a duplicate CLI arg) the same way
+// computeCheckConflicts dedupes plain check's rows. Each key includes the
+// blocker path: a hold may be a directory, so one owner can hold several
+// holds covering one target, each owed a row.
+func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t domain.Target, locks []domain.LockRecord, myUUID string, ec domain.EvalContext) []render.GateDenyRow {
 	for i := range locks {
 		l := &locks[i]
 		if !gateLockDenies(t, l, myUUID, ec) {
@@ -79,76 +74,12 @@ func appendGateDenyForTarget(rows []render.GateDenyRow, seen map[string]bool, t 
 			Intent: l.Intent, ExpiresAt: l.ExpiresAt, BlockerPath: l.Target.Canonical,
 		})
 	}
-	for i := range claims {
-		c := &claims[i]
-		if !ec.Refuses(domain.AgentUUID(myUUID), ec.MyWorktree, t.Canonical, ec.ClaimHold(*c)) {
-			continue
-		}
-		key := "claim|" + t.Canonical + "|" + c.PathPrefix + "|" + string(c.OwnerUUID)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		rows = append(rows, render.GateDenyRow{
-			Path: t.Canonical, Kind: render.GateKindClaim, HolderUUID: string(c.OwnerUUID),
-			Intent: c.Intent, ExpiresAt: c.ExpiresAt, BlockerPath: c.PathPrefix,
-		})
-	}
 	return rows
 }
 
 // gateLockDenies reports whether lock l is foreign live coverage of t.
 func gateLockDenies(t domain.Target, l *domain.LockRecord, myUUID string, ec domain.EvalContext) bool {
 	return ec.Refuses(domain.AgentUUID(myUUID), ec.MyWorktree, t.Canonical, ec.LockHold(*l))
-}
-
-// gateDecideAny is gateDecide's path-free sibling (ccp-vx4w): "does any
-// foreign live lock or claim exist anywhere in this repo", for a guard whose
-// operation (a branch switch) has no meaningful path operand — unlike
-// gateDecide, it never matches a target, it enumerates. One deny row per
-// distinct foreign live lock and per distinct foreign live claim; the
-// per-target dedupe keys collapse to lock/claim identity alone since there
-// is no target path to key on. Same liveness rule as gateDecide (!IsStale,
-// not Classify==Alive) and the same wave carve-out (myUUID excluded) —
-// deliberately reuses gateDecide's semantics rather than drifting a second
-// definition of "foreign" and "live".
-func gateDecideAny(locks []domain.LockRecord, claims []domain.ClaimRecord, myUUID string, ec domain.EvalContext) []render.GateDenyRow {
-	var rows []render.GateDenyRow
-	for i := range locks {
-		l := &locks[i]
-		// "." covers every target: any live hold of another actor in this
-		// worktree refuses the move (docs/write-gate.md, ref transitions).
-		if !ec.Refuses(domain.AgentUUID(myUUID), ec.MyWorktree, ".", ec.LockHold(*l)) {
-			continue
-		}
-		rows = append(rows, render.GateDenyRow{
-			Path: l.Target.Canonical, Kind: render.GateKindLock, HolderUUID: string(l.OwnerUUID),
-			Intent: l.Intent, ExpiresAt: l.ExpiresAt, BlockerPath: l.Target.Canonical,
-		})
-	}
-	for i := range claims {
-		c := &claims[i]
-		// loto-tzmv.9: claims get the SAME liveness standard locks get above.
-		// Filtering on Expired alone let a crashed session's claim deny every
-		// tree-move in the repo for its full 2h TTL, with no reclaim path.
-		if !ec.Refuses(domain.AgentUUID(myUUID), ec.MyWorktree, ".", ec.ClaimHold(*c)) {
-			continue
-		}
-		rows = append(rows, render.GateDenyRow{
-			Path: c.PathPrefix, Kind: render.GateKindClaim, HolderUUID: string(c.OwnerUUID),
-			Intent: c.Intent, ExpiresAt: c.ExpiresAt, BlockerPath: c.PathPrefix,
-		})
-	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Path != rows[j].Path {
-			return rows[i].Path < rows[j].Path
-		}
-		if rows[i].Kind != rows[j].Kind {
-			return rows[i].Kind < rows[j].Kind
-		}
-		return rows[i].HolderUUID < rows[j].HolderUUID
-	})
-	return rows
 }
 
 // gateInfraUnreachable renders the shared infra-fail-open row: `loto check
@@ -164,11 +95,11 @@ func gateInfraUnreachable(stderr io.Writer, err error) int {
 }
 
 // runCheckGate is the IO runner for `loto check --gate <path>...`: resolve
-// targets (never stats them — a claim covers not-yet-on-disk paths, the
-// kuv.10 class), short-circuit fail-open BEFORE any store IO when identity
+// targets (never stats them — a directory hold covers not-yet-on-disk paths,
+// the kuv.10 class), short-circuit fail-open BEFORE any store IO when identity
 // isn't pinned (an unpinned identity.Ensure mints a throwaway UUID owning
 // nothing, so opening the store here would false-deny every path on a bare
-// human-shell invocation), then read-only query ListLocks/ListClaims and
+// human-shell invocation), then read-only query ListLocks and
 // render gateDecide's verdict. Never acquires, refreshes, or chmods — pure
 // read (plan CLI contract). Verdict rows (✓ no conflicts, deny rows, invalid
 // rows) go to stdout; FAIL-OPEN notices go to stderr (loto-tzmv.8), because a
@@ -208,15 +139,11 @@ func runCheckGate(ctx context.Context, paths []string, base, repoTop string, std
 	if err != nil {
 		return gateInfraUnreachable(stderr, err)
 	}
-	claims, err := rt.Store.ListClaims(rt.Ctx)
-	if err != nil {
-		return gateInfraUnreachable(stderr, err)
-	}
 
 	// memoized: gateDecide evaluates the predicate per (target × record), so a
 	// wide staged set would otherwise re-probe one holder hundreds of times.
 	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
-	rows := gateDecide(targets, locks, claims, rt.Agent.UUID, ec)
+	rows := gateDecide(targets, locks, rt.Agent.UUID, ec)
 	// Resurfaced on BOTH verdicts, and never as one: an unresolved violation
 	// is not a reason to block this tool call — it is a reason the NEXT
 	// submit will be refused, and the agent is better told now than at the

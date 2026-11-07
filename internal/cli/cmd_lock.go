@@ -108,7 +108,7 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
 
-	return acquireBatch(rt, targets, *intent, *ttl, rt.liveProbe(), stdout, stderr)
+	return acquireBatch(rt, targets, false, *intent, *ttl, rt.liveProbe(), stdout, stderr)
 }
 
 // emitDirLockHint — sd-hh0h. `loto lock <dir>` is refused with
@@ -453,12 +453,15 @@ func classifyCanonicalizeErr(err error) string {
 	}
 }
 
-func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.Duration, live domain.HolderLiveProbe, stdout, stderr io.Writer) int {
+func acquireBatch(rt *runtime, targets []domain.Target, dir bool, intent string, ttl time.Duration, live domain.HolderLiveProbe, stdout, stderr io.Writer) int {
 	now := time.Now()
 	if w := degradedPidWarning(); w != "" {
 		fmt.Fprint(stderr, w)
 	}
 	recs := buildLockRecords(targets, rt, intent, now, ttl)
+	for i := range recs {
+		recs[i].Directory = dir
+	}
 	acquired, err := rt.Store.AcquireLocks(rt.Ctx, recs, live)
 	if err != nil {
 		if mce, ok := errors.AsType[*store.MultiConflictError](err); ok {
@@ -478,9 +481,6 @@ func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.
 		return 3
 	}
 	render.EmitLockSuccess(stdout, acquired)
-	// Foreign-claim advisory (loto-qoq): claims never block a lock, so this
-	// only runs on the success path, after the success rows.
-	emitForeignClaimAdvisories(stdout, foreignClaimAdvisoriesFor(rt, targets, now))
 	return 0
 }
 

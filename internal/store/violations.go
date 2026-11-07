@@ -495,7 +495,7 @@ func (s *Store) ackedFingerprints(ctx context.Context, paths []string, baseline,
 }
 
 // authorizedPaths is the set of observed paths something live covers — a live
-// lock or a live candidate claim. Both reads are whole-table-cheap at loto's
+// hold on the path or a directory above it, or a live candidate claim. Both reads are whole-table-cheap at loto's
 // scale and are taken once per pass rather than once per path.
 func (s *Store) authorizedPaths(ctx context.Context, obs []gate.Observation, ec domain.EvalContext) (map[string]struct{}, error) {
 	out := make(map[string]struct{}, len(obs))
@@ -512,8 +512,11 @@ func (s *Store) authorizedPaths(ctx context.Context, obs []gate.Observation, ec 
 	paths := make([]string, 0, len(obs))
 	for _, o := range obs {
 		paths = append(paths, o.Path)
-		if _, ok := live[o.Path]; ok {
-			out[o.Path] = struct{}{}
+		for _, k := range coveringKeys(o.Path) { // a directory hold covers its files
+			if _, ok := live[k]; ok {
+				out[o.Path] = struct{}{}
+				break
+			}
 		}
 	}
 	claims, err := s.CandidateClaimsForPaths(ctx, paths)
