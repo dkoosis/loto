@@ -334,9 +334,9 @@ func printCheckConflicts(stdout io.Writer, rows []checkConflict) bool {
 			fmt.Fprintf(stdout, "✗ path=%s blocker=%s holder_target=%s intent=%q expires_at=%s liveness=alive\n",
 				relPath(r.Path), r.Blocker.OwnerUUID, relPath(r.Blocker.Target.Canonical), r.Blocker.Intent,
 				r.Blocker.ExpiresAt.UTC().Format(time.RFC3339))
-			// A directory hold above the path has no fix to print: tag and
-			// unlock take only a file, and holder_target names the hold.
-			if render.HoldAbove(r.Blocker.Target.Canonical, r.Path) {
+			// tag and unlock refuse the repo root, so a root claim has no fix
+			// to print; holder_target names it.
+			if r.Blocker.Target.Canonical == "." {
 				continue
 			}
 			// Prefer tag+defer: the breadcrumb surfaces in the holder's tag

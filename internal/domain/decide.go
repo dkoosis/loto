@@ -1,5 +1,7 @@
 package domain
 
+import "strings"
+
 // Hold is the one shape the write gate's conflict rule reads (docs/write-gate.md):
 // whose it is, which worktree, which target, and whether it is live. A hold's
 // target is a file or a directory prefix, so every surface that decides a
@@ -50,4 +52,10 @@ func (c EvalContext) Decide(actor AgentUUID, worktree, target string, holds []Ho
 		}
 	}
 	return -1
+}
+
+// HoldAbove reports whether a hold on target is a directory hold above path,
+// not a hold on path itself. Byte comparison: both are canonical keys.
+func HoldAbove(target, path string) bool {
+	return target != path && (target == "." || strings.HasPrefix(path, target+"/"))
 }

@@ -283,7 +283,7 @@ func TestClaimCaseVariantPrefixCoversLock(t *testing.T) {
 		if code != 1 {
 			t.Fatalf("gate admitted %q under alice's claim on internal/Store; exit %d: %q", tcStoreStoreGo, code, out.String())
 		}
-		if !strings.Contains(out.String(), " hold=internal/store") {
+		if !strings.Contains(out.String(), "unlock --force -t \"unblock\" internal/store") {
 			t.Errorf("expected a deny row naming the directory hold: %q", out.String())
 		}
 		return

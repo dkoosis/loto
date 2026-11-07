@@ -53,6 +53,25 @@ func TestStatusSingleTargetFree(t *testing.T) {
 	}
 }
 
+// TestStatusSingleTarget_NamesAClaimAbove: status on a file under a peer's
+// claim reports the claim, as the gate that refuses the write does.
+func TestStatusSingleTarget_NamesAClaimAbove(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	if code := Run([]string{tcCmdClaim, tcPrefixStore, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("claim: exit %d", code)
+	}
+	t.Setenv("LOTO_AGENT_ID", "")
+	pinAgent(t)
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdStatus, tcStoreStoreGo}, &out, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(out.String(), "✗ holder target="+tcPrefixStore+" ") {
+		t.Errorf("want the claim above named: %q", out.String())
+	}
+}
+
 // TestStatusShowsTTLAndLiveness pins loto-k5el.1 SC3: status reports remaining
 // TTL and an owner-liveness verdict per lock.
 func TestStatusShowsTTLAndLiveness(t *testing.T) {

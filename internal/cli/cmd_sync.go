@@ -1137,7 +1137,14 @@ func syncLockConflictFor(path string, locks []domain.LockRecord, ec domain.EvalC
 		if !ec.Covers(ec.MyWorktree, path, h) {
 			continue
 		}
-		if v, probed := ec.HolderLiveness(*l); probed && v != domain.LivenessDead {
+		v, probed := ec.HolderLiveness(*l)
+		// A lapsed directory hold refuses only while its holder is provably
+		// alive, as a claim did (loto-3dhl): it carries no pid, so UNKNOWN would
+		// hold every path beneath it back forever.
+		if domain.HoldAbove(l.Target.Canonical, path) && v != domain.LivenessAlive {
+			continue
+		}
+		if probed && v != domain.LivenessDead {
 			return syncLapsedReason(v), string(l.OwnerUUID), true
 		}
 	}

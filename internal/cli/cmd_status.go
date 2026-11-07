@@ -262,10 +262,9 @@ func fmtTTL(d time.Duration) string {
 }
 
 func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
-	// LocksAt scopes the query to this target (WHERE target_canonical = ?) in
-	// deterministic order — same row set the old full-table ListLocks + Go-side
-	// SameCanonical filter produced, without pulling every lock into memory.
-	overlapping, err := rt.Store.LocksAt(rt.Ctx, t)
+	// HoldsCovering is the gate's read: a hold on this target or a directory
+	// hold above it, in deterministic order. Each row names its own target.
+	overlapping, err := rt.Store.HoldsCovering(rt.Ctx, t)
 	if err != nil {
 		fmt.Fprintf(w, "✗ %v\n", err)
 		return 3

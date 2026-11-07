@@ -5,7 +5,6 @@ import (
 	"io"
 	"slices"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -32,9 +31,9 @@ type GateDenyRow struct {
 // of caller order; the blocker-path tie-break keeps two same-owner holds at
 // different directories above one target in a stable order. The `blocker=`
 // field name matches EmitConflictWithTags — one vocabulary for "who is
-// blocking me" across every conflict-reporting surface. A file hold's row
-// carries the `loto unlock --force` fix block, mirroring printCheckConflicts,
-// naming the hold's own target.
+// blocking me" across every conflict-reporting surface. Each row but a root
+// claim's carries the `loto unlock --force` fix block, mirroring
+// printCheckConflicts, naming the hold's own target.
 func EmitGateDeny(w io.Writer, rows []GateDenyRow) {
 	cwd := getCwd()
 	sorted := slices.Clone(rows)
@@ -53,23 +52,14 @@ func EmitGateDeny(w io.Writer, rows []GateDenyRow) {
 	fmt.Fprintf(w, "✗ blocked count=%d\n", len(sorted))
 	for i := range sorted {
 		r := &sorted[i]
-		fmt.Fprintf(w, "✗ path=%s kind=%s blocker=%s intent=%q expires_at=%s",
+		fmt.Fprintf(w, "✗ path=%s kind=%s blocker=%s intent=%q expires_at=%s\n",
 			relToCwd(r.Path, cwd), r.Kind, holderTag(r.HolderUUID), r.Intent,
 			r.ExpiresAt.UTC().Format(time.RFC3339))
-		if HoldAbove(r.BlockerPath, r.Path) {
-			fmt.Fprintf(w, " hold=%s\n", relToCwd(r.BlockerPath, cwd))
-			continue
+		if r.BlockerPath == "." {
+			continue // unlock refuses the repo root, so a root claim has no fix to print
 		}
-		fmt.Fprintln(w)
 		fmt.Fprintln(w, "```bash")
 		fmt.Fprintf(w, "loto unlock --force -t \"unblock\" %s\n", relToCwd(r.BlockerPath, cwd))
 		fmt.Fprintln(w, "```")
 	}
-}
-
-// HoldAbove reports whether blocker is a directory hold above path. unlock
-// takes only a file, so such a row names the hold and prints no fix block,
-// as a claim's did.
-func HoldAbove(blocker, path string) bool {
-	return blocker != path && (blocker == "." || strings.HasPrefix(path, blocker+"/"))
 }

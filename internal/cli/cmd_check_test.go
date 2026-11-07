@@ -219,8 +219,25 @@ func TestCheck_UnderForeignClaim_ReportsTheHold(t *testing.T) {
 	if s := out.String(); !strings.Contains(s, "holder_target="+tcPrefixStore+" ") || !strings.Contains(s, "blocker="+alice.UUID) {
 		t.Errorf("want a conflict naming alice's directory hold: %q", s)
 	}
-	if strings.Contains(out.String(), "unlock --force") {
-		t.Errorf("unlock takes only a file, so a directory hold prints no unlock fix: %q", out.String())
+}
+
+// TestCheck_UnderRootClaim_PrintsNoFix: tag and unlock refuse the repo root,
+// so a conflict with a peer's `loto claim .` prints no command they refuse.
+func TestCheck_UnderRootClaim_PrintsNoFix(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid()))
+	if code := Run([]string{tcCmdClaim, ".", tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("claim .: exit %d", code)
+	}
+	t.Setenv("LOTO_AGENT_ID", "")
+	pinAgent(t)
+	var out bytes.Buffer
+	if code := Run([]string{tcCmdCheck, tcStoreStoreGo}, &out, &bytes.Buffer{}); code != 1 {
+		t.Fatalf("exit %d, want 1: %q", code, out.String())
+	}
+	if s := out.String(); !strings.Contains(s, "holder_target=. ") || strings.Contains(s, "unlock --force") {
+		t.Errorf("want the root claim named and no unlock fix: %q", s)
 	}
 }
 

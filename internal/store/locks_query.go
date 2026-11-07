@@ -134,13 +134,10 @@ func (s *Store) LocksAt(ctx context.Context, t domain.Target) ([]domain.LockReco
 // LocksAt's order. One indexed lookup over the ancestor keys, not a scan, so
 // the pre-hook's decision stays one read.
 func (s *Store) HoldsCovering(ctx context.Context, t domain.Target) ([]domain.LockRecord, error) {
-	targets := []domain.Target{t}
-	for p := t.Canonical; strings.Contains(p, "/"); {
-		p = p[:strings.LastIndexByte(p, '/')]
-		targets = append(targets, domain.Target{Canonical: p})
-	}
-	if t.Canonical != "." {
-		targets = append(targets, domain.Target{Canonical: "."})
+	keys := coveringKeys(t.Canonical)
+	targets := make([]domain.Target, 0, len(keys))
+	for _, k := range keys {
+		targets = append(targets, domain.Target{Canonical: k})
 	}
 	ph, args := s.keys().inTargets(targets)
 	rows, err := s.db.QueryContext(ctx,
@@ -151,4 +148,18 @@ func (s *Store) HoldsCovering(ctx context.Context, t domain.Target) ([]domain.Lo
 	}
 	defer rows.Close()
 	return scanLocksRows(rows)
+}
+
+// coveringKeys is the targets whose hold covers path: path itself, each of
+// its ancestors, and the repo root ".".
+func coveringKeys(path string) []string {
+	keys := []string{path}
+	for p := path; strings.Contains(p, "/"); {
+		p = p[:strings.LastIndexByte(p, '/')]
+		keys = append(keys, p)
+	}
+	if path != "." {
+		keys = append(keys, ".")
+	}
+	return keys
 }

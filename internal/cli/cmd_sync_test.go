@@ -1423,3 +1423,25 @@ func TestSyncBatchContext_ScopesHoldsToOwnWorktree(t *testing.T) {
 		t.Error("a directory hold in this worktree must hold back its sync")
 	}
 }
+
+// TestSyncConflictFor_LapsedDirectoryHoldRefusesOnlyWhileAlive: a lapsed
+// claim carries no pid, so its holder reads UNKNOWN once its session record
+// ages out; only a provably alive holder still holds the paths beneath it
+// back (loto-3dhl). A lapsed file hold with an UNKNOWN holder still refuses.
+func TestSyncConflictFor_LapsedDirectoryHoldRefusesOnlyWhileAlive(t *testing.T) {
+	lapsed := time.Now().Add(-time.Minute)
+	probe := func(v domain.Liveness) domain.EvalContext {
+		return domain.EvalContext{Now: time.Now(), Live: func(domain.LockRecord) domain.Liveness { return v }}
+	}
+	dir := []domain.LockRecord{{Target: domain.Target{Canonical: "a"}, OwnerUUID: "o1", ExpiresAt: lapsed}}
+	if _, _, conflict := syncConflictFor("a/f.go", dir, nil, probe(domain.LivenessUnknown)); conflict {
+		t.Error("a lapsed directory hold whose holder reads UNKNOWN must not hold back sync")
+	}
+	if _, _, conflict := syncConflictFor("a/f.go", dir, nil, probe(domain.LivenessAlive)); !conflict {
+		t.Error("a lapsed directory hold whose holder is alive must hold back sync")
+	}
+	file := []domain.LockRecord{{Target: domain.Target{Canonical: "a/f.go"}, OwnerUUID: "o1", ExpiresAt: lapsed}}
+	if _, _, conflict := syncConflictFor("a/f.go", file, nil, probe(domain.LivenessUnknown)); !conflict {
+		t.Error("a lapsed file hold whose holder reads UNKNOWN must still hold back sync")
+	}
+}

@@ -575,7 +575,10 @@ func hookAdmit(rt *runtime, filePath string) (declared string, blocker *domain.L
 // blocker when a live foreign row refuses it; neither when the path is free
 // to take.
 //
-// L(f) = s. A row of the caller's actor is authorization already held. A
+// L(f) = s. A row of the caller's actor on path is authorization already
+// held. My directory hold above path is not: the hook still takes the file
+// hold beneath it, so the observation and the violation sensor, which read
+// file holds, see the write as held. A
 // subagent is its parent's actor (docs/write-gate.md, loto-e1ku), so its write
 // over its parent's lock is admitted here, and another actor's is refused
 // below.
@@ -591,7 +594,8 @@ func hookAdmit(rt *runtime, filePath string) (declared string, blocker *domain.L
 // another checkout, or a peer's, either way not this write's concern.
 func hookRowsDecide(rows []domain.LockRecord, path string, me domain.AgentUUID, ec domain.EvalContext) (held bool, blocker *domain.LockRecord) {
 	for i := range rows {
-		if rows[i].OwnerUUID == me && domain.SameWorktree(ec.MyWorktree, rows[i].Worktree) {
+		if rows[i].OwnerUUID == me && domain.SameWorktree(ec.MyWorktree, rows[i].Worktree) &&
+			ec.SameTarget(rows[i].Target, domain.Target{Canonical: path}) {
 			return true, nil
 		}
 	}
