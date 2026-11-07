@@ -553,13 +553,13 @@ func hookAdmit(rt *runtime, filePath string) (declared string, blocker *domain.L
 	if reason := statFileTargetReason(rt.RepoTop, t.Canonical, true); reason != "" {
 		return "", nil, nil
 	}
-	rows, err := rt.Store.LocksAt(rt.Ctx, t)
+	rows, err := rt.Store.HoldsCovering(rt.Ctx, t)
 	if err != nil {
 		return "", nil, err
 	}
 	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
 	me := domain.AgentUUID(rt.Agent.UUID)
-	if held, blocker := hookRowsDecide(rows, me, ec); held {
+	if held, blocker := hookRowsDecide(rows, t.Canonical, me, ec); held {
 		return t.Canonical, nil, nil
 	} else if blocker != nil {
 		return "", blocker, nil
@@ -569,8 +569,9 @@ func hookAdmit(rt *runtime, filePath string) (declared string, blocker *domain.L
 	return hookTakeLock(rt, t, me, ec)
 }
 
-// hookRowsDecide reads the rows already on the path for hookAdmit: held=true
-// when a row of mine already authorizes the write; a non-nil
+// hookRowsDecide reads the holds already covering path for hookAdmit (on it,
+// or on a directory above it): held=true when a row of mine already
+// authorizes the write; a non-nil
 // blocker when a live foreign row refuses it; neither when the path is free
 // to take.
 //
@@ -588,19 +589,19 @@ func hookAdmit(rt *runtime, filePath string) (declared string, blocker *domain.L
 // worktree of one repo, so a row at the same repo-relative canonical but a
 // different LockRecord.Worktree names a different file on disk — mine in
 // another checkout, or a peer's, either way not this write's concern.
-func hookRowsDecide(rows []domain.LockRecord, me domain.AgentUUID, ec domain.EvalContext) (held bool, blocker *domain.LockRecord) {
+func hookRowsDecide(rows []domain.LockRecord, path string, me domain.AgentUUID, ec domain.EvalContext) (held bool, blocker *domain.LockRecord) {
 	for i := range rows {
 		if rows[i].OwnerUUID == me && domain.SameWorktree(ec.MyWorktree, rows[i].Worktree) {
 			return true, nil
 		}
 	}
-	return false, hookBlocker(rows, me, ec)
+	return false, hookBlocker(rows, path, me, ec)
 }
 
-// hookBlocker is Decide over the rows on one path (store.LocksAt, so rows[0]
-// names the target): the first live row of another actor in this worktree,
-// or nil. Subagents resolve to the same actor as their parent.
-func hookBlocker(rows []domain.LockRecord, me domain.AgentUUID, ec domain.EvalContext) *domain.LockRecord {
+// hookBlocker is Decide over the rows covering path: the first live row of
+// another actor in this worktree, or nil. Subagents resolve to the same actor
+// as their parent.
+func hookBlocker(rows []domain.LockRecord, path string, me domain.AgentUUID, ec domain.EvalContext) *domain.LockRecord {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -608,7 +609,7 @@ func hookBlocker(rows []domain.LockRecord, me domain.AgentUUID, ec domain.EvalCo
 	for i := range rows {
 		holds = append(holds, ec.LockHold(rows[i]))
 	}
-	if j := ec.Decide(me, ec.MyWorktree, rows[0].Target.Canonical, holds); j >= 0 {
+	if j := ec.Decide(me, ec.MyWorktree, path, holds); j >= 0 {
 		return &rows[j]
 	}
 	return nil
@@ -633,13 +634,13 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, ec domain.E
 		Worktree:  rt.Worktree,
 	}
 	if _, err := rt.Store.AcquireLocks(rt.Ctx, []domain.LockRecord{rec}, memoLiveProbe(rt.liveProbe())); err != nil {
-		held, lerr := rt.Store.LocksAt(rt.Ctx, t)
+		held, lerr := rt.Store.HoldsCovering(rt.Ctx, t)
 		if lerr != nil {
 			return "", nil, lerr
 		}
 		// A row of mine won: the write is authorized. No row to name means the
 		// acquire failed for its own reason, and the write goes unchecked.
-		authorized, blocker := hookRowsDecide(held, me, ec)
+		authorized, blocker := hookRowsDecide(held, t.Canonical, me, ec)
 		if blocker != nil || authorized {
 			return "", blocker, nil
 		}

@@ -81,14 +81,13 @@ type syncDiff struct {
 }
 
 // syncConflict is a divergent path syncDecide refused to write, and why.
-// Holder is a uuid8 (leased/territory-claim) or a candidate id (candidate-claim).
+// Holder is a uuid8 (leased) or a candidate id (candidate-claim).
 type syncConflict struct {
 	Path, Reason, Holder string
 }
 
 const (
 	syncReasonLeased         = "leased"
-	syncReasonTerritoryClaim = "territory-claim"
 	syncReasonCandidateClaim = "candidate-claim"
 	// syncReasonLeaseLapsedHolderLive refuses a fast-forward whose lease has
 	// lapsed but whose holder still probes ALIVE. Its own reason string rather
@@ -102,20 +101,6 @@ const (
 	// operator's next move is different: this one is a question about another
 	// machine, not a wait.
 	syncReasonLeaseLapsedHolderUnknown = "lease-lapsed-holder-unknown"
-	// syncReasonClaimLapsedHolderLive refuses a fast-forward inside a territory
-	// claim whose TTL lapsed while its owner is still provably running
-	// (loto-3dhl). The claim leg had the same hole the lease leg did: a claim
-	// that lapsed mid-session stopped covering its prefix, and the agent's
-	// uncommitted edits under it were fast-forwarded away while the agent was
-	// still writing them.
-	//
-	// ‡ There is deliberately NO claim-lapsed-holder-unknown twin. A lease row
-	// carries a PID and a start time, so an UNKNOWN verdict there is rare and
-	// self-heals; a claim carries neither, so every claim whose session record
-	// has aged out probes UNKNOWN forever, and refusing on that would freeze
-	// sync over the whole prefix with no reclaim path. See
-	// domain.EvalContext.ClaimHolderIsLive for the full argument.
-	syncReasonClaimLapsedHolderLive = "claim-lapsed-holder-live"
 	// syncReasonResidueNotFile refuses a deletion whose target stopped being an
 	// ordinary file between the scan and the delete — a directory or a symlink
 	// now stands where the rejected candidate created a blob. Advisory (⚠), not
@@ -509,13 +494,13 @@ func syncFastForwardBatches(rt *runtime, repoTop, expectedIntegration string, de
 			paths[i] = d.Path
 		}
 		err := rt.Store.WithStableCoordinationState(rt.Ctx, paths, func(
-			locks []domain.LockRecord, claims []domain.ClaimRecord, cands []domain.CandidateClaim,
+			locks []domain.LockRecord, cands []domain.CandidateClaim,
 		) error {
 			ec, err := syncBatchContext(rt, repoTop, expectedIntegration)
 			if err != nil {
 				return err
 			}
-			apply, conflicts := syncDecide(batch, locks, claims, cands, ec)
+			apply, conflicts := syncDecide(batch, locks, cands, ec)
 			out.Conflicts = append(out.Conflicts, conflicts...)
 			if syncBeforeApplyFn != nil {
 				syncBeforeApplyFn()
@@ -547,13 +532,13 @@ func syncSweepBatches(rt *runtime, repoTop, expectedIntegration string, residue 
 			paths[i] = r.Path
 		}
 		err := rt.Store.WithStableCoordinationState(rt.Ctx, paths, func(
-			locks []domain.LockRecord, claims []domain.ClaimRecord, cands []domain.CandidateClaim,
+			locks []domain.LockRecord, cands []domain.CandidateClaim,
 		) error {
 			ec, err := syncBatchContext(rt, repoTop, expectedIntegration)
 			if err != nil {
 				return err
 			}
-			sweep, conflicts := syncDecideResidue(batch, locks, claims, cands, ec)
+			sweep, conflicts := syncDecideResidue(batch, locks, cands, ec)
 			out.Conflicts = append(out.Conflicts, conflicts...)
 			if syncBeforeDeleteFn != nil {
 				syncBeforeDeleteFn()
@@ -615,15 +600,15 @@ func syncDryRun(rt *runtime, repoTop, expectedIntegration string, decidable []sy
 
 	var sweep []syncResidue
 	err := rt.Store.WithStableCoordinationState(rt.Ctx, paths, func(
-		locks []domain.LockRecord, claims []domain.ClaimRecord, cands []domain.CandidateClaim,
+		locks []domain.LockRecord, cands []domain.CandidateClaim,
 	) error {
 		ec, err := syncBatchContext(rt, repoTop, expectedIntegration)
 		if err != nil {
 			return err
 		}
-		apply, decidedConflicts := syncDecide(decidable, locks, claims, cands, ec)
+		apply, decidedConflicts := syncDecide(decidable, locks, cands, ec)
 		var residueConflicts []syncConflict
-		sweep, residueConflicts = syncDecideResidue(residue, locks, claims, cands, ec)
+		sweep, residueConflicts = syncDecideResidue(residue, locks, cands, ec)
 		out.Conflicts = mergeSyncConflicts(decidedConflicts, residueConflicts)
 		for _, d := range apply {
 			out.Synced = append(out.Synced, d.Path)
@@ -741,19 +726,14 @@ func syncClassifyResidue(ctx context.Context, repoTop string, sweep []syncResidu
 
 // syncDecideResidue partitions attributed residue into what may be deleted and
 // what a live holder blocks, using the same predicate as syncDecide. Pure.
-func syncDecideResidue(residue []syncResidue, locks []domain.LockRecord, claims []domain.ClaimRecord, cands []domain.CandidateClaim, ec domain.EvalContext) (sweep []syncResidue, conflicts []syncConflict) {
-	locksByPath := map[string][]domain.LockRecord{}
-	for i := range locks {
-		l := &locks[i]
-		locksByPath[l.Target.Canonical] = append(locksByPath[l.Target.Canonical], *l)
-	}
+func syncDecideResidue(residue []syncResidue, locks []domain.LockRecord, cands []domain.CandidateClaim, ec domain.EvalContext) (sweep []syncResidue, conflicts []syncConflict) {
 	candsByPath := map[string][]domain.CandidateClaim{}
 	for i := range cands {
 		c := &cands[i]
 		candsByPath[c.PathCanonical] = append(candsByPath[c.PathCanonical], *c)
 	}
 	for _, r := range residue {
-		if reason, holder, ok := syncConflictFor(r.Path, locksByPath[r.Path], claims, candsByPath[r.Path], ec); ok {
+		if reason, holder, ok := syncConflictFor(r.Path, locks, candsByPath[r.Path], ec); ok {
 			conflicts = append(conflicts, syncConflict{Path: r.Path, Reason: reason, Holder: holder})
 			continue
 		}
@@ -1085,13 +1065,8 @@ func hashExceptionalPath(ctx context.Context, repoTop, path string) (string, err
 // fast-forward) and conflicts (never written). Pure — no IO, clock only via
 // ec.Now — φ gateDecide (cmd_check_gate.go). Deliberately has no myUUID
 // parameter: unlike gateDecide/submitLeaseCheck, sync must not clobber ANY
-// live lease or claim, including its own caller's (plan §3, plan-review P1-1).
-func syncDecide(diffs []syncDiff, locks []domain.LockRecord, claims []domain.ClaimRecord, cands []domain.CandidateClaim, ec domain.EvalContext) (apply []syncDiff, conflicts []syncConflict) {
-	locksByPath := map[string][]domain.LockRecord{}
-	for i := range locks {
-		l := &locks[i]
-		locksByPath[l.Target.Canonical] = append(locksByPath[l.Target.Canonical], *l)
-	}
+// live hold, including its own caller's (plan §3, plan-review P1-1).
+func syncDecide(diffs []syncDiff, locks []domain.LockRecord, cands []domain.CandidateClaim, ec domain.EvalContext) (apply []syncDiff, conflicts []syncConflict) {
 	candsByPath := map[string][]domain.CandidateClaim{}
 	for i := range cands {
 		c := &cands[i]
@@ -1099,7 +1074,7 @@ func syncDecide(diffs []syncDiff, locks []domain.LockRecord, claims []domain.Cla
 	}
 
 	for _, d := range diffs {
-		if reason, holder, ok := syncConflictFor(d.Path, locksByPath[d.Path], claims, candsByPath[d.Path], ec); ok {
+		if reason, holder, ok := syncConflictFor(d.Path, locks, candsByPath[d.Path], ec); ok {
 			conflicts = append(conflicts, syncConflict{Path: d.Path, Reason: reason, Holder: holder})
 			continue
 		}
@@ -1111,15 +1086,14 @@ func syncDecide(diffs []syncDiff, locks []domain.LockRecord, claims []domain.Cla
 	return apply, conflicts
 }
 
-// syncConflictFor checks, in order, whether path is covered by a live lease
-// (any owner), a live territory claim (no owner
-// carve-out — Refuses called with an empty actor per plan-review
-// P1-1), or any candidate-claim row (liveness irrelevant — durable by
+// syncConflictFor checks, in order, whether path is covered by a live hold on
+// it or a directory above it (any owner — Refuses called with an empty actor
+// per plan-review P1-1), or any candidate-claim row (liveness irrelevant — durable by
 // design, a dead one is doctor's reclaim job, not sync's).
 //
 // ‡ A lapsed lease is TWO questions here, not one (loto-0o0j). IsStale answers
 // the first — may the row be reclaimed? — on TTL alone, and that is right:
-// lapsing frees the territory for the next lock or claim. It does not answer
+// lapsing frees the territory for the next hold. It does not answer
 // the second, which is the only one sync is actually asking: may these bytes be
 // destroyed? An agent whose lease lapsed during a long tool call is still
 // running and its edits are still uncommitted, so the answer is no.
@@ -1131,11 +1105,6 @@ func syncDecide(diffs []syncDiff, locks []domain.LockRecord, claims []domain.Cla
 // naming which it was, because the operator's next move differs: wait out a
 // live agent, go look at the other host for an unknown one.
 //
-// ‡ The claim leg asks the same second question and answers it more narrowly
-// (loto-3dhl): a lapsed claim holds the bytes back only when its owner probes
-// ALIVE, never on UNKNOWN, because a claim carries no PID to make UNKNOWN
-// recoverable. domain.EvalContext.ClaimHolderIsLive carries that argument.
-//
 // syncLapsedReason names which non-dead verdict refused a lapsed lease.
 func syncLapsedReason(v domain.Liveness) string {
 	if v == domain.LivenessAlive {
@@ -1144,28 +1113,12 @@ func syncLapsedReason(v domain.Liveness) string {
 	return syncReasonLeaseLapsedHolderUnknown
 }
 
-func syncConflictFor(path string, locks []domain.LockRecord, claims []domain.ClaimRecord, cands []domain.CandidateClaim, ec domain.EvalContext) (reason, holder string, conflict bool) {
+func syncConflictFor(path string, locks []domain.LockRecord, cands []domain.CandidateClaim, ec domain.EvalContext) (reason, holder string, conflict bool) {
 	// Sync overwrites bytes on behalf of no actor, so every live hold covering
 	// path refuses it (Refuses with an empty actor); a lapsed one still holds
 	// the bytes back while its holder may be writing them (loto-0o0j, 3dhl).
 	if reason, holder, ok := syncLockConflictFor(path, locks, ec); ok {
 		return reason, holder, true
-	}
-	for i := range claims {
-		c := &claims[i]
-		h := ec.ClaimHold(*c)
-		if !ec.Covers(ec.MyWorktree, path, h) {
-			continue
-		}
-		if ec.Refuses("", ec.MyWorktree, path, h) {
-			return syncReasonTerritoryClaim, string(c.OwnerUUID), true
-		}
-		// Lapsed, so the RESERVATION is gone and the next claim may take the
-		// prefix — but the bytes under it are a separate question, the same
-		// one the lease leg above asks (loto-3dhl).
-		if ec.ClaimHolderIsLive(*c) {
-			return syncReasonClaimLapsedHolderLive, string(c.OwnerUUID), true
-		}
 	}
 	if len(cands) > 0 {
 		return syncReasonCandidateClaim, cands[0].CandidateID, true
@@ -1500,7 +1453,7 @@ func emitSyncFixBlock(w io.Writer, out syncOutcome, unattributed []string, opts 
 	fmt.Fprintln(w, "```bash")
 	if len(out.Conflicts) > 0 {
 		fmt.Fprintln(w, "loto status                # see holders")
-		fmt.Fprintln(w, "loto sync                  # re-run once the lease/claim resolves")
+		fmt.Fprintln(w, "loto sync                  # re-run once the hold resolves")
 	}
 	if len(out.TargetSkips) > 0 {
 		// The bytes on disk are safe — what a target-modified row's reader

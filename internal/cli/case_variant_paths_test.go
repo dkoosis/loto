@@ -261,8 +261,8 @@ func TestCheckGateCaseVariantAgreesWithLock(t *testing.T) {
 	}
 }
 
-// TestClaimCaseVariantPrefixCoversLock: claims overlap by prefix
-// (domain.PrefixOverlaps), also a byte comparison, so resolveCLIPrefix needs
+// TestClaimCaseVariantPrefixCoversLock: a directory hold covers by prefix
+// (domain.PrefixCovers), also a byte comparison, so resolveCLIPrefix needs
 // the same fold. A claim typed `internal/Store` must cover the store package.
 func TestClaimCaseVariantPrefixCoversLock(t *testing.T) {
 	repo := withTempProject(t)
@@ -283,8 +283,8 @@ func TestClaimCaseVariantPrefixCoversLock(t *testing.T) {
 		if code != 1 {
 			t.Fatalf("gate admitted %q under alice's claim on internal/Store; exit %d: %q", tcStoreStoreGo, code, out.String())
 		}
-		if !strings.Contains(out.String(), "kind=claim") {
-			t.Errorf("expected a claim-kind deny row: %q", out.String())
+		if !strings.Contains(out.String(), "unlock --force -t \"unblock\" internal/store") {
+			t.Errorf("expected a deny row naming the directory hold: %q", out.String())
 		}
 		return
 	}

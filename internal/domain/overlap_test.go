@@ -43,53 +43,32 @@ func TestPrefixOverlaps(t *testing.T) {
 	}
 }
 
-func TestClaimRecordExpired(t *testing.T) {
-	now := time.Now()
-	cases := []struct {
-		name      string
-		expiresAt time.Time
-		want      bool
-	}{
-		{"future", now.Add(time.Hour), false},
-		{"past", now.Add(-time.Hour), true},
-		{"exactly-now", now, true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			r := ClaimRecord{PathPrefix: tcStorePrefix, ExpiresAt: c.expiresAt}
-			if got := r.Expired(now); got != c.want {
-				t.Errorf("Expired(now) with expires_at=%v = %v; want %v", c.expiresAt, got, c.want)
-			}
-		})
-	}
-}
-
 func TestRefuses_Claim(t *testing.T) {
 	now := time.Now()
 	const myUUID = "11111111-1111-1111-1111-111111111111"
 	const foeUUID = "22222222-2222-2222-2222-222222222222"
 	cases := []struct {
 		name   string
-		c      ClaimRecord
+		c      LockRecord
 		target string
 		want   bool
 	}{
-		{"foreign-live-covers", ClaimRecord{PathPrefix: tcStorePrefix, OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix + "/file.go", true},
-		{"own-claim", ClaimRecord{PathPrefix: tcStorePrefix, OwnerUUID: myUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix + "/file.go", false},
-		{"expired", ClaimRecord{PathPrefix: tcStorePrefix, OwnerUUID: foeUUID, ExpiresAt: now.Add(-time.Hour)}, tcStorePrefix + "/file.go", false},
-		{"non-overlapping-sibling", ClaimRecord{PathPrefix: tcStorePrefix, OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, "internal/storefront/file.go", false},
-		{"exact-prefix-match", ClaimRecord{PathPrefix: tcStorePrefix, OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix, true},
-		{"strict-ancestor-deep", ClaimRecord{PathPrefix: "pkg", OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, "pkg/a/b/c/deep.go", true},
+		{"foreign-live-covers", LockRecord{Target: Target{Canonical: tcStorePrefix}, OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix + "/file.go", true},
+		{"own-claim", LockRecord{Target: Target{Canonical: tcStorePrefix}, OwnerUUID: myUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix + "/file.go", false},
+		{"expired", LockRecord{Target: Target{Canonical: tcStorePrefix}, OwnerUUID: foeUUID, ExpiresAt: now.Add(-time.Hour)}, tcStorePrefix + "/file.go", false},
+		{"non-overlapping-sibling", LockRecord{Target: Target{Canonical: tcStorePrefix}, OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, "internal/storefront/file.go", false},
+		{"exact-prefix-match", LockRecord{Target: Target{Canonical: tcStorePrefix}, OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix, true},
+		{"strict-ancestor-deep", LockRecord{Target: Target{Canonical: "pkg"}, OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, "pkg/a/b/c/deep.go", true},
 		// sd-isv2: a takeover's root claim is what a peer's ref-mutating git
 		// has to consult. These are the rows the gate reads.
-		{"foreign-root-claim-covers-anything", ClaimRecord{PathPrefix: ".", OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix + "/file.go", true},
-		{"own-root-claim-does-not-block-me", ClaimRecord{PathPrefix: ".", OwnerUUID: myUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix + "/file.go", false},
-		{"expired-root-claim", ClaimRecord{PathPrefix: ".", OwnerUUID: foeUUID, ExpiresAt: now.Add(-time.Hour)}, tcStorePrefix + "/file.go", false},
+		{"foreign-root-claim-covers-anything", LockRecord{Target: Target{Canonical: "."}, OwnerUUID: foeUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix + "/file.go", true},
+		{"own-root-claim-does-not-block-me", LockRecord{Target: Target{Canonical: "."}, OwnerUUID: myUUID, ExpiresAt: now.Add(time.Hour)}, tcStorePrefix + "/file.go", false},
+		{"expired-root-claim", LockRecord{Target: Target{Canonical: "."}, OwnerUUID: foeUUID, ExpiresAt: now.Add(-time.Hour)}, tcStorePrefix + "/file.go", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ec := EvalContext{Now: now}
-			if got := ec.Refuses(myUUID, "", c.target, ec.ClaimHold(c.c)); got != c.want {
+			if got := ec.Refuses(myUUID, "", c.target, ec.LockHold(c.c)); got != c.want {
 				t.Errorf("Refuses(%+v, %q) = %v; want %v", c.c, c.target, got, c.want)
 			}
 		})
@@ -130,7 +109,7 @@ func TestEvalContextFoldedComparisonsResolveLegacyKeys(t *testing.T) {
 	legacy := Target{Canonical: "docs/README.md"} // as a pre-fold loto stored it
 	folded := Target{Canonical: "docs/readme.md"} // as the CLI mints it now
 	const target = "docs/guides/x.md"
-	claim := ClaimRecord{PathPrefix: "docs/Guides", OwnerUUID: "owner-a"}
+	claim := LockRecord{Target: Target{Canonical: "docs/Guides"}, OwnerUUID: "owner-a"}
 
 	for _, c := range []struct {
 		name string
@@ -143,10 +122,10 @@ func TestEvalContextFoldedComparisonsResolveLegacyKeys(t *testing.T) {
 			if got := ec.SameTarget(folded, legacy); got != c.want {
 				t.Errorf("SameTarget(%q,%q) = %v; want %v", folded.Canonical, legacy.Canonical, got, c.want)
 			}
-			if got := ec.PrefixCovers(claim.PathPrefix, target); got != c.want {
-				t.Errorf("PrefixCovers(%q,%q) = %v; want %v", claim.PathPrefix, target, got, c.want)
+			if got := ec.PrefixCovers(claim.Target.Canonical, target); got != c.want {
+				t.Errorf("PrefixCovers(%q,%q) = %v; want %v", claim.Target.Canonical, target, got, c.want)
 			}
-			if got := ec.Refuses("owner-b", "", target, ec.ClaimHold(claim)); got != c.want {
+			if got := ec.Refuses("owner-b", "", target, ec.LockHold(claim)); got != c.want {
 				t.Errorf("Refuses = %v; want %v", got, c.want)
 			}
 		})
@@ -157,12 +136,12 @@ func TestEvalContextFoldedComparisonsResolveLegacyKeys(t *testing.T) {
 // expired, covers nothing however the spellings line up.
 func TestEvalContextFoldWidensOnlyThePathLeg(t *testing.T) {
 	ec := EvalContext{Now: time.Now(), CaseFold: true}
-	mine := ClaimRecord{PathPrefix: "Docs", OwnerUUID: "me", ExpiresAt: ec.Now.Add(time.Hour)}
-	if ec.Refuses("me", "", "docs/x.md", ec.ClaimHold(mine)) {
+	mine := LockRecord{Target: Target{Canonical: "Docs"}, OwnerUUID: "me", ExpiresAt: ec.Now.Add(time.Hour)}
+	if ec.Refuses("me", "", "docs/x.md", ec.LockHold(mine)) {
 		t.Error("a caller's own claim must not cover its own target")
 	}
-	dead := ClaimRecord{PathPrefix: "Docs", OwnerUUID: "other", ExpiresAt: ec.Now.Add(-time.Hour)}
-	if ec.Refuses("me", "", "docs/x.md", ec.ClaimHold(dead)) {
+	dead := LockRecord{Target: Target{Canonical: "Docs"}, OwnerUUID: "other", ExpiresAt: ec.Now.Add(-time.Hour)}
+	if ec.Refuses("me", "", "docs/x.md", ec.LockHold(dead)) {
 		t.Error("an expired claim must not cover a target")
 	}
 }

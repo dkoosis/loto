@@ -55,7 +55,7 @@ func TestClaimCmdAcquireUnclaimTTL(t *testing.T) {
 	if code := Run([]string{tcCmdClaim, tcPrefixStore, "-t", tcIntentTest}, &out, &errBuf); code != 0 {
 		t.Fatalf("claim exit=%d out=%q err=%q", code, out.String(), errBuf.String())
 	}
-	if !strings.Contains(out.String(), "✓ claimed count=1") || !strings.Contains(out.String(), "prefix=internal/store") {
+	if !strings.Contains(out.String(), "✓ locked count=1") || !strings.Contains(out.String(), "target=internal/store") {
 		t.Errorf("claim output: %q", out.String())
 	}
 	if strings.Contains(out.String(), "⚠") {
@@ -76,7 +76,7 @@ func TestClaimCmdAcquireUnclaimTTL(t *testing.T) {
 	if !strings.Contains(out.String(), "⚠ prefix=pkg/notyet not-on-disk") {
 		t.Errorf("expected not-on-disk advisory: %q", out.String())
 	}
-	if !strings.Contains(out.String(), "✓ claimed count=1") {
+	if !strings.Contains(out.String(), "✓ locked count=1") {
 		t.Errorf("advisory must not block the claim: %q", out.String())
 	}
 
@@ -85,7 +85,7 @@ func TestClaimCmdAcquireUnclaimTTL(t *testing.T) {
 	if code := Run([]string{tcCmdUnclaim, tcPrefixStore}, &out, &errBuf); code != 0 {
 		t.Fatalf("unclaim exit=%d out=%q err=%q", code, out.String(), errBuf.String())
 	}
-	if !strings.Contains(out.String(), "✓ unclaimed count=1") {
+	if !strings.Contains(out.String(), "✓ unlocked count=1") {
 		t.Errorf("unclaim output: %q", out.String())
 	}
 
@@ -94,8 +94,8 @@ func TestClaimCmdAcquireUnclaimTTL(t *testing.T) {
 	if code := Run([]string{tcCmdUnclaim, tcPrefixStore}, &out, &errBuf); code != 0 {
 		t.Fatalf("unclaim-none exit=%d out=%q err=%q", code, out.String(), errBuf.String())
 	}
-	if !strings.Contains(out.String(), "state=no-claim") {
-		t.Errorf("expected no-claim row: %q", out.String())
+	if !strings.Contains(out.String(), "state=no-lock") {
+		t.Errorf("expected no-lock row: %q", out.String())
 	}
 
 	// TTL e2e: expired claim is reclaimed by a second agent. Generous margin —
@@ -155,7 +155,7 @@ func TestClaimCmdRepoRootIsTheWidestPrefix(t *testing.T) {
 	if code := Run([]string{tcCmdClaim, ".", "-t", tcIntentTest}, &out, &errBuf); code != 0 {
 		t.Fatalf("claim . exit=%d; want 0; out=%q err=%q", code, out.String(), errBuf.String())
 	}
-	if !strings.Contains(out.String(), "✓ claimed count=1") || !strings.Contains(out.String(), "prefix=.") {
+	if !strings.Contains(out.String(), "✓ locked count=1") || !strings.Contains(out.String(), "target=.") {
 		t.Errorf("claim . output: %q", out.String())
 	}
 

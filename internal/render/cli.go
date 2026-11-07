@@ -119,80 +119,6 @@ func EmitCandidateClaimConflict(w io.Writer, ce *store.CandidateClaimConflictErr
 	}
 }
 
-// EmitClaimSuccess renders the acquired-claim block (loto-7af9). Single-claim
-// by design — the claim verb takes exactly one prefix — so the count header is
-// constant; it stays count-first for surface consistency with lock/unlock.
-// The ttl shown is the record's own lease span (ExpiresAt−CreatedAt), so the
-// row can never disagree with what was stored.
-func EmitClaimSuccess(w io.Writer, rec domain.ClaimRecord) {
-	fmt.Fprintf(w, "✓ claimed count=1\n")
-	fmt.Fprintf(w, "✓ prefix=%s ttl=%s expires_at=%s\n",
-		relToCwd(rec.PathPrefix, getCwd()), rec.ExpiresAt.Sub(rec.CreatedAt),
-		rec.ExpiresAt.UTC().Format(time.RFC3339))
-	// Advisory-limit reminder (pass-2 strategic-fit): a claim binds claimants
-	// only — lock/check under the prefix do not consult it, so the per-file
-	// lock discipline still applies inside claimed territory.
-	fmt.Fprintf(w, "ℹ advisory: claim does not block lock/check under the prefix — still lock files before editing\n")
-}
-
-// EmitClaimConflict renders the blocked-claim block: count-first, ⚠ per
-// blocker, holder named by owner id, sorted prefix then created_at.
-func EmitClaimConflict(w io.Writer, ce *store.ClaimConflictError) {
-	cwd := getCwd()
-	blockers := slices.Clone(ce.Blockers)
-	sort.Slice(blockers, func(i, j int) bool {
-		if blockers[i].PathPrefix != blockers[j].PathPrefix {
-			return blockers[i].PathPrefix < blockers[j].PathPrefix
-		}
-		return blockers[i].CreatedAt.Before(blockers[j].CreatedAt)
-	})
-	fmt.Fprintf(w, "✗ blocked count=%d\n", len(blockers))
-	for i := range blockers {
-		b := &blockers[i]
-		fmt.Fprintf(w, "⚠ prefix=%s blocker=%s intent=%q expires_at=%s\n",
-			relToCwd(b.PathPrefix, cwd), holderTag(string(b.OwnerUUID)), b.Intent,
-			b.ExpiresAt.UTC().Format(time.RFC3339))
-	}
-}
-
-// EmitClaimRelease renders the unclaim outcome and returns the suggested exit
-// code: 0 for released / no-claim, 1 for not-owner. Render owns the rows and
-// the code so the claim verb pair matches the lock pair's shape
-// (EmitReleaseResults); the ✗ row names the actual live holder.
-func EmitClaimRelease(w io.Writer, res store.ClaimReleaseResult) int {
-	path := relToCwd(res.PathPrefix, getCwd())
-	switch res.State {
-	case store.ClaimStateReleased:
-		fmt.Fprintf(w, "✓ unclaimed count=1\n✓ prefix=%s\n", path)
-		return 0
-	case store.ClaimStateNoClaim:
-		fmt.Fprintf(w, "✓ unclaimed count=0\nℹ prefix=%s state=no-claim\n", path)
-		return 0
-	case store.ClaimStateNotOwner:
-		// Name the holder like EmitClaimConflict does — matches the lock-side
-		// not-owner row now that both route through holderTag (loto-a8t).
-		fmt.Fprintf(w, "✓ unclaimed count=0\n✗ prefix=%s state=not-owner owner=%s\n", path, holderTag(res.Owner))
-		return 1
-	default:
-		fmt.Fprintf(w, "✗ prefix=%s state=unknown\n", path)
-		return 3
-	}
-}
-
-// EmitClaimsReleased renders the claim half of a session-end `unlock --all`:
-// the claim prefixes ReleaseBySession dropped. Prints a triage count first
-// (design.md), then one ✓ row per prefix, cwd-relative. Empty input still emits
-// the count=0 line so the claim leg is never silent — a hook reading this
-// surface must be able to tell "no claims owned" from a crash. prefixes are
-// pre-sorted by the store.
-func EmitClaimsReleased(w io.Writer, prefixes []string) {
-	fmt.Fprintf(w, "ℹ claims-released count=%d\n", len(prefixes))
-	cwd := getCwd()
-	for _, p := range prefixes {
-		fmt.Fprintf(w, "✓ prefix=%s\n", relToCwd(p, cwd))
-	}
-}
-
 // EmitTagFooter renders the holder-facing trailing block of pending external
 // tags. Empty input emits nothing — the caller's primary output must stand
 // alone when there's no message to surface. Sort order is the caller's
@@ -318,7 +244,7 @@ func EmitReleaseResults(w io.Writer, results []store.ReleaseResult) int {
 		case store.StateNoLock:
 			fmt.Fprintf(w, "ℹ target=%s state=no-lock\n", path)
 		case store.StateNotOwner:
-			// Name the holder like EmitClaimConflict/EmitConflictWithTags do —
+			// Name the holder like EmitConflictWithTags do —
 			// a bare UUID here forked the release-surface convention (loto-a8t).
 			fmt.Fprintf(w, "✗ target=%s state=not-owner owner=%s\n", path, holderTag(r.Owner))
 		}

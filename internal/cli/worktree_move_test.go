@@ -52,7 +52,7 @@ func TestWorktreeMove_KeepsHoldLiveAndOwned(t *testing.T) {
 	if strings.Contains(errBuf.String(), "ambiguous") {
 		t.Fatalf("the moved checkout's holds must read as its own: %q", errBuf.String())
 	}
-	if !strings.Contains(out.String(), "count=1") || !strings.Contains(out.String(), tcPrefixStore) {
+	if !strings.Contains(out.String(), "unlocked count=2") || !strings.Contains(out.String(), tcPrefixStore) {
 		t.Errorf("want the lock and the claim released: %q", out.String())
 	}
 	if code := Run([]string{tcCmdLock, tcTargetB, tcFlagIntent, "after"}, io.Discard, io.Discard); code != 0 {

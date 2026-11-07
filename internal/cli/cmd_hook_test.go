@@ -327,6 +327,26 @@ func TestHook_EditAdmission(t *testing.T) {
 		}
 	})
 
+	// A claim is a directory hold: it covers every path beneath it, so a
+	// peer's write there is refused like a write over a file lock.
+	t.Run("another owner's claim refuses a write beneath it", func(t *testing.T) {
+		withTempProject(t)
+		alice := pinAgent(t)
+		if code := Run([]string{tcCmdClaim, tcPrefixStore, tcFlagIntent, tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+			t.Fatalf("alice claim: exit %d", code)
+		}
+		t.Setenv("LOTO_AGENT_ID", "")
+		pinAgent(t)
+
+		_, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Write", "call-under-claim", tcStoreStoreGo, ""))
+		if code != 2 {
+			t.Fatalf("want exit 2 under a peer's claim, got %d err=%q", code, errOut)
+		}
+		if !strings.Contains(errOut, alice.UUID) {
+			t.Errorf("the refusal must name the holder: %q", errOut)
+		}
+	})
+
 	// NotebookEdit names its target notebook_path, not file_path; admission
 	// must read it, or a peer-held notebook is written past the gate.
 	t.Run("a NotebookEdit over another owner's lock refuses", func(t *testing.T) {

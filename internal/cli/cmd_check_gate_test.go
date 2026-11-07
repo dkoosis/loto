@@ -21,7 +21,7 @@ const (
 )
 
 // gateDecide unit tests (loto-vr2, gate-design.md component 4). Pure —
-// domain.LockRecord/domain.ClaimRecord fixtures in, []render.GateDenyRow
+// domain.LockRecord fixtures in, []render.GateDenyRow
 // out — no store, no CLI, no clock read beyond the EvalContext/now passed
 // in. These
 // pin the deliberate divergences from plain check's computeCheckConflicts:
@@ -45,50 +45,18 @@ func gateEC(now time.Time) domain.EvalContext {
 	return domain.EvalContext{Now: now, Live: nil}
 }
 
-// deadProbe / aliveProbe stand in for runtime.liveProbe in unit tests: the
-// probe owns all environmental policy, so pinning its verdict is the only way
-// to exercise the liveness leg of the claim predicate (loto-tzmv.9). They
-// answer unconditionally because a claim carries no PID — a pid-gated stub
-// would return UNKNOWN for every claim and silently skip the leg under test.
-func deadProbe(domain.LockRecord) domain.Liveness  { return domain.LivenessDead }
-func aliveProbe(domain.LockRecord) domain.Liveness { return domain.LivenessAlive }
-
-func TestGateDecide_ForeignLiveClaimDenies(t *testing.T) {
+func TestGateDecide_ForeignDirectoryHoldDenies(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcPrefixStore + "/new.go"} // kuv.10 class: not on disk
-	claims := []domain.ClaimRecord{
-		{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "foe-claim", ExpiresAt: now.Add(time.Hour)},
+	locks := []domain.LockRecord{
+		{Target: domain.Target{Canonical: tcPrefixStore}, OwnerUUID: gateFoeUUID, Intent: "foe-claim", ExpiresAt: now.Add(time.Hour)},
 	}
-	rows := gateDecide([]domain.Target{target}, nil, claims, gateMyUUID, gateEC(now))
+	rows := gateDecide([]domain.Target{target}, locks, gateMyUUID, gateEC(now))
 	if len(rows) != 1 {
 		t.Fatalf("want 1 deny row, got %d: %+v", len(rows), rows)
 	}
-	if rows[0].Kind != render.GateKindClaim || rows[0].HolderUUID != gateFoeUUID || rows[0].Path != target.Canonical {
+	if rows[0].HolderUUID != gateFoeUUID || rows[0].Path != target.Canonical || rows[0].BlockerPath != tcPrefixStore {
 		t.Errorf("unexpected row: %+v", rows[0])
-	}
-}
-
-func TestGateDecide_OwnClaimAllows(t *testing.T) {
-	now := time.Now()
-	target := domain.Target{Canonical: tcPrefixStore + "/new.go"}
-	claims := []domain.ClaimRecord{
-		{PathPrefix: tcPrefixStore, OwnerUUID: gateMyUUID, Intent: gateIntentMine, ExpiresAt: now.Add(time.Hour)},
-	}
-	rows := gateDecide([]domain.Target{target}, nil, claims, gateMyUUID, gateEC(now))
-	if len(rows) != 0 {
-		t.Fatalf("own claim must not deny, got %+v", rows)
-	}
-}
-
-func TestGateDecide_ExpiredClaimAllows(t *testing.T) {
-	now := time.Now()
-	target := domain.Target{Canonical: tcPrefixStore + "/new.go"}
-	claims := []domain.ClaimRecord{
-		{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "stale", ExpiresAt: now.Add(-time.Minute)},
-	}
-	rows := gateDecide([]domain.Target{target}, nil, claims, gateMyUUID, gateEC(now))
-	if len(rows) != 0 {
-		t.Fatalf("expired claim must not deny, got %+v", rows)
 	}
 }
 
@@ -101,7 +69,7 @@ func TestGateDecide_ForeignSharedBeaconDenies(t *testing.T) {
 	locks := []domain.LockRecord{
 		{Target: target, OwnerUUID: gateFoeUUID, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
 	}
-	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
+	rows := gateDecide([]domain.Target{target}, locks, gateMyUUID, gateEC(now))
 	if len(rows) != 1 || rows[0].Kind != render.GateKindLock || rows[0].HolderUUID != gateFoeUUID {
 		t.Fatalf("want 1 lock-kind deny row, got %+v", rows)
 	}
@@ -117,7 +85,7 @@ func TestGateDecide_SiblingHoldDeniesWrite(t *testing.T) {
 	locks := []domain.LockRecord{
 		{Target: target, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession, PID: 0, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
 	}
-	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
+	rows := gateDecide([]domain.Target{target}, locks, gateMyUUID, gateEC(now))
 	if len(rows) != 1 || rows[0].HolderUUID != gateFoeUUID {
 		t.Fatalf("a sibling's beacon must deny this sibling's write, got %+v", rows)
 	}
@@ -131,7 +99,7 @@ func TestGateDecide_OwnHoldAllowsWrite(t *testing.T) {
 	locks := []domain.LockRecord{
 		{Target: target, OwnerUUID: gateMyUUID, SessionUUID: gateMySession, PID: 0, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
 	}
-	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
+	rows := gateDecide([]domain.Target{target}, locks, gateMyUUID, gateEC(now))
 	if len(rows) != 0 {
 		t.Fatalf("own beacon must not deny own write, got %+v", rows)
 	}
@@ -143,7 +111,7 @@ func TestGateDecide_ForeignStaleLockAllows(t *testing.T) {
 	locks := []domain.LockRecord{
 		{Target: target, OwnerUUID: gateFoeUUID, Intent: "old", ExpiresAt: now.Add(-time.Minute)},
 	}
-	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
+	rows := gateDecide([]domain.Target{target}, locks, gateMyUUID, gateEC(now))
 	if len(rows) != 0 {
 		t.Fatalf("stale (TTL-lapsed) lock must not deny, got %+v", rows)
 	}
@@ -155,7 +123,7 @@ func TestGateDecide_OwnLockAllows(t *testing.T) {
 	locks := []domain.LockRecord{
 		{Target: target, OwnerUUID: gateMyUUID, Intent: gateIntentMine, ExpiresAt: now.Add(time.Hour)},
 	}
-	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
+	rows := gateDecide([]domain.Target{target}, locks, gateMyUUID, gateEC(now))
 	if len(rows) != 0 {
 		t.Fatalf("own lock must not deny, got %+v", rows)
 	}
@@ -177,16 +145,15 @@ func TestGateDecide_PID0ForeignHoldWithinTTLDenies(t *testing.T) {
 	if ec.Classify(locks[0]) != domain.LivenessUnknown {
 		t.Fatalf("test fixture invariant broken: want LivenessUnknown, got %v", ec.Classify(locks[0]))
 	}
-	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, ec)
+	rows := gateDecide([]domain.Target{target}, locks, gateMyUUID, ec)
 	if len(rows) != 1 || rows[0].Kind != render.GateKindLock {
 		t.Fatalf("PID-0 beacon within TTL must deny, got %+v", rows)
 	}
 }
 
-// TestGateDecide_DedupeAndOrder: a claim AND a lock both cover the same
-// path from the same foreign owner must not collapse into one row (distinct
-// kinds), a duplicate target in the input must not double-count, and output
-// is sorted path -> kind -> holder UUID regardless of input order.
+// TestGateDecide_DedupeAndOrder: a duplicate target in the input must not
+// double-count, and output is sorted path -> kind -> holder UUID regardless
+// of input order.
 func TestGateDecide_DedupeAndOrder(t *testing.T) {
 	now := time.Now()
 	tB := domain.Target{Canonical: tcTargetB}
@@ -194,12 +161,10 @@ func TestGateDecide_DedupeAndOrder(t *testing.T) {
 	tA := domain.Target{Canonical: aPath}
 	locks := []domain.LockRecord{
 		{Target: tB, OwnerUUID: gateFoeUUID, Intent: "lockrow", ExpiresAt: now.Add(time.Hour)},
-	}
-	claims := []domain.ClaimRecord{
-		{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "claimrow", ExpiresAt: now.Add(time.Hour)},
+		{Target: domain.Target{Canonical: tcPrefixStore}, OwnerUUID: gateFoeUUID, Intent: "dirrow", ExpiresAt: now.Add(time.Hour)},
 	}
 	// tB passed twice (duplicate CLI arg) + tA once, out of sorted order.
-	rows := gateDecide([]domain.Target{tB, tA, tB}, locks, claims, gateMyUUID, gateEC(now))
+	rows := gateDecide([]domain.Target{tB, tA, tB}, locks, gateMyUUID, gateEC(now))
 	if len(rows) != 2 {
 		t.Fatalf("want 2 deduped rows (one per distinct path), got %d: %+v", len(rows), rows)
 	}
@@ -207,23 +172,20 @@ func TestGateDecide_DedupeAndOrder(t *testing.T) {
 	if rows[0].Path != tcTargetB || rows[1].Path != aPath {
 		t.Fatalf("want path-sorted rows, got %+v", rows)
 	}
-	if rows[0].Kind != render.GateKindLock || rows[1].Kind != render.GateKindClaim {
-		t.Fatalf("unexpected kinds: %+v", rows)
-	}
 }
 
 // TestGateDecide_SameOwnerTwoPrefixes_BlockerPathTieBreak: one owner holding
-// claims at two ancestor prefixes of one target yields two rows identical in
+// two directories above one target yields two rows identical in
 // path/kind/holder — the blocker-path tie-break must order them ascending
-// regardless of claim input order (review, #211).
+// regardless of input order (review, #211).
 func TestGateDecide_SameOwnerTwoPrefixes_BlockerPathTieBreak(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcPrefixStore + "/sub/new.go"}
-	claims := []domain.ClaimRecord{ // deeper prefix first: reversed vs sorted order
-		{PathPrefix: tcPrefixStore + "/sub", OwnerUUID: gateFoeUUID, Intent: "deep", ExpiresAt: now.Add(time.Hour)},
-		{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "shallow", ExpiresAt: now.Add(time.Hour)},
+	locks := []domain.LockRecord{ // deeper prefix first: reversed vs sorted order
+		{Target: domain.Target{Canonical: tcPrefixStore + "/sub"}, OwnerUUID: gateFoeUUID, Intent: "deep", ExpiresAt: now.Add(time.Hour)},
+		{Target: domain.Target{Canonical: tcPrefixStore}, OwnerUUID: gateFoeUUID, Intent: "shallow", ExpiresAt: now.Add(time.Hour)},
 	}
-	rows := gateDecide([]domain.Target{target}, nil, claims, gateMyUUID, gateEC(now))
+	rows := gateDecide([]domain.Target{target}, locks, gateMyUUID, gateEC(now))
 	if len(rows) != 2 {
 		t.Fatalf("want 2 rows (distinct blocker prefixes), got %d: %+v", len(rows), rows)
 	}
@@ -241,171 +203,12 @@ func TestGateDecide_SameOwnerTwoLocks_EachBlockerReported(t *testing.T) {
 		{Target: target, OwnerUUID: gateFoeUUID, Intent: "file", ExpiresAt: now.Add(time.Hour)},
 		{Target: domain.Target{Canonical: tcPrefixStore}, OwnerUUID: gateFoeUUID, Intent: "dir", ExpiresAt: now.Add(time.Hour)},
 	}
-	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
+	rows := gateDecide([]domain.Target{target}, locks, gateMyUUID, gateEC(now))
 	if len(rows) != 2 {
 		t.Fatalf("want 2 rows (one per covering lock), got %d: %+v", len(rows), rows)
 	}
 	if rows[0].BlockerPath != tcPrefixStore || rows[1].BlockerPath != target.Canonical {
 		t.Errorf("want blocker-path ascending, got %+v", rows)
-	}
-}
-
-// gateDecideAny unit tests (ccp-vx4w): the repo-wide sibling of gateDecide,
-// for an operation with no path operand — a branch switch. It has NO caller
-// today: `loto guard` was its only one and #318 deleted it; `loto check
-// --gate` reaches gateDecide, not this. loto-ea8y.2 (post-checkout warns on
-// peer-locked paths the move changed) is the intended next consumer, and
-// these tests are what keeps the predicate honest until it arrives — delete
-// them only alongside gateDecideAny itself. Table-driven per ADR-008 — one
-// lock/claim fixture set per row, no target list since the predicate is
-// path-free.
-func TestGateDecideAny(t *testing.T) {
-	now := time.Now()
-	cases := []struct {
-		name   string
-		locks  []domain.LockRecord
-		claims []domain.ClaimRecord
-		live   domain.HolderLiveProbe // nil = TTL is the sole authority
-		want   int
-	}{
-		{
-			name: "foreign live lock denies",
-			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
-			},
-			want: 1,
-		},
-		{
-			name: "own lock allows",
-			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateMyUUID, Intent: gateIntentMine, ExpiresAt: now.Add(time.Hour)},
-			},
-			want: 0,
-		},
-		{
-			name: "stale foreign lock allows",
-			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, Intent: gateIntentFoe, ExpiresAt: now.Add(-time.Hour)},
-			},
-			want: 0,
-		},
-		{
-			name: "foreign live claim denies",
-			claims: []domain.ClaimRecord{
-				{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "foe claim", ExpiresAt: now.Add(time.Hour)},
-			},
-			want: 1,
-		},
-		{
-			name: "expired foreign claim allows",
-			claims: []domain.ClaimRecord{
-				{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "stale", ExpiresAt: now.Add(-time.Minute)},
-			},
-			want: 0,
-		},
-		{
-			name: "no locks or claims allows",
-			want: 0,
-		},
-		{
-			// loto-tzmv.9: an unexpired claim whose owner is provably dead must
-			// stop denying. Before the fix this row denied for the claim's full
-			// 2h TTL, freezing every tree-move in the repo behind one crash.
-			name: "unexpired claim from a dead owner allows",
-			claims: []domain.ClaimRecord{
-				{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "crashed", ExpiresAt: now.Add(time.Hour)},
-			},
-			live: deadProbe,
-			want: 0,
-		},
-		{
-			// The other half of the same predicate: liveness must not weaken a
-			// live owner's claim.
-			name: "unexpired claim from a live owner denies",
-			claims: []domain.ClaimRecord{
-				{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "working", ExpiresAt: now.Add(time.Hour)},
-			},
-			live: aliveProbe,
-			want: 1,
-		},
-		{
-			// Process identity is authoritative even if session ids match.
-			name: "another actor's beacon denies despite a matching session",
-			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession, PID: 0, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
-			},
-			want: 1,
-		},
-		{
-			// loto-dm4i: the carve-out keys on the persisted marker, never on the
-			// shape. An ordinary `loto lock --shared` placed without LOTO_PID is
-			// shared with PID 0 — byte-identical to a beacon — but it is a lease
-			// a sibling asked for, so the tree-move must still refuse. Reading
-			// the shape waived exactly this row and moved the tree.
-			name: "sibling's pid-less shared lock is not a beacon and still denies",
-			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession, PID: 0, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
-			},
-			want: 1,
-		},
-		{
-			// The carve-out is beacons only. A sibling's real exclusive lock is a
-			// declaration of uncommitted territory, and a checkout under it is the
-			// 2026-08-14 incident itself.
-			name: "sibling's exclusive lock still denies the tree-move",
-			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession, PID: 4242, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
-			},
-			want: 1,
-		},
-		{
-			name: "another session's beacon denies the tree-move",
-			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateFoeSession, PID: 0, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
-			},
-			want: 1,
-		},
-		{
-			// An empty session id must match nothing rather than everything —
-			// direct CLI use outside Claude Code has no session to be a sibling of.
-			name: "beacon carve-out needs a known session",
-			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: "", PID: 0, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
-			},
-			want: 1,
-		},
-		{
-			name: "one foreign lock plus one foreign claim denies both",
-			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
-			},
-			claims: []domain.ClaimRecord{
-				{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "foe claim", ExpiresAt: now.Add(time.Hour)},
-			},
-			want: 2,
-		},
-		{
-			// loto-njgz: a tree move applies the one conflict rule, so a
-			// peer's claim in another worktree does not refuse it.
-			name: "a foreign claim in another worktree does not deny",
-			claims: []domain.ClaimRecord{
-				{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: gateIntentFoe, Worktree: "/elsewhere", ExpiresAt: now.Add(time.Hour)},
-			},
-			want: 0,
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			ec := gateEC(now)
-			ec.Live = c.live
-			if ec.MyWorktree == "" {
-				ec.MyWorktree = "/here"
-			}
-			rows := gateDecideAny(c.locks, c.claims, gateMyUUID, ec)
-			if len(rows) != c.want {
-				t.Fatalf("gateDecideAny() = %d rows, want %d: %+v", len(rows), c.want, rows)
-			}
-		})
 	}
 }
 
@@ -443,14 +246,8 @@ func TestGateCLI_ForeignClaimDeniesNotOnDiskTarget(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("expected exit 1, got %d: %q", code, out.String())
 	}
-	if !strings.Contains(out.String(), "✗ blocked count=1") || !strings.Contains(out.String(), "kind=claim") {
-		t.Errorf("expected claim-kind deny row: %q", out.String())
-	}
-	if !strings.Contains(out.String(), "options=wait|pick-other-work|message-holder") {
-		t.Errorf("expected options line, no fix command, on a claim row: %q", out.String())
-	}
-	if strings.Contains(out.String(), "loto unlock --force") {
-		t.Errorf("claim row must not carry the lock-only fix command: %q", out.String())
+	if !strings.Contains(out.String(), "✗ blocked count=1") || !strings.Contains(out.String(), "unlock --force -t \"unblock\" "+tcPrefixStore) {
+		t.Errorf("expected a deny row naming the directory hold: %q", out.String())
 	}
 }
 

@@ -262,89 +262,7 @@ func TestEmitReleaseResults_EmptySlice_EmitsInfoGlyph(t *testing.T) {
 	}
 }
 
-func TestEmitClaimSuccess(t *testing.T) {
-	var buf bytes.Buffer
-	exp := time.Date(2026, 7, 5, 18, 4, 5, 0, time.UTC)
-	EmitClaimSuccess(&buf, domain.ClaimRecord{
-		PathPrefix: "internal/store",
-		CreatedAt:  exp.Add(-4 * time.Hour),
-		ExpiresAt:  exp,
-	})
-	got := buf.String()
-	if !strings.HasPrefix(got, "✓ claimed count=1\n") {
-		t.Errorf("count-first header: %q", got)
-	}
-	want := "✓ prefix=internal/store ttl=4h0m0s expires_at=2026-07-05T18:04:05Z\n"
-	if !strings.Contains(got, want) {
-		t.Errorf("row = %q; want %q", got, want)
-	}
-	if !strings.Contains(got, "ℹ advisory: claim does not block lock/check") {
-		t.Errorf("missing advisory-limit ℹ row: %q", got)
-	}
-}
-
-func TestEmitClaimRelease_Outcomes(t *testing.T) {
-	cases := []struct {
-		name     string
-		res      store.ClaimReleaseResult
-		wantExit int
-		wantRows []string
-	}{
-		{
-			name:     "released",
-			res:      store.ClaimReleaseResult{PathPrefix: pkgA, State: store.ClaimStateReleased},
-			wantExit: 0,
-			wantRows: []string{"✓ unclaimed count=1\n", "✓ prefix=pkg/a\n"},
-		},
-		{
-			name:     "no-claim",
-			res:      store.ClaimReleaseResult{PathPrefix: pkgA, State: store.ClaimStateNoClaim},
-			wantExit: 0,
-			wantRows: []string{"✓ unclaimed count=0\n", "ℹ prefix=pkg/a state=no-claim\n"},
-		},
-		{
-			name:     "not-owner",
-			res:      store.ClaimReleaseResult{PathPrefix: pkgA, State: store.ClaimStateNotOwner, Owner: "alice"},
-			wantExit: 1,
-			wantRows: []string{"✓ unclaimed count=0\n", "✗ prefix=pkg/a state=not-owner owner=alice\n"},
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			if exit := EmitClaimRelease(&buf, c.res); exit != c.wantExit {
-				t.Errorf("exit=%d; want %d", exit, c.wantExit)
-			}
-			for _, row := range c.wantRows {
-				if !strings.Contains(buf.String(), row) {
-					t.Errorf("missing row %q in %q", row, buf.String())
-				}
-			}
-		})
-	}
-}
-
-func TestEmitClaimsReleased(t *testing.T) {
-	t.Run("some released", func(t *testing.T) {
-		var buf bytes.Buffer
-		EmitClaimsReleased(&buf, []string{"pkg/a", "pkg/b"})
-		got := buf.String()
-		for _, row := range []string{"ℹ claims-released count=2\n", "✓ prefix=pkg/a\n", "✓ prefix=pkg/b\n"} {
-			if !strings.Contains(got, row) {
-				t.Errorf("missing row %q in %q", row, got)
-			}
-		}
-	})
-	t.Run("none released still emits count", func(t *testing.T) {
-		var buf bytes.Buffer
-		EmitClaimsReleased(&buf, nil)
-		if got := buf.String(); got != "ℹ claims-released count=0\n" {
-			t.Errorf("empty claim release = %q, want the count=0 line (never silent)", got)
-		}
-	})
-}
-
-// Both release surfaces name the holder on a not-owner row, matching the
+// The release surface names the holder on a not-owner row, matching the
 // conflict surface (loto-a8t): the owner id, verbatim.
 func TestReleaseNotOwnerNamesHolder(t *testing.T) {
 	const uuid = "aaaaaaaa-1111-4111-8111-111111111111"
@@ -359,42 +277,6 @@ func TestReleaseNotOwnerNamesHolder(t *testing.T) {
 			t.Errorf("lock not-owner row must name holder %q, got %q", want, got)
 		}
 	})
-	t.Run("claim release", func(t *testing.T) {
-		var buf bytes.Buffer
-		EmitClaimRelease(&buf, store.ClaimReleaseResult{
-			PathPrefix: pkgA, State: store.ClaimStateNotOwner, Owner: uuid,
-		})
-		if got := buf.String(); !strings.Contains(got, want) {
-			t.Errorf("claim not-owner row must name holder %q, got %q", want, got)
-		}
-	})
-}
-
-func TestEmitClaimConflictNamesHolder(t *testing.T) {
-	now := time.Date(2026, 5, 10, 18, 0, 0, 0, time.UTC)
-	var buf bytes.Buffer
-	EmitClaimConflict(&buf, &store.ClaimConflictError{
-		Blockers: []domain.ClaimRecord{
-			{PathPrefix: "pkg/z", OwnerUUID: ownerRed, Intent: "y", ExpiresAt: now},
-			{PathPrefix: pkgA, OwnerUUID: ownerGreen, Intent: "store refactor", ExpiresAt: now},
-		},
-	})
-	got := buf.String()
-	if !strings.HasPrefix(got, "✗ blocked count=2\n") {
-		t.Errorf("triage first: %q", got)
-	}
-	if strings.Index(got, "prefix=pkg/a") > strings.Index(got, "prefix=pkg/z") {
-		t.Errorf("not sorted by prefix: %q", got)
-	}
-	if !strings.Contains(got, "blocker=Green") {
-		t.Errorf("blocker row must name holder: %q", got)
-	}
-	if !strings.Contains(got, `intent="store refactor"`) {
-		t.Errorf("intent must be quoted: %q", got)
-	}
-	if !strings.Contains(got, "⚠ prefix=") {
-		t.Errorf("per-blocker rows use ⚠: %q", got)
-	}
 }
 
 // TestEmitCandidateClaimConflict_NamesBlocker pins loto-u2p7 AC2: the

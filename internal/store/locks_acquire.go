@@ -165,6 +165,9 @@ func blockOnCandidateClaims(ctx context.Context, tx *sql.Tx, sorted []domain.Loc
 
 func (s *Store) validateAllFileTargets(sorted []domain.LockRecord) error {
 	for i := range sorted {
+		if sorted[i].Directory {
+			continue // a prefix, not a file: CanonicalizePrefix already shaped it
+		}
 		if err := validateFileTarget(s.repoTop, sorted[i]); err != nil {
 			return err
 		}
@@ -246,9 +249,12 @@ func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domai
 	var blockers []domain.LockRecord
 	for i := range all {
 		ex := &all[i]
-		// Same-owner rows are never reclaimed here, never blocking. A row from a sibling worktree is a different file on disk
-		// (loto-3eq6): never reclaimed from here, never blocking.
-		if !ec.SameTarget(ex.Target, l.Target) || ex.OwnerUUID == l.OwnerUUID ||
+		// Contending means covering l or covered by it: a directory hold
+		// covers every path beneath it (docs/write-gate.md). Same-owner rows
+		// are never reclaimed here, never blocking. A row from a sibling
+		// worktree is a different file on disk (loto-3eq6): never reclaimed
+		// from here, never blocking.
+		if !ec.PrefixCovers(ex.Target.Canonical, l.Target.Canonical) || ex.OwnerUUID == l.OwnerUUID ||
 			!domain.SameWorktree(l.Worktree, ex.Worktree) {
 			continue
 		}
@@ -258,7 +264,7 @@ func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domai
 			}
 			continue
 		}
-		// The same-canonical/same-owner/stale guards above are kept for the
+		// The covering/same-owner/stale guards above are kept for the
 		// reclaim side-effect; Conflicts is the final gate on whether a live,
 		// non-self peer actually blocks.
 		if ec.Conflicts(l, *ex) {

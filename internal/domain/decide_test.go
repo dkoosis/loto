@@ -20,7 +20,7 @@ func TestDecide_WriteGateFixTable(t *testing.T) {
 		return EvalContext{Now: now}.LockHold(LockRecord{OwnerUUID: owner, Worktree: worktree, Target: Target{Canonical: target}, ExpiresAt: exp})
 	}
 	claim := func(owner AgentUUID, worktree, prefix string) Hold {
-		return EvalContext{Now: now}.ClaimHold(ClaimRecord{OwnerUUID: owner, Worktree: worktree, PathPrefix: prefix, ExpiresAt: live})
+		return EvalContext{Now: now}.LockHold(LockRecord{OwnerUUID: owner, Worktree: worktree, Target: Target{Canonical: prefix}, ExpiresAt: live})
 	}
 	cases := []struct {
 		fix      string

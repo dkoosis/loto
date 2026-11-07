@@ -251,13 +251,8 @@ func deleteOwnedTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals []str
 // rows and deletes them in one transaction, closing the TOCTOU gap where the
 // old path could miss locks created between ListLocks and ReleaseLocks.
 //
-// It also releases the agent's claims in the SAME transaction, returning the
-// released claim prefixes alongside the lock results: a session-end unlock must
-// clear claimed territory too, or a crashed/ended agent's claim squats until TTL
-// (loto-ei5). Claims strip no write bits and carry no PID, so unlike locks they
-// need no post-commit filesystem restore and fold safely into this tx — making
-// the lock+claim release atomic (Codex #219 P1: a separate claim tx could leave
-// claims squatting after the lock tx already committed).
+// A directory hold (`loto claim`) is a row like any other, so a session-end
+// unlock clears claimed territory in the same transaction (loto-ei5).
 //
 // The sweep takes every matching row in every worktree (loto-e1ku): release
 // is by actor, and the actor is the process, not the checkout it stands in
@@ -281,25 +276,8 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 	if err != nil {
 		return SessionRelease{}, err
 	}
-	// Claims: pure DB, nothing to restore after commit.
-	//
-	// ‡ Skipped under an intent filter (loto-lzap). A claim records territory a
-	// lane reserved, not the write-set it took, and carries no intent to match —
-	// sweeping claims on a filtered release would drop the one thing the filter
-	// exists to leave standing.
-	var claimPrefixes []string
-	if onlyIntent == "" {
-		claimPrefixes, err = deleteClaimsBySessionTx(ctx, tx, byAgent, string(sessionUUID))
-		if err != nil {
-			return SessionRelease{}, err
-		}
-	}
 	if len(canonicals) == 0 {
-		// No locks — still commit any claim deletes above.
-		if err := tx.Commit(); err != nil {
-			return SessionRelease{}, err
-		}
-		return SessionRelease{Results: []ReleaseResult{}, ClaimPrefixes: claimPrefixes}, nil
+		return SessionRelease{Results: []ReleaseResult{}}, nil
 	}
 	if err := s.releaseSessionTargetsTx(ctx, tx, canonicals, byAgent); err != nil {
 		return SessionRelease{}, err
@@ -309,7 +287,7 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 	}
 
 	flock.release()
-	return SessionRelease{Results: sessionReleaseResults(canonicals, s.worktree), ClaimPrefixes: claimPrefixes, Intents: distinctIntents(canonicals)}, nil
+	return SessionRelease{Results: sessionReleaseResults(canonicals, s.worktree), Intents: distinctIntents(canonicals)}, nil
 }
 
 // sessionReleaseResults reports each released row, naming the checkout of a
@@ -363,8 +341,7 @@ func (s *Store) releaseSessionTargetsTx(ctx context.Context, tx *sql.Tx, canonic
 // nothing about the very peer lock it took. Reporting the intents of the rows
 // the transaction deleted is the only version that cannot lie.
 type SessionRelease struct {
-	Results       []ReleaseResult
-	ClaimPrefixes []string
+	Results []ReleaseResult
 	// Intents are the distinct intents of the released rows, sorted. Empty
 	// when nothing was released.
 	Intents []string

@@ -926,7 +926,6 @@ func TestSyncDecide_ConflictTable(t *testing.T) {
 	tests := []struct {
 		name       string
 		locks      []domain.LockRecord
-		claims     []domain.ClaimRecord
 		cands      []domain.CandidateClaim
 		wantApply  bool
 		wantReason string
@@ -950,32 +949,25 @@ func TestSyncDecide_ConflictTable(t *testing.T) {
 			wantApply: true,
 		},
 		{
-			name: "live beacon -> conflict",
+			name: "live directory hold above -> conflict",
 			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: path}, OwnerUUID: syncOwner, ExpiresAt: now.Add(time.Hour)},
+				{Target: domain.Target{Canonical: tcPrefixParent}, OwnerUUID: syncOwner, ExpiresAt: now.Add(time.Hour)},
 			},
 			wantReason: syncReasonLeased,
 		},
 		{
-			name: "live territory claim -> conflict",
-			claims: []domain.ClaimRecord{
-				{PathPrefix: tcPrefixParent, OwnerUUID: syncOwner, ExpiresAt: now.Add(time.Hour)},
-			},
-			wantReason: syncReasonTerritoryClaim,
-		},
-		{
 			// plan-review P1-1: no owner carve-out — even the caller's OWN live
-			// territory claim blocks sync. syncDecide takes no myUUID at all.
-			name: "own live territory claim still conflicts (P1-1)",
-			claims: []domain.ClaimRecord{
-				{PathPrefix: tcPrefixParent, OwnerUUID: "the-caller-itself", ExpiresAt: now.Add(time.Hour)},
+			// directory hold blocks sync. syncDecide takes no myUUID at all.
+			name: "own live directory hold still conflicts (P1-1)",
+			locks: []domain.LockRecord{
+				{Target: domain.Target{Canonical: tcPrefixParent}, OwnerUUID: "the-caller-itself", ExpiresAt: now.Add(time.Hour)},
 			},
-			wantReason: syncReasonTerritoryClaim,
+			wantReason: syncReasonLeased,
 		},
 		{
-			name: "expired territory claim -> syncable",
-			claims: []domain.ClaimRecord{
-				{PathPrefix: tcPrefixParent, OwnerUUID: syncOwner, ExpiresAt: now.Add(-time.Hour)},
+			name: "expired directory hold -> syncable",
+			locks: []domain.LockRecord{
+				{Target: domain.Target{Canonical: tcPrefixParent}, OwnerUUID: syncOwner, ExpiresAt: now.Add(-time.Hour)},
 			},
 			wantApply: true,
 		},
@@ -990,7 +982,7 @@ func TestSyncDecide_ConflictTable(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			apply, conflicts := syncDecide(diffs, tc.locks, tc.claims, tc.cands, ec)
+			apply, conflicts := syncDecide(diffs, tc.locks, tc.cands, ec)
 			if tc.wantApply {
 				if len(apply) != 1 || len(conflicts) != 0 {
 					t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
@@ -1025,7 +1017,7 @@ func TestSyncDecide_LapsedLeaseWithLiveHolder(t *testing.T) {
 
 	t.Run("holder alive -> conflict", func(t *testing.T) {
 		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessAlive)}
-		apply, conflicts := syncDecide(diffs, lapsed, nil, nil, ec)
+		apply, conflicts := syncDecide(diffs, lapsed, nil, ec)
 		if len(apply) != 0 || len(conflicts) != 1 {
 			t.Fatalf("want 1 conflict, got apply=%d conflicts=%+v", len(apply), conflicts)
 		}
@@ -1036,7 +1028,7 @@ func TestSyncDecide_LapsedLeaseWithLiveHolder(t *testing.T) {
 
 	t.Run("holder dead -> fast-forward", func(t *testing.T) {
 		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessDead)}
-		apply, conflicts := syncDecide(diffs, lapsed, nil, nil, ec)
+		apply, conflicts := syncDecide(diffs, lapsed, nil, ec)
 		if len(apply) != 1 || len(conflicts) != 0 {
 			t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
 		}
@@ -1047,7 +1039,7 @@ func TestSyncDecide_LapsedLeaseWithLiveHolder(t *testing.T) {
 	// exactly as thoroughly. Only DEAD authorizes the overwrite.
 	t.Run("holder unknown -> conflict", func(t *testing.T) {
 		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessUnknown)}
-		apply, conflicts := syncDecide(diffs, lapsed, nil, nil, ec)
+		apply, conflicts := syncDecide(diffs, lapsed, nil, ec)
 		if len(apply) != 0 || len(conflicts) != 1 {
 			t.Fatalf("want 1 conflict, got apply=%d conflicts=%+v", len(apply), conflicts)
 		}
@@ -1061,97 +1053,7 @@ func TestSyncDecide_LapsedLeaseWithLiveHolder(t *testing.T) {
 	// staleness helpers keeps today's behaviour.
 	t.Run("no probe -> fast-forward, TTL is sole authority", func(t *testing.T) {
 		ec := domain.EvalContext{Now: now}
-		apply, conflicts := syncDecide(diffs, lapsed, nil, nil, ec)
-		if len(apply) != 1 || len(conflicts) != 0 {
-			t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
-		}
-	})
-}
-
-// TestSyncDecide_LapsedClaimWithLiveHolder pins loto-3dhl, the claim-shaped
-// half of the hole loto-0o0j closed for leases. The claim leg filtered expired
-// claims out before asking anything about the holder, so an agent whose 2h
-// territory claim lapsed mid-session had its uncommitted edits fast-forwarded
-// away while it was still writing them.
-//
-// The asymmetry with the lease test above is deliberate and load-bearing: a
-// lapsed lease refuses on UNKNOWN too, a lapsed claim does not. A claim carries
-// no PID and no start time, so UNKNOWN is the permanent answer for any claim
-// whose session record has aged out, and refusing on it would freeze sync over
-// the whole prefix with no reclaim path.
-func TestSyncDecide_LapsedClaimWithLiveHolder(t *testing.T) {
-	now := time.Now()
-	const path = syncPrefixWT + "/a.md"
-	diffs := []syncDiff{{syncEntry: syncEntry{Path: path, Mode: "100644", OID: syncBlobOID}, State: syncModified}}
-	lapsed := []domain.ClaimRecord{
-		{PathPrefix: syncPrefixWT, OwnerUUID: syncOwner, ExpiresAt: now.Add(-time.Hour)},
-	}
-	probeOf := func(v domain.Liveness) domain.HolderLiveProbe {
-		return func(domain.LockRecord) domain.Liveness { return v }
-	}
-
-	t.Run("holder alive -> conflict", func(t *testing.T) {
-		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessAlive)}
-		apply, conflicts := syncDecide(diffs, nil, lapsed, nil, ec)
-		if len(apply) != 0 || len(conflicts) != 1 {
-			t.Fatalf("want 1 conflict, got apply=%d conflicts=%+v", len(apply), conflicts)
-		}
-		if conflicts[0].Reason != syncReasonClaimLapsedHolderLive {
-			t.Errorf("got reason=%s want %s", conflicts[0].Reason, syncReasonClaimLapsedHolderLive)
-		}
-		if conflicts[0].Holder != syncOwner {
-			t.Errorf("got holder=%s want %s", conflicts[0].Holder, syncOwner)
-		}
-	})
-
-	t.Run("holder dead -> fast-forward", func(t *testing.T) {
-		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessDead)}
-		apply, conflicts := syncDecide(diffs, nil, lapsed, nil, ec)
-		if len(apply) != 1 || len(conflicts) != 0 {
-			t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
-		}
-	})
-
-	t.Run("holder unknown -> fast-forward, no permanent freeze", func(t *testing.T) {
-		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessUnknown)}
-		apply, conflicts := syncDecide(diffs, nil, lapsed, nil, ec)
-		if len(apply) != 1 || len(conflicts) != 0 {
-			t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
-		}
-	})
-
-	t.Run("no probe -> fast-forward, TTL is sole authority", func(t *testing.T) {
-		ec := domain.EvalContext{Now: now}
-		apply, conflicts := syncDecide(diffs, nil, lapsed, nil, ec)
-		if len(apply) != 1 || len(conflicts) != 0 {
-			t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
-		}
-	})
-
-	// An UNEXPIRED claim still blocks on the old reason — the split of
-	// the claim leg into Covers + Refuses must not change this leg.
-	t.Run("claim still live -> territory-claim", func(t *testing.T) {
-		live := []domain.ClaimRecord{
-			{PathPrefix: syncPrefixWT, OwnerUUID: syncOwner, ExpiresAt: now.Add(time.Hour)},
-		}
-		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessAlive)}
-		apply, conflicts := syncDecide(diffs, nil, live, nil, ec)
-		if len(apply) != 0 || len(conflicts) != 1 {
-			t.Fatalf("want 1 conflict, got apply=%d conflicts=%+v", len(apply), conflicts)
-		}
-		if conflicts[0].Reason != syncReasonTerritoryClaim {
-			t.Errorf("got reason=%s want %s", conflicts[0].Reason, syncReasonTerritoryClaim)
-		}
-	})
-
-	// A lapsed claim over a DIFFERENT prefix is not this path's business, live
-	// holder or not: the territory predicate still gates the liveness question.
-	t.Run("lapsed claim elsewhere -> fast-forward", func(t *testing.T) {
-		elsewhere := []domain.ClaimRecord{
-			{PathPrefix: tcPrefixParent, OwnerUUID: syncOwner, ExpiresAt: now.Add(-time.Hour)},
-		}
-		ec := domain.EvalContext{Now: now, Live: probeOf(domain.LivenessAlive)}
-		apply, conflicts := syncDecide(diffs, nil, elsewhere, nil, ec)
+		apply, conflicts := syncDecide(diffs, lapsed, nil, ec)
 		if len(apply) != 1 || len(conflicts) != 0 {
 			t.Fatalf("want apply, got apply=%d conflicts=%+v", len(apply), conflicts)
 		}
@@ -1500,7 +1402,7 @@ func TestSyncMkdirAll_SkipsExistingDir(t *testing.T) {
 }
 
 // TestSyncBatchContext_ScopesHoldsToOwnWorktree: the context a sync batch
-// decides with carries the runtime's worktree, so a live claim in a sibling
+// decides with carries the runtime's worktree, so a live hold in a sibling
 // worktree does not hold back this one's bytes, while one in its own does
 // (loto-qbw4).
 func TestSyncBatchContext_ScopesHoldsToOwnWorktree(t *testing.T) {
@@ -1512,12 +1414,12 @@ func TestSyncBatchContext_ScopesHoldsToOwnWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	live := time.Now().Add(time.Hour)
-	sibling := []domain.ClaimRecord{{PathPrefix: "a", OwnerUUID: "o1", Worktree: "worktrees/sib", ExpiresAt: live}}
-	if _, _, conflict := syncConflictFor("a/f.go", nil, sibling, nil, ec); conflict {
-		t.Error("a sibling worktree's claim must not hold back this worktree's sync")
+	sibling := []domain.LockRecord{{Target: domain.Target{Canonical: "a"}, OwnerUUID: "o1", Worktree: "worktrees/sib", ExpiresAt: live}}
+	if _, _, conflict := syncConflictFor("a/f.go", sibling, nil, ec); conflict {
+		t.Error("a sibling worktree's directory hold must not hold back this worktree's sync")
 	}
-	own := []domain.ClaimRecord{{PathPrefix: "a", OwnerUUID: "o1", Worktree: "worktrees/own", ExpiresAt: live}}
-	if _, _, conflict := syncConflictFor("a/f.go", nil, own, nil, ec); !conflict {
-		t.Error("a claim in this worktree must hold back its sync")
+	own := []domain.LockRecord{{Target: domain.Target{Canonical: "a"}, OwnerUUID: "o1", Worktree: "worktrees/own", ExpiresAt: live}}
+	if _, _, conflict := syncConflictFor("a/f.go", own, nil, ec); !conflict {
+		t.Error("a directory hold in this worktree must hold back its sync")
 	}
 }

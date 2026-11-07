@@ -69,7 +69,7 @@ on the roadmap.
 |------|-----------|--------------|--------|----------|
 | Tag (record-tier) | `locks` row with non-zero, unexpired `expires_at` | row + TTL (lazy GC) | **shipped (v2)** | "I'm holding this across two events (PreToolUse → PostToolUse) — no foreground process" |
 | **Enforcement (chmod)** | strip-write on acquire; restore on release | filesystem mode bits | **retired** (loto-zssw) | locked out the HOLDER too — see "why chmod enforcement is gone" |
-| Harness gate | PreToolUse hook refuses a write over a peer's live lock or claim | `locks` + `claims` rows | **shipped** | stops the peer without touching the holder's own filesystem |
+| Harness gate | PreToolUse hook refuses a write over a peer's live hold on the file or a directory above it | `locks` rows | **shipped** | stops the peer without touching the holder's own filesystem |
 | Op-flock (internal) | project-wide flock on `lock-op.flock`, held only during an op | flock | **shipped** | serializes overlapping `loto lock` / `loto unlock` invocations |
 | File flock (foreground) | flock(2) exclusive held by the editing process | flock | **deferred** (`loto with <cmd>`) | "I am editing this specific file right now" |
 | Global lock | flock(2) on a project-wide handle | flock | **deferred** | "Sweep across the whole tree; everyone else stand down" |

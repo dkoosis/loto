@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 
 	"loto/internal/domain"
 )
@@ -121,6 +122,30 @@ func (s *Store) LocksAt(ctx context.Context, t domain.Target) ([]domain.LockReco
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+lockCols+` FROM locks WHERE `+s.keys().col("target_canonical")+` = ? ORDER BY created_at ASC, owner_uuid ASC`, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
 		s.keys().key(t.Canonical))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanLocksRows(rows)
+}
+
+// HoldsCovering returns every hold whose target covers t: a hold on t itself,
+// or a directory hold on one of its ancestors up to the repo root ".", in
+// LocksAt's order. One indexed lookup over the ancestor keys, not a scan, so
+// the pre-hook's decision stays one read.
+func (s *Store) HoldsCovering(ctx context.Context, t domain.Target) ([]domain.LockRecord, error) {
+	targets := []domain.Target{t}
+	for p := t.Canonical; strings.Contains(p, "/"); {
+		p = p[:strings.LastIndexByte(p, '/')]
+		targets = append(targets, domain.Target{Canonical: p})
+	}
+	if t.Canonical != "." {
+		targets = append(targets, domain.Target{Canonical: "."})
+	}
+	ph, args := s.keys().inTargets(targets)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+lockCols+` FROM locks WHERE `+s.keys().col("target_canonical")+` IN (`+ph+`) ORDER BY created_at ASC, owner_uuid ASC`, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
+		args...)
 	if err != nil {
 		return nil, err
 	}

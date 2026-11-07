@@ -35,9 +35,8 @@ CREATE INDEX IF NOT EXISTS idx_territory_tags_live ON territory_tags(expires_at,
 // that is not running yet — in loto's own vocabulary.
 //
 // Unlike Tag, whose lifetime is parasitic on a host lock, a territory tag is a
-// TTL lease exactly like ClaimRecord: Expired is the sole staleness authority,
-// no PID, no liveness refinement. That is deliberate reuse — it gives the
-// codebase one staleness model for territory-shaped state rather than two.
+// TTL lease: Expired is the sole staleness authority, no PID, no liveness
+// refinement.
 type TerritoryTag struct {
 	ID, PathPrefix, TaggerUUID, Text string
 	CreatedAt, ExpiresAt             int64
@@ -50,8 +49,8 @@ type TerritoryTag struct {
 	AckedByUUID string
 }
 
-// Expired reports whether the note's TTL has lapsed. Mirrors
-// domain.ClaimRecord.Expired — TTL is the only authority.
+// Expired reports whether the note's TTL has lapsed — TTL is the only
+// authority.
 func (n TerritoryTag) Expired(nowNs int64) bool { return nowNs >= n.ExpiresAt }
 
 // Live reports whether the note should still be surfaced: unacked and unexpired.
@@ -148,7 +147,7 @@ func (s *Store) InsertTerritoryTag(ctx context.Context, n NewTerritoryTag) (stri
 }
 
 // ListTerritoryTags returns EVERY row, expired and acked included. Staleness is
-// a display-time judgment, exactly as it is for ListClaims — the store reports
+// a display-time judgment — the store reports
 // what is written and the caller decides what is worth showing. Deterministic
 // order (path_prefix, created_at, id) so the same DB renders byte-identically.
 func (s *Store) ListTerritoryTags(ctx context.Context) ([]TerritoryTag, error) {
@@ -213,7 +212,7 @@ func (s *Store) AckTerritoryTag(ctx context.Context, id, by string) error {
 }
 
 // gcTerritoryTagsTx sweeps expired notes and long-acked ones inside
-// DoctorRepair's tx, beside gcTagsTx and gcClaimsTx.
+// DoctorRepair's tx, beside gcTagsTx.
 //
 // `expires_at <= now` is the exact complement of the live probe's
 // `expires_at > now`, so a note is never both surfaced and sweepable. Acked
@@ -228,7 +227,7 @@ func gcTerritoryTagsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 }
 
 // ensureTerritoryTagsTable adds the table to a DB stamped before this feature.
-// Follows ensureClaimsTable verbatim: probe sqlite_master, apply the DDL,
+// Probe sqlite_master, apply the DDL,
 // never bump user_version.
 func ensureTerritoryTagsTable(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	return ensureTableBySentinelName(ctx, db, apply, "territory_tags", territoryTagsDDL)

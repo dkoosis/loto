@@ -351,18 +351,18 @@ func TestCheckMoved_RefusesGateCombination(t *testing.T) {
 
 // ── collapseMovedRows: one row per path ───────────────────────────────────
 
-func TestCollapseMovedRows_LockBeatsClaimOnOnePath(t *testing.T) {
+func TestCollapseMovedRows_FileHoldBeatsDirectoryHold(t *testing.T) {
 	now := time.Now()
 	deny := []render.GateDenyRow{
-		{Path: tcTargetA, Kind: render.GateKindClaim, HolderUUID: gateFoeUUID, BlockerPath: tcPrefixParent, ExpiresAt: now},
+		{Path: tcTargetA, Kind: render.GateKindLock, HolderUUID: gateFoeUUID, BlockerPath: tcPrefixParent, ExpiresAt: now},
 		{Path: tcTargetA, Kind: render.GateKindLock, HolderUUID: gateMyUUID, BlockerPath: tcTargetA, ExpiresAt: now},
 	}
 	rows := collapseMovedRows(deny)
 	if len(rows) != 1 {
 		t.Fatalf("want one row per path, got %+v", rows)
 	}
-	if rows[0].Kind != render.GateKindLock {
-		t.Errorf("the lock names who is actually in the file: %+v", rows[0])
+	if rows[0].HolderUUID != gateMyUUID {
+		t.Errorf("the hold on the file names who is actually in it: %+v", rows[0])
 	}
 }
 

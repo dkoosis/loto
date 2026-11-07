@@ -641,29 +641,26 @@ func refVerdict(ctx context.Context, refusals []refRefusal, live map[string]stru
 }
 
 // refCheckoutWideClaim reports whether this caller holds the live
-// checkout-wide claim. A subagent is its parent's actor (docs/write-gate.md),
-// so a lane's fan-out is covered by the claim the lane took.
+// checkout-wide hold (`loto claim .`). A subagent is its parent's actor
+// (docs/write-gate.md), so a lane's fan-out is covered by the hold the lane
+// took.
 //
-// ‡ Both reads fail OPEN — an unreadable claims table or an unresolvable
+// ‡ Both reads fail OPEN — an unreadable holds table or an unresolvable
 // parent answers "the override is held", not "refuse". They are the same
 // question the store-unreachable path already answers that way, asked one
 // layer in: loto not being able to read its own state must not turn into a
 // refusal the operator cannot even override, since taking the override needs
 // the very table that just failed to read.
 func refCheckoutWideClaim(rt *runtime, stderr io.Writer) (bool, string) {
-	claims, err := rt.Store.ListClaims(rt.Ctx)
+	holds, err := rt.Store.LocksAt(rt.Ctx, domain.Target{Canonical: refCheckoutWidePrefix})
 	if err != nil {
-		fmt.Fprintf(stderr, "⚠ claims=unreadable ref-guard=fail-open err=%q\n", err)
+		fmt.Fprintf(stderr, "⚠ holds=unreadable ref-guard=fail-open err=%q\n", err)
 		return true, "unknown"
 	}
 	now := time.Now()
-	for i := range claims {
-		c := claims[i]
-		if c.PathPrefix != refCheckoutWidePrefix || c.Expired(now) {
-			continue
-		}
-		if string(c.OwnerUUID) == rt.Agent.UUID {
-			return true, string(c.OwnerUUID)
+	for i := range holds {
+		if string(holds[i].OwnerUUID) == rt.Agent.UUID && now.Before(holds[i].ExpiresAt) {
+			return true, rt.Agent.UUID
 		}
 	}
 	return false, ""

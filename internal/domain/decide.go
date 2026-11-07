@@ -1,10 +1,10 @@
 package domain
 
 // Hold is the one shape the write gate's conflict rule reads (docs/write-gate.md):
-// whose it is, which worktree, which target, and whether it is live. A lock and
-// a claim both lift into it — a lock holds one path, a claim a directory
-// prefix — so every surface that decides a write asks one question of one
-// shape. Live is settled when the hold is lifted (LockHold, ClaimHold), against
+// whose it is, which worktree, which target, and whether it is live. A hold's
+// target is a file or a directory prefix, so every surface that decides a
+// write asks one question of one shape. Live is settled when the hold is
+// lifted (LockHold), against
 // the same EvalContext that then decides.
 type Hold struct {
 	Actor    AgentUUID
@@ -17,12 +17,6 @@ type Hold struct {
 // provably dead holder frees the territory.
 func (c EvalContext) LockHold(l LockRecord) Hold {
 	return Hold{Actor: l.OwnerUUID, Worktree: l.Worktree, Target: l.Target.Canonical, Live: !c.IsStale(l)}
-}
-
-// ClaimHold lifts a claim into a Hold. ClaimIsStale applies the lock's own
-// standard of live to the claim (loto-tzmv.9).
-func (c EvalContext) ClaimHold(cl ClaimRecord) Hold {
-	return Hold{Actor: cl.OwnerUUID, Worktree: cl.Worktree, Target: cl.PathPrefix, Live: !c.ClaimIsStale(cl)}
 }
 
 // Covers is the territory half of the conflict rule: h lies in worktree and

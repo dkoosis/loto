@@ -29,9 +29,6 @@ var vacuumFn = func(ctx context.Context, db *sql.DB) error {
 
 type DoctorReport struct {
 	StaleLocks []domain.LockRecord
-	// ExpiredClaims are the TTL-lapsed territory reservations that --repair
-	// would sweep (gcClaimsTx), in (prefix, owner) order (loto-ebkc D3).
-	ExpiredClaims []domain.ClaimRecord
 	// ExpiredTerritoryTags are notes that lapsed with nobody having acked them
 	// (loto-z3y1 D2). Reported here and nowhere else: a note that vanishes
 	// unread is the mail-lost failure returning, and doctor is loto's
@@ -88,9 +85,6 @@ func (s *Store) DoctorAudit(ctx context.Context, thisHost string, hostKnown bool
 			}
 		}
 	}
-	if err := s.collectExpiredClaims(ctx, r, ec.Now); err != nil {
-		return nil, err
-	}
 	if err := s.collectStaleCandidateClaims(ctx, r, ec); err != nil {
 		return nil, err
 	}
@@ -103,28 +97,6 @@ func (s *Store) DoctorAudit(ctx context.Context, thisHost string, hostKnown bool
 		return nil, err
 	}
 	return r, nil
-}
-
-// collectExpiredClaims fills r.ExpiredClaims with every TTL-lapsed claim in
-// deterministic (prefix, owner) order — the audit half of the D3 sweep: what
-// --repair's gcClaimsTx would delete (loto-ebkc).
-func (s *Store) collectExpiredClaims(ctx context.Context, r *DoctorReport, now time.Time) error {
-	claims, err := s.ListClaims(ctx)
-	if err != nil {
-		return err
-	}
-	for i := range claims {
-		if claims[i].Expired(now) {
-			r.ExpiredClaims = append(r.ExpiredClaims, claims[i])
-		}
-	}
-	sort.Slice(r.ExpiredClaims, func(i, j int) bool {
-		if r.ExpiredClaims[i].PathPrefix != r.ExpiredClaims[j].PathPrefix {
-			return r.ExpiredClaims[i].PathPrefix < r.ExpiredClaims[j].PathPrefix
-		}
-		return r.ExpiredClaims[i].OwnerUUID < r.ExpiredClaims[j].OwnerUUID
-	})
-	return nil
 }
 
 // promotableCandidates reports the candidate ids whose refs/loto/candidates/<id>
@@ -251,7 +223,7 @@ func checkSidecar(l domain.LockRecord, sc SidecarCheck) (SidecarFinding, bool) {
 	return SidecarFinding{}, false
 }
 
-// DoctorRepair sweeps stale locks, expired claims, and orphaned tags. Host
+// DoctorRepair sweeps stale holds and orphaned tags. Host
 // policy rides inside `live` (HolderLiveProbe takes the record), so unlike
 // DoctorAudit — whose sidecar cross-check still needs a this-host string — it
 // takes no host argument.
@@ -303,9 +275,6 @@ func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live d
 		return err
 	}
 	if err := gcTagsTx(ctx, tx, now); err != nil {
-		return err
-	}
-	if err := gcClaimsTx(ctx, tx, now); err != nil {
 		return err
 	}
 	// refsKnown false means the candidates namespace could not be read, and an
@@ -498,22 +467,10 @@ func gcTagsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	return err
 }
 
-// gcClaimsTx hard-deletes expired claims inside DoctorRepair's tx, beside
-// gcTagsTx (loto-ebkc D3). `expires_at <= now` is the exact complement of the
-// live-claim probe's `expires_at > now` (ReleaseClaim/partitionClaims), so a
-// claim is either live or sweepable — never both, never neither. Without this
-// sweep an expired claim accretes until a same-territory ClaimPrefix happens
-// to overlap it. Purely disk reclamation: read paths already filter by Expired.
-func gcClaimsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
-	_, err := tx.ExecContext(ctx, `DELETE FROM claims WHERE expires_at <= ?`, now.UnixNano())
-	return err
-}
-
 // gcCandidateClaimsTx deletes every row belonging to a candidate whose claim
 // domain.EvalContext.CandidateClaimIsAbandoned judges abandoned (loto-u2p7),
 // returning the number of rows removed (report.StaleCandidateClaims' count,
-// when the caller wants dry-run parity). Runs inside DoctorRepair's tx beside
-// gcClaimsTx.
+// when the caller wants dry-run parity). Runs inside DoctorRepair's tx.
 //
 // ‡ Deletes by CandidateID, not by individual (path, candidate_id) row — the
 // same granularity ReleaseCandidateClaims already uses everywhere a

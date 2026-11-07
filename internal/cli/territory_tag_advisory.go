@@ -110,9 +110,9 @@ func territoryTagsForHeldGround(rt *runtime, notes []store.TerritoryTag, now tim
 	return out
 }
 
-// heldGround is every canonical path this agent currently holds a lock on plus
-// every prefix it has claimed — the ground a note has to overlap to be worth
-// telling the caller about.
+// heldGround is every canonical path this agent currently holds, file or
+// directory — the ground a note has to overlap to be worth telling the caller
+// about.
 func heldGround(rt *runtime) []string {
 	var out []string
 	locks, err := rt.Store.ListLocks(rt.Ctx)
@@ -120,14 +120,6 @@ func heldGround(rt *runtime) []string {
 		for i := range locks {
 			if string(locks[i].OwnerUUID) == rt.Agent.UUID {
 				out = append(out, locks[i].Target.Canonical)
-			}
-		}
-	}
-	claims, err := rt.Store.ListClaims(rt.Ctx)
-	if err == nil {
-		for i := range claims {
-			if string(claims[i].OwnerUUID) == rt.Agent.UUID {
-				out = append(out, claims[i].PathPrefix)
 			}
 		}
 	}

@@ -52,7 +52,7 @@ type Store struct {
 	repoTop string
 
 	// worktree is the checkout's WorktreeKey ("main", "worktrees/<name>"),
-	// the key every lock and claim row is stamped and scoped by (loto-hu8o).
+	// the key every hold row is stamped and scoped by (loto-hu8o).
 	// "" scopes nothing: every row matches, the widen-only reading
 	// domain.SameWorktree gives an unknown side.
 	worktree string
@@ -403,7 +403,6 @@ var migrationEnsures = []struct {
 	{"upgrade locks mode/pk", ensureLocksModeAndPK},
 	{"add locks.beacon", ensureLocksBeacon},
 	{"upgrade events check", ensureEventsCheckCurrent},
-	{"add claims table", ensureClaimsTable},
 	{"add territory_tags table", ensureTerritoryTagsTable},
 	{"add locks.epoch", ensureLocksEpoch},
 	{"add path_epochs table", ensurePathEpochsTable},
@@ -420,8 +419,8 @@ var migrationEnsures = []struct {
 	{"add tree event and report tables", ensureTreeEventsTables},
 	{"add tree_reports.acted_at", ensureTreeReportsActedAt},
 	{"add locks.worktree", ensureLocksWorktree},
-	{"add claims.worktree", ensureClaimsWorktree},
 	{"key locks pk on worktree", ensureLocksWorktreeKeyed},
+	{"fold claims into holds", ensureClaimsFolded},
 	{"key holds by admin dir", ensureHoldsKeyedByAdminDir},
 }
 
@@ -700,7 +699,7 @@ func ensureLocksWorktree(ctx context.Context, db sqlExecQuerier, apply bool) (bo
 }
 
 // ensurePathEpochsTable adds the durable per-path epoch counter to an
-// existing DB (loto-ovno.2). Follows ensureClaimsTable's precedent: probe
+// existing DB (loto-ovno.2). Follows ensureTableBySentinelName's shape: probe
 // sqlite_master, apply the DDL, never bump user_version.
 func ensurePathEpochsTable(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	return ensureTableBySentinelName(ctx, db, apply, "path_epochs", pathEpochsDDL)
@@ -865,8 +864,8 @@ func ensureColumn(ctx context.Context, db sqlExecQuerier, apply bool, table, col
 	return true, nil
 }
 
-// ensureTableBySentinelName is the shared body ensureClaimsTable /
-// ensureTerritoryTagsTable each hand-duplicated: probe sqlite_master for
+// ensureTableBySentinelName is the shared body the table-adding ensures
+// each hand-duplicated: probe sqlite_master for
 // tableName, apply ddl if apply and absent, never touch user_version. Factored
 // out here rather than duplicated a third and fourth time — two new tables in
 // one bead is where the copy-paste stopped paying for itself.
@@ -1134,11 +1133,39 @@ CREATE INDEX IF NOT EXISTS idx_events_created_id ON events(created_at, id);`
 	return true, nil
 }
 
-// ensureClaimsWorktree adds claims.worktree to an existing DB (loto-19bz),
-// the claims twin of ensureLocksWorktree: ” backfills every pre-existing
-// row, which the unlock --all ambiguity check reads as "unknown", never as
-// foreign. Runs after ensureClaimsTable.
-func ensureClaimsWorktree(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
-	return ensureColumn(ctx, db, apply, "claims", "worktree",
-		`ALTER TABLE claims ADD COLUMN worktree TEXT NOT NULL DEFAULT ''`)
+// ensureClaimsFolded moves each live claim into locks as a directory hold and
+// drops the claims table (loto-hof2: one hold kind). A lapsed claim protects
+// nothing and lapses with the table. The hold keeps the claim's owner,
+// session, intent, times, host and worktree; it has no pid, as the claim had
+// none, so TTL and the session oracle judge it as they judged the claim. A
+// claims table from before loto-19bz has no worktree column; its holds take
+// "" (unknown), which conflicts in every worktree. INSERT OR IGNORE keeps a
+// row the owner already holds at that key. Ordered after the locks PK is
+// final and before ensureHoldsKeyedByAdminDir, which rekeys the worktree.
+func ensureClaimsFolded(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
+	if !tableExists(ctx, db, "claims") {
+		return false, nil
+	}
+	if !apply {
+		return true, nil
+	}
+	worktree := "''"
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('claims') WHERE name = 'worktree'`).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		worktree = "worktree"
+	}
+	if _, err := db.ExecContext(ctx, `
+INSERT OR IGNORE INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, epoch, worktree)
+SELECT path_prefix, owner_uuid, session_uuid, intent, created_at, expires_at, host, 0, NULL, '', 0, `+worktree+`
+  FROM claims WHERE expires_at > ?`, time.Now().UnixNano()); err != nil {
+		return false, err
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE claims`); err != nil {
+		return false, err
+	}
+	return false, nil
 }

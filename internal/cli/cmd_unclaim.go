@@ -17,8 +17,8 @@ func init() { register("unclaim", cmdUnclaim) } //nolint:gochecknoinits // comma
 // loto-e0mz).
 const unclaimUsageHead = `usage: loto unclaim <path-prefix>
 
-Release your claim at exactly this prefix. Only the claim's owner can release
-it; another agent's claim reports ✗ not-owner and stays in place.
+Release your hold on exactly this directory. Only its owner can release it;
+another agent's hold reports ✗ not-owner and stays in place.
 
 examples:
   loto unclaim internal/store
@@ -46,10 +46,10 @@ func cmdUnclaim(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
 
-	res, err := rt.Store.ReleaseClaim(rt.Ctx, prefix.Canonical, domain.AgentUUID(rt.Agent.UUID))
+	results, err := rt.Store.ReleaseLocks(rt.Ctx, []domain.Target{prefix}, domain.AgentUUID(rt.Agent.UUID), rt.liveProbe())
 	if err != nil {
 		fmt.Fprintf(stderr, "✗ %v\n", err)
 		return 3
 	}
-	return render.EmitClaimRelease(stdout, res)
+	return render.EmitReleaseResults(stdout, results)
 }

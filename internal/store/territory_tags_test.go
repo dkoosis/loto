@@ -158,8 +158,8 @@ func TestTerritoryTagTTLCeiling(t *testing.T) {
 	}
 }
 
-// ListClaims' contract, inherited: the store reports what is written and the
-// caller decides what is worth showing.
+// The store reports what is written and the caller decides what is worth
+// showing.
 func TestListTerritoryTagsReturnsExpired(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()

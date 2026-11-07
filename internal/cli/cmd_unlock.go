@@ -436,13 +436,7 @@ func unlockAll(rt *runtime, onlyIntent string, stdout, stderr io.Writer) int {
 		warnPeerIntents(stdout, rel)
 	}
 
-	exit := render.EmitReleaseResults(stdout, rel.Results)
-	// Claims ride along on the unfiltered sweep only: a session-end --all must
-	// clear claimed territory too, or a crashed/ended agent's claim squats its
-	// prefix until TTL (the reclamation-parity gap ei5 closes). A filtered
-	// release returns none, so this is a no-op there.
-	render.EmitClaimsReleased(stdout, rel.ClaimPrefixes)
-	return exit
+	return render.EmitReleaseResults(stdout, rel.Results)
 }
 
 // warnPeerIntents names the distinct intents a full --all sweep just released,
