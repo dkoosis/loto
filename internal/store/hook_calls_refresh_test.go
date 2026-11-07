@@ -391,7 +391,57 @@ func TestRefreshCallerLocks_ManyPathsStayUnderSQLVarLimit(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // the tx is discarded; only refresh's error matters here
-	if err := refreshCallerLocksTx(ctx, tx, s.keys(), string(tcOwnerA), rec.Worktree, paths, t0.Add(16*time.Minute)); err != nil {
+	if err := refreshCallerLocksTx(ctx, tx, s.keys(), string(tcOwnerA), rec.Worktree, paths, t0.Add(16*time.Minute), t0.Add(16*time.Minute)); err != nil {
 		t.Fatalf("refresh over %d paths: %v", len(paths), err)
+	}
+}
+
+// TestBashCallOutlivingItsLease_KeepsTheHold is loto-d0cb: a Bash call that
+// began before its caller's lease expired holds the lock past that expiry. A
+// peer cannot reclaim it mid-call, and the post that changed the file renews
+// it. Once the call is over, a lease no call holds lapses again (#394).
+func TestBashCallOutlivingItsLease_KeepsTheHold(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	rec := mkFileLock(t, "a.go", tcOwnerA, tcHookRefreshTTL)
+	rec.CreatedAt, rec.ExpiresAt = now.Add(-30*time.Minute), now.Add(-time.Minute) // lapsed a minute ago
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{rec}, liveProbe); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	pre := touching(rec)
+	pre.Declared = false // a Bash call names no file
+	// The call began before the lease lapsed and is still running.
+	preAt(t, s, tcOwnerA, "call-bash", now.Add(-2*time.Minute), pre)
+
+	peer := mkFileLock(t, "b.go", tcOwnerB, tcHookRefreshTTL)
+	peer.Target = rec.Target
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{peer}, liveProbe); !isConflictErr(err) {
+		t.Fatalf("a peer took the lock while the call that began before its expiry ran: err=%v", err)
+	}
+
+	post := pre
+	post.Digest = tcSHA2
+	postAt(t, s, "call-bash", now, post)
+	a, err := s.LockForOwnerAt(ctx, rec.Target, tcOwnerA)
+	if err != nil || a == nil {
+		t.Fatalf("read back: %v %v", a, err)
+	}
+	if !a.ExpiresAt.After(now) {
+		t.Errorf("post did not renew the lease the call held: expires_at=%v", a.ExpiresAt)
+	}
+
+	// A lapsed lock that no call holds is still reclaimed.
+	idle := mkFileLock(t, "c.go", tcOwnerA, -time.Minute)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{idle}, liveProbe); err != nil {
+		t.Fatalf("acquire idle: %v", err)
+	}
+	// This call began after the lapse, so it holds nothing.
+	preAt(t, s, tcOwnerA, "call-late", now, touching(idle))
+	idlePeer := idle
+	idlePeer.OwnerUUID, idlePeer.SessionUUID, idlePeer.ExpiresAt = tcOwnerB, tcOwnerB, now.Add(time.Hour)
+	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{idlePeer}, liveProbe); err != nil {
+		t.Errorf("a lapsed lock held by no earlier call must lapse: %v", err)
 	}
 }

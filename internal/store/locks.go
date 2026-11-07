@@ -111,7 +111,13 @@ type BreakResult struct {
 	Err    error
 }
 
-const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch,epoch,worktree`
+const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch,epoch,worktree,` + lockInFlightSQL
+
+// lockInFlightSQL is LockRecord.InFlight: the holder has a call open, not yet
+// flagged post_missing, that began before the lease expired (loto-d0cb,
+// docs/write-gate.md). T_report bounds it, since MarkPostMissing flags a call
+// that old.
+const lockInFlightSQL = `EXISTS(SELECT 1 FROM hook_calls c WHERE c.owner_uuid = locks.owner_uuid AND c.t_post IS NULL AND c.dead_at IS NULL AND c.post_missing = 0 AND c.t_pre < locks.expires_at)`
 
 func inClause(targets []domain.Target) (string, []any) {
 	ph := make([]byte, 0, len(targets)*2)
@@ -266,7 +272,7 @@ func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	// anyway and maps an absent value to "" — the conservative "unknown"
 	// reading domain.SameWorktree already treats as matching any worktree.
 	var worktree sql.NullString
-	if err := r.Scan(&canonical, &owner, &session, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &l.Epoch, &worktree); err != nil {
+	if err := r.Scan(&canonical, &owner, &session, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &l.Epoch, &worktree, &l.InFlight); err != nil {
 		return l, err
 	}
 	if worktree.Valid {

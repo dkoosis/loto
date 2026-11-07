@@ -52,13 +52,13 @@ type EvalContext struct {
 	MyWorktree string
 }
 
-// IsStale returns true if the lock is past its TTL OR the holder is provably
-// dead. A nil probe (zero-value EvalContext) means liveness is undeterminable →
+// IsStale returns true if the lock is past its TTL with no call of its holder
+// in flight since before that (InFlight), OR the holder is provably dead. A nil probe (zero-value EvalContext) means liveness is undeterminable →
 // TTL governs, no panic. Liveness accelerates staleness, it never extends the
 // lease: an ALIVE holder past its TTL is still stale (refresh is the remedy —
 // locks_refresh.go).
 func (c EvalContext) IsStale(l LockRecord) bool {
-	if !c.Now.Before(l.ExpiresAt) {
+	if !c.Now.Before(l.ExpiresAt) && !l.InFlight {
 		return true
 	}
 	return c.Live != nil && c.Live(l) == LivenessDead
