@@ -583,7 +583,7 @@ func syncBatchContext(rt *runtime, repoTop, expectedIntegration string) (domain.
 	if !exists || currentIntegration != expectedIntegration {
 		return domain.EvalContext{}, fmt.Errorf("%w: expected=%s actual=%s", errSyncIntegrationChanged, expectedIntegration, currentIntegration)
 	}
-	return domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold}, nil
+	return domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}, nil
 }
 
 // sortSyncOutcome restores the report's one-verdict-per-path ordering after the

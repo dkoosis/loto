@@ -1498,3 +1498,26 @@ func TestSyncMkdirAll_SkipsExistingDir(t *testing.T) {
 		t.Errorf("fsynced %v for an already-existing dir, want none", synced)
 	}
 }
+
+// TestSyncBatchContext_ScopesHoldsToOwnWorktree: the context a sync batch
+// decides with carries the runtime's worktree, so a live claim in a sibling
+// worktree does not hold back this one's bytes, while one in its own does
+// (loto-qbw4).
+func TestSyncBatchContext_ScopesHoldsToOwnWorktree(t *testing.T) {
+	repo := syncBaseRepo(t)
+	sha := syncGitT(t, repo, "rev-parse", "refs/loto/integration")
+	rt := &runtime{Ctx: context.Background(), Worktree: "worktrees/own"}
+	ec, err := syncBatchContext(rt, repo, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := time.Now().Add(time.Hour)
+	sibling := []domain.ClaimRecord{{PathPrefix: "a", OwnerUUID: "o1", Worktree: "worktrees/sib", ExpiresAt: live}}
+	if _, _, conflict := syncConflictFor("a/f.go", nil, sibling, nil, ec); conflict {
+		t.Error("a sibling worktree's claim must not hold back this worktree's sync")
+	}
+	own := []domain.ClaimRecord{{PathPrefix: "a", OwnerUUID: "o1", Worktree: "worktrees/own", ExpiresAt: live}}
+	if _, _, conflict := syncConflictFor("a/f.go", nil, own, nil, ec); !conflict {
+		t.Error("a claim in this worktree must hold back its sync")
+	}
+}
