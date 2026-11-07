@@ -773,13 +773,19 @@ const (
 	probeAnswerInline
 )
 
+// hookProbeTimeout bounds one guard probe. A probe that outruns it reads as
+// no answer, the same as a hook that never answers. Its own var, apart from
+// gitTimeout, so a test can make the probe alone run out of time while the
+// git calls around it still finish (TestDoctorGuard_ProbeOutrunByItsBound).
+var hookProbeTimeout = gitTimeout
+
 // probeHookAnswer runs target (the effective hook file for one guard,
 // resolved from core.hooksPath) with LOTO_HOOK_PROBE=1 and empty stdin, and
 // classifies what it printed against the two contracts a doorman hook can
-// answer with. Bounded by gitTimeout so a wedged foreign hook cannot hang
-// doctor.
+// answer with. Bounded by hookProbeTimeout so a wedged foreign hook cannot
+// hang doctor.
 func probeHookAnswer(ctx context.Context, target, hook, repoTop string) probeAnswer {
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	ctx, cancel := context.WithTimeout(ctx, hookProbeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, target)
 	cmd.Stdin = bytes.NewReader(nil)

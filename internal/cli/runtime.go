@@ -19,8 +19,10 @@ import (
 )
 
 // gitTimeout caps blocking git rev-parse calls so a hung repo (stale NFS,
-// fsmonitor wedge) cannot turn the CLI into an unkillable process.
-const gitTimeout = 5 * time.Second
+// fsmonitor wedge) cannot turn the CLI into an unkillable process. A var, not
+// a const, so a test whose verdict must follow the tree alone can lift it:
+// on a CPU-starved make check a healthy git call can outrun 5s (loto-bqk7).
+var gitTimeout = 5 * time.Second
 
 // errNotInGitRepo is deliberately actionable (design.md: fix block under
 // actionable findings) rather than surfacing the raw git exec error — "exit

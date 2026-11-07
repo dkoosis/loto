@@ -83,9 +83,19 @@ func writeHookFixture(t *testing.T, repo string, withLoto ...string) {
 // setHooksPath points core.hooksPath at value via `git config --local`,
 // matching both `make hooks` (value ".githooks") and a foreign tool
 // repointing the slot (an absolute path outside the repo).
+//
+// It also lifts the guard check's two clocks for the test (loto-bqk7):
+// gitTimeout, which bounds the git calls that find the repo top and read
+// core.hooksPath, and hookProbeTimeout, which bounds each hook probe. A guard
+// test's verdict must follow the hooks on disk, and a CPU-starved make check
+// can stall a healthy call past the 5s product bound, turning every ✓ row
+// into ✗ for one run. A test that wants a bound to bind sets it after.
 func setHooksPath(t *testing.T, repo, value string) {
 	t.Helper()
 	submitGitT(t, repo, "config", "--local", "core.hooksPath", value)
+	prevGit, prevProbe := gitTimeout, hookProbeTimeout
+	gitTimeout, hookProbeTimeout = 2*time.Minute, 2*time.Minute
+	t.Cleanup(func() { gitTimeout, hookProbeTimeout = prevGit, prevProbe })
 }
 
 // writeForeignForwarder lays out, for every hook in guardSpecs, an executable
@@ -433,6 +443,45 @@ func TestDoctorGuard_InlineGuardDoormanForwardsWhenChainExists(t *testing.T) {
 	status := runOK(t, tcCmdStatus)
 	if !strings.Contains(status, "guard:   ok\n") {
 		t.Errorf("expected guard: ok in status: %q", status)
+	}
+}
+
+// TestDoctorGuard_ProbeOutrunByItsBound is loto-bqk7's cause, injected: a
+// forwarder that would answer, as writeForeignForwarder's does, but only after
+// its probe bound has passed. doctor and status then read the intact chain as
+// a bypass: the ✗ row and guard: inert that loto-bqk7 saw once from
+// TestDoctorGuard_InlineGuardDoormanForwardsWhenChainExists. This bound and
+// gitTimeout are the guard verdict's only clocks, which is why setHooksPath
+// lifts both for every other guard test.
+func TestDoctorGuard_ProbeOutrunByItsBound(t *testing.T) {
+	repo := withTempProject(t)
+	pinAgent(t)
+	writeHookFixture(t, repo, "post-checkout", "reference-transaction")
+	foreign := filepath.Join(t.TempDir(), "global-hooks")
+	if err := os.MkdirAll(foreign, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, spec := range guardSpecs {
+		target := filepath.Join(repo, ".githooks", spec.hook)
+		body := "#!/usr/bin/env sh\nsleep 1\nexec " + shellQuote(target) + " \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(foreign, spec.hook), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setHooksPath(t, repo, foreign)
+	hookProbeTimeout = 50 * time.Millisecond
+
+	out := runOK(t, tcCmdDoctor)
+	for _, label := range allGuardLabels {
+		want := "✗ guard=" + label + " unreachable reason=hooksPath-foreign probe=no-answer detail=" + foreign
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in: %q", want, out)
+		}
+	}
+
+	status := runOK(t, tcCmdStatus)
+	if !strings.Contains(status, "guard:   inert\n") {
+		t.Errorf("expected guard: inert in status: %q", status)
 	}
 }
 
