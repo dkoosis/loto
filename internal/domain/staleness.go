@@ -220,5 +220,11 @@ func (c EvalContext) Conflicts(incoming, existing LockRecord) bool {
 	if incoming.EffectiveMode() == ModeShared && existing.EffectiveMode() == ModeShared {
 		return false
 	}
+	// Probe liveness (LockHold) only for a row that could conflict: foreign and
+	// covering. Refuses with Live true is that cheap filter (loto-kxxs).
+	cheap := Hold{Actor: existing.OwnerUUID, Worktree: existing.Worktree, Target: existing.Target.Canonical, Live: true}
+	if !c.Refuses(incoming.OwnerUUID, incoming.Worktree, incoming.Target.Canonical, cheap) {
+		return false
+	}
 	return c.Refuses(incoming.OwnerUUID, incoming.Worktree, incoming.Target.Canonical, c.LockHold(existing))
 }
