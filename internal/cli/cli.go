@@ -54,7 +54,7 @@ commands:
   claim    Reserve a path-prefix territory for this session; -t required
   unclaim  Release your claim by path-prefix
   check    Check targets for lock conflicts; --staged reads git staged paths, --branch guards publication
-  status   Show lock state; --mine to filter to yours, --collisions for ≥2-owner targets
+  status   Show lock state; --mine to filter to yours
   doctor   Detect and optionally repair stale locks
   sync     Fast-forward unleased paths from refs/loto/integration; report conflicts
   tag      Leave a note on a locked target, or pin one to unlocked territory

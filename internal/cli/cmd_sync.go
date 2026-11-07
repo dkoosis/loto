@@ -1499,7 +1499,7 @@ func emitSyncFixBlock(w io.Writer, out syncOutcome, unattributed []string, opts 
 	}
 	fmt.Fprintln(w, "```bash")
 	if len(out.Conflicts) > 0 {
-		fmt.Fprintln(w, "loto status --collisions   # see holders")
+		fmt.Fprintln(w, "loto status                # see holders")
 		fmt.Fprintln(w, "loto sync                  # re-run once the lease/claim resolves")
 	}
 	if len(out.TargetSkips) > 0 {
