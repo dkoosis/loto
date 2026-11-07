@@ -625,35 +625,12 @@ func ensureLocksProcStart(ctx context.Context, db sqlExecQuerier, apply bool) (b
 	return true, nil
 }
 
-// legacyBeaconIntent is the intent `loto beacon` stamped during the one release
-// that minted beacons before locks.beacon existed. Frozen history, not a live
-// coupling to internal/cli's beaconIntent — the arch layering forbids that
-// import, and this literal must never change even if the CLI's does: it names
-// rows already on disk. Sole use is the backfill below.
-const legacyBeaconIntent = "beacon: agent is writing this file"
-
 // ensureLocksBeacon adds the locks.beacon column to an existing DB that
-// predates it (loto-dm4i). Pending when the column is absent; not-pending on a
-// fresh DB (CREATE TABLE already declared it) and on every re-Open. Ordered
-// AFTER ensureLocksModeAndPK: that step rebuilds a legacy locks table from a
-// fixed column list which does not name beacon, so adding the column first
-// would lose it again on the rebuild. user_version is not bumped: a bump trips
-// MoveCorruptAside and destroys live locks (loto-kwlp precedent).
-//
-// ‡ The backfill matters because the default is the wrong answer for exactly
-// one population (Codex #252). Rows taken before beacons existed were asked
-// for by an agent, which is what 0 means — but the release immediately before
-// this one DID mint beacons, as shared / pid-0 rows carrying a fixed intent.
-// Defaulting those to 0 would promote them to apparent explicit leases that
-// guard refuses to move past.
-//
-// The predicate names every persisted field a beacon fixes and a hand-taken
-// lock does not: shared, pid 0, no branch, and that intent. Branch is in there
-// because intent alone is user-supplied — `loto lock --shared -t "<the beacon
-// text>"` is possible, if perverse — while buildLockRecords stamps the holder's
-// git branch (loto-16cf) and buildBeaconRecords deliberately does not. Wrongly
-// marking a real lease would let a tree move waive it, so the backfill errs
-// toward leaving rows alone.
+// predates it (loto-dm4i). Nothing reads the column since beacons became holds
+// (loto-hof2); it stays because ensureLocksWorktreeKeyed's rebuild names it.
+// Ordered AFTER ensureLocksModeAndPK: that step rebuilds a legacy locks table
+// from a fixed column list which does not name beacon. user_version is not
+// bumped: a bump trips MoveCorruptAside and destroys live locks (loto-kwlp).
 func ensureLocksBeacon(ctx context.Context, db sqlExecQuerier, apply bool) (bool, error) {
 	var n int
 	if err := db.QueryRowContext(ctx,
@@ -666,12 +643,6 @@ func ensureLocksBeacon(ctx context.Context, db sqlExecQuerier, apply bool) (bool
 	}
 	if apply {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE locks ADD COLUMN beacon INTEGER NOT NULL DEFAULT 0`); err != nil {
-			return false, err
-		}
-		if _, err := db.ExecContext(ctx,
-			`UPDATE locks SET beacon = 1 WHERE mode = 'shared' AND pid = 0 AND branch = '' AND intent = ?`,
-			legacyBeaconIntent,
-		); err != nil {
 			return false, err
 		}
 		return false, nil // applied: no longer outstanding

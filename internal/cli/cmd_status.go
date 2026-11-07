@@ -129,11 +129,8 @@ func printStatusTerritoryTags(stdout io.Writer, rt *runtime, mine bool, now time
 // (guard=inert) on top of this, and shaving branches inside each printer
 // instead would push both back over gocognit's ceiling a second time.
 //
-// owner is compared as a plain string regardless of which uuid space the row
-// lives in: a claim/exclusive-lock row carries the parent SESSION uuid, a
-// `beacon:` row carries a PER-AGENT uuid, and callerUUID already resolves to
-// whichever space the calling process is in (identity.Ensure), so one
-// comparison covers both. Suppressed under --mine, where every remaining row is
+// owner is compared as a plain string against callerUUID, the identity
+// identity.Ensure resolves for the calling process. Suppressed under --mine, where every remaining row is
 // the caller's own by construction and marking them would move the golden
 // output the AC pins unchanged.
 func rowOwnerMark(owner, callerUUID string, mine bool) (mark string, foreign bool) {
@@ -285,13 +282,8 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord, mi
 		// uuid is opaque on its own, and an agent scanning the unfiltered dump
 		// for its own reservation had no way to tell one uuid from another
 		// without a second command. Derived from the exact identity `loto
-		// whoami` reports — rt.Agent.UUID — so the two can never disagree, and
-		// checked as a plain string equality regardless of which uuid space
-		// this row's owner lives in: a claim/exclusive-lock row carries the
-		// parent SESSION uuid, a `beacon:` row carries a PER-AGENT uuid, and
-		// rt.Agent.UUID already resolves to whichever space the CALLING
-		// process itself is in (identity.Ensure), so one comparison covers
-		// both. Suppressed under --mine (see mine gate above the loop).
+		// whoami` reports — rt.Agent.UUID — so the two can never disagree.
+		// Suppressed under --mine (see mine gate above the loop).
 		self, other := rowOwnerMark(string(l.OwnerUUID), rt.Agent.UUID, mine)
 		if other {
 			foreign = true

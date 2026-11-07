@@ -99,9 +99,8 @@ func CanonicalizeFrom(in string, prov Provenance) (Target, error) {
 	}
 	// Spelling rule, decided before any filesystem question, so every verb
 	// agrees on what a path even is — `lock` (which also checks existence),
-	// `beacon` (which must NOT, since it announces a write to a file that does
-	// not exist yet), `tag`, and `claim` through CanonicalizePrefix. Keeping it
-	// here is what stops beacon and lock from drifting apart (loto-bl66).
+	// the pre-hook (which must NOT, since it admits a write that creates its
+	// file), `tag`, and `claim` through CanonicalizePrefix (loto-bl66).
 	if prov == ProvenanceTyped &&
 		(strings.ContainsAny(in, shellMeta) || HasControl(in) ||
 			strings.TrimSpace(in) != in) {

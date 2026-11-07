@@ -123,7 +123,7 @@ func TestFoldTargetKeyFoldsSpelling(t *testing.T) {
 }
 
 // TestFoldTargetKeyFoldsAPathThatDoesNotExist is the first of loto-8soe's two
-// doors, at unit scale: `loto beacon` names a file nobody has written yet, and
+// doors, at unit scale: the pre-hook names a file nobody has written yet, and
 // the old disk walk stopped at the first absent segment and kept the caller's
 // casing — so two spellings of one future file were two keys. The key must not
 // depend on whether anything is on disk.
@@ -298,45 +298,6 @@ func TestClaimCaseVariantPrefixCoversLock(t *testing.T) {
 // — and both admitted two agents to one file on a case-folding filesystem.
 // #306 closed the third door (two spellings of a file that EXISTS) and left
 // these two open; Codex filed them as P1s on that PR.
-
-// TestGateRefusesCaseVariantOfABeaconedPathThatDoesNotExist is door one.
-// `loto beacon` announces a write to a file that has not been created yet, so
-// the old walk had nothing on disk to resolve the tail against and kept the
-// caller's casing: internal/store/New.go and internal/store/new.go were two
-// keys and B was admitted onto A's ground.
-func TestGateRefusesCaseVariantOfABeaconedPathThatDoesNotExist(t *testing.T) {
-	repo := withTempProject(t)
-	alice, bob := twoAgents(t)
-	folds := caseVariantFSNote(t, repo)
-	const beaconed, variant = "internal/store/New.go", "internal/store/new.go"
-
-	t.Setenv("LOTO_AGENT_ID", alice.UUID)
-	t.Setenv("LOTO_PID", strconv.Itoa(os.Getpid())) // durable live holder → hard block
-	if code := Run([]string{"beacon", beaconed}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("alice beacon on %q failed", beaconed)
-	}
-
-	t.Setenv("LOTO_AGENT_ID", bob.UUID)
-	var out bytes.Buffer
-	code := Run([]string{tcCmdCheck, tcFlagGate, variant}, &out, &bytes.Buffer{})
-
-	if folds {
-		if code != 1 {
-			t.Fatalf("gate admitted %q against alice's beacon on %q — the key was read off a directory entry that does not exist (loto-8soe); exit %d: %q", variant, beaconed, code, out.String())
-		}
-		// A beacon is a lock row, so the gate names it kind=lock.
-		if !strings.Contains(out.String(), "kind=lock") {
-			t.Errorf("expected a lock-kind deny row: %q", out.String())
-		}
-		if !strings.Contains(out.String(), alice.UUID) {
-			t.Errorf("the refusal must name alice as the holder: %q", out.String())
-		}
-		return
-	}
-	if code != 0 {
-		t.Fatalf("on a case-sensitive filesystem %q and %q are two files; exit %d: %q", beaconed, variant, code, out.String())
-	}
-}
 
 // TestGateRefusesAfterCaseOnlyRename is door two. The lock's key used to be
 // whatever the directory entry was spelled at acquire time, and that spelling

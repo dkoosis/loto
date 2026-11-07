@@ -399,8 +399,8 @@ func normalizeRepoPath(p, repoTop string) string {
 // spellings resolved the leaf before this change and now do not; that is the
 // asymmetry loto-j39r named, unified toward the stricter half.
 //
-// ‡ The missing tail can be more than one segment. A beacon announces a write
-// to a path that does not exist yet — `loto beacon a/b/c.go` with `a` a symlink
+// ‡ The missing tail can be more than one segment. The pre-hook admits a write
+// to a path that does not exist yet — `a/b/c.go` with `a` a symlink
 // and `b` not yet created — and the previous one-level fallback (EvalSymlinks
 // on Dir(p) only) gave up there, leaving the symlinked ancestor unresolved and
 // the alias intact.
@@ -460,8 +460,8 @@ func foldContains(parent, child string) (string, bool) {
 // case class. It never reads a directory entry, and that is the fix: its
 // predecessor resolveDiskCase asked disk what the file was called, and disk
 // cannot answer twice the same way (loto-8soe, Codex's two P1s on #306). It
-// has NO answer for a path nobody has written yet — the whole purpose of
-// `loto beacon` — so `internal/store/New.go` and `internal/store/new.go` stayed
+// has NO answer for a path nobody has written yet — the case a Write that
+// creates its file needs — so `internal/store/New.go` and `internal/store/new.go` stayed
 // two keys and both agents were admitted. And its answer MOVES: rename an
 // entry by case alone (`git mv foo.go Foo.go`) and a live lock minted as
 // foo.go no longer matches the Foo.go a peer now resolves to.

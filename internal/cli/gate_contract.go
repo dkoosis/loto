@@ -30,7 +30,7 @@ import (
 const GateContractVersion = 3
 
 // gateContractEnv is where the hook stamps the version it needs. An env var
-// rather than a per-verb flag: `check --gate`, `guard` and `beacon` are all
+// rather than a per-verb flag: `check --gate` and `guard` are both
 // gate surfaces, and a flag would have to be threaded through each one's
 // parser and each one's usage text to say the same thing.
 const gateContractEnv = "LOTO_GATE_CONTRACT"

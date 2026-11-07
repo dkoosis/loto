@@ -952,7 +952,7 @@ func TestSyncDecide_ConflictTable(t *testing.T) {
 		{
 			name: "live beacon -> conflict",
 			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: path}, OwnerUUID: syncOwner, ExpiresAt: now.Add(time.Hour), Beacon: true},
+				{Target: domain.Target{Canonical: path}, OwnerUUID: syncOwner, ExpiresAt: now.Add(time.Hour)},
 			},
 			wantReason: syncReasonLeased,
 		},

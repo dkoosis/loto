@@ -111,11 +111,11 @@ func TestGateDecide_ForeignSharedBeaconDenies(t *testing.T) {
 // opposite of gateDecideAny (loto-xwod). Denying a sibling's write to a path
 // another sibling is writing IS the bead: on 2026-08-14 two subagents of one
 // session wrote the same files concurrently and one's work was destroyed.
-func TestGateDecide_SiblingBeaconDeniesWrite(t *testing.T) {
+func TestGateDecide_SiblingHoldDeniesWrite(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
+		{Target: target, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession, PID: 0, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
 	}
 	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 1 || rows[0].HolderUUID != gateFoeUUID {
@@ -125,11 +125,11 @@ func TestGateDecide_SiblingBeaconDeniesWrite(t *testing.T) {
 
 // Re-entrancy: an agent's own beacon, re-minted on every write to the same
 // path, must never block that agent's next write.
-func TestGateDecide_OwnBeaconAllowsWrite(t *testing.T) {
+func TestGateDecide_OwnHoldAllowsWrite(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateMyUUID, SessionUUID: gateMySession, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
+		{Target: target, OwnerUUID: gateMyUUID, SessionUUID: gateMySession, PID: 0, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
 	}
 	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 0 {
@@ -161,17 +161,17 @@ func TestGateDecide_OwnLockAllows(t *testing.T) {
 	}
 }
 
-// TestGateDecide_PID0ForeignBeaconWithinTTLDenies pins the liveness-threshold
+// TestGateDecide_PID0ForeignHoldWithinTTLDenies pins the liveness-threshold
 // divergence (plan point 3): the gate uses !IsStale, not Classify==Alive, so
 // a hook-minted beacon with no durable PID (the sentinel PID<=0 — no
 // LOTO_PID) still denies while its TTL hasn't lapsed. Classify would report
 // this holder LivenessUnknown; plain check's Classify==Alive gate would only
 // warn, never hard-block, on this row.
-func TestGateDecide_PID0ForeignBeaconWithinTTLDenies(t *testing.T) {
+func TestGateDecide_PID0ForeignHoldWithinTTLDenies(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateFoeUUID, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
+		{Target: target, OwnerUUID: gateFoeUUID, PID: 0, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
 	}
 	ec := gateEC(now)
 	if ec.Classify(locks[0]) != domain.LivenessUnknown {
@@ -332,7 +332,7 @@ func TestGateDecideAny(t *testing.T) {
 			// Process identity is authoritative even if session ids match.
 			name: "another actor's beacon denies despite a matching session",
 			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession, PID: 0, Beacon: true, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
+				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession, PID: 0, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
 			want: 1,
 		},
@@ -361,7 +361,7 @@ func TestGateDecideAny(t *testing.T) {
 		{
 			name: "another session's beacon denies the tree-move",
 			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateFoeSession, PID: 0, Beacon: true, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
+				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateFoeSession, PID: 0, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
 			want: 1,
 		},
@@ -370,7 +370,7 @@ func TestGateDecideAny(t *testing.T) {
 			// direct CLI use outside Claude Code has no session to be a sibling of.
 			name: "beacon carve-out needs a known session",
 			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: "", PID: 0, Beacon: true, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
+				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: "", PID: 0, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
 			want: 1,
 		},

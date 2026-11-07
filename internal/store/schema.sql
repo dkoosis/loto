@@ -21,13 +21,9 @@ CREATE TABLE IF NOT EXISTS locks (
   -- nothing reads or writes it. Kept because the historical locks rebuilds in
   -- migrate() still name it.
   mode             TEXT NOT NULL DEFAULT 'exclusive',
-  -- beacon: 1 = minted by the PreToolUse gate on a writing agent's behalf,
-  -- 0 = a lease an agent asked for. The row shape cannot carry this: a beacon
-  -- is shared with pid 0, and so is an ordinary `loto lock --shared` placed
-  -- without LOTO_PID, so the old shape test read a real shared lease as a
-  -- beacon and let guard's same-session carve-out waive it (loto-dm4i,
-  -- Codex #249). Added in-place to existing DBs via the guarded ALTER in
-  -- migrate(); declared here so fresh DBs match without it.
+  -- beacon: retired with beacons (loto-hof2); every row is a hold and
+  -- nothing reads or writes it. Kept because the historical locks rebuilds in
+  -- migrate() still name it.
   beacon           INTEGER NOT NULL DEFAULT 0,
   -- epoch: generation counter of the AUTHORIZATION to write this path, not of
   -- this row (loto-ovno.2). A renewal (same live owner re-acquiring) leaves it

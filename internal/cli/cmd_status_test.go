@@ -2,14 +2,11 @@ package cli
 
 import (
 	"bytes"
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"loto/internal/identity"
 )
 
 func TestStatusEmpty(t *testing.T) {
@@ -316,45 +313,6 @@ func TestStatusSingleTarget_SelfMarkerOnHolderRows(t *testing.T) {
 	}
 	if peer := holderRow(bob.UUID); strings.Contains(peer, "self=true") {
 		t.Errorf("a peer's holder row must be unmarked: %q", peer)
-	}
-}
-
-// TestStatusSelfMarker_MarksOwnBeaconRow pins the second uuid space (Rules):
-// a beacon row carries a PER-AGENT uuid derived from (parent, LOTO_SUBAGENT_ID
-// stamp), distinct from the parent SESSION uuid on exclusive locks/claims. The
-// caller that wrote the beacon, asking `loto status` under the SAME stamp,
-// must still see its own row marked — the marker has to hold in both spaces,
-// not just the one the incident happened to hit.
-func TestStatusSelfMarker_MarksOwnBeaconRow(t *testing.T) {
-	withTempProject(t)
-	pinAgent(t) // parent identity every stamped sibling derives from
-	t.Setenv("LOTO_SUBAGENT_ID", "sibling-1")
-
-	derived, err := identity.Ensure(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if code := Run([]string{gateIntentBeacon, tcTargetA}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatal("beacon failed")
-	}
-
-	// Still stamped: resolveSubagent is deterministic over (parent, stamp), so
-	// this status call resolves to the exact per-agent uuid the beacon row
-	// carries.
-	var out bytes.Buffer
-	if code := Run([]string{tcCmdStatus}, &out, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("status exit: %q", out.String())
-	}
-	row := statusRowFor(t, out.String(), tcTargetA)
-	if !strings.Contains(row, "owner="+derived.UUID) {
-		t.Fatalf("sanity: row owner must be the derived per-agent uuid: %q", row)
-	}
-	if !strings.Contains(row, `intent="beacon:`) {
-		t.Fatalf("sanity: row must be the beacon row, not an exclusive lock: %q", row)
-	}
-	if !strings.Contains(row, "self=true") {
-		t.Errorf("caller's own beacon row (per-agent uuid) must be marked self=true: %q", row)
 	}
 }
 

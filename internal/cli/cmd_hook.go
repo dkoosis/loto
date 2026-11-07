@@ -98,7 +98,7 @@ const hookTReportEnv = "LOTO_T_REPORT"
 // hookAdmitIntent is stamped on a lock the pre-hook takes on the caller's
 // behalf, so `loto status` and a blocked peer can say where the row came from.
 // I2's admission is not a lease anybody asked for, so the verb supplies the
-// reason the way `loto beacon` does.
+// reason.
 const hookAdmitIntent = "hook: admitted Edit-family write"
 
 // hookStdin is the harness event source, a seam so the tests can drive a
@@ -306,8 +306,7 @@ func runHook(ctx context.Context, pre bool, stdout, stderr io.Writer) int {
 	status := startGitStatusPaths(ctx, "")
 	defer func() { _, _ = status() }()
 	// openRuntime, not openRuntimeGC: this is the per-tool-call hot path and
-	// must not pay the session GC sweep (loto-6pn6, same reason `loto beacon`
-	// takes this door).
+	// must not pay the session GC sweep (loto-6pn6).
 	rt, err := openRuntime(ctx)
 	if errors.Is(err, errNotInGitRepo) {
 		// No tree here to gate, so the model has nothing to learn.
@@ -550,7 +549,7 @@ func hookAdmit(rt *runtime, filePath string) (declared string, blocker *domain.L
 		return "", nil, nil //nolint:nilerr // a path outside this repo is out of frame, not a failure
 	}
 	// allowMissing: a Write that CREATES the file is the case I2 most needs
-	// to admit (loto-z5nb, the same reason `loto beacon` tolerates ENOENT).
+	// to admit (loto-z5nb).
 	if reason := statFileTargetReason(rt.RepoTop, t.Canonical, true); reason != "" {
 		return "", nil, nil
 	}
@@ -580,15 +579,9 @@ func hookAdmit(rt *runtime, filePath string) (declared string, blocker *domain.L
 // over its parent's lock is admitted here, and another actor's is refused
 // below.
 //
-// ‡ A beacon of mine is NOT that authorization (loto-9zcq):
-// a beacon is not an exclusive lock, so stopping on one left the path with
-// no exclusive lock under its author.
-// Fall through and take the lock; an exclusive row upgrades over the
-// owner's beacon at the store.
-//
-// L(f) = s' ≠ s. Any live foreign row refuses, beacon or lease alike: a
-// beacon means an agent is writing here right now, which is the case I2
-// exists to serialize. My own rows are not foreign.
+// L(f) = s' ≠ s. Any live foreign row refuses: it means another actor holds
+// or is writing the path, which is the case I2 exists to serialize. My own
+// rows are not foreign.
 //
 // ‡ A row from a DIFFERENT worktree is never held-by-me and never a blocker
 // (loto-3eq6, domain.SameWorktree): the store is shared across every linked
@@ -597,8 +590,7 @@ func hookAdmit(rt *runtime, filePath string) (declared string, blocker *domain.L
 // another checkout, or a peer's, either way not this write's concern.
 func hookRowsDecide(rows []domain.LockRecord, me domain.AgentUUID, ec domain.EvalContext) (held bool, blocker *domain.LockRecord) {
 	for i := range rows {
-		if rows[i].OwnerUUID == me && !rows[i].IsBeacon() &&
-			domain.SameWorktree(ec.MyWorktree, rows[i].Worktree) {
+		if rows[i].OwnerUUID == me && domain.SameWorktree(ec.MyWorktree, rows[i].Worktree) {
 			return true, nil
 		}
 	}
@@ -766,7 +758,7 @@ func hookSeqAtObserve(rt *runtime, paths []string, holders map[string]domain.Loc
 // hookLiveHolders reduces the live lock rows to one holder per path — the `L`
 // a call record cites.
 //
-// ‡ Several live rows can sit on one path (a beacon beside a lock), and `L` in
+// ‡ Several live rows can sit on one path (legacy rows taken before every hold was exclusive), and `L` in
 // the design is single-valued. The lowest owner uuid wins, so the record is deterministic rather than
 // whatever order the scan happened to return (.claude/rules/design.md: same
 // input, byte-identical output).

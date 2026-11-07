@@ -90,10 +90,10 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	// DOES exist, is a first-class lock target by default — no --create flag
 	// (dk's call on the bead). ~100 refusals in 14 days were an agent locking
 	// a file it was about to CREATE; statFileTargetReason already tolerates
-	// ENOENT the same way `loto beacon`/hookAdmit do (loto-z5nb), and
+	// ENOENT the same way hookAdmit does (loto-z5nb), and
 	// buildLockRecords below sets MayCreate so the store's own target
 	// validation agrees. validateLockTargetsForLock adds the parent-exists
-	// requirement neither of those other two callers enforce.
+	// requirement hookAdmit does not enforce.
 	targets, invalid := validateLockTargetsForLock(fs.Args(), repoTop)
 	if len(invalid) > 0 {
 		render.EmitInvalid(stderr, invalid)
@@ -298,17 +298,15 @@ func emitDashTIsIntentHint(w io.Writer, targets []domain.Target) {
 // store work, so rejection produces a single render.EmitInvalid block and
 // leaves zero side effects on disk or DB.
 //
-// allowMissing tolerates ENOENT instead of rejecting it — originally the
-// beacon-scoped carve-out (loto-z5nb): `loto beacon` announces a write about
-// to happen, and a Write tool call creating a brand-new path is exactly the
-// case a beacon exists to protect. domain.Canonicalize (inside
+// allowMissing tolerates ENOENT instead of rejecting it (loto-z5nb): a Write
+// tool call creating a brand-new path still needs a hold. domain.Canonicalize (inside
 // resolveCLITarget) already tolerates a non-existent path; this was the one
 // place downstream that still demanded the file pre-exist. Every other
 // check — symlink, non-regular — still runs unconditionally when the path
 // DOES exist. `loto lock` now passes true too (loto-i382): a missing target
 // is a first-class lock by default, no --create flag — but ONLY when its
-// parent exists, which this function does not check (beacon/hookAdmit must
-// not gain that restriction). validateLockTargetsForLock layers that
+// parent exists, which this function does not check (hookAdmit must not
+// gain that restriction). validateLockTargetsForLock layers that
 // narrower rule on top, for `loto lock` alone.
 func validateLockTargets(args []string, repoTop string, allowMissing bool) ([]domain.Target, []render.InvalidTarget) {
 	targets := make([]domain.Target, 0, len(args))
@@ -339,7 +337,7 @@ func validateLockTargets(args []string, repoTop string, allowMissing bool) ([]do
 
 // validateLockTargetsForLock is `loto lock`'s own entry point: it accepts a
 // missing target the way validateLockTargets(..., true) does, then enforces
-// the bead's Rule that beacon/hookAdmit deliberately do not — a missing
+// the bead's Rule that hookAdmit deliberately does not — a missing
 // target is only lockable when its PARENT directory already exists
 // (loto-i382). `loto lock nodir/file.go` with nodir/ itself absent is still
 // refused reason=not-found, the same shape a plain missing file always used.
@@ -398,7 +396,7 @@ func missingParentReason(repoTop, canonical string) string {
 // silently means "repoTop/<cwd-suffix>/<canonical>" whenever loto runs from a
 // subdirectory — which used to surface as a spurious `not-found` on `loto
 // lock`, and with the allowMissing carve-out below would instead SILENTLY
-// admit a beacon while skipping the symlink and regular-file checks the path
+// admit a target while skipping the symlink and regular-file checks the path
 // would actually have failed (Codex #258 P1). repoTop is empty only outside a
 // git repo, where CWD-relative is the only meaning available.
 func statFileTargetReason(repoTop, canonical string, allowMissing bool) string {
