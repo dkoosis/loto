@@ -67,3 +67,22 @@ func TestConflicts_TruthTable(t *testing.T) {
 		})
 	}
 }
+
+// Conflicts probes a holder's liveness only for a row that could conflict
+// (loto-kxxs): none for a same-owner row or one whose target does not cover.
+func TestConflicts_ProbesOnlyRowsThatCouldConflict(t *testing.T) {
+	probes := 0
+	ec := EvalContext{Now: time.Now(), Live: func(LockRecord) Liveness { probes++; return LivenessAlive }}
+	in := mk("alice", ModeExclusive)
+	other := mk("bob", ModeExclusive)
+	other.Target = Target{Canonical: "/b.go"}
+	if ec.Conflicts(in, mk("alice", ModeExclusive)) || ec.Conflicts(in, other) {
+		t.Fatal("same-owner and non-covering rows must not conflict")
+	}
+	if probes != 0 {
+		t.Fatalf("probe called %d times for rows that cannot conflict, want 0", probes)
+	}
+	if !ec.Conflicts(in, mk("bob", ModeExclusive)) || probes != 1 {
+		t.Fatalf("foreign covering row must conflict after one probe, probes=%d", probes)
+	}
+}
