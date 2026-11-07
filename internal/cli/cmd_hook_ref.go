@@ -657,9 +657,11 @@ func refCheckoutWideClaim(rt *runtime, stderr io.Writer) (bool, string) {
 		fmt.Fprintf(stderr, "⚠ holds=unreadable ref-guard=fail-open err=%q\n", err)
 		return true, "unknown"
 	}
-	now := time.Now()
+	// The lease alone, not the probe: a claim lapses on its TTL here, unless a
+	// call of its holder that began before then is still running (InFlight).
+	ec := domain.EvalContext{Now: time.Now()}
 	for i := range holds {
-		if string(holds[i].OwnerUUID) == rt.Agent.UUID && now.Before(holds[i].ExpiresAt) {
+		if string(holds[i].OwnerUUID) == rt.Agent.UUID && !ec.IsStale(holds[i]) {
 			return true, rt.Agent.UUID
 		}
 	}
