@@ -17,13 +17,9 @@ CREATE TABLE IF NOT EXISTS locks (
   -- guarded ALTER in migrate(); declared here so fresh DBs match without it.
   proc_start       INTEGER,
   branch           TEXT NOT NULL DEFAULT '',
-  -- mode: 'shared' (multi-reader, write-bit NOT stripped) or 'exclusive'
-  -- (sole-writer, write-bit stripped). Legacy rows / NULL read as 'exclusive'
-  -- to preserve the pre-mode binary-lock semantics (loto-k5el.2). Added in-place
-  -- to existing DBs via the guarded table-rebuild in migrate(); declared here so
-  -- fresh DBs match. The composite PK (target_canonical, owner_uuid) lets several
-  -- shared holders coexist on one target — meaningless for the old binary lock,
-  -- mandatory for shared mode.
+  -- mode: retired with shared mode (loto-hof2); every hold is exclusive and
+  -- nothing reads or writes it. Kept because the historical locks rebuilds in
+  -- migrate() still name it.
   mode             TEXT NOT NULL DEFAULT 'exclusive',
   -- beacon: 1 = minted by the PreToolUse gate on a writing agent's behalf,
   -- 0 = a lease an agent asked for. The row shape cannot carry this: a beacon

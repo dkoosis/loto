@@ -38,16 +38,6 @@ func TestEmitLockSuccess_SortedDeterministic(t *testing.T) {
 	}
 }
 
-func TestEmitLockSuccess_ShowsMode(t *testing.T) {
-	var buf bytes.Buffer
-	EmitLockSuccess(&buf, []domain.LockRecord{
-		{Target: domain.Target{Canonical: aGo}, Mode: domain.ModeShared},
-	})
-	if !strings.Contains(buf.String(), "mode=shared") {
-		t.Fatalf("want mode=shared in: %q", buf.String())
-	}
-}
-
 func TestEmitConflict_TriageFirst(t *testing.T) {
 	now := time.Date(2026, 5, 10, 18, 0, 0, 0, time.UTC)
 	var buf bytes.Buffer

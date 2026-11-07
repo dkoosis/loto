@@ -30,8 +30,10 @@ const (
 	// rows written before the strip retired are still readable.
 	EventModeRestoreFailed    = "mode_restore_failed"
 	EventAcquireRollbackStart = "acquire_rollback_started"
-	EventLockDowngraded       = "lock_downgraded"
-	EventLockRefreshed        = "lock_refreshed"
+	// EventLockDowngraded was written by `loto downgrade`, retired with shared
+	// mode (loto-hof2); it stays so the CHECK constraint and old rows read.
+	EventLockDowngraded = "lock_downgraded"
+	EventLockRefreshed  = "lock_refreshed"
 	// EventGateBypass is emitted every time LOTO_GATE=off bypasses admission
 	// (loto-ovno.4, git-gate.md "The gate can never become the outage"). No
 	// Target — a bypass is a session-scoped fact, not a per-path one — so

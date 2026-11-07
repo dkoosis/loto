@@ -229,8 +229,6 @@ func assertLocksHeld(rt *runtime, ec domain.EvalContext, targets []domain.Target
 			blocked = append(blocked, laneBlock{t.Canonical, "no-lock-held"})
 		case ec.IsStale(l):
 			blocked = append(blocked, laneBlock{t.Canonical, lockStaleReason})
-		case l.EffectiveMode() != domain.ModeExclusive:
-			blocked = append(blocked, laneBlock{t.Canonical, "lock-not-exclusive"})
 		default:
 			held[t.Canonical] = l.CreatedAt
 		}
@@ -239,8 +237,8 @@ func assertLocksHeld(rt *runtime, ec domain.EvalContext, targets []domain.Target
 }
 
 // reassertLocksHeld re-checks, after staging, that every lock the pre-assert
-// accepted is still held by owner, still live, still exclusive, and is the same
-// lock instance (CreatedAt unchanged). Any vanished/stale/downgraded/reacquired
+// accepted is still held by owner, still live, and is the same
+// lock instance (CreatedAt unchanged). Any vanished/stale/reacquired
 // lock means a peer could have reclaimed the path and dirtied the working tree
 // inside the stage window (loto-9sro TOCTOU). A store/ctx read error is returned
 // as the second value: the re-check could not run, which is infra — distinct
@@ -259,8 +257,6 @@ func reassertLocksHeld(rt *runtime, ec domain.EvalContext, targets []domain.Targ
 			tainted = append(tainted, laneBlock{t.Canonical, "lock-lost"})
 		case ec.IsStale(l):
 			tainted = append(tainted, laneBlock{t.Canonical, lockStaleReason})
-		case l.EffectiveMode() != domain.ModeExclusive:
-			tainted = append(tainted, laneBlock{t.Canonical, "lock-downgraded"})
 		case !l.CreatedAt.Equal(before[t.Canonical]):
 			tainted = append(tainted, laneBlock{t.Canonical, "lock-reacquired"})
 		}

@@ -2,7 +2,7 @@ Usage of unlock:
   -all
     	release every lock owned by my uuid
   -expect-holder value
-    	owner@epoch (from loto status) this break must find; repeat per holder of a shared target; refuse if the holder set moved
+    	owner@epoch (from loto status) this break must find; repeat per holder of a target; refuse if the holder set moved
   -force
     	break a lock; BLIND unless --expect-holder names the hold to break
   -intent string

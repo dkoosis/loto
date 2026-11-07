@@ -444,8 +444,6 @@ func submitBlockedTargets(targets []domain.Target, locks map[string]domain.LockR
 			blocked = append(blocked, submitBlocked{t.Canonical, "no-lock-held"})
 		case ec.IsStale(l):
 			blocked = append(blocked, submitBlocked{t.Canonical, lockStaleReason})
-		case l.EffectiveMode() != domain.ModeExclusive:
-			blocked = append(blocked, submitBlocked{t.Canonical, "lock-not-exclusive"})
 		}
 	}
 	return blocked

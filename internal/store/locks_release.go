@@ -148,7 +148,6 @@ func classifyReleases(targets []domain.Target, existing map[string][]domain.Lock
 			default:
 				results[i].State = results[j].State
 				results[i].Owner = results[j].Owner
-				results[i].Mode = results[j].Mode
 			}
 			continue
 		}
@@ -159,16 +158,13 @@ func classifyReleases(targets []domain.Target, existing map[string][]domain.Lock
 			results[i].State = StateNoLock
 		case own != nil:
 			results[i].State = StateUnlocked
-			results[i].Mode = own.Mode
 			owned = append(owned, t.Canonical)
 		case authorizeHolders(holders, ec, false) == nil:
 			// The stale-reclaim gate is authorizeHolders — the same single-
 			// sourced live-holder veto BreakStale uses (loto-w77f), not a
-			// re-derived predicate. All holders share one mode (all-shared-or-
-			// one-exclusive invariant), so holders[0] drives restore; holders
-			// arrive created_at,owner-ordered, so Owner is deterministic.
+			// re-derived predicate. Holders arrive created_at,owner-ordered,
+			// so Owner is deterministic.
 			results[i].State = StateReclaimedStale
-			results[i].Mode = holders[0].Mode
 			results[i].Owner = string(holders[0].OwnerUUID)
 			reclaims = append(reclaims, holders...)
 		default:
@@ -324,7 +320,6 @@ func sessionReleaseResults(canonicals []sessionTarget, own string) []ReleaseResu
 		results[i] = ReleaseResult{
 			Target: domain.Target{Canonical: c.Canonical},
 			State:  StateUnlocked,
-			Mode:   c.Mode,
 		}
 		if !domain.SameWorktree(own, c.Worktree) {
 			results[i].Worktree = c.Worktree
@@ -410,8 +405,7 @@ func emitLockReleaseEventsTx(ctx context.Context, tx *sql.Tx, canonicals []sessi
 	return rotateEventsTx(ctx, tx, now)
 }
 
-// sessionTarget pairs a session-owned lock's canonical path with its mode so
-// the release restore guard can skip shared rows (loto-k5el.2 T4), with the
+// sessionTarget pairs a session-owned lock's canonical path with the
 // intent the row recorded AT DELETE TIME so the caller can report what it
 // actually swept rather than what it saw beforehand (loto-lzap), and with the
 // worktree it was acquired from so a sweep can tell a row minted by a
@@ -419,12 +413,11 @@ func emitLockReleaseEventsTx(ctx context.Context, tx *sql.Tx, canonicals []sessi
 // collapse onto one value (loto-19bz).
 type sessionTarget struct {
 	Canonical string
-	Mode      string
 	Intent    string
 	Worktree  string
 }
 
-// loadSessionTargetsTx returns canonical paths + modes for all locks owned by
+// loadSessionTargetsTx returns canonical paths for all locks owned by
 // agent (and optionally scoped to session). Returns them in deterministic order.
 // onlyIntent, when non-empty, narrows the set to rows recording exactly that
 // intent. The filter belongs in this query — inside the release transaction —
@@ -435,7 +428,7 @@ type sessionTarget struct {
 // a delete keyed on target and owner alone then takes the peer's lock — the
 // exact loss --only-intent exists to prevent (loto-lzap).
 func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID, onlyIntent string) ([]sessionTarget, error) {
-	q := `SELECT target_canonical, mode, intent, worktree FROM locks WHERE owner_uuid = ?`
+	q := `SELECT target_canonical, intent, worktree FROM locks WHERE owner_uuid = ?`
 	args := []any{byAgent}
 	if sessionUUID != "" {
 		q += andSessionClause
@@ -454,7 +447,7 @@ func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID,
 	var out []sessionTarget
 	for rows.Next() {
 		var c sessionTarget
-		if err := rows.Scan(&c.Canonical, &c.Mode, &c.Intent, &c.Worktree); err != nil {
+		if err := rows.Scan(&c.Canonical, &c.Intent, &c.Worktree); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

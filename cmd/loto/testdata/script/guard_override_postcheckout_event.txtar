@@ -16,9 +16,9 @@ exec git commit -m 'other: rewrites shared.go'
 
 exec git checkout -
 
-# Alice takes a shared lock on the path the next checkout would move.
+# Alice takes a lock on the path the next checkout would move.
 env LOTO_AGENT_ID=$ALICE
-loto lock shared.go --shared -t 'alice reading'
+loto lock shared.go -t 'alice reading'
 stdout '✓ locked count=1'
 
 env LOTO_AGENT_ID=$BOB

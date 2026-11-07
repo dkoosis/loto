@@ -609,7 +609,7 @@ func TestValidateFileTarget_BeaconToleratesMissingPath(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "new.go")
 
-	beacon := domain.LockRecord{Target: domain.Target{Canonical: missing}, Mode: domain.ModeShared, PID: 0, Beacon: true}
+	beacon := domain.LockRecord{Target: domain.Target{Canonical: missing}, PID: 0, Beacon: true}
 	if !beacon.IsBeacon() {
 		t.Fatal("test fixture invariant broken: want a beacon shape")
 	}
@@ -627,7 +627,7 @@ func TestValidateFileTarget_BeaconToleratesMissingPath(t *testing.T) {
 	if err := os.Symlink(realPath, sym); err != nil {
 		t.Fatal(err)
 	}
-	beaconOnSymlink := domain.LockRecord{Target: domain.Target{Canonical: sym}, Mode: domain.ModeShared, PID: 0, Beacon: true}
+	beaconOnSymlink := domain.LockRecord{Target: domain.Target{Canonical: sym}, PID: 0, Beacon: true}
 	var tve *TargetValidationError
 	if err := validateFileTarget("", beaconOnSymlink); !errors.As(err, &tve) || tve.Reason != ReasonSymlink {
 		t.Fatalf("beacon on an existing symlink must still be refused, got %v", err)

@@ -28,8 +28,9 @@ var ErrMalformedHoldRef = errors.New("malformed hold ref, want owner@epoch")
 // off `loto status` and retype; created_at is a unix-nanosecond integer nobody
 // transcribes correctly.
 //
-// A target's holder set is HoldRefs, plural: shared mode lets several owners
-// coexist on one path (I1), so "the holder" is a set, not a value.
+// A target's holder set is HoldRefs, plural: rows taken before holds were
+// exclusive, or in another worktree, can sit on one path, so "the holder" is a
+// set, not a value.
 type HoldRef struct {
 	Owner AgentUUID
 	// Epoch is the path-epoch the hold was granted at. Zero is meaningful, not

@@ -23,8 +23,7 @@ import (
 // from plain check's computeCheckConflicts (plan "gate semantics vs plain
 // check"):
 //
-//  1. any foreign live lock/beacon denies, any mode — not the shared-vs-
-//     shared-safe probe computeCheckConflicts uses.
+//  1. any foreign live lock/beacon denies.
 //  2. claims are consulted at all (plain check never reads them);
 //     PrefixOverlaps gives ancestor coverage, so a claim on internal/store
 //     denies a not-yet-on-disk internal/store/new.go.

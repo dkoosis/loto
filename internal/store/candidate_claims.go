@@ -44,7 +44,6 @@ type ClaimLeaseConflict struct {
 const (
 	ClaimLeaseGone         = "lease-gone"
 	ClaimLeaseStale        = "lease-stale"
-	ClaimLeaseNotExclusive = "lease-not-exclusive"
 	ClaimLeaseEpochChanged = "lease-epoch-changed"
 )
 
@@ -198,8 +197,6 @@ func revalidateClaimLeasesTx(ctx context.Context, tx *sql.Tx, claims []domain.Ca
 			conflicts = append(conflicts, ClaimLeaseConflict{path, ClaimLeaseGone})
 		case ec.IsStale(l):
 			conflicts = append(conflicts, ClaimLeaseConflict{path, ClaimLeaseStale})
-		case l.EffectiveMode() != domain.ModeExclusive:
-			conflicts = append(conflicts, ClaimLeaseConflict{path, ClaimLeaseNotExclusive})
 		case guard.Epoch[path] != l.Epoch:
 			conflicts = append(conflicts, ClaimLeaseConflict{path, ClaimLeaseEpochChanged})
 		}

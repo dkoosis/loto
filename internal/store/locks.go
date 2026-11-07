@@ -13,7 +13,7 @@ import (
 
 // Event kind constants used by this file (EventLockAcquired,
 // EventLockReleased, EventLockBroken, EventLockReclaimedStale,
-// EventModeRestoreFailed, EventAcquireRollbackStart, EventLockDowngraded,
+// EventModeRestoreFailed, EventAcquireRollbackStart,
 // EventLockRefreshed, EventGateBypass, EventStagedGateFired) are declared in
 // event_kinds.go — the single site for the whole event-kind vocabulary
 // (loto-123y).
@@ -99,7 +99,6 @@ type ReleaseResult struct {
 	// Owner is the vetoing live holder (StateNotOwner) or the first reclaimed
 	// dead holder in created_at,owner order (StateReclaimedStale).
 	Owner string
-	Mode  string // mode of the released row; "" → exclusive (loto-k5el.2)
 	// Worktree is set only on a row a session sweep released from a checkout
 	// other than the caller's own (loto-e1ku).
 	Worktree string
@@ -110,10 +109,9 @@ type ReleaseResult struct {
 type BreakResult struct {
 	Target domain.Target
 	Err    error
-	Mode   string // mode of the broken row; "" → exclusive (mirrors ReleaseResult.Mode)
 }
 
-const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch,mode,beacon,epoch,worktree`
+const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch,beacon,epoch,worktree`
 
 func inClause(targets []domain.Target) (string, []any) {
 	ph := make([]byte, 0, len(targets)*2)
@@ -263,10 +261,6 @@ func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	// Map NULL → 0 (UNKNOWN) at the store boundary so domain logic never sees
 	// the SQL-null distinction.
 	var procStart sql.NullInt64
-	// mode is NOT NULL DEFAULT 'exclusive' in fresh schema, but a NullString
-	// keeps scan robust against any NULL legacy row; "" → EffectiveMode treats
-	// it as exclusive.
-	var mode sql.NullString
 	// beacon is NOT NULL DEFAULT 0 in fresh schema and in the in-place ALTER,
 	// so every row has a value; NullBool keeps the scan robust anyway and maps
 	// an absent value to false — "not a beacon", the conservative reading,
@@ -277,7 +271,7 @@ func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	// anyway and maps an absent value to "" — the conservative "unknown"
 	// reading domain.SameWorktree already treats as matching any worktree.
 	var worktree sql.NullString
-	if err := r.Scan(&canonical, &owner, &session, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &mode, &beacon, &l.Epoch, &worktree); err != nil {
+	if err := r.Scan(&canonical, &owner, &session, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &beacon, &l.Epoch, &worktree); err != nil {
 		return l, err
 	}
 	if worktree.Valid {
@@ -291,9 +285,6 @@ func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	l.ExpiresAt = time.Unix(0, expiresNs).UTC()
 	if procStart.Valid {
 		l.ProcStart = procStart.Int64
-	}
-	if mode.Valid {
-		l.Mode = mode.String
 	}
 	return l, nil
 }

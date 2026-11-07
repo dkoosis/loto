@@ -253,21 +253,6 @@ func TestLock_NonPositiveTTL_Rejected(t *testing.T) {
 	}
 }
 
-func TestCmdLock_SharedFlag_AllowsCoexist(t *testing.T) {
-	withTempProject(t)
-	pinAgent(t) // alice
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentRead, tcFlagShared}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("alice shared lock failed, exit %d", code)
-	}
-	t.Setenv("LOTO_AGENT_ID", "")
-	pinAgent(t) // bob
-	var out, errBuf bytes.Buffer
-	code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentRead, tcFlagShared}, &out, &errBuf)
-	if code != 0 {
-		t.Fatalf("second shared lock should succeed; code=%d out=%q err=%q", code, out.String(), errBuf.String())
-	}
-}
-
 func TestCmdLock_DefaultExclusive_Blocks(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t) // alice
@@ -713,7 +698,7 @@ func TestLock_NoClaims_OutputUnchanged(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %q", code, out.String())
 	}
-	want := fmt.Sprintf("✓ locked count=1\n✓ target=%s mode=exclusive\n", tcTargetA)
+	want := fmt.Sprintf("✓ locked count=1\n✓ target=%s\n", tcTargetA)
 	if out.String() != want {
 		t.Errorf("output changed with zero claims:\ngot  %q\nwant %q", out.String(), want)
 	}

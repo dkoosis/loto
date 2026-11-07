@@ -275,10 +275,9 @@ func reclaimStaleAndCollectBlockers(ctx context.Context, tx *sql.Tx, all []domai
 			}
 			continue
 		}
-		// Mode-aware: a shared peer does not block a shared acquire. The
-		// same-canonical/same-owner/stale guards above are kept for the reclaim
-		// side-effect; Conflicts is the final gate on whether a live, non-self
-		// peer actually blocks (loto-k5el.2 T3).
+		// The same-canonical/same-owner/stale guards above are kept for the
+		// reclaim side-effect; Conflicts is the final gate on whether a live,
+		// non-self peer actually blocks.
 		if ec.Conflicts(l, *ex) {
 			blockers = append(blockers, all[i])
 		}
@@ -381,9 +380,7 @@ func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, s
 	// DIFFERENT worktree still matched the old two-column key and silently
 	// overwrote the first worktree's row instead of inserting beside it. The
 	// old `WHERE locks.owner_uuid = excluded.owner_uuid` guard is now
-	// redundant (the conflict is keyed on owner) and dropped. Persist
-	// EffectiveMode() (not raw l.Mode) so the column never stores ''
-	// (loto-k5el.2 T3).
+	// redundant (the conflict is keyed on owner) and dropped.
 	//
 	// ‡ The DO UPDATE WHERE is the beacon yield (loto-xl4g, Codex #249): an
 	// incoming BEACON never overwrites an existing LIVE NON-beacon row of the
@@ -404,8 +401,8 @@ func insertOrRefreshLock(ctx context.Context, tx *sql.Tx, l domain.LockRecord, s
 	// refreshed, and peers read it as free — `loto beacon` would report success
 	// over a row announcing the file is available while the agent is mid-edit.
 	res, err := tx.ExecContext(ctx, `
-INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, mode, beacon, epoch, worktree)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, beacon, epoch, worktree)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(target_canonical, owner_uuid, worktree) DO UPDATE SET
   intent=excluded.intent,
   expires_at=excluded.expires_at,
@@ -414,7 +411,6 @@ ON CONFLICT(target_canonical, owner_uuid, worktree) DO UPDATE SET
   pid=excluded.pid,
   proc_start=excluded.proc_start,
   branch=excluded.branch,
-  mode=excluded.mode,
   beacon=excluded.beacon,
   epoch=excluded.epoch
 WHERE ? = 1
@@ -422,7 +418,7 @@ WHERE ? = 1
    OR locks.beacon = 1`,
 		l.Target.Canonical, string(l.OwnerUUID), string(l.SessionUUID),
 		l.Intent, l.CreatedAt.UnixNano(), l.ExpiresAt.UnixNano(),
-		l.Host, l.PID, procStart, l.Branch, l.EffectiveMode(), l.Beacon, epoch, l.Worktree,
+		l.Host, l.PID, procStart, l.Branch, l.Beacon, epoch, l.Worktree,
 		supersede,
 	)
 	if err != nil {

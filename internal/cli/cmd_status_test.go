@@ -12,63 +12,6 @@ import (
 	"loto/internal/identity"
 )
 
-// TestStatusCollisions pins loto-bo8c: two distinct agents shared-locking the
-// same target coexist (Conflicts(shared,shared)=false), so `loto check` never
-// surfaces them — but `status --collisions` flags the target as a ≥2-owner
-// collision, the signal the shared beacon exists to expose.
-// tcFlagCollisions is declared here rather than in testconsts_test.go on
-// purpose: that file is a shared test-constants file held by another lane
-// (sd-xhap), and a second lane editing it is the collision this repo has been
-// avoiding all night. Move it there later if it earns a second caller.
-const tcFlagCollisions = "--collisions"
-
-func TestStatusCollisions(t *testing.T) {
-	withTempProject(t)
-	alice, bob := twoAgents(t)
-	lockShared := func(uuid string) {
-		t.Setenv("LOTO_AGENT_ID", uuid)
-		if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, "--shared"},
-			&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-			t.Fatalf("shared lock for %s failed", uuid)
-		}
-	}
-	lockShared(alice.UUID)
-	lockShared(bob.UUID)
-
-	var out bytes.Buffer
-	if code := Run([]string{tcCmdStatus, tcFlagCollisions}, &out, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("status --collisions exit: %q", out.String())
-	}
-	got := out.String()
-	if !strings.Contains(got, "⚠ collisions count=1") {
-		t.Errorf("expected 1 collision: %q", got)
-	}
-	if !strings.Contains(got, "target=a.go distinct_owners=2") {
-		t.Errorf("expected a.go with 2 distinct owners: %q", got)
-	}
-	if !strings.Contains(got, alice.UUID) || !strings.Contains(got, bob.UUID) {
-		t.Errorf("both colliding owners must be named: %q", got)
-	}
-}
-
-// A single shared owner is not a collision — coexistence needs two DISTINCT
-// owners on one target.
-func TestStatusCollisions_NoneWhenSingleOwner(t *testing.T) {
-	withTempProject(t)
-	pinAgent(t)
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, "--shared"},
-		&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatal("shared lock failed")
-	}
-	var out bytes.Buffer
-	if code := Run([]string{tcCmdStatus, tcFlagCollisions}, &out, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("exit: %q", out.String())
-	}
-	if !strings.Contains(out.String(), "✓ no collisions") {
-		t.Errorf("single shared owner must not collide: %q", out.String())
-	}
-}
-
 func TestStatusEmpty(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
@@ -302,20 +245,6 @@ func statusRowFor(t *testing.T, out, target string) string {
 	return ""
 }
 
-// statusRowForOwner returns the status line naming owner=<uuid> — used for
-// the same-target-two-owners case, where both rows share target= and only
-// owner= tells them apart.
-func statusRowForOwner(t *testing.T, out, uuid string) string {
-	t.Helper()
-	for line := range strings.SplitSeq(out, "\n") {
-		if strings.Contains(line, "owner="+uuid) {
-			return line
-		}
-	}
-	t.Fatalf("no status row for owner=%s in: %q", uuid, out)
-	return ""
-}
-
 // TestStatusSelfMarker_MarksOwnRow_NotPeers pins ferret-m3t's core AC: the
 // unfiltered dump marks the caller's own row and leaves a peer's unmarked, so
 // a caller answers "is this mine?" from one `loto status` call — the read
@@ -355,49 +284,6 @@ func TestStatusSelfMarker_MarksOwnRow_NotPeers(t *testing.T) {
 	}
 }
 
-// TestStatusSelfMarker_SameTargetTwoOwners pins the exact incident shape: two
-// owners each hold a row on the SAME target (shared locks), and the marking
-// flips depending on who is asking — never both, never neither.
-func TestStatusSelfMarker_SameTargetTwoOwners(t *testing.T) {
-	withTempProject(t)
-	alice, bob := twoAgents(t)
-	lockShared := func(uuid string) {
-		t.Setenv("LOTO_AGENT_ID", uuid)
-		if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagShared},
-			&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-			t.Fatalf("shared lock for %s failed", uuid)
-		}
-	}
-	lockShared(alice.UUID)
-	lockShared(bob.UUID)
-
-	t.Setenv("LOTO_AGENT_ID", alice.UUID)
-	var out bytes.Buffer
-	if code := Run([]string{tcCmdStatus}, &out, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("status exit: %q", out.String())
-	}
-	s := out.String()
-	if !strings.Contains(statusRowForOwner(t, s, alice.UUID), "self=true") {
-		t.Errorf("alice must see her own row on the shared target marked: %q", s)
-	}
-	if strings.Contains(statusRowForOwner(t, s, bob.UUID), "self=true") {
-		t.Errorf("alice must NOT see bob's row on the same target marked: %q", s)
-	}
-
-	t.Setenv("LOTO_AGENT_ID", bob.UUID)
-	out.Reset()
-	if code := Run([]string{tcCmdStatus}, &out, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("status exit: %q", out.String())
-	}
-	s = out.String()
-	if strings.Contains(statusRowForOwner(t, s, alice.UUID), "self=true") {
-		t.Errorf("bob must NOT see alice's row marked: %q", s)
-	}
-	if !strings.Contains(statusRowForOwner(t, s, bob.UUID), "self=true") {
-		t.Errorf("bob must see his own row on the shared target marked: %q", s)
-	}
-}
-
 // TestStatusSingleTarget_SelfMarkerOnHolderRows: `loto status <path>` is the
 // read the PreToolUse gate makes to tell its own lock from a peer's on that
 // path (loto-wuzh) — `✗ overlap` alone said nothing about whose, so the gate
@@ -406,33 +292,30 @@ func TestStatusSelfMarker_SameTargetTwoOwners(t *testing.T) {
 func TestStatusSingleTarget_SelfMarkerOnHolderRows(t *testing.T) {
 	withTempProject(t)
 	alice, bob := twoAgents(t)
-	for _, uuid := range []string{alice.UUID, bob.UUID} {
-		t.Setenv("LOTO_AGENT_ID", uuid)
-		if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagShared},
-			&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-			t.Fatalf("shared lock for %s failed", uuid)
-		}
-	}
-
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
-	var out bytes.Buffer
-	if code := Run([]string{tcCmdStatus, tcTargetA}, &out, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("status exit: %q", out.String())
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest},
+		&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("alice lock failed")
 	}
-	var mine, peer string
-	for line := range strings.SplitSeq(out.String(), "\n") {
-		switch {
-		case strings.HasPrefix(line, "✗ holder ") && strings.Contains(line, "owner="+alice.UUID+" "):
-			mine = line
-		case strings.HasPrefix(line, "✗ holder ") && strings.Contains(line, "owner="+bob.UUID+" "):
-			peer = line
+	holderRow := func(asker string) string {
+		t.Setenv("LOTO_AGENT_ID", asker)
+		var out bytes.Buffer
+		if code := Run([]string{tcCmdStatus, tcTargetA}, &out, &bytes.Buffer{}); code != 0 {
+			t.Fatalf("status exit: %q", out.String())
 		}
+		for line := range strings.SplitSeq(out.String(), "\n") {
+			if strings.HasPrefix(line, "✗ holder ") && strings.Contains(line, "owner="+alice.UUID+" ") {
+				return line
+			}
+		}
+		t.Fatalf("no holder row for alice: %q", out.String())
+		return ""
 	}
-	if !strings.HasSuffix(mine, " self=true") {
-		t.Errorf("caller's own holder row must end self=true: %q\n%s", mine, out.String())
+	if mine := holderRow(alice.UUID); !strings.HasSuffix(mine, " self=true") {
+		t.Errorf("caller's own holder row must end self=true: %q", mine)
 	}
-	if peer == "" || strings.Contains(peer, "self=true") {
-		t.Errorf("a peer's holder row must be present and unmarked: %q\n%s", peer, out.String())
+	if peer := holderRow(bob.UUID); strings.Contains(peer, "self=true") {
+		t.Errorf("a peer's holder row must be unmarked: %q", peer)
 	}
 }
 
@@ -522,11 +405,11 @@ func TestStatusForeignRowFixBlock_AbsentWhenAllSelf(t *testing.T) {
 	}
 }
 
-// TestStatusMineAndCollisions_GoldenUnchanged pins the AC that this bead must
-// not move `-mine`/`-collisions` output: neither the self marker nor the
-// foreign-row fix block belong there — `-mine` already answers "is this
-// mine?" by construction, and `-collisions` is its own, unrelated surface.
-func TestStatusMineAndCollisions_GoldenUnchanged(t *testing.T) {
+// TestStatusMine_GoldenUnchanged pins the AC that this bead must
+// not move `-mine` output: neither the self marker nor the foreign-row fix
+// block belong there — `-mine` already answers "is this mine?" by
+// construction.
+func TestStatusMine_GoldenUnchanged(t *testing.T) {
 	repo := withTempProject(t)
 	if err := os.WriteFile(filepath.Join(repo, tcTargetB), nil, 0o644); err != nil {
 		t.Fatal(err)
@@ -537,8 +420,8 @@ func TestStatusMineAndCollisions_GoldenUnchanged(t *testing.T) {
 		t.Fatal("alice lock failed")
 	}
 	t.Setenv("LOTO_AGENT_ID", bob.UUID)
-	if code := Run([]string{tcCmdLock, tcTargetB, "-t", tcIntentTest, tcFlagShared}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatal("bob shared lock failed")
+	if code := Run([]string{tcCmdLock, tcTargetB, "-t", tcIntentTest}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("bob lock failed")
 	}
 
 	t.Setenv("LOTO_AGENT_ID", alice.UUID)
@@ -551,13 +434,5 @@ func TestStatusMineAndCollisions_GoldenUnchanged(t *testing.T) {
 	}
 	if strings.Contains(mineOut.String(), "rows above with no self=true") {
 		t.Errorf("-mine output must stay unchanged (no fix block): %q", mineOut.String())
-	}
-
-	var colOut bytes.Buffer
-	if code := Run([]string{tcCmdStatus, tcFlagCollisions}, &colOut, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("status --collisions exit: %q", colOut.String())
-	}
-	if strings.Contains(colOut.String(), "self=true") || strings.Contains(colOut.String(), "rows above with no self=true") {
-		t.Errorf("-collisions output must stay unchanged: %q", colOut.String())
 	}
 }

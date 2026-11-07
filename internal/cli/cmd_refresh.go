@@ -83,7 +83,7 @@ func cmdRefresh(ctx context.Context, args []string, stdout, stderr io.Writer) in
 
 // refreshTargets resolves the target set: --all reads back every lock this
 // agent currently holds, otherwise the CLI args are canonicalized the same way
-// lock/downgrade do. --all requires a pinned identity for the same reason
+// lock does. --all requires a pinned identity for the same reason
 // `unlock --all` does — an unpinned throwaway UUID owns zero locks, so a
 // cheerful "0 refreshed" would be a silent false-success while the real locks
 // drift toward expiry.

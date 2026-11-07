@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"loto/internal/domain"
 	"loto/internal/identity"
 	"loto/internal/store"
 )
@@ -414,7 +413,7 @@ func TestHook_EditAdmission(t *testing.T) {
 		}
 		var exclusive bool
 		for _, l := range held {
-			if l.Target.Canonical == tcTargetA && string(l.OwnerUUID) == me.UUID && !l.IsBeacon() && l.Mode == domain.ModeExclusive {
+			if l.Target.Canonical == tcTargetA && string(l.OwnerUUID) == me.UUID && !l.IsBeacon() {
 				exclusive = true
 			}
 		}
@@ -443,7 +442,7 @@ func TestHook_EditAdmission(t *testing.T) {
 		}
 		var exclusive bool
 		for _, l := range held {
-			if l.Target.Canonical == created && string(l.OwnerUUID) == me.UUID && !l.IsBeacon() && l.Mode == domain.ModeExclusive {
+			if l.Target.Canonical == created && string(l.OwnerUUID) == me.UUID && !l.IsBeacon() {
 				exclusive = true
 			}
 		}

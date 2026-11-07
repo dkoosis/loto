@@ -54,13 +54,13 @@ run() {
 }
 
 one_lane_two_locks=$(cat <<'EOF'
-✓ target=a.go owner=x epoch=1 mode=exclusive intent="sd-xhap: work" held_since=t ttl_remaining=1 liveness=alive host=h pid=0 branch=b
-✓ target=b.go owner=x epoch=1 mode=exclusive intent="sd-xhap: work" held_since=t ttl_remaining=1 liveness=alive host=h pid=0 branch=b
+✓ target=a.go owner=x epoch=1 intent="sd-xhap: work" held_since=t ttl_remaining=1 liveness=alive host=h pid=0 branch=b
+✓ target=b.go owner=x epoch=1 intent="sd-xhap: work" held_since=t ttl_remaining=1 liveness=alive host=h pid=0 branch=b
 EOF
 )
 two_lanes=$(cat <<'EOF'
-✓ target=a.go owner=x epoch=1 mode=exclusive intent="laneA: work" held_since=t ttl_remaining=1 liveness=alive host=h pid=0 branch=b
-✓ target=c.go owner=x epoch=1 mode=exclusive intent="laneB: work" held_since=t ttl_remaining=1 liveness=alive host=h pid=0 branch=b
+✓ target=a.go owner=x epoch=1 intent="laneA: work" held_since=t ttl_remaining=1 liveness=alive host=h pid=0 branch=b
+✓ target=c.go owner=x epoch=1 intent="laneB: work" held_since=t ttl_remaining=1 liveness=alive host=h pid=0 branch=b
 EOF
 )
 

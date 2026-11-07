@@ -635,7 +635,6 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, ec domain.E
 		CreatedAt:   now,
 		ExpiresAt:   now.Add(domain.DegradedModeTTL),
 		Host:        rt.Host,
-		Mode:        domain.ModeExclusive,
 		// A Write that creates its file is the case I2 most needs to admit
 		// (statFileTargetReason above already allows it); the store must too.
 		MayCreate: true,
@@ -767,9 +766,8 @@ func hookSeqAtObserve(rt *runtime, paths []string, holders map[string]domain.Loc
 // hookLiveHolders reduces the live lock rows to one holder per path — the `L`
 // a call record cites.
 //
-// ‡ Several live rows can cover one path under shared mode, and `L` in the
-// design is single-valued. An exclusive holder is authoritative; among equals
-// the lowest owner uuid wins, so the record is deterministic rather than
+// ‡ Several live rows can sit on one path (a beacon beside a lock), and `L` in
+// the design is single-valued. The lowest owner uuid wins, so the record is deterministic rather than
 // whatever order the scan happened to return (.claude/rules/design.md: same
 // input, byte-identical output).
 //
@@ -783,10 +781,7 @@ func hookLiveHolders(locks []domain.LockRecord, ec domain.EvalContext) map[strin
 		}
 		key := locks[i].Target.Canonical
 		cur, seen := holders[key]
-		switch {
-		case !seen,
-			locks[i].EffectiveMode() == domain.ModeExclusive && cur.EffectiveMode() != domain.ModeExclusive,
-			locks[i].EffectiveMode() == cur.EffectiveMode() && locks[i].OwnerUUID < cur.OwnerUUID:
+		if !seen || locks[i].OwnerUUID < cur.OwnerUUID {
 			holders[key] = locks[i]
 		}
 	}

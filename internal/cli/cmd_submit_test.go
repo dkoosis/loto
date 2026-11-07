@@ -95,28 +95,6 @@ func TestSubmit_RefusesWithoutLock(t *testing.T) {
 	}
 }
 
-// TestSubmit_RefusesSharedLock: a shared lock is not the exclusive authority
-// submit's model assumes — refused, same as lane's own precondition.
-func TestSubmit_RefusesSharedLock(t *testing.T) {
-	repo := withTempProject(t)
-	submitGitT(t, repo, "add", "-A")
-	submitGitT(t, repo, "commit", "-q", "-m", "base")
-	pinAgent(t)
-
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentTest, tcFlagShared}, io.Discard, io.Discard); code != 0 {
-		t.Fatal("shared lock")
-	}
-
-	var out, errBuf bytes.Buffer
-	code := Run([]string{tcCmdSubmit, tcTargetA, tcFlagBead, tcBeadOvno5}, &out, &errBuf)
-	if code != 1 {
-		t.Fatalf("want exit 1, got %d: out=%q", code, out.String())
-	}
-	if !strings.Contains(out.String(), "lock-not-exclusive") {
-		t.Errorf("missing reason: %q", out.String())
-	}
-}
-
 // TestSubmit_RendersAdmissionRejection exercises a REAL admission rejection
 // through the full CLI flow, using submitAfterLeaseCheck to perturb the lock's
 // epoch after the lease check passes but before Capture reads it — the exact

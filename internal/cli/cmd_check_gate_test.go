@@ -99,7 +99,7 @@ func TestGateDecide_ForeignSharedBeaconDenies(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateFoeUUID, Mode: domain.ModeShared, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
+		{Target: target, OwnerUUID: gateFoeUUID, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
 	}
 	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 1 || rows[0].Kind != render.GateKindLock || rows[0].HolderUUID != gateFoeUUID {
@@ -115,8 +115,7 @@ func TestGateDecide_SiblingBeaconDeniesWrite(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession,
-			Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
+		{Target: target, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
 	}
 	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 1 || rows[0].HolderUUID != gateFoeUUID {
@@ -130,8 +129,7 @@ func TestGateDecide_OwnBeaconAllowsWrite(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateMyUUID, SessionUUID: gateMySession,
-			Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
+		{Target: target, OwnerUUID: gateMyUUID, SessionUUID: gateMySession, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
 	}
 	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 0 {
@@ -143,7 +141,7 @@ func TestGateDecide_ForeignStaleLockAllows(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateFoeUUID, Mode: domain.ModeExclusive, Intent: "old", ExpiresAt: now.Add(-time.Minute)},
+		{Target: target, OwnerUUID: gateFoeUUID, Intent: "old", ExpiresAt: now.Add(-time.Minute)},
 	}
 	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 0 {
@@ -155,7 +153,7 @@ func TestGateDecide_OwnLockAllows(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateMyUUID, Mode: domain.ModeExclusive, Intent: gateIntentMine, ExpiresAt: now.Add(time.Hour)},
+		{Target: target, OwnerUUID: gateMyUUID, Intent: gateIntentMine, ExpiresAt: now.Add(time.Hour)},
 	}
 	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 0 {
@@ -173,7 +171,7 @@ func TestGateDecide_PID0ForeignBeaconWithinTTLDenies(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcTargetA}
 	locks := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateFoeUUID, Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
+		{Target: target, OwnerUUID: gateFoeUUID, PID: 0, Beacon: true, Intent: gateIntentBeacon, ExpiresAt: now.Add(time.Hour)},
 	}
 	ec := gateEC(now)
 	if ec.Classify(locks[0]) != domain.LivenessUnknown {
@@ -195,7 +193,7 @@ func TestGateDecide_DedupeAndOrder(t *testing.T) {
 	aPath := tcPrefixStore + "/a.go"
 	tA := domain.Target{Canonical: aPath}
 	locks := []domain.LockRecord{
-		{Target: tB, OwnerUUID: gateFoeUUID, Mode: domain.ModeExclusive, Intent: "lockrow", ExpiresAt: now.Add(time.Hour)},
+		{Target: tB, OwnerUUID: gateFoeUUID, Intent: "lockrow", ExpiresAt: now.Add(time.Hour)},
 	}
 	claims := []domain.ClaimRecord{
 		{PathPrefix: tcPrefixStore, OwnerUUID: gateFoeUUID, Intent: "claimrow", ExpiresAt: now.Add(time.Hour)},
@@ -240,8 +238,8 @@ func TestGateDecide_SameOwnerTwoLocks_EachBlockerReported(t *testing.T) {
 	now := time.Now()
 	target := domain.Target{Canonical: tcPrefixStore + "/new.go"}
 	locks := []domain.LockRecord{
-		{Target: target, OwnerUUID: gateFoeUUID, Mode: domain.ModeExclusive, Intent: "file", ExpiresAt: now.Add(time.Hour)},
-		{Target: domain.Target{Canonical: tcPrefixStore}, OwnerUUID: gateFoeUUID, Mode: domain.ModeExclusive, Intent: "dir", ExpiresAt: now.Add(time.Hour)},
+		{Target: target, OwnerUUID: gateFoeUUID, Intent: "file", ExpiresAt: now.Add(time.Hour)},
+		{Target: domain.Target{Canonical: tcPrefixStore}, OwnerUUID: gateFoeUUID, Intent: "dir", ExpiresAt: now.Add(time.Hour)},
 	}
 	rows := gateDecide([]domain.Target{target}, locks, nil, gateMyUUID, gateEC(now))
 	if len(rows) != 2 {
@@ -334,8 +332,7 @@ func TestGateDecideAny(t *testing.T) {
 			// Process identity is authoritative even if session ids match.
 			name: "another actor's beacon denies despite a matching session",
 			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession,
-					Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
+				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession, PID: 0, Beacon: true, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
 			want: 1,
 		},
@@ -347,8 +344,7 @@ func TestGateDecideAny(t *testing.T) {
 			// the shape waived exactly this row and moved the tree.
 			name: "sibling's pid-less shared lock is not a beacon and still denies",
 			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession,
-					Mode: domain.ModeShared, PID: 0, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
+				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession, PID: 0, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
 			want: 1,
 		},
@@ -358,16 +354,14 @@ func TestGateDecideAny(t *testing.T) {
 			// 2026-08-14 incident itself.
 			name: "sibling's exclusive lock still denies the tree-move",
 			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession,
-					Mode: domain.ModeExclusive, PID: 4242, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
+				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateMySession, PID: 4242, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
 			want: 1,
 		},
 		{
 			name: "another session's beacon denies the tree-move",
 			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateFoeSession,
-					Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
+				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: gateFoeSession, PID: 0, Beacon: true, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
 			want: 1,
 		},
@@ -376,8 +370,7 @@ func TestGateDecideAny(t *testing.T) {
 			// direct CLI use outside Claude Code has no session to be a sibling of.
 			name: "beacon carve-out needs a known session",
 			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: "",
-					Mode: domain.ModeShared, PID: 0, Beacon: true, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
+				{Target: domain.Target{Canonical: tcTargetA}, OwnerUUID: gateFoeUUID, SessionUUID: "", PID: 0, Beacon: true, Intent: gateIntentFoe, ExpiresAt: now.Add(time.Hour)},
 			},
 			want: 1,
 		},
@@ -495,40 +488,13 @@ func TestGateCLI_ExpiredClaimAllows(t *testing.T) {
 	}
 }
 
-// TestGateCLI_ForeignSharedBeaconDeniesButPlainCheckAllows pins the
-// deliberate gate-vs-plain-check divergence (plan point 1): the same
-// on-disk state reads as a deny under --gate and a pass under plain check.
-func TestGateCLI_ForeignSharedBeaconDeniesButPlainCheckAllows(t *testing.T) {
-	withTempProject(t)
-	alice, bob := twoAgents(t)
-
-	t.Setenv("LOTO_AGENT_ID", alice.UUID)
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentRead, tcFlagShared}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatal("alice shared lock failed")
-	}
-
-	t.Setenv("LOTO_AGENT_ID", bob.UUID)
-	var gateOut bytes.Buffer
-	if code := Run([]string{tcCmdCheck, tcFlagGate, tcTargetA}, &gateOut, &bytes.Buffer{}); code != 1 {
-		t.Fatalf("expected gate exit 1 for foreign shared beacon, got %d: %q", code, gateOut.String())
-	}
-	if !strings.Contains(gateOut.String(), "kind=lock") {
-		t.Errorf("expected lock-kind deny row: %q", gateOut.String())
-	}
-
-	var plainOut bytes.Buffer
-	if code := Run([]string{tcCmdCheck, tcTargetA}, &plainOut, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("plain check must still pass shared-vs-shared, got %d: %q", code, plainOut.String())
-	}
-}
-
-// TestGateCLI_OwnBeaconAllows: a shared beacon the checking agent holds
-// itself must not deny.
+// TestGateCLI_OwnBeaconAllows: a lock the checking agent holds itself must
+// not deny.
 func TestGateCLI_OwnBeaconAllows(t *testing.T) {
 	withTempProject(t)
 	pinAgent(t)
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentRead, tcFlagShared}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatal("shared lock failed")
+	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentRead}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatal("lock failed")
 	}
 	var out bytes.Buffer
 	code := Run([]string{tcCmdCheck, tcFlagGate, tcTargetA}, &out, &bytes.Buffer{})

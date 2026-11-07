@@ -461,7 +461,7 @@ func TestSync_MixedReport(t *testing.T) {
 	if !strings.HasPrefix(lines[3], "✗ target="+tcTargetB+" reason=leased holder=") {
 		t.Errorf("want b.go conflict row third, got: %q", lines[3])
 	}
-	if !strings.Contains(out.String(), "loto status --collisions") {
+	if !strings.Contains(out.String(), "loto status                # see holders") {
 		t.Errorf("missing fix block: %q", out.String())
 	}
 	if got := readFileT(t, filepath.Join(repo, tcTargetA)); got != "" {
@@ -952,7 +952,7 @@ func TestSyncDecide_ConflictTable(t *testing.T) {
 		{
 			name: "live beacon -> conflict",
 			locks: []domain.LockRecord{
-				{Target: domain.Target{Canonical: path}, OwnerUUID: syncOwner, ExpiresAt: now.Add(time.Hour), Mode: domain.ModeShared, Beacon: true},
+				{Target: domain.Target{Canonical: path}, OwnerUUID: syncOwner, ExpiresAt: now.Add(time.Hour), Beacon: true},
 			},
 			wantReason: syncReasonLeased,
 		},
