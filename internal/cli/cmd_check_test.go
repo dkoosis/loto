@@ -219,6 +219,9 @@ func TestCheck_UnderForeignClaim_ReportsTheHold(t *testing.T) {
 	if s := out.String(); !strings.Contains(s, "holder_target="+tcPrefixStore+" ") || !strings.Contains(s, "blocker="+alice.UUID) {
 		t.Errorf("want a conflict naming alice's directory hold: %q", s)
 	}
+	if strings.Contains(out.String(), "unlock --force") {
+		t.Errorf("unlock takes only a file, so a directory hold prints no unlock fix: %q", out.String())
+	}
 }
 
 // TestCheck_RelativeTokenFromSubdirFindsPeerConflict is the loto-3tv3 false

@@ -56,7 +56,7 @@ func EmitGateDeny(w io.Writer, rows []GateDenyRow) {
 		fmt.Fprintf(w, "✗ path=%s kind=%s blocker=%s intent=%q expires_at=%s",
 			relToCwd(r.Path, cwd), r.Kind, holderTag(r.HolderUUID), r.Intent,
 			r.ExpiresAt.UTC().Format(time.RFC3339))
-		if holdAbove(r.BlockerPath, r.Path) {
+		if HoldAbove(r.BlockerPath, r.Path) {
 			fmt.Fprintf(w, " hold=%s\n", relToCwd(r.BlockerPath, cwd))
 			continue
 		}
@@ -67,9 +67,9 @@ func EmitGateDeny(w io.Writer, rows []GateDenyRow) {
 	}
 }
 
-// holdAbove reports whether blocker is a directory hold above path. unlock
+// HoldAbove reports whether blocker is a directory hold above path. unlock
 // takes only a file, so such a row names the hold and prints no fix block,
 // as a claim's did.
-func holdAbove(blocker, path string) bool {
+func HoldAbove(blocker, path string) bool {
 	return blocker != path && (blocker == "." || strings.HasPrefix(path, blocker+"/"))
 }
