@@ -281,6 +281,34 @@ func TestRunHookRef_CheckoutWideClaimOverrides(t *testing.T) {
 	}
 }
 
+// TestRunHookRef_InFlightClaimStillOverrides (loto-d0cb): a Bash call that
+// began before the caller's checkout-wide claim lapsed still holds it, so a
+// rebase inside that call moves the ref under the claim.
+func TestRunHookRef_InFlightClaimStillOverrides(t *testing.T) {
+	repo := withTempProject(t)
+	a := pinAgent(t)
+	plantLiveSessionHere(t, repo, "sess-self", a.UUID)
+	plantLiveSessionHere(t, repo, "sess-peer", tcPeerOwner)
+
+	if _, _, code := executeCommand("claim", ".", tcFlagIntent, "takeover: rebasing every lane", "--ttl", "50ms"); code != 0 {
+		t.Fatalf("claim . exit %d", code)
+	}
+	rt, done := hookStoreRead(t)
+	if _, err := rt.Store.RecordCallPre(rt.Ctx, store.HookCall{
+		CallID: "call-rebase", OwnerUUID: domain.AgentUUID(a.UUID), SessionUUID: "sess-self",
+		ToolName: "Bash", TPre: time.Now().Add(-time.Minute), Worktree: rt.Worktree,
+	}, nil); err != nil {
+		t.Fatalf("record call: %v", err)
+	}
+	done()
+	time.Sleep(100 * time.Millisecond) // the claim's lease lapses while the call runs
+
+	code, stdout, stderr := runRefHook(t, tcPhasePrepared, txnCheckoutOther)
+	if code != 0 || !strings.Contains(stdout, "override=claim") {
+		t.Fatalf("an in-flight call still holds the claim: exit %d, %s %s", code, stdout, stderr)
+	}
+}
+
 // TestRunHookRef_PeerClaimDoesNotOverride: the override is the CALLER's claim.
 // A peer holding the checkout does not license this session to move the tree.
 func TestRunHookRef_PeerClaimDoesNotOverride(t *testing.T) {

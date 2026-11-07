@@ -123,7 +123,7 @@ func (s *Store) lockWorktree(callWorktree string) string {
 // stopped touching lapses on its own lease however busy the holder is
 // elsewhere — dk, 2026-09-28: zombie locks are the common failure, and an
 // agent's time in one file is short. No paths → nothing renewed.
-func refreshCallerLocksTx(ctx context.Context, tx *sql.Tx, k keyMatch, owner, worktree string, paths []string, now time.Time) error {
+func refreshCallerLocksTx(ctx context.Context, tx *sql.Tx, k keyMatch, owner, worktree string, paths []string, since, now time.Time) error {
 	if len(paths) == 0 {
 		return nil
 	}
@@ -133,7 +133,7 @@ func refreshCallerLocksTx(ctx context.Context, tx *sql.Tx, k keyMatch, owner, wo
 	var refreshed []domain.Target
 	for len(paths) > 0 {
 		n := min(refreshBatch, len(paths))
-		got, err := refreshOwnLocksBelowHalfTTLTx(ctx, tx, k, owner, worktree, paths[:n], now)
+		got, err := refreshOwnLocksBelowHalfTTLTx(ctx, tx, k, owner, worktree, paths[:n], since, now)
 		if err != nil {
 			return err
 		}
@@ -157,10 +157,13 @@ func refreshCallerLocksTx(ctx context.Context, tx *sql.Tx, k keyMatch, owner, wo
 // WHERE clause carries the two guarantees down to SQL rather than trusting a
 // caller's filter: owner_uuid = owner means a lock this owner does not hold
 // is never touched (a peer's row, however close to expiry, is invisible to
-// this query), and expires_at > now excludes an already-lapsed lease — that
-// territory is reclaimable, and resurrecting it here would race the peer
-// already entitled to take it (mirrors ErrLeaseExpired's reasoning in
-// RefreshLocks/commitRefreshes, the manual verb's sibling).
+// this query), and expires_at > since excludes a lease that had lapsed before
+// the call began — that territory is reclaimable, and resurrecting it here
+// would race the peer already entitled to take it (mirrors ErrLeaseExpired's
+// reasoning in RefreshLocks/commitRefreshes, the manual verb's sibling). since
+// is now at pre, and the call's t_pre at post: a lease that lapsed during the
+// call was held by it (InFlight, loto-d0cb), so no peer took it, and post
+// renews it.
 //
 // domain.DegradedModeTTL, not each row's own (expires_at - created_at): a
 // refreshed row's span from created_at grows with every refresh, so reusing
@@ -179,7 +182,7 @@ func refreshCallerLocksTx(ctx context.Context, tx *sql.Tx, k keyMatch, owner, wo
 // Returns the refreshed targets (nil when none needed it) so the caller can
 // decide whether to pay for rotateEventsTx — most hook calls touch nothing
 // here and should not.
-func refreshOwnLocksBelowHalfTTLTx(ctx context.Context, tx *sql.Tx, k keyMatch, owner, worktree string, paths []string, now time.Time) ([]domain.Target, error) {
+func refreshOwnLocksBelowHalfTTLTx(ctx context.Context, tx *sql.Tx, k keyMatch, owner, worktree string, paths []string, since, now time.Time) ([]domain.Target, error) {
 	const ttl = domain.DegradedModeTTL
 	newExpiry := now.Add(ttl)
 	halfDeadline := now.Add(ttl / 2)
@@ -193,7 +196,7 @@ func refreshOwnLocksBelowHalfTTLTx(ctx context.Context, tx *sql.Tx, k keyMatch, 
 	// it.
 	wtCond, wtArgs := worktreeFilter(worktree)
 	pathPH, pathArgs := k.inStrings(paths)
-	args := append([]any{newExpiry.UnixNano(), owner, now.UnixNano(), halfDeadline.UnixNano()}, wtArgs...)
+	args := append([]any{newExpiry.UnixNano(), owner, since.UnixNano(), halfDeadline.UnixNano()}, wtArgs...)
 	args = append(args, pathArgs...)
 	q := `UPDATE locks SET expires_at = ? WHERE owner_uuid = ? AND expires_at > ? AND expires_at < ? AND ` + wtCond + ` AND ` + k.col("target_canonical") + ` IN (` + pathPH + `) RETURNING target_canonical` //nolint:gosec // G202 wtCond, col and pathPH are fixed SQL, all data via args
 	rows, err := tx.QueryContext(ctx, q, args...)

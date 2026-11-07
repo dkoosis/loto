@@ -92,6 +92,11 @@ type LockRecord struct {
 	// a file. Request-only: a stored row's coverage is its target, whatever
 	// kind it names (PrefixCovers).
 	Directory bool
+	// InFlight is true while the holder has a hook call open that began before
+	// ExpiresAt (loto-d0cb): a Bash call that outlives the lease keeps the hold
+	// until its post lands or T_report flags it missing. Read-only: the store
+	// computes it on every read.
+	InFlight bool
 }
 
 // CandidateClaim is a durable, per-path territory hold on behalf of a

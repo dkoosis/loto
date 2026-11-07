@@ -92,4 +92,5 @@ dk ratified the model; each bead below is open to build.
 - loto-e1ku: the actor is the process.
 - loto-ojq3: remove the staged-lock gate. loto-6itj is closed with it.
 - loto-d0cb survives: a hold stays live while its actor's in-flight call began
-  before the lease expired.
+  before the lease expired. T_report bounds the call, and its post renews a
+  file it changed.
