@@ -84,16 +84,18 @@ func writeHookFixture(t *testing.T, repo string, withLoto ...string) {
 // matching both `make hooks` (value ".githooks") and a foreign tool
 // repointing the slot (an absolute path outside the repo).
 //
-// It also lifts hookProbeTimeout for the test (loto-bqk7): a guard test's
-// verdict must follow the hooks on disk, and a CPU-starved make check can
-// stall a healthy probe past the 5s product bound, turning a ✓ row into
-// probe=no-answer for one run. A test that wants the bound sets it after.
+// It also lifts the guard check's two clocks for the test (loto-bqk7):
+// gitTimeout, which bounds the git calls that find the repo top and read
+// core.hooksPath, and hookProbeTimeout, which bounds each hook probe. A guard
+// test's verdict must follow the hooks on disk, and a CPU-starved make check
+// can stall a healthy call past the 5s product bound, turning every ✓ row
+// into ✗ for one run. A test that wants a bound to bind sets it after.
 func setHooksPath(t *testing.T, repo, value string) {
 	t.Helper()
 	submitGitT(t, repo, "config", "--local", "core.hooksPath", value)
-	prev := hookProbeTimeout
-	hookProbeTimeout = 2 * time.Minute
-	t.Cleanup(func() { hookProbeTimeout = prev })
+	prevGit, prevProbe := gitTimeout, hookProbeTimeout
+	gitTimeout, hookProbeTimeout = 2*time.Minute, 2*time.Minute
+	t.Cleanup(func() { gitTimeout, hookProbeTimeout = prevGit, prevProbe })
 }
 
 // writeForeignForwarder lays out, for every hook in guardSpecs, an executable
@@ -447,10 +449,10 @@ func TestDoctorGuard_InlineGuardDoormanForwardsWhenChainExists(t *testing.T) {
 // TestDoctorGuard_ProbeOutrunByItsBound is loto-bqk7's cause, injected: a
 // forwarder that would answer, as writeForeignForwarder's does, but only after
 // its probe bound has passed. doctor and status then read the intact chain as
-// a bypass — the ✗ row and guard: inert that a starved make check produced
-// once for TestDoctorGuard_InlineGuardDoormanForwardsWhenChainExists. The
-// bound is the only clock in the guard verdict, which is why setHooksPath
-// lifts it for every other guard test.
+// a bypass: the ✗ row and guard: inert that loto-bqk7 saw once from
+// TestDoctorGuard_InlineGuardDoormanForwardsWhenChainExists. This bound and
+// gitTimeout are the guard verdict's only clocks, which is why setHooksPath
+// lifts both for every other guard test.
 func TestDoctorGuard_ProbeOutrunByItsBound(t *testing.T) {
 	repo := withTempProject(t)
 	pinAgent(t)

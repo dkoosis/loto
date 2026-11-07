@@ -774,10 +774,9 @@ const (
 )
 
 // hookProbeTimeout bounds one guard probe. A probe that outruns it reads as
-// no answer, the same as a hook that never answers. It is a var so a test can
-// lift it (setHooksPath does): a test's verdict must follow the tree alone,
-// and on a CPU-starved make check a healthy probe chain (sh, sh, git) can
-// outrun any wall-clock bound (loto-bqk7).
+// no answer, the same as a hook that never answers. Its own var, apart from
+// gitTimeout, so a test can make the probe alone run out of time while the
+// git calls around it still finish (TestDoctorGuard_ProbeOutrunByItsBound).
 var hookProbeTimeout = gitTimeout
 
 // probeHookAnswer runs target (the effective hook file for one guard,
