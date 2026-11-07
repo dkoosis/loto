@@ -36,7 +36,7 @@ CREATE INDEX IF NOT EXISTS idx_violations_open ON violations(resolved_at, path_c
 // authorized this write"; they differ in what the record can say about who
 // was supposed to be there, which is forensic, never attribution.
 const (
-	// LeaseStateUnleased: no lock, beacon, or candidate claim has ever
+	// LeaseStateUnleased: no lock or candidate claim has ever
 	// covered this path in a way the scan could see.
 	LeaseStateUnleased = "unleased"
 	// LeaseStateExpired: a lock row exists for the path but is stale — the

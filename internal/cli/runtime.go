@@ -156,14 +156,9 @@ func openRuntime(ctx context.Context) (*runtime, error) {
 	return openRuntimeForRepoTop(ctx, top)
 }
 
-// openRuntimeForRepoTop is openRuntime for a repo toplevel the CALLER has
-// already resolved, rather than one derived from this process's own cwd
-// (loto-72i): a beacon target that resolves into a different project than
-// the one the invoking agent stands in still needs a runtime scoped to ITS
-// OWN project's store — StateDir(top) below, not the caller's. top must
-// already be a validated git toplevel (as repoTopForPath returns); this does
-// no git-repo-ness check of its own and has no errNotInGitRepo path, unlike
-// openRuntime.
+// openRuntimeForRepoTop is openRuntime for a repo toplevel already resolved.
+// top must be a validated git toplevel; this does no git-repo-ness check of
+// its own and has no errNotInGitRepo path, unlike openRuntime.
 func openRuntimeForRepoTop(ctx context.Context, top string) (*runtime, error) {
 	// Capture whether an explicit identity env var was set before Ensure runs.
 	// An unpinned read verb runs on a throwaway UUID that owns no locks and
@@ -176,8 +171,7 @@ func openRuntimeForRepoTop(ctx context.Context, top string) (*runtime, error) {
 
 	a, err := identity.Ensure(ctx)
 	if errors.Is(err, identity.ErrUnpinned) {
-		// This is the READ path (check, status, guard, doctor, sync, beacon
-		// gates itself): ambiguity is allowed for display, so render the table
+		// This is the READ path (check, status, guard, doctor, sync): ambiguity is allowed for display, so render the table
 		// under a throwaway owner. Write verbs never reach here unpinned —
 		// openRuntimeGC refuses first.
 		a, err = identity.Ephemeral(), nil

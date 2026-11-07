@@ -69,7 +69,7 @@ on the roadmap.
 |------|-----------|--------------|--------|----------|
 | Tag (record-tier) | `locks` row with non-zero, unexpired `expires_at` | row + TTL (lazy GC) | **shipped (v2)** | "I'm holding this across two events (PreToolUse → PostToolUse) — no foreground process" |
 | **Enforcement (chmod)** | strip-write on acquire; restore on release | filesystem mode bits | **retired** (loto-zssw) | locked out the HOLDER too — see "why chmod enforcement is gone" |
-| Harness gate | PreToolUse hook refuses a write over a peer's live lock/claim/beacon | `locks` + `claims` rows | **shipped** | stops the peer without touching the holder's own filesystem |
+| Harness gate | PreToolUse hook refuses a write over a peer's live lock or claim | `locks` + `claims` rows | **shipped** | stops the peer without touching the holder's own filesystem |
 | Op-flock (internal) | project-wide flock on `lock-op.flock`, held only during an op | flock | **shipped** | serializes overlapping `loto lock` / `loto unlock` invocations |
 | File flock (foreground) | flock(2) exclusive held by the editing process | flock | **deferred** (`loto with <cmd>`) | "I am editing this specific file right now" |
 | Global lock | flock(2) on a project-wide handle | flock | **deferred** | "Sweep across the whole tree; everyone else stand down" |
@@ -173,14 +173,8 @@ and locks taken by a subagent worktree are owned by the same id with
 nothing minted and nothing cached (loto-jnid — the handle wordlist, agent
 registry and peer records that used to do this were retired once Claude
 Code shipped `ListAgents`/`SendMessage` natively). This is the keystone —
-without it, "release my locks on session end" is meaningless. A `/team`
-sibling stamped with `LOTO_SUBAGENT_ID` derives its own owner from
-(session id, stamp), so siblings serialize instead of collapsing onto one
-owner (loto-fs84). A sibling's Bash is not stamped — the harness gives
-it no per-subagent id — so its `loto lock` runs as the session; that lock
-is taken beside a live beacon of the same session rather than refused on
-it, and the beacon stays for the write gate to serialize siblings on
-(loto-6sf4). A caller with no session id and no `LOTO_AGENT_ID` is
+without it, "release my locks on session end" is meaningless. A subagent
+is its parent session's actor (loto-e1ku, docs/write-gate.md). A caller with no session id and no `LOTO_AGENT_ID` is
 refused on every verb that writes an owner.
 
 **Useful holder reports.** When a Claude is blocked, it sees a KV row

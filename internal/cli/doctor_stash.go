@@ -52,7 +52,7 @@ type danglingStash struct {
 // `loto status`'s per-lock liveness=alive|dead and `loto whoami`'s recorded
 // witnesses both come from the same session-record oracle (identity.
 // ProbeSession / SessionRecord.Verdict), and that oracle is keyed on a
-// session id, not on lock possession — an agent between beacon leases, or one
+// session id, not on lock possession — an agent between holds, or one
 // that never claimed anything, still has a findable record. The two sets are
 // unioned rather than one replacing the other: an agent pinned via a bare
 // LOTO_AGENT_ID that never ran `loto whoami` (so it has no session record at

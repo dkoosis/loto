@@ -111,7 +111,7 @@ type BreakResult struct {
 	Err    error
 }
 
-const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch,beacon,epoch,worktree`
+const lockCols = `target_canonical,owner_uuid,session_uuid,intent,created_at,expires_at,host,pid,proc_start,branch,epoch,worktree`
 
 func inClause(targets []domain.Target) (string, []any) {
 	ph := make([]byte, 0, len(targets)*2)
@@ -261,23 +261,17 @@ func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	// Map NULL → 0 (UNKNOWN) at the store boundary so domain logic never sees
 	// the SQL-null distinction.
 	var procStart sql.NullInt64
-	// beacon is NOT NULL DEFAULT 0 in fresh schema and in the in-place ALTER,
-	// so every row has a value; NullBool keeps the scan robust anyway and maps
-	// an absent value to false — "not a beacon", the conservative reading,
-	// since a false beacon makes guard refuse rather than move the tree.
-	var beacon sql.NullBool
 	// worktree is NOT NULL DEFAULT '' in fresh schema and in the in-place
 	// ALTER, so every row has a value; NullString keeps the scan robust
 	// anyway and maps an absent value to "" — the conservative "unknown"
 	// reading domain.SameWorktree already treats as matching any worktree.
 	var worktree sql.NullString
-	if err := r.Scan(&canonical, &owner, &session, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &beacon, &l.Epoch, &worktree); err != nil {
+	if err := r.Scan(&canonical, &owner, &session, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &l.Epoch, &worktree); err != nil {
 		return l, err
 	}
 	if worktree.Valid {
 		l.Worktree = worktree.String
 	}
-	l.Beacon = beacon.Valid && beacon.Bool
 	l.OwnerUUID = domain.AgentUUID(owner)
 	l.SessionUUID = domain.SessionUUID(session)
 	l.Target = domain.Target{Canonical: canonical}

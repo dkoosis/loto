@@ -392,36 +392,6 @@ func TestHook_EditAdmission(t *testing.T) {
 		}
 	})
 
-	// loto-9zcq: the gate script mints a beacon for the same write the pre-hook
-	// admits, and nothing orders the two. A beacon is not a write claim, so admission over the caller's own
-	// beacon must still leave an exclusive lock behind, or the file reaches a
-	// commit that nobody holds.
-	t.Run("the caller's own beacon is upgraded to an exclusive lock", func(t *testing.T) {
-		withTempProject(t)
-		me := pinAgent(t)
-		if code := Run([]string{tcCmdBeacon, tcTargetA}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-			t.Fatalf("beacon: exit %d", code)
-		}
-		if _, errOut, code := runHookEvent(t, tcHookPre, hookEventJSON("Write", "call-over-beacon", tcTargetA, "")); code != 0 {
-			t.Fatalf("pre over my own beacon: exit=%d err=%q", code, errOut)
-		}
-		rt, done := hookStoreRead(t)
-		defer done()
-		held, err := rt.Store.ListLocks(rt.Ctx)
-		if err != nil {
-			t.Fatalf("list locks: %v", err)
-		}
-		var exclusive bool
-		for _, l := range held {
-			if l.Target.Canonical == tcTargetA && string(l.OwnerUUID) == me.UUID && !l.IsBeacon() {
-				exclusive = true
-			}
-		}
-		if !exclusive {
-			t.Errorf("admission over my own beacon left no exclusive lock: %+v", held)
-		}
-	})
-
 	// loto-9zcq, the cause the 2026-09-09 firing actually had: a Write that
 	// CREATES its file. The store's target validation refused the missing path
 	// for anything but a beacon, hookTakeLock read the error as "no foreign
@@ -442,7 +412,7 @@ func TestHook_EditAdmission(t *testing.T) {
 		}
 		var exclusive bool
 		for _, l := range held {
-			if l.Target.Canonical == created && string(l.OwnerUUID) == me.UUID && !l.IsBeacon() {
+			if l.Target.Canonical == created && string(l.OwnerUUID) == me.UUID {
 				exclusive = true
 			}
 		}

@@ -11,7 +11,7 @@ import (
 // GateKindClaim/GateKindLock name what denied a `loto check --gate` target
 // (loto-vr2, gate-design.md component 4). A claim-kind row has no takeover
 // verb — the only remedies are wait/pick-other-work/message-holder. A
-// lock-kind row (locks and beacons alike) carries the same `loto unlock --force`
+// lock-kind row carries the same `loto unlock --force`
 // fix line printCheckConflicts uses for a live blocker.
 const (
 	GateKindClaim = "claim"
@@ -19,7 +19,7 @@ const (
 )
 
 // GateDenyRow is one `loto check --gate` deny: a foreign live claim or
-// lock/beacon covers Path. BlockerPath is the blocker's own canonical path —
+// lock covers Path. BlockerPath is the blocker's own canonical path —
 // a claim's PathPrefix (may be an ancestor of Path, not equal to it: the
 // kuv.10 "not yet on disk" class) or a lock's Target.Canonical (always ==
 // Path, since locks are per-file).

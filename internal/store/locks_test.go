@@ -553,10 +553,8 @@ func TestReleaseLocks_DistinguishesMissingFromNotOwner(t *testing.T) {
 	}
 }
 
-// mkTargetRec wraps a bare canonical path into the non-beacon LockRecord
-// validateFileTarget now takes — plain `loto lock` shape, the case every
-// TestValidateFileTarget_TypedErrors assertion predates the beacon carve-out
-// with (loto-z5nb).
+// mkTargetRec wraps a bare canonical path into the plain `loto lock`
+// LockRecord validateFileTarget takes.
 func mkTargetRec(canonical string) domain.LockRecord {
 	return domain.LockRecord{Target: domain.Target{Canonical: canonical}}
 }
@@ -601,24 +599,20 @@ func TestValidateFileTarget_TypedErrors(t *testing.T) {
 	}
 }
 
-// TestValidateFileTarget_BeaconToleratesMissingPath is loto-z5nb's own AC: a
-// beacon for a path that does not exist yet must pass, since it announces a
-// Write about to CREATE it — the case AcquireLocks previously had nothing to
-// protect.
-func TestValidateFileTarget_BeaconToleratesMissingPath(t *testing.T) {
+// TestValidateFileTarget_MayCreateToleratesMissingPath is loto-z5nb's own AC:
+// a MayCreate record for a path that does not exist yet must pass, since the
+// pre-hook admits a Write about to CREATE it.
+func TestValidateFileTarget_MayCreateToleratesMissingPath(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "new.go")
 
-	beacon := domain.LockRecord{Target: domain.Target{Canonical: missing}, PID: 0, Beacon: true}
-	if !beacon.IsBeacon() {
-		t.Fatal("test fixture invariant broken: want a beacon shape")
-	}
-	if err := validateFileTarget("", beacon); err != nil {
-		t.Errorf("beacon on a missing path must be allowed, got %v", err)
+	create := domain.LockRecord{Target: domain.Target{Canonical: missing}, MayCreate: true}
+	if err := validateFileTarget("", create); err != nil {
+		t.Errorf("MayCreate on a missing path must be allowed, got %v", err)
 	}
 
-	// The carve-out is ENOENT-only: a beacon whose path IS a symlink is still
-	// refused, same as a plain lock.
+	// The carve-out is ENOENT-only: a MayCreate record whose path IS a symlink
+	// is still refused, same as a plain lock.
 	realPath := filepath.Join(dir, "real.go")
 	if err := os.WriteFile(realPath, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
@@ -627,14 +621,14 @@ func TestValidateFileTarget_BeaconToleratesMissingPath(t *testing.T) {
 	if err := os.Symlink(realPath, sym); err != nil {
 		t.Fatal(err)
 	}
-	beaconOnSymlink := domain.LockRecord{Target: domain.Target{Canonical: sym}, PID: 0, Beacon: true}
+	createOnSymlink := domain.LockRecord{Target: domain.Target{Canonical: sym}, MayCreate: true}
 	var tve *TargetValidationError
-	if err := validateFileTarget("", beaconOnSymlink); !errors.As(err, &tve) || tve.Reason != ReasonSymlink {
-		t.Fatalf("beacon on an existing symlink must still be refused, got %v", err)
+	if err := validateFileTarget("", createOnSymlink); !errors.As(err, &tve) || tve.Reason != ReasonSymlink {
+		t.Fatalf("MayCreate on an existing symlink must still be refused, got %v", err)
 	}
 
-	// A plain (non-beacon) lock on a missing path is unaffected — the carve-out
-	// is beacon-scoped, not a general relaxation.
+	// A plain lock on a missing path is unaffected — the carve-out is
+	// MayCreate-scoped, not a general relaxation.
 	plain := mkTargetRec(missing)
 	if err := validateFileTarget("", plain); err == nil {
 		t.Error("a plain lock on a missing path must still be refused")
@@ -751,16 +745,16 @@ func TestValidateFileTarget_AbsoluteCanonicalIgnoresRepoTop(t *testing.T) {
 	}
 }
 
-// TestValidateFileTarget_BeaconMissingLeafStillTolerated keeps the loto-z5nb
-// carve-out intact under the join: a beacon announces a write to a path that
-// may not exist yet.
-func TestValidateFileTarget_BeaconMissingLeafStillTolerated(t *testing.T) {
+// TestValidateFileTarget_MayCreateMissingLeafStillTolerated keeps the
+// loto-z5nb carve-out intact under the join: the pre-hook admits a write to a
+// path that may not exist yet.
+func TestValidateFileTarget_MayCreateMissingLeafStillTolerated(t *testing.T) {
 	repoTop := t.TempDir()
 	t.Chdir(t.TempDir())
 	rec := mkTargetRec("sub/brand-new.go")
-	rec.Beacon = true
+	rec.MayCreate = true
 	if err := validateFileTarget(repoTop, rec); err != nil {
-		t.Errorf("beacon on a missing path: %v", err)
+		t.Errorf("MayCreate on a missing path: %v", err)
 	}
 }
 

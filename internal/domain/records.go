@@ -60,7 +60,7 @@ type LockRecord struct {
 	// the path are what the row keys on (loto-3eq6). The store is SHARED across every linked worktree of one
 	// repo (StateDir keys by origin-remote slug, store.Store.repoTop), so two
 	// worktrees editing the SAME repo-relative canonical are really editing
-	// two independent files on disk; without this a beacon minted in one
+	// two independent files on disk; without this a hold taken in one
 	// worktree denied a peer's write to the same-named file in a sibling
 	// worktree that git will later merge cleanly. "" means unset — a legacy
 	// row predating this column, or an in-memory record a caller never
@@ -68,11 +68,6 @@ type LockRecord struct {
 	// ANY worktree: an omission here can only WIDEN a conflict, never narrow
 	// one away, the same stance EvalContext.CaseFold's zero value takes.
 	Worktree string
-	// Beacon marks a row the PreToolUse gate minted on a writing agent's
-	// behalf, as opposed to a lease an agent asked for. Persisted (locks.beacon)
-	// rather than inferred, because the row shape does not separate the two —
-	// see IsBeacon.
-	Beacon bool
 	// Epoch is the generation counter of the AUTHORIZATION to write this path,
 	// not of the row (git-gate.md "Ownership epoch semantics", loto-ovno.2).
 	// Renew/heartbeat (RefreshLocks, or a same-owner re-acquire of a still-live
@@ -91,29 +86,6 @@ type LockRecord struct {
 	// the store's target validation refused the missing path and the write was
 	// admitted holding nothing. Request-only: never persisted, never read back.
 	MayCreate bool
-}
-
-// IsBeacon reports whether this row was minted by the PreToolUse gate on a
-// writing agent's behalf rather than taken by an agent that asked for it
-// (loto-xwod). It reads the persisted flag and nothing else.
-//
-// The distinction is not cosmetic. gateDecideAny lets a session's own write
-// through its OWN siblings' beacons — they only say "an agent of mine is
-// writing here" — while a sibling's real exclusive lock still refuses it. A
-// write under declared, uncommitted territory is precisely what destroyed an
-// agent's work on 2026-08-14.
-//
-// ‡ The flag is persisted because the shape cannot carry it (loto-dm4i, Codex
-// #249). A beacon is shared with PID 0 — shared so two siblings' beacons never
-// collide at acquire, pid-less because the minting hook exits milliseconds
-// after the write it announces. But an ordinary `loto lock --shared` placed
-// without LOTO_PID stores exactly that shape too: PID 0 is the documented
-// "no durable liveness handle" sentinel, not a beacon marker. Reading the
-// shape therefore classified a real shared lease as a beacon, and the
-// same-session carve-out then waived it — the failure the carve-out was
-// written to avoid, pointed the other way.
-func (l LockRecord) IsBeacon() bool {
-	return l.Beacon
 }
 
 // ClaimRecord is a coarse path-prefix territory reservation: "this package is
@@ -234,7 +206,7 @@ const CandidateClaimReclaimGrace = DegradedModeTTL
 //
 // A provably-DEAD claim is abandoned at any age, same as CandidateClaimIsDead.
 // In addition, a claim minted with NO durable pid (PID<=0, the same
-// "no-durable-liveness-handle" sentinel IsBeacon/pidVerdict document
+// "no-durable-liveness-handle" sentinel pidVerdict documents
 // elsewhere) whose probe comes back UNKNOWN — no session record, no socket,
 // nothing to read — is ALSO abandoned, but only once it is at least
 // CandidateClaimReclaimGrace old: it carries zero evidence either way, and

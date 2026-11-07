@@ -81,7 +81,7 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	staged := fs.Bool("staged", false, "read paths from git diff --cached")
-	gateFlag := fs.Bool("gate", false, "read-only deny gate: exit 1 if a foreign live claim or lock/beacon covers any path; never acquires, refreshes, or writes")
+	gateFlag := fs.Bool("gate", false, "read-only deny gate: exit 1 if a foreign live claim or lock covers any path; never acquires, refreshes, or writes")
 	branch := fs.String("branch", "", "check a BRANCH instead of paths: exit 1 if another checkout has it and its owner is not provably gone")
 	held := fs.Bool("held", false, "retired (loto-ojq3): exits 0; commits are not gated")
 	moved := fs.Bool("moved", false, "advisory only: given two HEADs, print a ⚠ row for each path the move changed that a live peer holds; always exits 0")
@@ -155,7 +155,7 @@ func cmdCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 
 	// --gate is a distinct read-only decision surface (loto-vr2,
 	// gate-design.md component 4): it consults claims (plain check never
-	// does), denies on any foreign live lock/beacon regardless of mode, and
+	// does), denies on any foreign live lock, and
 	// fails open on identity/store infra BEFORE opening the store. Branching
 	// here — after path loading, before openRuntime — keeps every line below
 	// this point (the plain-check path) untouched, so plain `loto check`

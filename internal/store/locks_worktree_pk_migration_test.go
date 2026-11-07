@@ -9,7 +9,7 @@ import (
 )
 
 // TestLocksWorktreeKeyedOnExistingDB pins the no-version-bump migration for
-// loto-8z87 (mirrors TestLocksBeaconEnsuredOnExistingDB): a DB whose locks
+// loto-8z87: a DB whose locks
 // table still carries the OLD (target_canonical, owner_uuid) primary key gets
 // rebuilt onto (target_canonical, owner_uuid, worktree) on the next Open, the
 // row it already held survives untouched, and the new key actually admits a

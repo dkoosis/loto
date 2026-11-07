@@ -14,19 +14,6 @@ func mk(owner string) LockRecord {
 	}
 }
 
-// IsBeacon reads the persisted flag and nothing else (loto-dm4i): a pid-0
-// row is not a beacon unless marked.
-func TestLockRecordIsBeacon(t *testing.T) {
-	l := mk("alice")
-	if l.IsBeacon() {
-		t.Fatal("an unmarked pid-0 row is not a beacon")
-	}
-	l.Beacon = true
-	if !l.IsBeacon() {
-		t.Fatal("a marked row is a beacon")
-	}
-}
-
 func TestConflicts_TruthTable(t *testing.T) {
 	ec := EvalContext{Now: time.Now()}
 	cases := []struct {

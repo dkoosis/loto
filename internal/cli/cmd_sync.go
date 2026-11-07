@@ -434,9 +434,9 @@ func syncUntrackedPaths(ctx context.Context, repoTop string) ([]string, error) {
 
 // syncApplyBatch bounds how many paths one flock section may act on.
 //
-// ‡ The op-flock is the rendezvous every peer's `loto beacon`, AcquireLocks and
-// RefreshLocks needs. It gives up at LOTO_FLOCK_TIMEOUT (30s), and the
-// PreToolUse hook that consumes a beacon failure fails OPEN by design — so the
+// ‡ The op-flock is the rendezvous every peer's AcquireLocks and RefreshLocks
+// needs. It gives up at LOTO_FLOCK_TIMEOUT (30s), and the
+// PreToolUse hook that consumes an acquire failure fails OPEN by design — so the
 // longest hold is the window in which peers write with no lease row for sync to
 // find. Measured on this repo before the split (loto-roeh), one whole-run hold
 // cost 8.1s over 50 divergent paths, 22.0s over 200 and 33.3s over 327: past
@@ -1112,7 +1112,7 @@ func syncDecide(diffs []syncDiff, locks []domain.LockRecord, claims []domain.Cla
 }
 
 // syncConflictFor checks, in order, whether path is covered by a live lease
-// (any owner, beacons included), a live territory claim (no owner
+// (any owner), a live territory claim (no owner
 // carve-out — Refuses called with an empty actor per plan-review
 // P1-1), or any candidate-claim row (liveness irrelevant — durable by
 // design, a dead one is doctor's reclaim job, not sync's).
