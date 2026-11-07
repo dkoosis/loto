@@ -246,7 +246,7 @@ func TestGateCLI_ForeignClaimDeniesNotOnDiskTarget(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("expected exit 1, got %d: %q", code, out.String())
 	}
-	if !strings.Contains(out.String(), "✗ blocked count=1") || !strings.Contains(out.String(), "unlock --force -t \"unblock\" "+tcPrefixStore) {
+	if !strings.Contains(out.String(), "✗ blocked count=1") || !strings.Contains(out.String(), " hold="+tcPrefixStore) {
 		t.Errorf("expected a deny row naming the directory hold: %q", out.String())
 	}
 }

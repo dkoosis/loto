@@ -9,8 +9,9 @@ import (
 
 // TestEmitGateDeny_ByteExact pins the exact `loto check --gate` deny-block
 // shape (loto-vr2, gate-design.md component 4): count-first header, rows
-// sorted path -> kind -> holder, each row carrying the `loto unlock --force`
-// fix block for the hold's own target, mirroring printCheckConflicts.
+// sorted path -> kind -> holder, a file hold's row carrying the `loto unlock
+// --force` fix block, mirroring printCheckConflicts; a directory hold above
+// the path prints none, since unlock refuses a directory.
 func TestEmitGateDeny_ByteExact(t *testing.T) {
 	expires := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	rows := []GateDenyRow{
@@ -30,10 +31,7 @@ func TestEmitGateDeny_ByteExact(t *testing.T) {
 		"```bash\n" +
 		"loto unlock --force -t \"unblock\" b.go\n" +
 		"```\n" +
-		"✗ path=internal/store/new.go kind=lock blocker=foe-uuid intent=\"gate-intent\" expires_at=2026-01-02T03:04:05Z\n" +
-		"```bash\n" +
-		"loto unlock --force -t \"unblock\" internal/store\n" +
-		"```\n"
+		"✗ path=internal/store/new.go kind=lock blocker=foe-uuid intent=\"gate-intent\" expires_at=2026-01-02T03:04:05Z hold=internal/store\n"
 	if got := buf.String(); got != want {
 		t.Errorf("EmitGateDeny mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}

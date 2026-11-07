@@ -662,7 +662,7 @@ func hookObserve(ctx context.Context, rt *runtime, declared string, gitStatus gi
 		return nil, 0, 0, err
 	}
 	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
-	holders := hookLiveHolders(locks, ec)
+	holders := hookLiveHolders(locks, ec, rt.RepoTop)
 
 	status, err := gitStatus()
 	if err != nil {
@@ -756,6 +756,17 @@ func hookSeqAtObserve(rt *runtime, paths []string, holders map[string]domain.Loc
 	return seqAt, nil
 }
 
+// isDirectoryHold reports whether target names a directory (a claim), which
+// the hook does not observe: a directory's stat moves with every file made or
+// removed beneath it, and its digest would be the worktree's HEAD.
+func isDirectoryHold(repoTop, target string) bool {
+	if target == "." {
+		return true
+	}
+	fi, err := os.Stat(filepath.Join(repoTop, target))
+	return err == nil && fi.IsDir()
+}
+
 // hookLiveHolders reduces the live lock rows to one holder per path — the `L`
 // a call record cites.
 //
@@ -766,10 +777,10 @@ func hookSeqAtObserve(rt *runtime, paths []string, holders map[string]domain.Loc
 //
 // A row from a sibling worktree (ec.MyWorktree, loto-3eq6) names a different
 // file than the one this checkout observes, so it holds nothing here.
-func hookLiveHolders(locks []domain.LockRecord, ec domain.EvalContext) map[string]domain.LockRecord {
+func hookLiveHolders(locks []domain.LockRecord, ec domain.EvalContext, repoTop string) map[string]domain.LockRecord {
 	holders := map[string]domain.LockRecord{}
 	for i := range locks {
-		if ec.IsStale(locks[i]) || !domain.SameWorktree(ec.MyWorktree, locks[i].Worktree) {
+		if ec.IsStale(locks[i]) || !domain.SameWorktree(ec.MyWorktree, locks[i].Worktree) || isDirectoryHold(repoTop, locks[i].Target.Canonical) {
 			continue
 		}
 		key := locks[i].Target.Canonical
