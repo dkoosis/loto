@@ -212,14 +212,9 @@ func (c EvalContext) RemainingTTL(l LockRecord) time.Duration {
 }
 
 // Conflicts reports whether an incoming acquire `incoming` is blocked by existing
-// holder `existing`: Refuses, the one conflict rule, plus shared mode, where
-// shared+shared on the same target coexist until loto-hof2 retires it.
-// Same-owner holders never conflict (re-acquire is an upsert), and a
+// holder `existing`: Refuses, the one conflict rule. Same-owner holders never conflict (re-acquire is an upsert), and a
 // stale holder never does (loto-k5el.2).
 func (c EvalContext) Conflicts(incoming, existing LockRecord) bool {
-	if incoming.EffectiveMode() == ModeShared && existing.EffectiveMode() == ModeShared {
-		return false
-	}
 	// Probe liveness (LockHold) only for a row that could conflict: foreign and
 	// covering. Refuses with Live true is that cheap filter (loto-kxxs).
 	cheap := Hold{Actor: existing.OwnerUUID, Worktree: existing.Worktree, Target: existing.Target.Canonical, Live: true}

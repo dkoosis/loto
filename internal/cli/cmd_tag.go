@@ -204,8 +204,8 @@ func claimBeadWarn() bool {
 // contract exactly and served the caller not at all: the one thing they could
 // not do was leave word for whoever comes next.
 func runTag(rt *runtime, canonical, text string, ttl time.Duration, ttlSet bool, stdout, stderr io.Writer) int {
-	// Deliver to EVERY current holder, not an arbitrary one: a target held
-	// shared by N agents has N blockers, and a note "on this file" must reach
+	// Deliver to EVERY current holder, not an arbitrary one: a target with
+	// N holders has N blockers, and a note "on this file" must reach
 	// each (loto-2nc5). InsertTag binds to the (target, owner, created_at)
 	// triple, so one tag per holder.
 	holders, err := rt.Store.LocksAt(rt.Ctx, domain.Target{Canonical: canonical})

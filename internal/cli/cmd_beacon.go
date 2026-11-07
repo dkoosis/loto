@@ -241,7 +241,6 @@ func buildBeaconRecords(targets []domain.Target, rt *runtime, now time.Time, ttl
 			ExpiresAt:   now.Add(ttl),
 			Host:        rt.Host,
 			PID:         0,
-			Mode:        domain.ModeShared,
 			Beacon:      true,
 			Worktree:    rt.Worktree,
 		})

@@ -25,10 +25,10 @@ env LOTO_GUARD_OVERRIDE=
 exec git checkout -
 ! stderr 'moved-peer-locks'
 
-# Alice takes a shared lock — a read declaration, so the write bit stays on
-# and git can still rewrite the file underneath her. That is the point.
+# Alice takes a lock; a lock leaves the write bit on, so git can still
+# rewrite the file underneath her. That is the point.
 env LOTO_AGENT_ID=$ALICE
-loto lock shared.go --shared -t 'alice reading'
+loto lock shared.go -t 'alice reading'
 stdout '✓ locked count=1'
 
 # Bob switches back. The checkout succeeds and Alice is named.

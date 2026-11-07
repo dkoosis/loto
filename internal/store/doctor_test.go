@@ -64,7 +64,6 @@ func TestDoctorSkipsLiveBeaconWithDeadSessionProbe(t *testing.T) {
 	ctx := context.Background()
 	l := mkFileLock(t, "a.go", "alice", 2*time.Minute)
 	l.PID = 0
-	l.Mode = domain.ModeShared
 	l.Beacon = true
 
 	sessionDead := func(domain.LockRecord) domain.Liveness { return domain.LivenessDead }
@@ -620,9 +619,8 @@ func TestDoctorRepair_ReclaimLeavesModeUntouched(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
 	l := mkFileLock(t, "ro.md", "alice", time.Hour)
-	l.Mode = domain.ModeShared
-	// Deliberately read-only file: shared acquire never strips owner-write,
-	// so doctor --repair must not "restore" it either.
+	// Deliberately read-only file: acquire never strips owner-write, so
+	// doctor --repair must not "restore" it either.
 	if err := os.Chmod(l.Target.Canonical, 0o444); err != nil {
 		t.Fatal(err)
 	}

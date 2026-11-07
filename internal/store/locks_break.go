@@ -187,18 +187,13 @@ func classifyBreaks(b breakBatch, force bool, kind string) (results []BreakResul
 			results[i].Err = ErrNoLockAtTarget
 			continue
 		}
-		// A target carries either one exclusive holder or N shared holders
-		// (exclusive walls; shared coexist — NORTH_STAR I1/I2). Authorize the
-		// whole set atomically: under stale-reclaim a single live co-holder
+		// Authorize the whole holder set atomically: under stale-reclaim a single live co-holder
 		// protects the target, so reject it entirely rather than break some
 		// holders and leave others (loto-w77f).
 		if err := authorizeHolders(holders, b.ec, force); err != nil {
 			results[i].Err = err
 			continue
 		}
-		// All holders share one mode (the all-shared-or-one-exclusive
-		// invariant), so holders[0].Mode drives the restore decision.
-		results[i].Mode = holders[0].Mode
 		for j := range holders {
 			owner := string(holders[j].OwnerUUID) // map key + Event.SubjectUUID stay plain strings
 			events = append(events, domain.Event{
@@ -275,7 +270,7 @@ func authorizeHolders(holders []domain.LockRecord, ec domain.EvalContext, force 
 // k decides whether a target matches its row byte-exact or folded, and it also
 // keys the map: the caller indexes by the target it typed, so a legacy row's
 // stored spelling must be normalized on the way in or it is invisible to
-// release, refresh, downgrade and break alike (loto-8soe).
+// release, refresh and break alike (loto-8soe).
 func loadLocksByTargetTx(ctx context.Context, tx *sql.Tx, k keyMatch, targets []domain.Target) (map[string][]domain.LockRecord, error) {
 	placeholders, args := k.inTargets(targets)
 	rows, err := tx.QueryContext(ctx, `SELECT `+lockCols+` FROM locks WHERE `+k.col("target_canonical")+` IN (`+placeholders+`) ORDER BY created_at ASC, owner_uuid ASC`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args

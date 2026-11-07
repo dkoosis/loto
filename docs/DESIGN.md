@@ -28,7 +28,7 @@ $XDG_STATE_HOME/loto/                     # canonical, shared across subtrees
 ```
 
 SQLite tables:
-- `locks` — one row per holder per target. Keyed by the composite PK `(target_canonical, owner_uuid)` so a target can carry several coexisting shared holders. Carries owner, session, intent, expiry, host, pid, branch, **mode** (`shared` | `exclusive`; empty legacy → exclusive).
+- `locks` — one exclusive hold per row. Keyed by `(target_canonical, owner_uuid, worktree)`. Carries owner, session, intent, expiry, host, pid, branch, epoch. The `mode` column is retired (loto-hof2): every hold is exclusive and nothing reads it.
 
 ‡ **`target_canonical` is a repo-relative POSIX path, based at the git
 toplevel.** Absolute forms are rejected at `domain.Canonicalize`
@@ -117,49 +117,33 @@ The token is `owner@epoch`, not the owner alone, because an owner UUID
 survives release-and-reacquire — a break authorized against `alice` would
 still land on alice's *next* hold. The epoch is the path's authorization
 generation (see below): preserved across a lease renewal, bumped by every
-fresh grant. Shared targets carry several holders, so the caller repeats
-the flag and the compare is exact-set — a reader who joined since the read
-refuses the break rather than being swept up in it. `loto status` prints
+fresh grant. A target can still show several holders (rows from before
+holds were exclusive), so the caller repeats the flag and the compare is
+exact-set. `loto status` prints
 `owner=` and `epoch=` on every holder row so the token can be assembled.
 
 Bare `--force` stays a **blind** break, documented as such in
 `loto unlock -h`. A sweep over a dead peer's territory has no generation
 to name, and doctor's stale reclaim breaks rows it never read as a caller.
 
-## lock modes (shared / exclusive)
+## one exclusive hold
 
-A lock is `exclusive` (sole writer — the default) or `shared` (multi-reader
-lease). The point: several agents can declare a read-hold on the same target
-without false contention, and a writer can step down to a reader in place when
-a peer needs to read alongside — "conflicts as a negotiation, not a wall."
+Every lock is exclusive: one actor writes a target at a time
+(docs/write-gate.md). Shared mode and `loto downgrade` are retired
+(loto-hof2). No lock touches file permissions (loto-zssw).
 
 ```
-LockMode = shared | exclusive          -- empty/legacy reads as exclusive
-
 Conflicts(a, l):                        -- incoming a vs existing holder l
   same owner            → false         -- re-acquire is an upsert
   different target       → false
   l is stale            → false         -- reclaimable; never a hard block
-  else → a.exclusive OR l.exclusive     -- shared+shared coexist; exclusive walls
+  else                  → true
 ```
 
-Invariants:
-- **I1** shared + shared on one target coexist (any number of readers).
-- **I2** exclusive on either side conflicts (sole writer).
-- **I3** no lock of any mode touches file permissions (loto-zssw). The mode
-  field governs conflict resolution and nothing on disk.
-- **I4** `downgrade` flips exclusive → shared in place — no unlock/relock, no new
-  `created_at`, the hold is continuous. Already-shared is a no-op. There is **no** shared → exclusive upgrade (a non-goal).
-- **I5** under the composite PK, a per-owner lookup uses `LockForOwnerAt`; a
-  release/downgrade always resolves the caller's **own** row, never a peer's.
-- **I6** `check --staged` is **liveness-gated**: a *provably-live* exclusive peer
-  is a hard block (exit 1); an indeterminate/expiring exclusive peer (PID-0
-  sentinel, cross-host) is an advisory `✓ … liveness=unknown` that does not block;
-  a shared peer never blocks. (Whether to weaken further to pure grant-with-warning
-  remains an open dk decision.)
+`check --staged` is liveness-gated: a provably-live peer is a hard block
+(exit 1); an indeterminate or expiring peer (PID-0 sentinel, cross-host) is
+an advisory `✓ … liveness=unknown` that does not block.
 
-CLI: `loto lock <t> --shared` takes a read lease (default is exclusive);
-`loto downgrade <t>` steps an exclusive hold down to shared;
 `loto refresh <t> [--ttl d] | --all` extends the lease you already hold.
 
 ## the operating loop (Claude's POV)

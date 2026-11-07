@@ -132,7 +132,7 @@ func TestRefreshLocks_AuditsRefresh(t *testing.T) {
 }
 
 // TestRefreshLocks_EmptyTargets is the batch-API parity case: no targets, no
-// flock, no tx, empty slice (mirrors ReleaseLocks/DowngradeLocks).
+// flock, no tx, empty slice (mirrors ReleaseLocks).
 func TestRefreshLocks_EmptyTargets(t *testing.T) {
 	s := mustOpen(t)
 	results, err := s.RefreshLocks(context.Background(), nil, tcAlice, time.Hour)

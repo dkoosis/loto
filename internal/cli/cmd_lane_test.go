@@ -173,25 +173,6 @@ func TestLane_PostAssertCatchesLostLock(t *testing.T) {
 	}
 }
 
-// TestLane_RejectsSharedLock proves a shared (advisory) lock is not enough to
-// commit — staging needs sole-writer (exclusive) ownership.
-func TestLane_RejectsSharedLock(t *testing.T) {
-	repo := withTempProject(t)
-	pinAgent(t)
-	base := commitAllInRepo(t, repo, "init")
-	if code := Run([]string{tcCmdLock, tcTargetA, "-t", tcIntentRead, tcFlagShared}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("shared lock %s failed", tcTargetA)
-	}
-	var out, errB bytes.Buffer
-	code := Run([]string{tcCmdLane, tcTargetA, tcFlagRef, tcRefImpl1, tcFlagBase, base, "-m", tcMsg, tcFlagCloses, tcClosesAbc}, &out, &errB)
-	if code != 1 {
-		t.Fatalf("want exit 1, got %d; out=%q err=%q", code, out.String(), errB.String())
-	}
-	if !strings.Contains(out.String(), "reason=lock-not-exclusive") {
-		t.Errorf("missing lock-not-exclusive reason: %q", out.String())
-	}
-}
-
 // TestLane_MissingRef_UsageError rejects a malformed invocation with exit 2.
 func TestLane_MissingRef_UsageError(t *testing.T) {
 	withTempProject(t)

@@ -45,14 +45,12 @@ const reasonNotFound = "not-found"
 
 // lockUsageHead is the point-of-use teaching surface for lock (loto-5rwc):
 // usage line plus worked examples. The flag list is appended by PrintDefaults.
-const lockUsageHead = `usage: loto lock <target> [<target>...] -t "why" [--shared]
+const lockUsageHead = `usage: loto lock <target> [<target>...] -t "why"
 
-Acquire a lock on one or more targets. -t (intent) is required.
-Default mode is exclusive (sole writer). --shared takes a multi-reader lease.
+Acquire an exclusive lock on one or more targets. -t (intent) is required.
 
 examples:
   loto lock internal/store/store.go -t "store refactor"
-  loto lock README.md -t "reading docs" --shared
 `
 
 func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -65,7 +63,6 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	ttl := fs.Duration("ttl", domain.DegradedModeTTL, "lock TTL")
 	intent := fs.String("t", "", "intent (required)")
 	fs.StringVar(intent, "intent", "", "intent (required)")
-	shared := fs.Bool("shared", false, "acquire a shared (multi-reader) lock; default is exclusive")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
@@ -111,11 +108,7 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
 
-	mode := domain.ModeExclusive
-	if *shared {
-		mode = domain.ModeShared
-	}
-	return acquireBatch(rt, targets, *intent, *ttl, mode, rt.liveProbe(), stdout, stderr)
+	return acquireBatch(rt, targets, *intent, *ttl, rt.liveProbe(), stdout, stderr)
 }
 
 // emitDirLockHint — sd-hh0h. `loto lock <dir>` is refused with
@@ -462,12 +455,12 @@ func classifyCanonicalizeErr(err error) string {
 	}
 }
 
-func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.Duration, mode string, live domain.HolderLiveProbe, stdout, stderr io.Writer) int {
+func acquireBatch(rt *runtime, targets []domain.Target, intent string, ttl time.Duration, live domain.HolderLiveProbe, stdout, stderr io.Writer) int {
 	now := time.Now()
 	if w := degradedPidWarning(); w != "" {
 		fmt.Fprint(stderr, w)
 	}
-	recs := buildLockRecords(targets, rt, intent, now, ttl, mode)
+	recs := buildLockRecords(targets, rt, intent, now, ttl)
 	acquired, err := rt.Store.AcquireLocks(rt.Ctx, recs, live)
 	if err != nil {
 		if mce, ok := errors.AsType[*store.MultiConflictError](err); ok {
@@ -515,7 +508,7 @@ func fetchTagsForBlockers(rt *runtime, blockers []domain.LockRecord) map[string]
 	return out
 }
 
-func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now time.Time, ttl time.Duration, mode string) []domain.LockRecord {
+func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now time.Time, ttl time.Duration) []domain.LockRecord {
 	pid, src := stampPID()
 	// A durable pid (LOTO_PID = the session process) lets a later liveness probe
 	// fast-reclaim this lock when the holder dies and detect PID reuse via the
@@ -540,7 +533,6 @@ func buildLockRecords(targets []domain.Target, rt *runtime, intent string, now t
 			PID:         pid,
 			ProcStart:   procStartVal,
 			Branch:      branch,
-			Mode:        mode,
 			Worktree:    rt.Worktree,
 			// MayCreate mirrors the CLI-side allowMissing=true above
 			// (loto-i382): the store's own target validation would

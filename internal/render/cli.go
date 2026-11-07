@@ -55,16 +55,14 @@ func getCwd() string {
 	return cwd
 }
 
-// EmitLockSuccess renders the acquired-lock block. It takes records (not bare
-// targets) so each row carries its mode (loto-k5el.2). Mode is normalized via
-// EffectiveMode so a legacy/empty value renders as exclusive.
+// EmitLockSuccess renders the acquired-lock block.
 func EmitLockSuccess(w io.Writer, recs []domain.LockRecord) {
 	cwd := getCwd()
 	sorted := slices.Clone(recs)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })
 	fmt.Fprintf(w, "✓ locked count=%d\n", len(sorted))
 	for i := range sorted {
-		fmt.Fprintf(w, "✓ target=%s mode=%s\n", relToCwd(sorted[i].Target.Canonical, cwd), sorted[i].EffectiveMode())
+		fmt.Fprintf(w, "✓ target=%s\n", relToCwd(sorted[i].Target.Canonical, cwd))
 	}
 }
 
@@ -78,7 +76,7 @@ func EmitBeaconSuccess(w io.Writer, recs []domain.LockRecord, ttl time.Duration)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Target.Canonical < sorted[j].Target.Canonical })
 	fmt.Fprintf(w, "✓ beacon count=%d ttl=%s\n", len(sorted), ttl)
 	for i := range sorted {
-		fmt.Fprintf(w, "✓ target=%s mode=%s\n", relToCwd(sorted[i].Target.Canonical, cwd), sorted[i].EffectiveMode())
+		fmt.Fprintf(w, "✓ target=%s\n", relToCwd(sorted[i].Target.Canonical, cwd))
 	}
 }
 

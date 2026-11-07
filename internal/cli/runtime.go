@@ -225,7 +225,7 @@ func openRuntimeForRepoTop(ctx context.Context, top string) (*runtime, error) {
 }
 
 // openRuntimeGC is openRuntime for verbs that mutate coordination state
-// (lock/unlock/tag/ack/claim/unclaim/lane/downgrade/refresh/submit/gate/
+// (lock/unlock/tag/ack/claim/unclaim/lane/refresh/submit/gate/
 // violations): it REFUSES an unpinned identity before opening the store, and
 // runs the session-record GC pass. Read verbs — check, check --gate, guard,
 // status — must NOT use it: a ReadDir over ~/.loto/session cost 1.1s on the

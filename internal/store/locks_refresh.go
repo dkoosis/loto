@@ -34,8 +34,7 @@ type RefreshResult struct {
 // that is still alive proves it by refreshing before the deadline.
 //
 // Per-target failures do not abort the batch (see RefreshResult.Err); the
-// returned error is non-nil only on internal/SQL failures. Mirrors
-// DowngradeLocks: one op-flock for the whole batch, a plain read to decide, and
+// returned error is non-nil only on internal/SQL failures. One op-flock for the whole batch, a plain read to decide, and
 // a write tx opened only when at least one target actually needs the UPDATE
 // (loto-kw5k fast path). No post-commit FS work, so the flock releases via the
 // deferred call rather than the split restore-then-release dance.

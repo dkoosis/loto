@@ -18,8 +18,7 @@ func (s *Store) ListLocks(ctx context.Context) ([]domain.LockRecord, error) {
 // LockForOwnerAt returns the single lock at target held by owner IN THIS
 // STORE'S OWN WORKTREE, or (nil,nil) if none. Replaces LockAt for the
 // multi-holder world: under the composite PK LockAt's bare WHERE
-// target_canonical=? can match several rows (a shared target with several
-// holders) and returns an arbitrary one (loto-k5el.2).
+// target_canonical=? can match several rows and returns an arbitrary one (loto-k5el.2).
 //
 // ‡ Worktree-scoped (loto-8z87): since the PK widened to (target_canonical,
 // owner_uuid, worktree), one owner can hold a row per linked worktree of this
@@ -87,7 +86,7 @@ func (s *Store) LocksForOwnerAt(ctx context.Context, targets []domain.Target, ow
 }
 
 // LockAt returns the longest-standing holder of target, or (nil,nil) if none.
-// Under the composite PK a shared target may have several holders; the ORDER BY
+// Under the composite PK a target may have several holders; the ORDER BY
 // makes the choice deterministic (oldest created_at, then owner_uuid) rather
 // than the arbitrary row SQLite returned before (loto-2nc5). Production tag
 // delivery now fans out to every holder via LocksAt; LockAt remains for callers
@@ -114,8 +113,8 @@ func (s *Store) LockAt(ctx context.Context, t domain.Target) (*domain.LockRecord
 }
 
 // LocksAt returns EVERY holder of target in deterministic order (oldest lock
-// first), or an empty slice if none. Under the composite PK a shared target may
-// carry several coexisting holders. Tag delivery uses this to leave the note on
+// first), or an empty slice if none. Under the composite PK a target may carry
+// several holders. Tag delivery uses this to leave the note on
 // all current holders — a note "on this file" must reach every blocker, not an
 // arbitrary one (loto-2nc5).
 func (s *Store) LocksAt(ctx context.Context, t domain.Target) ([]domain.LockRecord, error) {

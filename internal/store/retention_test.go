@@ -330,13 +330,13 @@ func TestAppendEvent_DeliberatelyDoesNotRotate(t *testing.T) {
 	}
 }
 
-// loto-bvdk: rotation must also fire on the release/break/downgrade append
+// loto-bvdk: rotation must also fire on the release/break append
 // paths, not just acquire/doctor. Each subtest seeds >cap events AFTER the
 // lock exists (so no acquire rotates them away), then drives the op under
 // test and asserts ListEvents trimmed to the cap — proving the op itself
 // rotated. Without the fix these tables grow unbounded on acquire-rare,
 // mutate-frequent workloads.
-func TestRotateEvents_FiresOnReleaseBreakDowngrade(t *testing.T) {
+func TestRotateEvents_FiresOnReleaseBreak(t *testing.T) {
 	ctx := context.Background()
 
 	// seedExcess inserts n filler events directly (AppendEvent does NOT rotate),
@@ -405,19 +405,6 @@ func TestRotateEvents_FiresOnReleaseBreakDowngrade(t *testing.T) {
 		// tcBob force-breaks tcAlice's lock.
 		if _, err := s.BreakLocks(ctx, []domain.Target{l.Target}, tcBob, BreakForce, "x", liveProbe, nil); err != nil {
 			t.Fatalf("break: %v", err)
-		}
-		assertTrimmed(t, s)
-	})
-
-	t.Run("downgrade", func(t *testing.T) {
-		s := mustOpen(t)
-		l := mkFileLock(t, "a.go", tcAlice, time.Hour) // acquired exclusive by default
-		if _, err := s.AcquireLocks(ctx, []domain.LockRecord{l}, liveProbe); err != nil {
-			t.Fatalf("acquire: %v", err)
-		}
-		seedExcess(t, s, eventsRetentionMax+50)
-		if err := s.downgradeLock(ctx, l.Target, tcAlice); err != nil {
-			t.Fatalf("downgrade: %v", err)
 		}
 		assertTrimmed(t, s)
 	})

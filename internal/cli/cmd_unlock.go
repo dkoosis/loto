@@ -20,7 +20,7 @@ import (
 func init() { register("unlock", cmdUnlock) } //nolint:gochecknoinits // command registry pattern
 
 // holdRefList collects repeated --expect-holder values. Repeatable because a
-// shared target has a SET of holders (I1) and a compare-and-swap over a set
+// target can have a SET of holders and a compare-and-swap over a set
 // has to name every member — stating one of three and breaking all three would
 // dispossess two agents the caller never looked at.
 type holdRefList []domain.HoldRef
@@ -87,7 +87,7 @@ func cmdUnlock(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fs.StringVar(intent, "intent", "", "intent (required only with --force)")
 	onlyIntent := fs.String("only-intent", "", "with --all, release only locks whose recorded intent exactly matches this — scopes the sweep to one lane's own locks when a shared owner id also covers peer lanes (sd-xhap)")
 	var expect holdRefList
-	fs.Var(&expect, "expect-holder", "owner@epoch (from loto status) this break must find; repeat per holder of a shared target; refuse if the holder set moved")
+	fs.Var(&expect, "expect-holder", "owner@epoch (from loto status) this break must find; repeat per holder of a target; refuse if the holder set moved")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}

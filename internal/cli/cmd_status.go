@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strings"
 	"time"
 
 	"loto/internal/domain"
@@ -19,7 +18,6 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	mine := fs.Bool("mine", false, "show only locks and claims owned by my uuid")
-	collisions := fs.Bool("collisions", false, "report only targets held live by ≥2 distinct owners (shared-beacon collisions)")
 	if err := fs.Parse(permuteWith(fs, args)); err != nil {
 		return 2
 	}
@@ -36,10 +34,6 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fmt.Fprintf(stdout, "repo:    %s\n", repoTop)
 	fmt.Fprintf(stdout, "state:   %s\n", rt.StateDir)
 	fmt.Fprintf(stdout, "guard:   %s\n", guardSummary(checkGuardReachability(ctx, repoTop)))
-
-	if *collisions {
-		return statusCollisions(stdout, stderr, rt)
-	}
 
 	if fs.NArg() == 1 {
 		t, err := resolveCLITarget(nil, callerBase(), repoTop, fs.Arg(0))
@@ -234,65 +228,6 @@ func emitForeignRowFixBlock(stdout io.Writer) {
 	fmt.Fprintln(stdout, "```")
 }
 
-// statusCollisions reports every target held live by ≥2 DISTINCT owners — the
-// shared-beacon collision the gate deliberately can't see. `loto check` treats
-// Conflicts(shared,shared)=false so readers coexist, which means two subagents
-// that stamped the SAME file (a write-set partition failure the LOTO_SUBAGENT_ID
-// beacon exists to expose) never surface anywhere. The signal is in the data;
-// this pushes it (loto-bo8c). Advisory: exits 0 even with collisions — it is a
-// detection surface, and shared coexistence is legal; the ⚠ rows carry the heads-
-// up. "Live" = not stale (PID probe for real pids, TTL for PID-0 beacons).
-func statusCollisions(stdout, stderr io.Writer, rt *runtime) int {
-	all, err := rt.Store.ListLocks(rt.Ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ %v\n", err)
-		return 3
-	}
-	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe(), CaseFold: rt.CaseFold}
-	ownersByTarget := map[string]map[string]bool{}
-	for i := range all {
-		l := &all[i]
-		if ec.IsStale(*l) {
-			continue
-		}
-		m := ownersByTarget[l.Target.Canonical]
-		if m == nil {
-			m = map[string]bool{}
-			ownersByTarget[l.Target.Canonical] = m
-		}
-		m[string(l.OwnerUUID)] = true
-	}
-
-	type collision struct {
-		target string
-		owners []string
-	}
-	var cols []collision
-	for tgt, owners := range ownersByTarget {
-		if len(owners) < 2 {
-			continue
-		}
-		os := make([]string, 0, len(owners))
-		for o := range owners {
-			os = append(os, o)
-		}
-		sort.Strings(os)
-		cols = append(cols, collision{target: tgt, owners: os})
-	}
-	sort.Slice(cols, func(i, j int) bool { return cols[i].target < cols[j].target })
-
-	if len(cols) == 0 {
-		fmt.Fprintln(stdout, "✓ no collisions")
-		return 0
-	}
-	fmt.Fprintf(stdout, "⚠ collisions count=%d\n", len(cols))
-	for _, c := range cols {
-		fmt.Fprintf(stdout, "⚠ target=%s distinct_owners=%d owners=%s\n",
-			relPath(c.target), len(c.owners), strings.Join(c.owners, ","))
-	}
-	return 0
-}
-
 func filterLocksByOwner(all []domain.LockRecord, ownerUUID string) []domain.LockRecord {
 	filtered := all[:0]
 	for i := range all {
@@ -365,8 +300,8 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord, mi
 		// owner= as `owner@epoch` it is the token `unlock --force
 		// --expect-holder` compares against (loto-tqcw). Printed as its own
 		// field rather than a pre-joined `hold=` so no row repeats the owner.
-		fmt.Fprintf(stdout, "%s target=%s owner=%s epoch=%d mode=%s intent=%q held_since=%s ttl_remaining=%s liveness=%s host=%s pid=%d%s%s\n",
-			mark, relPath(l.Target.Canonical), l.OwnerUUID, l.Epoch, l.EffectiveMode(), l.Intent,
+		fmt.Fprintf(stdout, "%s target=%s owner=%s epoch=%d intent=%q held_since=%s ttl_remaining=%s liveness=%s host=%s pid=%d%s%s\n",
+			mark, relPath(l.Target.Canonical), l.OwnerUUID, l.Epoch, l.Intent,
 			l.CreatedAt.UTC().Format(time.RFC3339),
 			fmtTTL(ec.RemainingTTL(*l)), verdict,
 			l.Host, l.PID, branch, self)
@@ -414,8 +349,8 @@ func statusSingleTarget(w io.Writer, rt *runtime, t domain.Target) int {
 		// self=true lets the PreToolUse gate tell its own lock from a peer's on
 		// the same path (loto-wuzh); same marker as the whole-repo view.
 		self, _ := rowOwnerMark(string(l.OwnerUUID), rt.Agent.UUID, false)
-		fmt.Fprintf(w, "✗ holder target=%s owner=%s epoch=%d mode=%s intent=%q ttl_remaining=%s liveness=%s%s\n",
-			relPath(l.Target.Canonical), l.OwnerUUID, l.Epoch, l.EffectiveMode(), l.Intent,
+		fmt.Fprintf(w, "✗ holder target=%s owner=%s epoch=%d intent=%q ttl_remaining=%s liveness=%s%s\n",
+			relPath(l.Target.Canonical), l.OwnerUUID, l.Epoch, l.Intent,
 			fmtTTL(ec.RemainingTTL(*l)), ec.Classify(*l), self)
 	}
 	if tags, err := rt.Store.ListAliveForTarget(rt.Ctx, domain.Canonical(t.Canonical)); err == nil {

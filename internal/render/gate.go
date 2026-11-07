@@ -11,8 +11,7 @@ import (
 // GateKindClaim/GateKindLock name what denied a `loto check --gate` target
 // (loto-vr2, gate-design.md component 4). A claim-kind row has no takeover
 // verb — the only remedies are wait/pick-other-work/message-holder. A
-// lock-kind row (covers both exclusive locks and shared beacons — a beacon
-// is a ModeShared domain.LockRecord) carries the same `loto unlock --force`
+// lock-kind row (locks and beacons alike) carries the same `loto unlock --force`
 // fix line printCheckConflicts uses for a live blocker.
 const (
 	GateKindClaim = "claim"

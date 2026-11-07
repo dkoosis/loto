@@ -133,82 +133,6 @@ func TestReleaseLocks_TTLExpiredPidAlive_Reclaimed(t *testing.T) {
 	}
 }
 
-// Matrix row 4: all foreign shared holders stale → every row deleted and NO
-// chmod restore — shared never stripped, and the file may be deliberately
-// read-only.
-func TestReleaseLocks_AllSharedStale_DeletedNoRestore(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-	a := mkFileLock(t, "a.go", tcAlice, time.Hour)
-	a.Mode = domain.ModeShared
-	b := peerOn(a, tcBob, domain.ModeShared)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	// Deliberately read-only: a spurious restore would flip it writable.
-	if err := os.Chmod(a.Target.Canonical, 0o444); err != nil {
-		t.Fatal(err)
-	}
-
-	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, tcCarol, deadProbe)
-	if err != nil {
-		t.Fatalf("ReleaseLocks: %v", err)
-	}
-	if res[0].State != StateReclaimedStale {
-		t.Fatalf("want StateReclaimedStale, got %+v", res)
-	}
-	for _, owner := range []domain.AgentUUID{tcAlice, tcBob} {
-		if got, _ := s.LockForOwnerAt(ctx, a.Target, owner); got != nil {
-			t.Errorf("%s's stale shared row should be deleted, got %+v", owner, got)
-		}
-	}
-	st, _ := os.Stat(a.Target.Canonical)
-	if st.Mode().Perm()&0o200 != 0 {
-		t.Errorf("all-shared reclaim must NOT restore owner-write, got %o", st.Mode().Perm())
-	}
-	if n := countEvents(t, s, a.Target, EventLockReclaimedStale); n != 2 {
-		t.Errorf("want one reclaim event per dead holder (2), got %d", n)
-	}
-}
-
-// Matrix row 5: one live + one stale shared holder → the live holder vetoes
-// the whole target (loto-w77f): nothing is deleted, not even the stale row.
-func TestReleaseLocks_MixedLiveStaleShared_NotOwner(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-	a := mkFileLock(t, "a.go", tcAlice, time.Hour)
-	a.Mode = domain.ModeShared
-	a.PID = 101
-	b := peerOn(a, tcBob, domain.ModeShared)
-	b.PID = 102
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	bobAlive := hostPidProbe(tcHost, func(pid int, _ int64) bool { return pid == 102 })
-
-	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, tcCarol, bobAlive)
-	if err != nil {
-		t.Fatalf("ReleaseLocks: %v", err)
-	}
-	if res[0].State != StateNotOwner {
-		t.Fatalf("live co-holder must veto reclaim, got %+v", res)
-	}
-	if res[0].Owner != tcBob {
-		t.Errorf("Owner = %q, want the vetoing live holder %q", res[0].Owner, tcBob)
-	}
-	for _, owner := range []domain.AgentUUID{tcAlice, tcBob} {
-		if got, _ := s.LockForOwnerAt(ctx, a.Target, owner); got == nil {
-			t.Errorf("%s's row must survive a vetoed reclaim", owner)
-		}
-	}
-}
-
 // Matrix row 6: the caller's OWN stale row releases as a plain unlock
 // (prefer-own unchanged) — StateUnlocked, not reclaimed-stale.
 func TestReleaseLocks_OwnStale_Unlocked(t *testing.T) {
@@ -238,43 +162,6 @@ func TestReleaseLocks_OwnStale_Unlocked(t *testing.T) {
 	}
 	if n := countEvents(t, s, l.Target, EventLockReleased); n != 1 {
 		t.Errorf("want 1 lock_released event, got %d", n)
-	}
-}
-
-// Matrix row 7: own live shared + foreign stale shared → prefer-own releases
-// only the caller's row; the foreign stale row SURVIVES (no helpful reclaim
-// piggybacked on an own-release).
-func TestReleaseLocks_OwnLiveSharedForeignStaleShared_OwnOnly(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-	a := mkFileLock(t, "a.go", tcAlice, time.Hour)
-	a.Mode = domain.ModeShared
-	a.PID = 101
-	b := peerOn(a, tcBob, domain.ModeShared)
-	b.PID = 102
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{a}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{b}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	aliceAlive := hostPidProbe(tcHost, func(pid int, _ int64) bool { return pid == 101 })
-
-	res, err := s.ReleaseLocks(ctx, []domain.Target{a.Target}, tcAlice, aliceAlive)
-	if err != nil {
-		t.Fatalf("ReleaseLocks: %v", err)
-	}
-	if res[0].State != StateUnlocked {
-		t.Fatalf("want StateUnlocked (prefer-own), got %+v", res)
-	}
-	if got, _ := s.LockForOwnerAt(ctx, a.Target, tcAlice); got != nil {
-		t.Errorf("alice's row should be deleted, got %+v", got)
-	}
-	if got, _ := s.LockForOwnerAt(ctx, a.Target, tcBob); got == nil {
-		t.Error("bob's stale shared row must SURVIVE alice's own-release")
-	}
-	if n := countEvents(t, s, a.Target, EventLockReclaimedStale); n != 0 {
-		t.Errorf("own-release must not reclaim the co-holder, got %d reclaim events", n)
 	}
 }
 
@@ -331,7 +218,7 @@ func TestConcurrentReleaseReclaimVsAcquire(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fresh := peerOn(stale, tcCarol, domain.ModeExclusive)
+	fresh := peerOn(stale, tcCarol)
 	now := time.Now()
 	fresh.CreatedAt = now
 	fresh.ExpiresAt = now.Add(time.Hour)
@@ -527,4 +414,11 @@ func TestReleaseLocks_DuplicateTargets_NonConsumingFirstMirrors(t *testing.T) {
 	if len(locks) != 1 {
 		t.Errorf("live foreign lock must survive, got %d rows", len(locks))
 	}
+}
+
+// peerOn is base held by another owner.
+func peerOn(base domain.LockRecord, owner string) domain.LockRecord {
+	p := base
+	p.OwnerUUID, p.SessionUUID = domain.AgentUUID(owner), domain.SessionUUID(owner)
+	return p
 }

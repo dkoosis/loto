@@ -378,8 +378,7 @@ type ScanResult struct {
 // ReconcileScan turns one whole-tree sensor pass into violation rows.
 //
 // An observation becomes a violation exactly when NOTHING authorizes the
-// path: no live lock (of any owner, any mode — a shared beacon authorizes its
-// holder's write just as an exclusive lease does) and no live candidate claim.
+// path: no live lock of any owner and no live candidate claim.
 // A leaseholder's own edit is therefore never a violation, which is the
 // stated residual hole: a rogue edit INSIDE a held file is indistinguishable
 // from the holder's work (git-gate.md Outcome 1).

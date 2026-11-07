@@ -98,7 +98,6 @@ func leaseWriteSet(t *testing.T, s *Store, repoTop string, owner domain.AgentUUI
 			ExpiresAt:   now.Add(time.Hour),
 			Host:        tcHost,
 			PID:         1,
-			Mode:        domain.ModeExclusive,
 		}
 	}
 	got, err := s.AcquireLocks(context.Background(), recs, liveProbe)

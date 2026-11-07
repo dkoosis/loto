@@ -9,10 +9,9 @@ import (
 )
 
 // beaconOf turns a lock fixture into the row `loto beacon` mints for the same
-// owner and target: shared, pid-less, marked, short TTL.
+// owner and target: pid-less, marked, short TTL.
 func beaconOf(l domain.LockRecord, ttl time.Duration) domain.LockRecord {
 	now := time.Now()
-	l.Mode = domain.ModeShared
 	l.PID = 0
 	l.ProcStart = 0
 	l.Branch = ""
@@ -37,7 +36,6 @@ func TestBeaconYieldsToOwnExplicitLock(t *testing.T) {
 	ctx := context.Background()
 
 	held := mkFileLock(t, "a.go", tcAlice, time.Hour)
-	held.Mode = domain.ModeExclusive
 	held.Branch = "feat/x"
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{held}, liveProbe); err != nil {
 		t.Fatalf("acquire explicit lock: %v", err)
@@ -53,9 +51,6 @@ func TestBeaconYieldsToOwnExplicitLock(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("row vanished")
-	}
-	if got.EffectiveMode() != domain.ModeExclusive {
-		t.Errorf("mode = %q, want exclusive — the beacon downgraded a declared lease", got.EffectiveMode())
 	}
 	if got.PID != held.PID {
 		t.Errorf("pid = %d, want %d — the beacon dropped the durable liveness handle", got.PID, held.PID)
@@ -83,7 +78,6 @@ func TestBeaconReplacesOwnLapsedLock(t *testing.T) {
 	ctx := context.Background()
 
 	lapsed := mkFileLock(t, "a.go", tcAlice, time.Hour)
-	lapsed.Mode = domain.ModeExclusive
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{lapsed}, liveProbe); err != nil {
 		t.Fatalf("acquire explicit lock: %v", err)
 	}
@@ -124,7 +118,6 @@ func TestBeaconReplacesDeadSiblingsLock(t *testing.T) {
 	ctx := context.Background()
 
 	sibling := mkFileLockSession(t, "a.go", tcAlice, "dead-session", time.Hour)
-	sibling.Mode = domain.ModeExclusive
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{sibling}, liveProbe); err != nil {
 		t.Fatalf("acquire sibling lock: %v", err)
 	}
@@ -146,56 +139,6 @@ func TestBeaconReplacesDeadSiblingsLock(t *testing.T) {
 	}
 	if got.SessionUUID != beacon.SessionUUID {
 		t.Errorf("session = %q, want the minting session %q", got.SessionUUID, beacon.SessionUUID)
-	}
-}
-
-// TestLegacyBeaconRowsBackfilled pins the migration's one carve-out (Codex
-// #252). The release before this one minted beacons as shared / pid-0 rows with
-// a fixed intent and no marker. Defaulting those to beacon=0 would promote them
-// to apparent explicit leases that guard refuses to move past — and the yield
-// rule would then decline to overwrite them for as long as their TTL held.
-func TestLegacyBeaconRowsBackfilled(t *testing.T) {
-	dir := t.TempDir()
-	p := dir + "/loto.db"
-	s, err := Open(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-
-	legacyBeacon := beaconOf(mkFileLock(t, "a.go", tcAlice, time.Hour), time.Hour)
-	explicit := mkFileLock(t, "b.go", tcAlice, time.Hour)
-	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{legacyBeacon, explicit}, liveProbe); err != nil {
-		t.Fatal(err)
-	}
-	// Rewind to the pre-column shape: the marker did not exist, so both rows
-	// looked the same on disk apart from mode/pid/intent.
-	if _, err := s.db.ExecContext(ctx, `ALTER TABLE locks DROP COLUMN beacon`); err != nil {
-		t.Fatalf("drop beacon column: %v", err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	s2, err := Open(p)
-	if err != nil {
-		t.Fatalf("re-open on pre-beacon DB: %v", err)
-	}
-	defer s2.Close()
-
-	got, err := s2.LockForOwnerAt(ctx, legacyBeacon.Target, tcAlice)
-	if err != nil || got == nil {
-		t.Fatalf("LockForOwnerAt(legacy beacon): %v / %+v", err, got)
-	}
-	if !got.IsBeacon() {
-		t.Error("a legacy beacon row must migrate as a beacon, not as an explicit lease")
-	}
-	got, err = s2.LockForOwnerAt(ctx, explicit.Target, tcAlice)
-	if err != nil || got == nil {
-		t.Fatalf("LockForOwnerAt(explicit): %v / %+v", err, got)
-	}
-	if got.IsBeacon() {
-		t.Error("the backfill must not sweep in an ordinary lock")
 	}
 }
 
@@ -240,7 +183,6 @@ func TestExplicitLockUpgradesOwnBeacon(t *testing.T) {
 		t.Fatalf("beacon: %v", err)
 	}
 	explicit := base
-	explicit.Mode = domain.ModeExclusive
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{explicit}, liveProbe); err != nil {
 		t.Fatalf("explicit lock over own beacon: %v", err)
 	}
@@ -249,7 +191,7 @@ func TestExplicitLockUpgradesOwnBeacon(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("LockForOwnerAt: %v / %+v", err, got)
 	}
-	if got.IsBeacon() || got.EffectiveMode() != domain.ModeExclusive || got.PID != base.PID {
+	if got.IsBeacon() || got.PID != base.PID {
 		t.Errorf("explicit lock did not upgrade the beacon: %+v", got)
 	}
 }
@@ -264,7 +206,6 @@ func TestBeaconFlagRoundTrips(t *testing.T) {
 	ctx := context.Background()
 
 	plain := mkFileLock(t, "a.go", tcAlice, time.Hour)
-	plain.Mode = domain.ModeShared
 	plain.PID = 0
 	if _, err := s.AcquireLocks(ctx, []domain.LockRecord{plain}, liveProbe); err != nil {
 		t.Fatalf("acquire pid-less shared lock: %v", err)
