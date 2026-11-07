@@ -159,9 +159,10 @@ type AdmitParams struct {
 //
 // ‡ Admit decides a promotion, not a write: it asks whether the leases the
 // candidate was captured under still stand (checkLeaseEpochs), never whose
-// hold covers a path. submit's write decision is its step 1 lease acquire,
-// which reaches domain.EvalContext.Refuses through Conflicts like every other
-// surface (docs/write-gate.md, loto-njgz).
+// hold covers a path. submit's own write check is its step 1,
+// submitLeaseCheck: it reads the owner's rows and checks them held, live and
+// exclusive directly, without Conflicts or Refuses (docs/write-gate.md,
+// loto-njgz).
 func Admit(ctx context.Context, env Envelope, p AdmitParams) (Decision, error) {
 	if env.ProposalSHA != p.PresentedProposalSHA {
 		return reject(ReasonProposalSHAMismatch, fmt.Sprintf("envelope names %s, presented %s", env.ProposalSHA, p.PresentedProposalSHA)), nil
