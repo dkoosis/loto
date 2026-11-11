@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"loto/internal/domain"
 )
@@ -27,7 +28,10 @@ func nextPathEpoch(ctx context.Context, tx *sql.Tx, path string) (int64, error) 
 INSERT INTO path_epochs(path_canonical, epoch) VALUES (?, 1)
 ON CONFLICT(path_canonical) DO UPDATE SET epoch = epoch + 1
 RETURNING epoch`, path).Scan(&epoch)
-	return epoch, err
+	if err != nil {
+		return epoch, fmt.Errorf("scan: %w", err)
+	}
+	return epoch, nil
 }
 
 // resolveEpoch decides whether l's acquisition is a RENEWAL (same owner

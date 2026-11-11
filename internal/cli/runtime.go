@@ -24,6 +24,23 @@ import (
 // on a CPU-starved make check a healthy git call can outrun 5s (loto-bqk7).
 var gitTimeout = 5 * time.Second
 
+// gitWaitDelay bounds how long Output keeps draining git's pipes after the
+// context ends: a grandchild that inherited the pipe would otherwise block
+// Wait past the deadline.
+const gitWaitDelay = 2 * time.Second
+
+// gitRevOutput runs git under ctx and returns its stdout, with WaitDelay set.
+// The three rev-parse probes below share it.
+func gitRevOutput(ctx context.Context, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.WaitDelay = gitWaitDelay
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git %s: %w", args[0], err)
+	}
+	return out, nil
+}
+
 // errNotInGitRepo is deliberately actionable (design.md: fix block under
 // actionable findings) rather than surfacing the raw git exec error — "exit
 // status 128" tells a Claude caller nothing it can act on. Repo-scoped
@@ -38,7 +55,7 @@ func gitRevParseToplevel(parent context.Context) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(parent, gitTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel").Output()
+	out, err := gitRevOutput(ctx, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", err
 	}
@@ -56,7 +73,7 @@ func gitBranch(parent context.Context) string {
 	}
 	ctx, cancel := context.WithTimeout(parent, gitTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD").Output()
+	out, err := gitRevOutput(ctx, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return ""
 	}
@@ -64,7 +81,7 @@ func gitBranch(parent context.Context) string {
 	if name != "HEAD" {
 		return name
 	}
-	out, err = exec.CommandContext(ctx, "git", "rev-parse", "--short", "HEAD").Output()
+	out, err = gitRevOutput(ctx, "rev-parse", "--short", "HEAD")
 	if err != nil {
 		return ""
 	}
@@ -183,7 +200,7 @@ func openRuntimeForRepoTop(ctx context.Context, top string) (*runtime, error) {
 	}
 	dir := StateDir(top)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open runtime for repo top: mkdir all: %w", err)
 	}
 	fold := caseInsensitiveFS(top)
 	wt := store.WorktreeKey(top)
@@ -247,7 +264,7 @@ func openRuntimeGC(ctx context.Context) (*runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, _, _, _ = identity.GCSessionsIfDue(time.Now(), string(rt.SessionUUID), lockOwnerUUIDs(ctx, rt.Store))
+	_, _, _, _ = identity.GCSessionsIfDue(time.Now(), string(rt.SessionUUID), lockOwnerUUIDs(ctx, rt.Store)) //nolint:errcheck // opportunistic GC; a failure must not block the verb
 	return rt, nil
 }
 
@@ -262,7 +279,10 @@ func (r *runtime) Close() error {
 	if r.Store == nil {
 		return nil
 	}
-	return r.Store.Close()
+	if err := r.Store.Close(); err != nil {
+		return fmt.Errorf("close store: %w", err)
+	}
+	return nil
 }
 
 // DeferredTagFooter prints, after the primary command output, both kinds of

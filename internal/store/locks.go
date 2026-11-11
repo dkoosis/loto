@@ -236,7 +236,7 @@ func modeRestoreFailedEvent(path, byAgent string, now time.Time, cause error) do
 func loadLocksTx(ctx context.Context, tx *sql.Tx) ([]domain.LockRecord, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT `+lockCols+` FROM locks`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load locks tx: query: %w", err)
 	}
 	defer rows.Close()
 	return scanLocksRows(rows)
@@ -254,7 +254,10 @@ func scanLocksRows(rows *sql.Rows) ([]domain.LockRecord, error) {
 		}
 		out = append(out, l)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("scan locks rows: iterate rows: %w", err)
+	}
+	return out, nil
 }
 
 func scanLock(r *sql.Rows) (domain.LockRecord, error) {
@@ -273,7 +276,7 @@ func scanLock(r *sql.Rows) (domain.LockRecord, error) {
 	// reading domain.SameWorktree already treats as matching any worktree.
 	var worktree sql.NullString
 	if err := r.Scan(&canonical, &owner, &session, &l.Intent, &createdNs, &expiresNs, &l.Host, &l.PID, &procStart, &l.Branch, &l.Epoch, &worktree, &l.InFlight); err != nil {
-		return l, err
+		return l, fmt.Errorf("scan lock: scan: %w", err)
 	}
 	if worktree.Valid {
 		l.Worktree = worktree.String
@@ -307,7 +310,7 @@ func reclaimStaleTx(ctx context.Context, tx *sql.Tx, stale domain.LockRecord, by
 	// — under the widened PK a same-owner SIBLING row on the same canonical
 	// from another worktree must not be swept up here too.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE target_canonical = ? AND owner_uuid = ? AND worktree = ?`, stale.Target.Canonical, string(stale.OwnerUUID), stale.Worktree); err != nil {
-		return err
+		return fmt.Errorf("reclaim stale tx: exec: %w", err)
 	}
 	return nil
 }

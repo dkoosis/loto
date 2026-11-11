@@ -178,10 +178,14 @@ func runViolationScan(rt *runtime, repoTop string) (store.ScanResult, error) {
 			// genuinely clean tree.
 			return store.ScanResult{}, nil
 		}
-		return store.ScanResult{}, err
+		return store.ScanResult{}, fmt.Errorf("run violation scan: scan worktree: %w", err)
 	}
 	ec := domain.EvalContext{Now: time.Now(), Live: rt.liveProbe(), CaseFold: rt.CaseFold}
-	return rt.Store.ReconcileScan(rt.Ctx, scan, ec)
+	res, err := rt.Store.ReconcileScan(rt.Ctx, scan, ec)
+	if err != nil {
+		return res, fmt.Errorf("run violation scan: reconcile scan: %w", err)
+	}
+	return res, nil
 }
 
 // violationRows reads the open set and lifts it into render shape, reporting
@@ -231,7 +235,7 @@ func violationNoticeForPath(rt *runtime, w io.Writer, canonical string) {
 func unresolvedViolationRows(rt *runtime) ([]render.ViolationRow, error) {
 	vs, err := rt.Store.UnresolvedViolations(rt.Ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unresolved violation rows: unresolved violations: %w", err)
 	}
 	rows := make([]render.ViolationRow, len(vs))
 	for i := range vs {

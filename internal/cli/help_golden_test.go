@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -40,9 +41,12 @@ func readGolden(t *testing.T, path string) string {
 
 func writeGolden(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
+		return fmt.Errorf("write golden: mkdir all: %w", err)
 	}
-	return os.WriteFile(path, []byte(content), 0o644)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write golden: write file: %w", err)
+	}
+	return nil
 }
 
 func helpCommandNames() []string {

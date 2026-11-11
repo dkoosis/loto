@@ -1107,7 +1107,7 @@ func TestSync_WriteFailurePreservesExistingFile(t *testing.T) {
 	syncWriteFn = func(f *os.File, _ []byte) (int, error) {
 		n, err := f.WriteString("x")
 		if err != nil {
-			return n, err
+			return n, fmt.Errorf("test sync_write failure preserves existing file: write string: %w", err)
 		}
 		return n, writeErr
 	}

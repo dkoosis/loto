@@ -18,6 +18,7 @@
 // PR-1 split exactly: a future family's role functions live in that family's
 // own file and only add rows to crossProcRoles below, never a second
 // TestMain.
+
 package identity
 
 import (
@@ -318,7 +319,10 @@ func (c *child) wait() (crossProcVerdict, error) {
 		return v, fmt.Errorf("crossproc: decode verdict: %w (wait=%s stdout=%q stderr=%q)",
 			decErr, waitMsg, c.stdout.String(), c.stderr.String())
 	}
-	return v, waitErr
+	if waitErr != nil {
+		return v, fmt.Errorf("wait for child: %w", waitErr)
+	}
+	return v, nil
 }
 
 // crossProcBarrier is the kernel-mediated release-N-processes-at-once

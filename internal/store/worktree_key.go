@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,13 +87,13 @@ func ensureHoldsKeyedByAdminDir(ctx context.Context, db sqlExecQuerier, apply bo
 	for _, p := range paths {
 		key := WorktreeKey(p)
 		if _, err := db.ExecContext(ctx, `UPDATE OR IGNORE locks SET worktree = ? WHERE worktree = ?`, key, p); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure holds keyed by admin dir: exec: %w", err)
 		}
 		if _, err := db.ExecContext(ctx, rehomeCollidedTags, key, p, key); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure holds keyed by admin dir: exec: %w", err)
 		}
 		if _, err := db.ExecContext(ctx, `DELETE FROM locks WHERE worktree = ?`, p); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure holds keyed by admin dir: exec: %w", err)
 		}
 	}
 	return false, nil
@@ -120,16 +121,19 @@ func stampedCheckoutPaths(ctx context.Context, db sqlExecQuerier) ([]string, err
 	rows, err := db.QueryContext(ctx,
 		`SELECT DISTINCT worktree FROM locks WHERE worktree LIKE '/%'`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query context: %w", err)
 	}
 	defer rows.Close()
 	var out []string
 	for rows.Next() {
 		var p string
 		if err := rows.Scan(&p); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("stamped checkout paths: scan: %w", err)
 		}
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("stamped checkout paths: iterate rows: %w", err)
+	}
+	return out, nil
 }

@@ -836,6 +836,14 @@ func TestRecordCallPre_WithoutTheObservationSeqPreFollowsTheTx(t *testing.T) {
 // hook_timing cannot evict the rest of the audit trail. Its own cap holds it
 // to its share; every other kind keeps the room the global cap gives it.
 func TestRotateEvents_HookTimingHasItsOwnCap(t *testing.T) {
+	assertKindHasOwnCap(t, EventHookTiming, HookTimingRetentionMax, "pre")
+}
+
+// assertKindHasOwnCap seeds one gate_bypass row, appends cap+50 rows of kind
+// through AppendEventRotating, and checks that kind holds exactly its cap
+// while the unrelated seed row survives.
+func assertKindHasOwnCap(t *testing.T, kind string, limit int, reason string) {
+	t.Helper()
 	s := mustOpen(t)
 	ctx := context.Background()
 	now := time.Now()
@@ -847,26 +855,26 @@ func TestRotateEvents_HookTimingHasItsOwnCap(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
-	for i := range HookTimingRetentionMax + 50 {
+	for i := range limit + 50 {
 		if _, err := s.AppendEventRotating(ctx, domain.Event{
-			Kind: EventHookTiming, ActorUUID: tcOwnerA, Reason: "pre",
+			Kind: kind, ActorUUID: tcOwnerA, Reason: reason,
 			CreatedAt: now.Add(time.Duration(i+1) * time.Millisecond),
 		}); err != nil {
-			t.Fatalf("timing row %d: %v", i, err)
+			t.Fatalf("%s row %d: %v", kind, i, err)
 		}
 	}
 
-	var timing, bypass int
+	var got, bypass int
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM events WHERE event_kind = ?`, EventHookTiming).Scan(&timing); err != nil {
-		t.Fatalf("count timing: %v", err)
+		`SELECT count(*) FROM events WHERE event_kind = ?`, kind).Scan(&got); err != nil {
+		t.Fatalf("count %s: %v", kind, err)
 	}
 	if err := s.db.QueryRowContext(ctx,
 		`SELECT count(*) FROM events WHERE event_kind = ?`, EventGateBypass).Scan(&bypass); err != nil {
 		t.Fatalf("count bypass: %v", err)
 	}
-	if timing != HookTimingRetentionMax {
-		t.Errorf("hook_timing rows = %d, want its cap of %d", timing, HookTimingRetentionMax)
+	if got != limit {
+		t.Errorf("%s rows = %d, want its cap of %d", kind, got, limit)
 	}
 	if bypass != 1 {
 		t.Errorf("the hook evicted an unrelated kind: gate_bypass rows = %d, want 1", bypass)

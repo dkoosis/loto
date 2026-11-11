@@ -237,7 +237,7 @@ func verifyTreeIsClean(ctx context.Context, g gitRunner, path string) error {
 // in-flight verify worktree, which is the invariant Verify has always held.
 // A registration whose checkout dir is gone is cleared by the same call.
 func recutVerifyTree(ctx context.Context, g gitRunner, path, commit string) error {
-	_, _ = g.run(ctx, gitCall{args: removeWorktreeArgs(path)})
+	_, _ = g.run(ctx, gitCall{args: removeWorktreeArgs(path)}) //nolint:errcheck // removal is best-effort; os.RemoveAll below clears the dir either way
 	if err := os.RemoveAll(path); err != nil {
 		return fmt.Errorf("lane: clear verify tree: %w", err)
 	}
@@ -310,7 +310,7 @@ func freshVerifyTree(ctx context.Context, g gitRunner, commit, reason string) (v
 	}
 	return verifyTree{path: wt, mode: TreeFresh, reason: reason, release: func() {
 		// Background ctx so cleanup still runs when the caller's ctx expired.
-		_, _ = g.run(context.Background(), gitCall{args: removeWorktreeArgs(wt)})
+		_, _ = g.run(context.Background(), gitCall{args: removeWorktreeArgs(wt)}) //nolint:errcheck // cleanup is best-effort; the parent dir is removed on the next line
 		_ = os.RemoveAll(parent)
 	}}, nil
 }
@@ -340,7 +340,7 @@ func (h *verifyFlock) release() {
 	if h == nil || h.f == nil {
 		return
 	}
-	_ = syscall.Flock(int(h.f.Fd()), syscall.LOCK_UN)
+	_ = syscall.Flock(int(h.f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock; closing the fd on the next line drops the lock anyway
 	_ = h.f.Close()
 	h.f = nil
 }

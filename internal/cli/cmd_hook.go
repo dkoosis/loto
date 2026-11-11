@@ -304,7 +304,7 @@ func runHook(ctx context.Context, pre bool, stdout, stderr io.Writer) int {
 	// and in hookPre/hookPost): a git status still running after the hook
 	// exits could hold .git/index.lock against the tool call it observes.
 	status := startGitStatusPaths(ctx, "")
-	defer func() { _, _ = status() }()
+	defer func() { _, _ = status() }() //nolint:errcheck // the status wait only reaps the git status process; its result is unused on this path
 	// openRuntime, not openRuntimeGC: this is the per-tool-call hot path and
 	// must not pay the session GC sweep (loto-6pn6).
 	rt, err := openRuntime(ctx)
@@ -358,7 +358,7 @@ func hookNoteCheckout(rt *runtime, ev hookEvent, stderr io.Writer) {
 // addressee the two orders are indistinguishable: their report was filed by
 // someone else's earlier hook.
 func hookPre(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, status gitStatusWait, stdout, stderr io.Writer) int {
-	defer func() { _, _ = status() }()
+	defer func() { _, _ = status() }() //nolint:errcheck // the status wait only reaps the git status process; its result is unused on this path
 	now := time.Now()
 	tReport := hookTReport()
 	// Dead-owner first: it is what MOVES a call out of flight, and the two
@@ -457,7 +457,7 @@ func hookDeliver(rt *runtime, me domain.AgentUUID, now time.Time, stdout, stderr
 // those changes owe. The verdict table's `good`, `copy` and `L` columns are
 // deferred until §10b's acted/reported ratio says whether holders act at all.
 func hookPost(ctx context.Context, rt *runtime, ev hookEvent, started time.Time, status gitStatusWait, stderr io.Writer) int {
-	defer func() { _, _ = status() }()
+	defer func() { _, _ = status() }() //nolint:errcheck // the status wait only reaps the git status process; its result is unused on this path
 	obs, statusPaths, lockedBytes, err := hookObserve(ctx, rt, "", status, stderr)
 	if err != nil {
 		return hookSkip(stderr, "observe: %v", err)
@@ -502,7 +502,7 @@ func hookSessionIsDead(s domain.SessionUUID) bool {
 func hookAddRecordedPaths(rt *runtime, callID string, obs []store.HookPathState, warn io.Writer) ([]store.HookPathState, error) {
 	_, recorded, ok, err := rt.Store.CallRecord(rt.Ctx, callID)
 	if err != nil || !ok {
-		return obs, err
+		return obs, fmt.Errorf("hook add recorded paths: call record: %w", err)
 	}
 	have := make(map[string]bool, len(obs))
 	for i := range obs {
@@ -555,7 +555,7 @@ func hookAdmit(rt *runtime, filePath string) (declared string, blocker *domain.L
 	}
 	rows, err := rt.Store.HoldsCovering(rt.Ctx, t)
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("hook admit: holds covering: %w", err)
 	}
 	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
 	me := domain.AgentUUID(rt.Agent.UUID)
@@ -640,7 +640,7 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, ec domain.E
 	if _, err := rt.Store.AcquireLocks(rt.Ctx, []domain.LockRecord{rec}, memoLiveProbe(rt.liveProbe())); err != nil {
 		held, lerr := rt.Store.HoldsCovering(rt.Ctx, t)
 		if lerr != nil {
-			return "", nil, lerr
+			return "", nil, fmt.Errorf("hook take lock: holds covering: %w", lerr)
 		}
 		// A row of mine won: the write is authorized. No row to name means the
 		// acquire failed for its own reason, and the write goes unchecked.
@@ -648,7 +648,7 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, ec domain.E
 		if blocker != nil || authorized {
 			return "", blocker, nil
 		}
-		return "", nil, err
+		return "", nil, fmt.Errorf("hook take lock: acquire locks: %w", err)
 	}
 	return t.Canonical, nil, nil
 }
@@ -663,7 +663,7 @@ func hookTakeLock(rt *runtime, t domain.Target, me domain.AgentUUID, ec domain.E
 func hookObserve(ctx context.Context, rt *runtime, declared string, gitStatus gitStatusWait, warn io.Writer) (obs []store.HookPathState, statusPaths int, lockedBytes int64, err error) {
 	locks, err := rt.Store.ListLocks(rt.Ctx)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, fmt.Errorf("hook observe: list locks: %w", err)
 	}
 	ec := domain.EvalContext{Now: time.Now(), Live: memoLiveProbe(rt.liveProbe()), CaseFold: rt.CaseFold, MyWorktree: rt.Worktree}
 	holders := hookLiveHolders(locks, ec, rt.RepoTop)
@@ -753,7 +753,7 @@ func hookSeqAtObserve(rt *runtime, paths []string, holders map[string]domain.Loc
 		}
 		n, err := rt.Store.PathSeq(rt.Ctx, p, rt.RepoTop, epoch)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("hook seq at observe: path seq: %w", err)
 		}
 		seqAt[p] = n
 	}

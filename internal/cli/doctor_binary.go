@@ -104,7 +104,7 @@ func checkBinaryStaleness(ctx context.Context, repoTop string, id buildIdentity)
 	}
 	behind := 0
 	if out, cerr := gitCmd(ctx, repoTop, "rev-list", "--count", id.rev+".."+head); cerr == nil {
-		behind, _ = strconv.Atoi(strings.TrimSpace(out))
+		behind, _ = strconv.Atoi(strings.TrimSpace(out)) //nolint:errcheck // an unparsable count leaves behind at 0
 	}
 	return binaryStaleness{stale: true, repoHead: head, behind: behind}
 }

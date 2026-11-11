@@ -140,7 +140,10 @@ func timedVerify(ctx context.Context, p PromoteParams, b *batch, rec *[]VerifyRu
 		Tree:       vr.Tree,
 		TreeReason: vr.TreeReason,
 	})
-	return vr, err
+	if err != nil {
+		return vr, fmt.Errorf("timed verify: run verify: %w", err)
+	}
+	return vr, nil
 }
 
 const (
@@ -1027,7 +1030,7 @@ func (h *promoteFlock) release() {
 	if h == nil || h.f == nil {
 		return
 	}
-	_ = syscall.Flock(int(h.f.Fd()), syscall.LOCK_UN)
+	_ = syscall.Flock(int(h.f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock; closing the fd on the next line drops the lock anyway
 	_ = h.f.Close()
 	h.f = nil
 }
@@ -1075,7 +1078,7 @@ func acquirePromoteFlock(ctx context.Context, repoTop string) (*promoteFlock, er
 		select {
 		case <-ctx.Done():
 			f.Close()
-			return nil, ctx.Err()
+			return nil, fmt.Errorf("acquire promote flock: %w", ctx.Err())
 		case <-time.After(backoff):
 		}
 		if backoff < promoteFlockPollMax {

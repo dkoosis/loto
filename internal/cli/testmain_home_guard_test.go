@@ -94,7 +94,10 @@ func buildGitRepoTemplate(dir string) error {
 // by initBareGitRepo (cmd_lock_test.go) in place of the git subprocess
 // sequence buildGitRepoTemplate ran once above.
 func copyGitTemplate(dir string) error {
-	return os.CopyFS(filepath.Join(dir, ".git"), os.DirFS(filepath.Join(gitRepoTemplateDir, ".git")))
+	if err := os.CopyFS(filepath.Join(dir, ".git"), os.DirFS(filepath.Join(gitRepoTemplateDir, ".git"))); err != nil {
+		return fmt.Errorf("copy git template: %w", err)
+	}
+	return nil
 }
 
 // TestHomeGuardCanary_HomeIsNeverTheRealOne is the regression test for

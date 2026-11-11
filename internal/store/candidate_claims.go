@@ -136,7 +136,10 @@ func (s *Store) insertCandidateClaimsUnguarded(ctx context.Context, claims []dom
 	if err := insertCandidateClaimRowsTx(ctx, tx, claims); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit candidate claims: %w", err)
+	}
+	return nil
 }
 
 // insertCandidateClaimRowsTx writes one row per claim inside the caller's tx —
@@ -155,7 +158,7 @@ func insertCandidateClaimRowsTx(ctx context.Context, tx *sql.Tx, claims []domain
 			c.PathCanonical, c.CandidateID, string(c.OwnerUUID), string(c.SessionUUID),
 			c.CreatedAt.UnixNano(), c.Host, c.PID, procStart,
 		); err != nil {
-			return err
+			return fmt.Errorf("exec context: %w", err)
 		}
 	}
 	return nil
@@ -216,7 +219,10 @@ func revalidateClaimLeasesTx(ctx context.Context, tx *sql.Tx, claims []domain.Ca
 // rather than the store inventing one).
 func (s *Store) ReleaseCandidateClaims(ctx context.Context, candidateID string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM candidate_claims WHERE candidate_id = ?`, candidateID)
-	return err
+	if err != nil {
+		return fmt.Errorf("exec context: %w", err)
+	}
+	return nil
 }
 
 // ListCandidateClaims returns every candidate claim, expired-liveness
@@ -228,7 +234,7 @@ func (s *Store) ListCandidateClaims(ctx context.Context) ([]domain.CandidateClai
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+candidateClaimCols+` FROM candidate_claims ORDER BY path_canonical, candidate_id`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query context: %w", err)
 	}
 	defer rows.Close()
 	return scanCandidateClaims(rows)
@@ -243,7 +249,7 @@ func listCandidateClaimsTx(ctx context.Context, tx *sql.Tx) ([]domain.CandidateC
 	rows, err := tx.QueryContext(ctx,
 		`SELECT `+candidateClaimCols+` FROM candidate_claims ORDER BY path_canonical, candidate_id`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query context: %w", err)
 	}
 	defer rows.Close()
 	return scanCandidateClaims(rows)
@@ -263,7 +269,7 @@ func (s *Store) CandidateClaimsForPaths(ctx context.Context, paths []string) ([]
 			` ORDER BY path_canonical, candidate_id`,
 		args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query context: %w", err)
 	}
 	defer rows.Close()
 	return scanCandidateClaims(rows)
@@ -282,7 +288,7 @@ func candidateClaimsForPathsTx(ctx context.Context, tx *sql.Tx, paths []string) 
 		`SELECT `+candidateClaimCols+` FROM candidate_claims WHERE path_canonical IN (`+placeholders+`)`, //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 		args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query context: %w", err)
 	}
 	defer rows.Close()
 	return scanCandidateClaims(rows)
@@ -297,7 +303,7 @@ func scanCandidateClaims(rows *sql.Rows) ([]domain.CandidateClaim, error) {
 		var procStart sql.NullInt64
 		if err := rows.Scan(&c.PathCanonical, &c.CandidateID, &owner, &session,
 			&createdNs, &c.Host, &c.PID, &procStart); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan: %w", err)
 		}
 		c.OwnerUUID = domain.AgentUUID(owner)
 		c.SessionUUID = domain.SessionUUID(session)
@@ -307,7 +313,10 @@ func scanCandidateClaims(rows *sql.Rows) ([]domain.CandidateClaim, error) {
 		}
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("scan candidate claims: %w", err)
+	}
+	return out, nil
 }
 
 // claimCompensateTimeout bounds the compensating claim delete AcceptCandidate
@@ -344,5 +353,8 @@ func (s *Store) releaseCandidateClaimsForPathsDetached(candidateID string, paths
 	if err != nil && s.stderr != nil {
 		fmt.Fprintf(s.stderr, "loto: releasing %d claim(s) for candidate %s failed: %v\n", len(paths), candidateID, err)
 	}
-	return err
+	if err != nil {
+		return fmt.Errorf("exec context: %w", err)
+	}
+	return nil
 }

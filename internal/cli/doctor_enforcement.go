@@ -154,7 +154,7 @@ func settingsFilesToRead(repoTop string) []string {
 		out = append(out, enabledLotoPluginHooks(home, repoTop)...)
 	}
 	if repoTop != "" {
-		matches, _ := filepath.Glob(filepath.Join(repoTop, ".claude", "settings*.json"))
+		matches, _ := filepath.Glob(filepath.Join(repoTop, ".claude", "settings*.json")) //nolint:errcheck // best-effort listing; a bad pattern lists no settings files
 		sort.Strings(matches)
 		out = append(out, matches...)
 	}
@@ -372,12 +372,12 @@ func checkHookBinaryIdentity() enforcementFinding {
 func hashFile(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("hash file: open: %w", err)
 	}
 	defer f.Close()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+		return "", fmt.Errorf("hash file: copy: %w", err)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

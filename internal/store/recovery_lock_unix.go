@@ -34,7 +34,7 @@ func acquireRecoveryLock(ctx context.Context, dbPath string) (func(), error) {
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
 			return func() {
-				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock; closing the fd on the next line drops the lock anyway
 				_ = f.Close()
 			}, nil
 		}
@@ -49,7 +49,7 @@ func acquireRecoveryLock(ctx context.Context, dbPath string) (func(), error) {
 		select {
 		case <-ctx.Done():
 			f.Close()
-			return nil, ctx.Err()
+			return nil, fmt.Errorf("recovery lock wait: %w", ctx.Err())
 		case <-time.After(jitter(flockPollInitial)):
 		}
 	}

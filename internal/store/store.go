@@ -468,7 +468,12 @@ func schemaCurrent(ctx context.Context, db *sql.DB) bool {
 	return true
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	if err := s.db.Close(); err != nil {
+		return fmt.Errorf("close store: %w", err)
+	}
+	return nil
+}
 
 // setStderr overrides the writer used for diagnostic messages (audit-write
 // failures, op-flock contention notices). Defaults to os.Stderr. Intended for
@@ -493,24 +498,24 @@ var commitTxFn = func(tx *sql.Tx) error { return tx.Commit() }
 func (s *Store) beginTx(ctx context.Context) (*sql.Tx, func(), error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("conn: %w", err)
 	}
 	timeoutMs := txBusyTimeoutMs(ctx, time.Now())
 	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", timeoutMs)); err != nil {
 		_ = conn.Close()
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("exec context: %w", err)
 	}
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		_ = conn.Close()
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("begin tx: %w", err)
 	}
 	cleanup := func() {
-		_ = tx.Rollback()
+		_ = tx.Rollback() //nolint:errcheck // rollback after commit or failure; the conn is released next, so the error has no caller
 		// Reset busy_timeout to the DSN default before the conn returns to
 		// the pool — otherwise the next caller inherits this caller's
 		// ctx-scaled value (gh#55 follow-up).
-		_, _ = conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout=%d", txBusyTimeoutDefaultMs)) //nolint:forbidigo // teardown reset must run on conn return even if the request ctx is already cancelled (gh#55).
+		_, _ = conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout=%d", txBusyTimeoutDefaultMs)) //nolint:forbidigo,errcheck // teardown reset must run on conn return even if the request ctx is already cancelled (gh#55); a failed reset has no caller to tell, the conn closes next
 		_ = conn.Close()
 	}
 	return tx, cleanup, nil
@@ -610,14 +615,14 @@ func ensureLocksProcStart(ctx context.Context, db sqlExecQuerier, apply bool) (b
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('locks') WHERE name = 'proc_start'`,
 	).Scan(&n); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure locks proc start: scan: %w", err)
 	}
 	if n > 0 {
 		return false, nil
 	}
 	if apply {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE locks ADD COLUMN proc_start INTEGER`); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure locks proc start: exec: %w", err)
 		}
 		return false, nil // applied: no longer outstanding
 	}
@@ -635,14 +640,14 @@ func ensureLocksBeacon(ctx context.Context, db sqlExecQuerier, apply bool) (bool
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('locks') WHERE name = 'beacon'`,
 	).Scan(&n); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure locks beacon: scan: %w", err)
 	}
 	if n > 0 {
 		return false, nil
 	}
 	if apply {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE locks ADD COLUMN beacon INTEGER NOT NULL DEFAULT 0`); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure locks beacon: exec: %w", err)
 		}
 		return false, nil // applied: no longer outstanding
 	}
@@ -658,14 +663,14 @@ func ensureLocksEpoch(ctx context.Context, db sqlExecQuerier, apply bool) (bool,
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('locks') WHERE name = 'epoch'`,
 	).Scan(&n); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure locks epoch: scan: %w", err)
 	}
 	if n > 0 {
 		return false, nil
 	}
 	if apply {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE locks ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0`); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure locks epoch: exec: %w", err)
 		}
 		return false, nil // applied: no longer outstanding
 	}
@@ -684,14 +689,14 @@ func ensureLocksWorktree(ctx context.Context, db sqlExecQuerier, apply bool) (bo
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('locks') WHERE name = 'worktree'`,
 	).Scan(&n); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure locks worktree: scan: %w", err)
 	}
 	if n > 0 {
 		return false, nil
 	}
 	if apply {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE locks ADD COLUMN worktree TEXT NOT NULL DEFAULT ''`); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure locks worktree: exec: %w", err)
 		}
 		return false, nil // applied: no longer outstanding
 	}
@@ -727,14 +732,14 @@ func ensureViolationsBaseline(ctx context.Context, db sqlExecQuerier, apply bool
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('violations') WHERE name = 'baseline'`,
 	).Scan(&n); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure violations baseline: scan: %w", err)
 	}
 	if n > 0 {
 		return false, nil
 	}
 	if apply {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE violations ADD COLUMN baseline TEXT NOT NULL DEFAULT ''`); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure violations baseline: exec: %w", err)
 		}
 		return false, nil // applied: no longer outstanding
 	}
@@ -795,12 +800,12 @@ func ensureViolationsOpenIndexScoped(ctx context.Context, db sqlExecQuerier, app
 	}
 	if apply {
 		if _, err := db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_violations_open_path`); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure violations open index scoped: exec: %w", err)
 		}
 		if _, err := db.ExecContext(ctx,
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_violations_open_path_wt
 			   ON violations(path_canonical, worktree) WHERE resolved_at IS NULL`); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure violations open index scoped: exec: %w", err)
 		}
 		return false, nil // applied: no longer outstanding
 	}
@@ -834,7 +839,10 @@ func indexExists(ctx context.Context, db sqlExecQuerier, name string) (bool, err
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
-	return false, err
+	if err != nil {
+		return false, fmt.Errorf("index exists: scan: %w", err)
+	}
+	return false, nil
 }
 
 // ensureColumn is the shared body ensureLocksEpoch / ensureViolationsBaseline
@@ -848,7 +856,7 @@ func ensureColumn(ctx context.Context, db sqlExecQuerier, apply bool, table, col
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`, table, column,
 	).Scan(&n); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure column: scan: %w", err)
 	}
 	if n > 0 {
 		return false, nil
@@ -856,7 +864,7 @@ func ensureColumn(ctx context.Context, db sqlExecQuerier, apply bool, table, col
 	if apply {
 		for _, stmt := range append([]string{alter}, after...) {
 			if _, err := db.ExecContext(ctx, stmt); err != nil {
-				return false, err
+				return false, fmt.Errorf("ensure column: exec: %w", err)
 			}
 		}
 		return false, nil // applied: no longer outstanding
@@ -877,11 +885,11 @@ func ensureTableBySentinelName(ctx context.Context, db sqlExecQuerier, apply boo
 		return false, nil // already present
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return false, err
+		return false, fmt.Errorf("ensure table by sentinel name: scan: %w", err)
 	}
 	if apply {
 		if _, err := db.ExecContext(ctx, ddl); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure table by sentinel name: exec: %w", err)
 		}
 		return false, nil // applied: no longer outstanding
 	}
@@ -900,7 +908,7 @@ func ensureLocksModeAndPK(ctx context.Context, db sqlExecQuerier, apply bool) (b
 	var pkCols int
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('locks') WHERE pk > 0`).Scan(&pkCols); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure locks mode and pk: scan: %w", err)
 	}
 	// >= 2, not == 2 (loto-8z87): ensureLocksWorktreeKeyed later widens the PK
 	// to 3 columns (target_canonical, owner_uuid, worktree), and a DB that
@@ -942,7 +950,7 @@ CREATE INDEX IF NOT EXISTS idx_locks_session  ON locks(session_uuid);
 CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);`
 	if apply {
 		if _, err := db.ExecContext(ctx, rebuild); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure locks mode and pk: exec: %w", err)
 		}
 		return false, nil // applied: no longer outstanding
 	}
@@ -965,7 +973,7 @@ func ensureLocksWorktreeKeyed(ctx context.Context, db sqlExecQuerier, apply bool
 	var pkCols int
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('locks') WHERE pk > 0`).Scan(&pkCols); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure locks worktree keyed: scan: %w", err)
 	}
 	if pkCols >= 3 {
 		return false, nil // already migrated (fresh DB or prior upgrade)
@@ -1002,7 +1010,7 @@ CREATE INDEX IF NOT EXISTS idx_locks_session  ON locks(session_uuid);
 CREATE INDEX IF NOT EXISTS idx_locks_expires  ON locks(expires_at);`
 	if apply {
 		if _, err := db.ExecContext(ctx, rebuild); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure locks worktree keyed: exec: %w", err)
 		}
 		return false, nil // applied: no longer outstanding
 	}
@@ -1038,7 +1046,7 @@ func ensureEventsCheckCurrent(ctx context.Context, db sqlExecQuerier, apply bool
 	var ddl string
 	if err := db.QueryRowContext(ctx,
 		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&ddl); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure events check current: scan: %w", err)
 	}
 	if strings.Contains(ddl, "'"+EventCandidateRejected+"'") {
 		return false, nil // already current
@@ -1062,7 +1070,7 @@ CREATE INDEX IF NOT EXISTS idx_events_kind       ON events(event_kind, created_a
 CREATE INDEX IF NOT EXISTS idx_events_created_id ON events(created_at, id);`
 	if apply {
 		if _, err := db.ExecContext(ctx, rebuild); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure events check current: exec: %w", err)
 		}
 		return false, nil // applied: no longer outstanding
 	}
@@ -1098,7 +1106,7 @@ func ensureEventsCheckAllKinds(ctx context.Context, db sqlExecQuerier, apply boo
 	var ddl string
 	if err := db.QueryRowContext(ctx,
 		`SELECT sql FROM sqlite_master WHERE type='table' AND name='events'`).Scan(&ddl); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure events check all kinds: scan: %w", err)
 	}
 	if eventsCheckAdmitsEveryKind(ddl) {
 		return false, nil // already current
@@ -1126,7 +1134,7 @@ CREATE INDEX IF NOT EXISTS idx_events_kind       ON events(event_kind, created_a
 CREATE INDEX IF NOT EXISTS idx_events_created_id ON events(created_at, id);`
 	if apply {
 		if _, err := db.ExecContext(ctx, rebuild); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure events check all kinds: exec: %w", err)
 		}
 		return false, nil // applied: no longer outstanding
 	}
@@ -1153,7 +1161,7 @@ func ensureClaimsFolded(ctx context.Context, db sqlExecQuerier, apply bool) (boo
 	var n int
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('claims') WHERE name = 'worktree'`).Scan(&n); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure claims folded: scan: %w", err)
 	}
 	if n > 0 {
 		worktree = "worktree"
@@ -1162,10 +1170,10 @@ func ensureClaimsFolded(ctx context.Context, db sqlExecQuerier, apply bool) (boo
 INSERT OR IGNORE INTO locks(target_canonical, owner_uuid, session_uuid, intent, created_at, expires_at, host, pid, proc_start, branch, epoch, worktree)
 SELECT path_prefix, owner_uuid, session_uuid, intent, created_at, expires_at, host, 0, NULL, '', 0, `+worktree+`
   FROM claims WHERE expires_at > ?`, time.Now().UnixNano()); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure claims folded: exec: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `DROP TABLE claims`); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure claims folded: exec: %w", err)
 	}
 	return false, nil
 }

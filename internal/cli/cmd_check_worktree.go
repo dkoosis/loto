@@ -334,7 +334,7 @@ func otherSessions() ([]lotoSession, []claudeSession, error) {
 	}
 	ccs, err := identity.ClaudeSessions()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("other sessions: claude sessions: %w", err)
 	}
 	var ccRecs []claudeSession
 	for _, c := range ccs {

@@ -255,7 +255,7 @@ func holdRefsOf(holders []domain.LockRecord) []domain.HoldRef {
 func authorizeHolders(holders []domain.LockRecord, ec domain.EvalContext, force bool) error {
 	for i := range holders {
 		if err := ec.AuthorizeBreak(holders[i], force); err != nil {
-			return err
+			return fmt.Errorf("authorize break: %w", err)
 		}
 	}
 	return nil
@@ -276,7 +276,7 @@ func loadLocksByTargetTx(ctx context.Context, tx *sql.Tx, k keyMatch, targets []
 	rows, err := tx.QueryContext(ctx, `SELECT `+lockCols+` FROM locks WHERE `+k.col("target_canonical")+` IN (`+placeholders+`) ORDER BY created_at ASC, owner_uuid ASC`, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load locks by target tx: query: %w", err)
 	}
 	defer rows.Close()
 	out := make(map[string][]domain.LockRecord, len(targets))
@@ -288,5 +288,8 @@ func loadLocksByTargetTx(ctx context.Context, tx *sql.Tx, k keyMatch, targets []
 		key := k.key(l.Target.Canonical)
 		out[key] = append(out[key], l)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("load locks by target tx: iterate rows: %w", err)
+	}
+	return out, nil
 }

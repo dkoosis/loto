@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -119,7 +120,7 @@ func (s *Store) InsertTerritoryTag(ctx context.Context, n NewTerritoryTag) (stri
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM territory_tags WHERE `+k.col("path_prefix")+` = ? AND acked_at IS NULL AND expires_at > ?`,
 		k.key(n.PathPrefix), nowNs).Scan(&atPrefix); err != nil {
-		return "", err
+		return "", fmt.Errorf("insert territory tag: scan: %w", err)
 	}
 	if atPrefix >= territoryTagPrefixCap {
 		return "", ErrTagCapReached
@@ -127,7 +128,7 @@ func (s *Store) InsertTerritoryTag(ctx context.Context, n NewTerritoryTag) (stri
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM territory_tags WHERE acked_at IS NULL AND expires_at > ?`,
 		nowNs).Scan(&repoWide); err != nil {
-		return "", err
+		return "", fmt.Errorf("insert territory tag: scan: %w", err)
 	}
 	if repoWide >= territoryTagRepoCap {
 		return "", ErrTagCapReached
@@ -138,10 +139,10 @@ func (s *Store) InsertTerritoryTag(ctx context.Context, n NewTerritoryTag) (stri
 		`INSERT INTO territory_tags (id, path_prefix, tagger_uuid, text, created_at, expires_at)`+
 			` VALUES (?, ?, ?, ?, ?, ?)`,
 		id, n.PathPrefix, n.TaggerUUID, n.Text, nowNs, n.ExpiresAt); err != nil {
-		return "", err
+		return "", fmt.Errorf("insert territory tag: exec: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return "", err
+		return "", fmt.Errorf("insert territory tag: commit: %w", err)
 	}
 	return id, nil
 }
@@ -155,7 +156,7 @@ func (s *Store) ListTerritoryTags(ctx context.Context) ([]TerritoryTag, error) {
 		`SELECT id, path_prefix, tagger_uuid, text, created_at, expires_at, acked_at, acked_by_uuid`+
 			` FROM territory_tags ORDER BY path_prefix, created_at, id`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list territory tags: query: %w", err)
 	}
 	defer rows.Close()
 	return scanTerritoryTags(rows)
@@ -173,7 +174,7 @@ func (s *Store) ExpiredTerritoryTags(ctx context.Context, nowNs int64) ([]Territ
 			` FROM territory_tags WHERE acked_at IS NULL AND expires_at <= ?`+
 			` ORDER BY path_prefix, created_at, id`, nowNs)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("expired territory tags: query: %w", err)
 	}
 	defer rows.Close()
 	return scanTerritoryTags(rows)
@@ -186,7 +187,7 @@ func scanTerritoryTags(rows *sql.Rows) ([]TerritoryTag, error) {
 		var acked sql.NullInt64
 		if err := rows.Scan(&n.ID, &n.PathPrefix, &n.TaggerUUID, &n.Text,
 			&n.CreatedAt, &n.ExpiresAt, &acked, &n.AckedByUUID); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan territory tags: scan: %w", err)
 		}
 		if acked.Valid {
 			v := acked.Int64
@@ -194,7 +195,10 @@ func scanTerritoryTags(rows *sql.Rows) ([]TerritoryTag, error) {
 		}
 		out = append(out, n)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("scan territory tags: iterate rows: %w", err)
+	}
+	return out, nil
 }
 
 // AckTerritoryTag dismisses a note. Idempotent: an unknown id and an
@@ -208,7 +212,10 @@ func (s *Store) AckTerritoryTag(ctx context.Context, id, by string) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE territory_tags SET acked_at = ?, acked_by_uuid = ? WHERE id = ? AND acked_at IS NULL`,
 		time.Now().UnixNano(), by, id)
-	return err
+	if err != nil {
+		return fmt.Errorf("ack territory tag: exec: %w", err)
+	}
+	return nil
 }
 
 // gcTerritoryTagsTx sweeps expired notes and long-acked ones inside
@@ -223,7 +230,10 @@ func gcTerritoryTagsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	_, err := tx.ExecContext(ctx,
 		`DELETE FROM territory_tags WHERE expires_at <= ? OR (acked_at IS NOT NULL AND acked_at < ?)`,
 		nowNs, now.Add(-tagsRetentionAge).UnixNano())
-	return err
+	if err != nil {
+		return fmt.Errorf("gc territory tags tx: exec: %w", err)
+	}
+	return nil
 }
 
 // ensureTerritoryTagsTable adds the table to a DB stamped before this feature.

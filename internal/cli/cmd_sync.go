@@ -378,7 +378,7 @@ func syncScanResidue(rt *runtime, repoTop string) (residue []syncResidue, unattr
 	}
 	createdBy, err := rt.Store.RejectedCandidateCreations(rt.Ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("sync scan residue: rejected candidate creations: %w", err)
 	}
 	for _, p := range untracked {
 		if rc, ok := createdBy[p]; ok {
@@ -511,7 +511,7 @@ func syncFastForwardBatches(rt *runtime, repoTop, expectedIntegration string, de
 			return applyErr
 		})
 		if err != nil {
-			return err
+			return fmt.Errorf("sync fast forward batches: with stable coordination state: %w", err)
 		}
 	}
 	return nil
@@ -550,7 +550,7 @@ func syncSweepBatches(rt *runtime, repoTop, expectedIntegration string, residue 
 			return delErr
 		})
 		if err != nil {
-			return err
+			return fmt.Errorf("sync sweep batches: with stable coordination state: %w", err)
 		}
 	}
 	return nil
@@ -727,21 +727,29 @@ func syncClassifyResidue(ctx context.Context, repoTop string, sweep []syncResidu
 // syncDecideResidue partitions attributed residue into what may be deleted and
 // what a live holder blocks, using the same predicate as syncDecide. Pure.
 func syncDecideResidue(residue []syncResidue, locks []domain.LockRecord, cands []domain.CandidateClaim, ec domain.EvalContext) (sweep []syncResidue, conflicts []syncConflict) {
+	return syncPartition(residue, func(r syncResidue) string { return r.Path }, locks, cands, ec)
+}
+
+// syncPartition splits items into those no live holder blocks and the
+// conflicts that block the rest, sorted by path. It is the one predicate
+// behind syncDecide and syncDecideResidue.
+func syncPartition[T any](items []T, pathOf func(T) string, locks []domain.LockRecord, cands []domain.CandidateClaim, ec domain.EvalContext) (free []T, conflicts []syncConflict) {
 	candsByPath := map[string][]domain.CandidateClaim{}
 	for i := range cands {
 		c := &cands[i]
 		candsByPath[c.PathCanonical] = append(candsByPath[c.PathCanonical], *c)
 	}
-	for _, r := range residue {
-		if reason, holder, ok := syncConflictFor(r.Path, locks, candsByPath[r.Path], ec); ok {
-			conflicts = append(conflicts, syncConflict{Path: r.Path, Reason: reason, Holder: holder})
+	for _, it := range items {
+		path := pathOf(it)
+		if reason, holder, ok := syncConflictFor(path, locks, candsByPath[path], ec); ok {
+			conflicts = append(conflicts, syncConflict{Path: path, Reason: reason, Holder: holder})
 			continue
 		}
-		sweep = append(sweep, r)
+		free = append(free, it)
 	}
-	sort.Slice(sweep, func(i, j int) bool { return sweep[i].Path < sweep[j].Path })
+	sort.Slice(free, func(i, j int) bool { return pathOf(free[i]) < pathOf(free[j]) })
 	sort.Slice(conflicts, func(i, j int) bool { return conflicts[i].Path < conflicts[j].Path })
-	return sweep, conflicts
+	return free, conflicts
 }
 
 // syncDeleteResidue removes the classified-deletable residue, in sorted order,
@@ -842,7 +850,7 @@ func syncIntegrationSHA(ctx context.Context, repoTop string) (sha string, exists
 	cmd.Dir = repoTop
 	out, runErr := cmd.Output()
 	if runErr != nil {
-		if _, ok := errors.AsType[*exec.ExitError](runErr); ok {
+		if _, ok := errors.AsType[*exec.ExitError](runErr); ok { //nolint:errcheck // only the type match matters, the *exec.ExitError value is unused
 			// --verify --quiet exits non-zero with no stderr when the ref is
 			// simply absent — not an error, the expected fresh-repo shape.
 			return "", false, nil
@@ -1067,23 +1075,7 @@ func hashExceptionalPath(ctx context.Context, repoTop, path string) (string, err
 // parameter: unlike gateDecide/submitLeaseCheck, sync must not clobber ANY
 // live hold, including its own caller's (plan §3, plan-review P1-1).
 func syncDecide(diffs []syncDiff, locks []domain.LockRecord, cands []domain.CandidateClaim, ec domain.EvalContext) (apply []syncDiff, conflicts []syncConflict) {
-	candsByPath := map[string][]domain.CandidateClaim{}
-	for i := range cands {
-		c := &cands[i]
-		candsByPath[c.PathCanonical] = append(candsByPath[c.PathCanonical], *c)
-	}
-
-	for _, d := range diffs {
-		if reason, holder, ok := syncConflictFor(d.Path, locks, candsByPath[d.Path], ec); ok {
-			conflicts = append(conflicts, syncConflict{Path: d.Path, Reason: reason, Holder: holder})
-			continue
-		}
-		apply = append(apply, d)
-	}
-
-	sort.Slice(apply, func(i, j int) bool { return apply[i].Path < apply[j].Path })
-	sort.Slice(conflicts, func(i, j int) bool { return conflicts[i].Path < conflicts[j].Path })
-	return apply, conflicts
+	return syncPartition(diffs, func(d syncDiff) string { return d.Path }, locks, cands, ec)
 }
 
 // syncConflictFor checks, in order, whether path is covered by a live hold on
@@ -1261,7 +1253,7 @@ func syncMkdirAll(dir string, perm os.FileMode) error {
 		p = parent
 	}
 	if err := os.MkdirAll(dir, perm); err != nil {
-		return err
+		return fmt.Errorf("sync mkdir all: mkdir all: %w", err)
 	}
 	// Fsync top-down (shallowest first): a level's entry must be durable in
 	// its parent before a crash could otherwise orphan it.
@@ -1292,7 +1284,7 @@ func syncStageReplacement(ctx context.Context, repoTop string, d syncDiff) (sync
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(full), ".loto-sync-*")
 	if err != nil {
-		return syncStaged{}, err
+		return syncStaged{}, fmt.Errorf("sync stage replacement: create temp: %w", err)
 	}
 	staged := syncStaged{TmpPath: tmp.Name(), Target: full}
 	if err := syncFillStaged(tmp, blob, mode); err != nil {
@@ -1317,12 +1309,15 @@ func syncFillStaged(tmp *os.File, data []byte, mode os.FileMode) error {
 		return io.ErrShortWrite
 	}
 	if err := tmp.Chmod(mode); err != nil {
-		return err
+		return fmt.Errorf("sync fill staged: chmod: %w", err)
 	}
 	if err := syncFull(tmp); err != nil {
 		return err
 	}
-	return tmp.Close()
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("sync fill staged: close: %w", err)
+	}
+	return nil
 }
 
 // syncPublishStaged is the rename that makes the staged content the target,
@@ -1331,7 +1326,7 @@ func syncFillStaged(tmp *os.File, data []byte, mode os.FileMode) error {
 // names the path.
 func syncPublishStaged(s syncStaged) (bool, error) {
 	if err := os.Rename(s.TmpPath, s.Target); err != nil {
-		return false, err
+		return false, fmt.Errorf("sync publish staged: rename: %w", err)
 	}
 	if err := syncParentDirFn(filepath.Dir(s.Target)); err != nil {
 		return true, err
@@ -1350,7 +1345,7 @@ func syncDiscardStaged(s syncStaged) {
 func syncParentDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
-		return err
+		return fmt.Errorf("sync parent dir: open: %w", err)
 	}
 	defer d.Close()
 	return syncFull(d)

@@ -296,7 +296,10 @@ func adoptLegacyWorktreeRow(ctx context.Context, tx *sql.Tx, l domain.LockRecord
 	_, err := tx.ExecContext(ctx,
 		`UPDATE OR IGNORE locks SET worktree = ?, target_canonical = ? WHERE `+k.col("target_canonical")+` = ? AND owner_uuid = ? AND worktree = ''`, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
 		l.Worktree, l.Target.Canonical, k.key(l.Target.Canonical), string(l.OwnerUUID))
-	return err
+	if err != nil {
+		return fmt.Errorf("adopt legacy worktree row: exec: %w", err)
+	}
+	return nil
 }
 
 // insertOrRefreshLock upserts one lock row. epoch is the
@@ -346,5 +349,8 @@ ON CONFLICT(target_canonical, owner_uuid, worktree) DO UPDATE SET
 		l.Intent, l.CreatedAt.UnixNano(), l.ExpiresAt.UnixNano(),
 		l.Host, l.PID, procStart, l.Branch, epoch, l.Worktree,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("insert or refresh lock: exec: %w", err)
+	}
+	return nil
 }

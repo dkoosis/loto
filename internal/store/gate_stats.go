@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"sort"
 	"time"
@@ -116,7 +117,7 @@ func encodeVerdictDetail(createdPaths []gate.CreatedPath) (string, error) {
 	entries = slices.Compact(entries)
 	b, err := json.Marshal(verdictDetail{Created: entries})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("marshal: %w", err)
 	}
 	return string(b), nil
 }
@@ -146,7 +147,7 @@ func (s *Store) RejectedCandidateCreations(ctx context.Context) (map[string]Reje
 		  WHERE event_kind = ? AND detail <> ''
 		  ORDER BY created_at, id`, EventCandidateRejected)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("rejected candidate creations: query: %w", err)
 	}
 	defer rows.Close()
 
@@ -154,7 +155,7 @@ func (s *Store) RejectedCandidateCreations(ctx context.Context) (map[string]Reje
 	for rows.Next() {
 		var candidateID, detail string
 		if err := rows.Scan(&candidateID, &detail); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("rejected candidate creations: scan: %w", err)
 		}
 		var d verdictDetail
 		if err := json.Unmarshal([]byte(detail), &d); err != nil {
@@ -167,7 +168,10 @@ func (s *Store) RejectedCandidateCreations(ctx context.Context) (map[string]Reje
 			out[e.Path] = RejectedCreation{CandidateID: candidateID, Blob: e.Blob}
 		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("rejected candidate creations: iterate rows: %w", err)
+	}
+	return out, nil
 }
 
 // GateStats is what `loto gate stats` reports over one window.
@@ -207,7 +211,7 @@ func (s *Store) ReadGateStats(ctx context.Context, since time.Duration) (GateSta
 		  GROUP BY event_kind, reason`,
 		cutoff, EventCandidateAccepted, EventCandidateRejected, EventGateBypass)
 	if err != nil {
-		return out, err
+		return out, fmt.Errorf("read gate stats: query: %w", err)
 	}
 	defer rows.Close()
 
@@ -215,7 +219,7 @@ func (s *Store) ReadGateStats(ctx context.Context, since time.Duration) (GateSta
 		var kind, reason string
 		var n int
 		if err := rows.Scan(&kind, &reason, &n); err != nil {
-			return out, err
+			return out, fmt.Errorf("read gate stats: scan: %w", err)
 		}
 		switch kind {
 		case EventCandidateAccepted:
@@ -231,5 +235,8 @@ func (s *Store) ReadGateStats(ctx context.Context, since time.Duration) (GateSta
 			out.ByClass[gate.ReasonGateBypass] += n
 		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("read gate stats: iterate rows: %w", err)
+	}
+	return out, nil
 }

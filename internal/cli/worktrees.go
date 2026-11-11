@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -114,7 +115,7 @@ func gitWorktrees(ctx context.Context, repoTop string) ([]worktreeRec, error) {
 	cmd.Dir = repoTop
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("git worktrees: run git: %w", err)
 	}
 	return parseWorktreePorcelain(string(out)), nil
 }

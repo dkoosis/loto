@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"time"
@@ -240,18 +241,21 @@ SELECT p.call_id, c.owner_uuid
    AND (p.seq_post >= ? OR (c.t_post IS NULL AND c.dead_at IS NULL))
  ORDER BY c.owner_uuid, p.call_id`, path, epoch, worktree, string(observer), seq, seq)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("spanners tx: query: %w", err)
 	}
 	defer rows.Close()
 	var out []TreeSpanner
 	for rows.Next() {
 		var callID, owner string
 		if err := rows.Scan(&callID, &owner); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("spanners tx: scan: %w", err)
 		}
 		out = append(out, TreeSpanner{CallID: callID, Owner: domain.AgentUUID(owner)})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("spanners tx: iterate rows: %w", err)
+	}
+	return out, nil
 }
 
 // classifyTreeEvent picks the verdict-table rule and the report's addressees.
@@ -354,13 +358,13 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ev.EventID, ev.Path, ev.EpochPre, string(ev.HolderPre), string(ev.HolderNow), ev.EpochNow,
 		string(ev.Observer), ev.CallID, ev.Seq, ev.DigestPre, ev.DigestPost, boolInt(ev.Declared),
 		ev.Rule, ev.Note, now.UnixNano(), ev.Worktree); err != nil {
-		return TreeEvent{}, err
+		return TreeEvent{}, fmt.Errorf("file tree event tx: exec: %w", err)
 	}
 	for i := range spanners {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO tree_event_spanners(event_id, call_id, owner_uuid) VALUES (?,?,?)`,
 			ev.EventID, spanners[i].CallID, string(spanners[i].Owner)); err != nil {
-			return TreeEvent{}, err
+			return TreeEvent{}, fmt.Errorf("file tree event tx: exec: %w", err)
 		}
 	}
 	for _, who := range addressees {
@@ -368,7 +372,7 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			`INSERT INTO tree_reports(report_id, event_id, addressee_uuid, created_at, delivered_at)
 			 VALUES (?,?,?,?,NULL)`,
 			newEventID(), ev.EventID, string(who), now.UnixNano()); err != nil {
-			return TreeEvent{}, err
+			return TreeEvent{}, fmt.Errorf("file tree event tx: exec: %w", err)
 		}
 		if err := appendTreeChangeReportedTx(ctx, tx, ev, who, now); err != nil {
 			return TreeEvent{}, err
@@ -403,7 +407,7 @@ func appendTreeChangeReportedTx(ctx context.Context, tx *sql.Tx, ev TreeEvent, w
 	}
 	payload, err := json.Marshal(d)
 	if err != nil {
-		return err
+		return fmt.Errorf("append tree change reported tx: marshal: %w", err)
 	}
 	return appendEventTx(ctx, tx, domain.Event{
 		Kind:      EventTreeChangeReported,
@@ -445,12 +449,12 @@ func markTreeChangeActedTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUU
 			`UPDATE tree_reports SET acted_at = ? WHERE report_id = ? AND acted_at IS NULL`,
 			now.UnixNano(), r.reportID)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("mark tree change acted tx: exec: %w", err)
 		}
 		// A concurrent post for the same owner may have claimed it first;
 		// whoever wins the UPDATE writes the one audit row.
 		if n, err := res.RowsAffected(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("mark tree change acted tx: rows affected: %w", err)
 		} else if n == 0 {
 			continue
 		}
@@ -458,7 +462,7 @@ func markTreeChangeActedTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUU
 			Path: path, Holder: r.holder, Rule: r.rule, Seq: r.seq,
 		})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("mark tree change acted tx: marshal: %w", err)
 		}
 		acted = append(acted, domain.Event{
 			Kind:      EventTreeChangeActed,
@@ -490,18 +494,21 @@ func answeredReportsTx(ctx context.Context, tx *sql.Tx, owner domain.AgentUUID, 
 	rows, err := tx.QueryContext(ctx, answeredReportsSQL,
 		string(owner), path, worktree, digest, now.Add(-TreeActedWindow).UnixNano())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("answered reports tx: query: %w", err)
 	}
 	defer rows.Close()
 	var out []answeredReport
 	for rows.Next() {
 		var r answeredReport
 		if err := rows.Scan(&r.reportID, &r.rule, &r.seq, &r.holder); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("answered reports tx: scan: %w", err)
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("answered reports tx: iterate rows: %w", err)
+	}
+	return out, nil
 }
 
 // answeredReportsSQL finds every report this owner was HANDED inside the
@@ -655,7 +662,10 @@ func inFlightCallRecordedTx(ctx context.Context, tx *sql.Tx, path, worktree stri
 SELECT count(*) FROM hook_call_paths p JOIN hook_calls c ON c.call_id = p.call_id
  WHERE p.path_canonical = ? AND p.epoch_pre = ? AND c.worktree = ? AND c.t_post IS NULL AND c.dead_at IS NULL`,
 		path, epoch, worktree).Scan(&n)
-	return n > 0, err
+	if err != nil {
+		return n > 0, fmt.Errorf("in flight call recorded tx: scan: %w", err)
+	}
+	return n > 0, nil
 }
 
 func observedAtTx(ctx context.Context, tx *sql.Tx, path, worktree string, epoch int64) (stat, digest string, known bool, err error) {
@@ -666,7 +676,7 @@ func observedAtTx(ctx context.Context, tx *sql.Tx, path, worktree string, epoch 
 		return "", "", false, nil
 	}
 	if err != nil {
-		return "", "", false, err
+		return "", "", false, fmt.Errorf("observed at tx: scan: %w", err)
 	}
 	return stat, digest, true, nil
 }
@@ -678,7 +688,10 @@ ON CONFLICT(path_canonical, worktree, epoch) DO UPDATE SET stat = excluded.stat,
                                                  digest = excluded.digest,
                                                  observed_at = excluded.observed_at`,
 		o.Path, o.Epoch, o.Stat, o.Digest, now.UnixNano(), worktree)
-	return err
+	if err != nil {
+		return fmt.Errorf("set observed tx: exec: %w", err)
+	}
+	return nil
 }
 
 // UndeliveredReports lists every report nobody has been handed yet, oldest
@@ -715,12 +728,12 @@ func (s *Store) DeliverReports(ctx context.Context, addressee domain.AgentUUID, 
 			`UPDATE tree_reports SET delivered_at = ? WHERE report_id = ? AND delivered_at IS NULL`,
 			now.UnixNano(), pending[i].ReportID)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("deliver reports: exec: %w", err)
 		}
 		// A concurrent pre-hook for the same owner may have taken it first.
 		// Delivering it twice is the one outcome worth preventing here.
 		if n, err := res.RowsAffected(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("deliver reports: rows affected: %w", err)
 		} else if n == 0 {
 			continue
 		}
@@ -760,7 +773,7 @@ const (
 func (s *Store) readReports(ctx context.Context, query string, args ...any) ([]TreeReport, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read reports: query: %w", err)
 	}
 	defer rows.Close()
 	var out []TreeReport
@@ -772,7 +785,7 @@ func (s *Store) readReports(ctx context.Context, query string, args ...any) ([]T
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read reports: iterate rows: %w", err)
 	}
 	for i := range out {
 		sp, err := s.spannersOf(ctx, out[i].Event.EventID)
@@ -797,7 +810,7 @@ func scanTreeReport(rows *sql.Rows) (TreeReport, error) {
 		&r.Event.EventID, &r.Event.Path, &r.Event.EpochPre, &holderPre, &holderNow, &r.Event.EpochNow,
 		&observerStr, &r.Event.CallID, &r.Event.Seq, &r.Event.DigestPre, &r.Event.DigestPost, &declared,
 		&r.Event.Rule, &r.Event.Note, &evCreatedNs, &r.Event.Worktree); err != nil {
-		return TreeReport{}, err
+		return TreeReport{}, fmt.Errorf("scan tree report: scan: %w", err)
 	}
 	r.Addressee = domain.AgentUUID(addressee)
 	r.CreatedAt = time.Unix(0, createdNs)
@@ -817,18 +830,21 @@ func (s *Store) spannersOf(ctx context.Context, eventID string) ([]TreeSpanner, 
 		`SELECT call_id, owner_uuid FROM tree_event_spanners WHERE event_id = ? ORDER BY owner_uuid, call_id`,
 		eventID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("spanners of: query: %w", err)
 	}
 	defer rows.Close()
 	var out []TreeSpanner
 	for rows.Next() {
 		var callID, owner string
 		if err := rows.Scan(&callID, &owner); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("spanners of: scan: %w", err)
 		}
 		out = append(out, TreeSpanner{CallID: callID, Owner: domain.AgentUUID(owner)})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("spanners of: iterate rows: %w", err)
+	}
+	return out, nil
 }
 
 // TreeEventsFor reads every event filed against one path, oldest transition
@@ -840,7 +856,7 @@ SELECT event_id, path_canonical, epoch_pre, holder_pre, holder_now, epoch_now,
        observer_uuid, call_id, seq, digest_pre, digest_post, declared, rule, note, created_at, worktree
   FROM tree_events WHERE path_canonical = ? ORDER BY seq, event_id`, path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("tree events for: query: %w", err)
 	}
 	defer rows.Close()
 	var out []TreeEvent
@@ -854,7 +870,7 @@ SELECT event_id, path_canonical, epoch_pre, holder_pre, holder_now, epoch_now,
 		if err := rows.Scan(&e.EventID, &e.Path, &e.EpochPre, &holderPre, &holderNow, &e.EpochNow,
 			&observerStr, &e.CallID, &e.Seq, &e.DigestPre, &e.DigestPost, &declared,
 			&e.Rule, &e.Note, &createdNs, &e.Worktree); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("tree events for: scan: %w", err)
 		}
 		e.HolderPre = domain.AgentUUID(holderPre)
 		e.HolderNow = domain.AgentUUID(holderNow)
@@ -864,7 +880,7 @@ SELECT event_id, path_canonical, epoch_pre, holder_pre, holder_now, epoch_now,
 		out = append(out, e)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("tree events for: iterate rows: %w", err)
 	}
 	for i := range out {
 		sp, err := s.spannersOf(ctx, out[i].EventID)
@@ -905,11 +921,11 @@ DELETE FROM tree_events WHERE event_id IN (
    ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
 )`, treeEventsRetentionMax)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("drop old tree events: exec: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("drop old tree events: rows affected: %w", err)
 	}
 	if n > 0 {
 		for _, stmt := range []string{
@@ -917,7 +933,7 @@ DELETE FROM tree_events WHERE event_id IN (
 			`DELETE FROM tree_reports WHERE event_id NOT IN (SELECT event_id FROM tree_events)`,
 		} {
 			if _, err := tx.ExecContext(ctx, stmt); err != nil {
-				return 0, err
+				return 0, fmt.Errorf("drop old tree events: exec: %w", err)
 			}
 		}
 	}
@@ -938,7 +954,7 @@ func dropAgedUndeliveredTx(ctx context.Context, tx *sql.Tx, now time.Time) error
 	}
 	for _, id := range ids {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM tree_reports WHERE report_id = ?`, id); err != nil {
-			return err
+			return fmt.Errorf("drop aged undelivered tx: exec: %w", err)
 		}
 	}
 	return appendEventsTx(ctx, tx, dropped)
@@ -953,7 +969,7 @@ SELECT r.report_id, r.addressee_uuid, e.path_canonical, e.rule, e.seq, e.holder_
  WHERE r.delivered_at IS NULL AND r.created_at < ?
  ORDER BY r.report_id`, now.Add(-treeReportUndeliveredAge).UnixNano())
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("aged undelivered tx: query: %w", err)
 	}
 	defer rows.Close()
 	var (
@@ -964,11 +980,11 @@ SELECT r.report_id, r.addressee_uuid, e.path_canonical, e.rule, e.seq, e.holder_
 		var reportID, addressee, path, rule, holder string
 		var seq int64
 		if err := rows.Scan(&reportID, &addressee, &path, &rule, &seq, &holder); err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("aged undelivered tx: scan: %w", err)
 		}
 		payload, err := json.Marshal(treeChangeDetail{Path: path, Holder: holder, Rule: rule, Seq: seq})
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("aged undelivered tx: marshal: %w", err)
 		}
 		ids = append(ids, reportID)
 		dropped = append(dropped, domain.Event{
@@ -980,7 +996,10 @@ SELECT r.report_id, r.addressee_uuid, e.path_canonical, e.rule, e.seq, e.holder_
 			CreatedAt: now,
 		})
 	}
-	return ids, dropped, rows.Err()
+	if err := rows.Err(); err != nil {
+		return ids, dropped, fmt.Errorf("aged undelivered tx: iterate rows: %w", err)
+	}
+	return ids, dropped, nil
 }
 
 // ensurePathObservedWorktree widens path_observed's PK from (path_canonical,
@@ -994,7 +1013,7 @@ func ensurePathObservedWorktree(ctx context.Context, db sqlExecQuerier, apply bo
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('path_observed') WHERE name = 'worktree'`,
 	).Scan(&n); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure path observed worktree: scan: %w", err)
 	}
 	if n > 0 {
 		return false, nil
@@ -1015,7 +1034,7 @@ SELECT path_canonical, epoch, stat, digest, observed_at, '' FROM path_observed;
 DROP TABLE path_observed;
 ALTER TABLE path_observed_new RENAME TO path_observed;`
 		if _, err := db.ExecContext(ctx, rebuild); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure path observed worktree: exec: %w", err)
 		}
 		return false, nil
 	}

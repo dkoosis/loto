@@ -327,7 +327,7 @@ func refGitDirs(common string) ([]string, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return dirs, nil
 		}
-		return nil, err
+		return nil, fmt.Errorf("ref git dirs: read dir: %w", err)
 	}
 	for _, e := range entries {
 		if e.IsDir() {
@@ -352,7 +352,7 @@ func refHeadLockClaimant(dirs []string, want string) ([]string, error) {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
-			return nil, err
+			return nil, fmt.Errorf("ref head lock claimant: read file: %w", err)
 		}
 		if refSymrefTarget(strings.TrimSpace(string(raw))) != want {
 			continue
