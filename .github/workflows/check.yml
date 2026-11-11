@@ -46,7 +46,7 @@ jobs:
             echo "run_check=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # The docs-only set is conform-to-sdlc's (ci-docs-skip): drop entries to
+          # The docs-only set is repo-standard's (ci-docs-skip): drop entries to
           # narrow it; adding one is a finding.
           run_check="$(git diff --name-status --no-renames "$base" "$head" | awk -F'\t' '
             NF < 2 { next }
@@ -83,8 +83,8 @@ jobs:
           cache: true
 
       # Gate tooling — every pin read from one file (.sandbox/project.conf,
-      # conform-to-sdlc lint-pin rule). make check pipes vet/lint/test through fo and
-      # runs go-arch-lint (make arch), so all three must be on PATH.
+      # repo-standard lint-pin rule). make check pipes vet/lint/test through fo and
+      # runs go-arch-lint (make arch, pinned, via go run), so golangci-lint and fo must be on PATH.
       #
       # golangci-lint arrives via `go install` against the pinned tag, not a
       # piped install.sh — that script used to resolve from the repo's HEAD,
@@ -97,12 +97,11 @@ jobs:
           . ./.sandbox/project.conf
           go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VERSION"
           go install "github.com/dkoosis/fo/cmd/fo@$FO_VERSION"
-          go install github.com/fe3dback/go-arch-lint@v1.15.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       # CI = the same gate a developer runs; no verb re-implemented in YAML
-      # (conform-to-sdlc ci-gate rule). check runs vet + lint + arch + test + build +
-      # conform-to-sdlc (selfcheck, via the go.mod tool pin). This subsumes the old
+      # (repo-standard ci-gate rule). check runs vet + lint + arch + test + build +
+      # repo-standard (make standard, pinned in the Makefile). This subsumes the old
       # per-step vet/test/build and the linux-only arch step (loto-vlid) —
       # arch now runs on every leg, harmless since it is OS-independent.
       - name: check

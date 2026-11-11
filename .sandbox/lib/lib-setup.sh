@@ -105,8 +105,8 @@ STUB
 # Install jscpd via npm (optional)
 install_jscpd() {
   if have npm; then
-    echo "  npm install -g jscpd@4 ..."
-    npm install -g jscpd@4 --silent 2>&1 | tail -3 && echo "  installed jscpd" || warn "optional tool jscpd failed to install"
+    echo "  npm install -g jscpd@4 --ignore-scripts ..."
+    npm install -g jscpd@4 --silent --ignore-scripts 2>&1 | tail -3 && echo "  installed jscpd" || warn "optional tool jscpd failed to install"
   else
     echo "  npm not found, skipping"
   fi

@@ -1,0 +1,41 @@
+name: audit
+
+# The slow gates (race, fuzz, dupe, nilcheck, deadcode, omitempty, vuln), nightly and on
+# demand. repo-standard's ci-audit-schedule rule needs a cron here and a
+# step that runs make audit.
+on:
+  schedule:
+    - cron: '41 7 * * *' # daily; off the hour to dodge GitHub's top-of-hour queue
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: false
+
+      # dupe runs jscpd through npx.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Same pinned gate tools as check.yml (.sandbox/project.conf); audit runs
+      # check first, which pipes vet/lint/test through fo.
+      - name: gate tools (pinned in .sandbox/project.conf)
+        run: |
+          . ./.sandbox/project.conf
+          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VERSION"
+          go install "github.com/dkoosis/fo/cmd/fo@$FO_VERSION"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: audit
+        run: make audit
