@@ -768,7 +768,10 @@ func isDirectoryHold(repoTop, target string) bool {
 		return true
 	}
 	fi, err := os.Stat(filepath.Join(repoTop, target))
-	return err == nil && fi.IsDir()
+	if err != nil {
+		return false
+	}
+	return fi.IsDir()
 }
 
 // hookLiveHolders reduces the live lock rows to one holder per path — the `L`

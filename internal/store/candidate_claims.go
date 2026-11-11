@@ -119,29 +119,6 @@ func (s *Store) InsertCandidateClaims(ctx context.Context, claims []domain.Candi
 	return commitTxFn(tx)
 }
 
-// insertCandidateClaimsUnguarded writes the rows with no lease revalidation.
-// The store's own tests use it to plant claim fixtures whose subject is
-// something else (the acquisition-time overlap block, list/release round
-// trips); production has exactly one door, the guarded
-// InsertCandidateClaims above.
-func (s *Store) insertCandidateClaimsUnguarded(ctx context.Context, claims []domain.CandidateClaim) error {
-	if len(claims) == 0 {
-		return nil
-	}
-	tx, cleanup, err := s.beginTx(ctx)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-	if err := insertCandidateClaimRowsTx(ctx, tx, claims); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit candidate claims: %w", err)
-	}
-	return nil
-}
-
 // insertCandidateClaimRowsTx writes one row per claim inside the caller's tx —
 // a candidate's write-set is claimed atomically or not at all, so a crash
 // mid-write can never leave some paths claimed and others free for a

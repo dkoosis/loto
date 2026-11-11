@@ -115,21 +115,8 @@ func connDSN(path string) string {
 	return path + "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_txlock=immediate"
 }
 
-// Open opens the loto store at path. On a real sqlite corruption error
-// (SQLITE_CORRUPT or SQLITE_NOTADB, errno-checked — not string-matched),
-// the existing DB and its -wal/-shm siblings are moved aside atomically
-// and a fresh DB is created. Recovery is serialized via flock on a
-// sidecar lock file so concurrent openers cannot interleave.
-//
-// First-Open is serialized on the project op-flock: two processes
-// creating the same DB simultaneously would otherwise both pass the
-// existence check and clobber each other's writes. Subsequent Opens on
-// an initialized DB take the fast path (no flock).
-func Open(p string) (*Store, error) {
-	return OpenContext(context.Background(), p) //nolint:forbidigo // Open is the no-context convenience root; OpenContext is the ctx-threaded path for callers that have one.
-}
-
-// OpenContext is Open with a caller-supplied context. Cancellation aborts
+// OpenContext opens the loto store at path, creating or recovering it (see
+// the test helper Open for the context-free form). Cancellation aborts
 // flock polling (op-flock + recovery-lock) instead of waiting out
 // LOTO_FLOCK_TIMEOUT.
 func OpenContext(ctx context.Context, p string, opts ...OpenOption) (*Store, error) {
@@ -474,12 +461,6 @@ func (s *Store) Close() error {
 	}
 	return nil
 }
-
-// setStderr overrides the writer used for diagnostic messages (audit-write
-// failures, op-flock contention notices). Defaults to os.Stderr. Intended for
-// tests that need to observe these messages; production code should keep the
-// default.
-func (s *Store) setStderr(w io.Writer) { s.stderr = w }
 
 // beginTx starts an immediate-mode tx on a dedicated pooled conn whose
 // busy_timeout PRAGMA is scaled to the caller's ctx deadline. Returned

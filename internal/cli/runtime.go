@@ -36,7 +36,7 @@ func gitRevOutput(ctx context.Context, args ...string) ([]byte, error) {
 	cmd.WaitDelay = gitWaitDelay
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git %s: %w", args[0], err)
+		return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
 	return out, nil
 }

@@ -9,7 +9,7 @@ import (
 // them, to the path policy. It must never panic, and a token it accepts must
 // be a clean repo-relative path.
 func FuzzCanonicalizeFrom(f *testing.F) {
-	for _, s := range []string{"a.go", "dir/a.go", "../x", "/abs", "a/./b", "a//b", "a\x00b", "a\\b", "*.go", "$HOME", " a", "a/", ".", ""} {
+	for _, s := range []string{"a.go", "dir/a.go", "../x", "/abs", "a/./b", "a\x00b", "a\\b", "*.go", "$HOME", " a", "a/", ".", ""} {
 		f.Add(s, false)
 		f.Add(s, true)
 	}
@@ -26,7 +26,7 @@ func FuzzCanonicalizeFrom(f *testing.F) {
 		if c == "" || strings.ContainsRune(c, 0) || strings.HasPrefix(c, "/") {
 			t.Fatalf("CanonicalizeFrom(%q) = %q: not a clean relative path", in, c)
 		}
-		for _, part := range strings.Split(c, "/") {
+		for part := range strings.SplitSeq(c, "/") {
 			if part == ".." {
 				t.Fatalf("CanonicalizeFrom(%q) = %q: escapes the repo", in, c)
 			}
