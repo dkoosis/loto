@@ -231,9 +231,7 @@ trap cleanup EXIT
 
 # Resolve the linter only now: the mutex is held, so the `--version` probes
 # below cannot race a peer for golangci-lint's cache (header, line ~62).
-set -x
 resolve_lint_cmd
-set +x
 
 # Pass through every arg and preserve golangci-lint's exit code (1 = findings).
 # Anything but `run` goes straight through: --allow-parallel-runners and the

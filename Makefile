@@ -98,7 +98,7 @@ REPORT_CMD = set +e; \
 	echo '--- tool:vet format:sarif ---'; \
 	go vet $(PKG) 2>&1 | fo wrap diag --tool vet --level error; echo; \
 	echo '--- tool:lint format:sarif ---'; \
-	golangci-lint run --output.sarif.path=/dev/stdout $(PKG) 2>/dev/null; echo; \
+	golangci-lint run --output.sarif.path=stdout $(PKG) 2>/dev/null; echo; \
 	echo '--- tool:test format:testjson ---'; \
 	go test -race -json -cover -count=1 $(PKG) 2>&1; echo
 
@@ -221,7 +221,7 @@ arch: ## Enforce layering (.go-arch-lint.yml, go-arch-lint pinned)
 GOLANGCILINT := bash scripts/lint-locked
 
 lint: ## Run golangci-lint (full)
-	@$(GATE) lint sarif -- $(GOLANGCILINT) run --output.sarif.path=/dev/stdout $(PKG)
+	@$(GATE) lint sarif -- $(GOLANGCILINT) run --output.sarif.path=stdout $(PKG)
 
 # -count=1 defeats Go's test cache, so every local `make check` re-ran the whole
 # suite — 81s of the ~150s total, paid again for a one-line docs edit, and paid

@@ -501,8 +501,11 @@ func hookSessionIsDead(s domain.SessionUUID) bool {
 // real current state rather than inheriting the pre digest by omission.
 func hookAddRecordedPaths(rt *runtime, callID string, obs []store.HookPathState, warn io.Writer) ([]store.HookPathState, error) {
 	_, recorded, ok, err := rt.Store.CallRecord(rt.Ctx, callID)
-	if err != nil || !ok {
+	if err != nil {
 		return obs, fmt.Errorf("hook add recorded paths: call record: %w", err)
+	}
+	if !ok {
+		return obs, nil
 	}
 	have := make(map[string]bool, len(obs))
 	for i := range obs {
