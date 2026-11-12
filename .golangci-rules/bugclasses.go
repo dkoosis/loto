@@ -11,7 +11,7 @@
 // Rule coverage lives across three surfaces because no single golangci
 // mechanism spans them:
 //   - ruleguard (this file): scanner-buffer, raw-state-write, err-substring,
-//     pid-liveness, exec-no-wait-delay.
+//     pid-liveness, exec-no-wait-delay, os-is-err-helper.
 //   - forbidigo (see golangci.snippet.yml): context.Background in daemons.
 //   - a standalone analyzer (../omitemptyscalar): omitempty on meaningful
 //     zero-value fields — ruleguard can't read struct tags (README §rule 3).
@@ -22,7 +22,7 @@
 // lint-pack rule compares each repo's copy byte for byte (repair: `repo-standard
 // pack sync`).
 //
-//pack:version v3
+//pack:version v4
 package gorules
 
 import "github.com/quasilyte/go-ruleguard/dsl"
@@ -299,4 +299,37 @@ func execNoWaitDelay(m dsl.Matcher) {
 	).
 		Where(!m.File().Name.Matches(`_test\.go$`)).
 		Report(`exec.CommandContext run with no cmd.WaitDelay: a grandchild holding the pipe blocks Wait after cancel; set WaitDelay before running`)
+}
+
+// --- Rule 8: os.Is* error tests that do not unwrap ---------------------------
+
+//doc:summary os.IsNotExist / IsExist / IsPermission / IsTimeout on an error that may be %w-wrapped
+//doc:before  if os.IsNotExist(err) { ... }
+//doc:after   if errors.Is(err, fs.ErrNotExist) { ... }
+//doc:tags    correctness
+func osIsErrHelper(m dsl.Matcher) {
+	// os.IsNotExist and its siblings inspect only the error's own type, not
+	// its Unwrap chain. A caller that passes a %w-wrapped error (which the
+	// required wrapcheck linter drives) gets false, silently (atomicfile and
+	// ferret). Test files are NOT exempt: a test that asserts through the
+	// helper breaks the same way once the code under test wraps. The Suggest
+	// is a pure substitution; it needs "errors" and "io/fs" imported, which
+	// --fix does not add.
+	m.Match(`os.IsNotExist($err)`).
+		Suggest(`errors.Is($err, fs.ErrNotExist)`).
+		Report(`os.IsNotExist does not unwrap %w-wrapped errors; use errors.Is($err, fs.ErrNotExist)`)
+
+	m.Match(`os.IsExist($err)`).
+		Suggest(`errors.Is($err, fs.ErrExist)`).
+		Report(`os.IsExist does not unwrap %w-wrapped errors; use errors.Is($err, fs.ErrExist)`)
+
+	m.Match(`os.IsPermission($err)`).
+		Suggest(`errors.Is($err, fs.ErrPermission)`).
+		Report(`os.IsPermission does not unwrap %w-wrapped errors; use errors.Is($err, fs.ErrPermission)`)
+
+	// No exact errors.Is twin: IsTimeout asks "does the chain say Timeout()",
+	// which errors.Is(err, os.ErrDeadlineExceeded) covers only for deadline
+	// errors. So report, no Suggest.
+	m.Match(`os.IsTimeout($err)`).
+		Report(`os.IsTimeout does not unwrap %w-wrapped errors; use errors.Is($err, os.ErrDeadlineExceeded) for deadlines, or errors.As to an interface{ Timeout() bool }`)
 }

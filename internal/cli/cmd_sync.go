@@ -674,7 +674,7 @@ func syncProbePath(ctx context.Context, repoTop, path string) (oid string, state
 	full := filepath.Join(repoTop, filepath.FromSlash(path))
 	fi, statErr := os.Lstat(full)
 	switch {
-	case os.IsNotExist(statErr):
+	case errors.Is(statErr, os.ErrNotExist):
 		return "", syncProbeVanished, nil
 	case statErr != nil:
 		return "", syncProbeVanished, fmt.Errorf("lstat %s: %w", syncPathField(path), statErr)
@@ -686,7 +686,7 @@ func syncProbePath(ctx context.Context, repoTop, path string) (oid string, state
 	defer cancel()
 	oid, hashErr := hashExceptionalPath(c, repoTop, path)
 	if hashErr != nil {
-		if _, again := os.Lstat(full); os.IsNotExist(again) {
+		if _, again := os.Lstat(full); errors.Is(again, os.ErrNotExist) {
 			return "", syncProbeVanished, nil
 		}
 		return "", syncProbeVanished, hashErr
@@ -930,7 +930,7 @@ func syncDivergence(ctx context.Context, repoTop string, entries []syncEntry) ([
 		}
 		fi, err := os.Lstat(filepath.Join(repoTop, filepath.FromSlash(e.Path)))
 		switch {
-		case os.IsNotExist(err):
+		case errors.Is(err, os.ErrNotExist):
 			diffs = append(diffs, syncDiff{syncEntry: e, State: syncMissing})
 		case err != nil:
 			return nil, fmt.Errorf("lstat %s: %w", e.Path, err)

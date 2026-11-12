@@ -792,7 +792,7 @@ func fillCorruptStaging(dbPath, staging, base string) (bool, error) {
 		// Rename directly and tolerate a missing sibling rather than Stat-then-
 		// Rename: the stat+rename pair is a TOCTOU race, and a not-exist error
 		// here just means there was no WAL/SHM to quarantine.
-		if err := os.Rename(src, filepath.Join(staging, base+sfx)); err != nil && !os.IsNotExist(err) {
+		if err := os.Rename(src, filepath.Join(staging, base+sfx)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return true, fmt.Errorf("rename %s: %w", sfx, err)
 		}
 	}

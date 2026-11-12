@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -388,7 +389,7 @@ func TestLock_AllowsNonExistentTargetInRepo(t *testing.T) {
 	}
 	if _, statErr := os.Lstat(filepath.Join(repo, target)); statErr == nil {
 		t.Error("locking a missing target must not create it")
-	} else if !os.IsNotExist(statErr) {
+	} else if !errors.Is(statErr, os.ErrNotExist) {
 		t.Errorf("unexpected stat error on %q: %v", target, statErr)
 	}
 }

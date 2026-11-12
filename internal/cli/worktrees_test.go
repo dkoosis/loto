@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -154,7 +155,7 @@ func goneCheckout(ctx context.Context, repoTop string) func(string) bool {
 		}
 		admin := filepath.Join(common, "worktrees", name)
 		if _, err := os.Stat(admin); err != nil {
-			return os.IsNotExist(err)
+			return errors.Is(err, os.ErrNotExist)
 		}
 		b, err := os.ReadFile(filepath.Join(admin, "gitdir"))
 		if err != nil {
@@ -165,6 +166,6 @@ func goneCheckout(ctx context.Context, repoTop string) func(string) bool {
 			link = filepath.Join(admin, link) // git can record the link relative to the admin dir
 		}
 		_, err = os.Stat(link)
-		return os.IsNotExist(err)
+		return errors.Is(err, os.ErrNotExist)
 	}
 }

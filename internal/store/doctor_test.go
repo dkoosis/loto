@@ -545,7 +545,7 @@ func TestMoveCorruptAsideAtomic(t *testing.T) {
 
 	// After move-aside: the original three names must all be gone together.
 	for _, sfx := range []string{"", sqliteWALSuffix, sqliteSHMSuffix} {
-		if _, err := os.Stat(dbPath + sfx); !os.IsNotExist(err) {
+		if _, err := os.Stat(dbPath + sfx); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("expected %s removed, stat err=%v", dbPath+sfx, err)
 		}
 	}
