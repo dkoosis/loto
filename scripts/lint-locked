@@ -358,7 +358,7 @@ replay_probe_buffers() {
 # cheap, a false phantom is not.
 phantom_paths() {
   [ -s "$probe_json" ] || return 0
-  grep -o '"Filename":"[^"]*"' "$probe_json" 2>/dev/null \
+  { grep -o '"Filename":"[^"]*"' "$probe_json" 2>/dev/null || true; } \
     | sed -e 's/^"Filename":"//' -e 's/"$//' \
           -e 's/\\u0026/\&/g' -e 's/\\u003c/</g' -e 's/\\u003e/>/g' \
     | sort -u \
