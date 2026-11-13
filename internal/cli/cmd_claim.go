@@ -170,7 +170,7 @@ func refRefusalInCheckout(detail, repoTop string) bool {
 func resolveCLIPrefix(cc *caseCache, repoTop, raw string) (domain.Target, error) {
 	t, err := domain.CanonicalizePrefix(normalizeRepoPath(raw, repoTop))
 	if err != nil {
-		return domain.Target{}, err
+		return domain.Target{}, fmt.Errorf("resolve cliprefix: canonicalize prefix: %w", err)
 	}
 	t.Canonical = foldTargetKey(cc, repoTop, t.Canonical)
 	return t, nil
@@ -185,7 +185,7 @@ func claimVerbPrefix(ctx context.Context, flags *flag.FlagSet, usage string, std
 		fmt.Fprintln(stderr, usage)
 		return domain.Target{}, "", 2
 	}
-	repoTop, _ := repoTopForCwd(ctx)
+	repoTop, _ := repoTopForCwd(ctx) //nolint:errcheck // outside a repo repoTop stays empty, which resolveCLIPrefix accepts
 	prefix, err := resolveCLIPrefix(nil, repoTop, flags.Arg(0))
 	if err != nil {
 		render.EmitInvalid(stderr, []render.InvalidTarget{{Path: flags.Arg(0), Reason: classifyCanonicalizeErr(err)}})

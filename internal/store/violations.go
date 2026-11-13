@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -180,14 +181,14 @@ func (s *Store) RecordViolations(ctx context.Context, obs []ObservedViolation) (
 			v.ID, v.PathCanonical, v.ObservedAt, v.Fingerprint, v.Baseline, v.LeaseState, v.ExpectedOwner, v.Worktree,
 			v.PathCanonical, v.Fingerprint, v.Baseline, v.Worktree, ResolutionReverted)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("record violations: exec: %w", err)
 		}
 		if n, err := res.RowsAffected(); err == nil && n > 0 {
 			recorded = append(recorded, v)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("record violations: commit: %w", err)
 	}
 	sort.Slice(recorded, func(i, j int) bool { return recorded[i].PathCanonical < recorded[j].PathCanonical })
 	return recorded, nil
@@ -201,7 +202,7 @@ func (s *Store) UnresolvedViolations(ctx context.Context) ([]Violation, error) {
 		`SELECT id, path_canonical, observed_at, fingerprint, baseline, lease_state, expected_owner, worktree, resolved_at, resolution
 		   FROM violations WHERE resolved_at IS NULL ORDER BY path_canonical, id`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unresolved violations: query: %w", err)
 	}
 	defer rows.Close()
 	return scanViolations(rows)
@@ -224,7 +225,7 @@ func (s *Store) UnresolvedViolationsIn(ctx context.Context, worktree string) ([]
 		  WHERE resolved_at IS NULL AND (worktree = ? OR worktree = ?)
 		  ORDER BY path_canonical, id`, worktree, WorktreeLegacy)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unresolved violations in: query: %w", err)
 	}
 	defer rows.Close()
 	return scanViolations(rows)
@@ -238,7 +239,7 @@ func (s *Store) ViolationByID(ctx context.Context, id string) (Violation, error)
 		`SELECT id, path_canonical, observed_at, fingerprint, baseline, lease_state, expected_owner, worktree, resolved_at, resolution
 		   FROM violations WHERE id = ?`, id)
 	if err != nil {
-		return Violation{}, err
+		return Violation{}, fmt.Errorf("violation by id: query: %w", err)
 	}
 	defer rows.Close()
 	vs, err := scanViolations(rows)
@@ -290,16 +291,19 @@ func (s *Store) ResolveViolation(ctx context.Context, id, resolution string) err
 		`UPDATE violations SET resolved_at = ?, resolution = ? WHERE id = ? AND resolved_at IS NULL`,
 		time.Now().UnixNano(), resolution, id)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve violation: exec: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve violation: rows affected: %w", err)
 	}
 	if n == 0 {
 		return ErrUnknownViolation
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("resolve violation: commit: %w", err)
+	}
+	return nil
 }
 
 // ResolveViolationsForPaths closes every open row on the given paths and
@@ -337,14 +341,14 @@ func (s *Store) ResolveViolationsForPaths(ctx context.Context, worktree string, 
 			  WHERE path_canonical = ? AND worktree = ? AND resolved_at IS NULL`,
 			nowNs, resolution, p, worktree)
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("resolve violations for paths: exec: %w", err)
 		}
 		if n, err := res.RowsAffected(); err == nil {
 			total += int(n)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("resolve violations for paths: commit: %w", err)
 	}
 	return total, nil
 }
@@ -356,7 +360,7 @@ func scanViolations(rows *sql.Rows) ([]Violation, error) {
 		var resolvedAt sql.NullInt64
 		if err := rows.Scan(&v.ID, &v.PathCanonical, &v.ObservedAt, &v.Fingerprint,
 			&v.Baseline, &v.LeaseState, &v.ExpectedOwner, &v.Worktree, &resolvedAt, &v.Resolution); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan violations: scan: %w", err)
 		}
 		if resolvedAt.Valid {
 			at := resolvedAt.Int64
@@ -364,7 +368,10 @@ func scanViolations(rows *sql.Rows) ([]Violation, error) {
 		}
 		out = append(out, v)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("scan violations: iterate rows: %w", err)
+	}
+	return out, nil
 }
 
 // ScanResult is what one ReconcileScan pass did: how many observations it was
@@ -481,17 +488,20 @@ func (s *Store) ackedFingerprints(ctx context.Context, paths []string, baseline,
 		` AND resolution != ? AND baseline = ? AND worktree = ?`
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("acked fingerprints: query: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var path, fp string
 		if err := rows.Scan(&path, &fp); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("acked fingerprints: scan: %w", err)
 		}
 		out[path+"\x00"+fp] = struct{}{}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("acked fingerprints: iterate rows: %w", err)
+	}
+	return out, nil
 }
 
 // authorizedPaths is the set of observed paths something live covers — a live

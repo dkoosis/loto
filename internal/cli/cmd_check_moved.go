@@ -66,7 +66,7 @@ func loadMovedPaths(ctx context.Context, repoTop, oldHead, newHead string) ([]st
 	}
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load moved paths: run git: %w", err)
 	}
 	var paths []string
 	for p := range strings.SplitSeq(strings.TrimRight(string(out), "\x00"), "\x00") {

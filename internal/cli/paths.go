@@ -101,7 +101,7 @@ func pinSlug(repoTop, slug string) {
 	// gh#131). atomicfile owns that sequence and adds F_FULLFSYNC on darwin.
 	// Best-effort: the caller uses the slug it computed regardless, so a write
 	// failure must not abort.
-	_ = atomicfile.WriteFile(pinFile, []byte(slug+"\n"), 0o600)
+	_ = atomicfile.WriteFile(pinFile, []byte(slug+"\n"), 0o600) //nolint:errcheck // best-effort pin write; the caller uses the computed slug regardless
 }
 
 func gitCommonDirFile(repoTop, name string) string {
@@ -267,7 +267,11 @@ func resolveTargetFrom(cc *caseCache, base, repoTop, raw string, prov domain.Pro
 func canonicalizeCLIToken(base, repoTop, raw string, prov domain.Provenance) (domain.Target, error) {
 	if repoTop == "" || filepath.IsAbs(raw) {
 		// No repo frame, or a token that carries its own base: today's path.
-		return domain.CanonicalizeFrom(normalizeRepoPath(raw, repoTop), prov)
+		t, err := domain.CanonicalizeFrom(normalizeRepoPath(raw, repoTop), prov)
+		if err != nil {
+			return t, fmt.Errorf("canonicalize cli token: canonicalize from: %w", err)
+		}
+		return t, nil
 	}
 	// Spelling verdicts are base-independent and are decided on the RAW token;
 	// positional verdicts are base-dependent and are re-decided after the join.
@@ -278,7 +282,7 @@ func canonicalizeCLIToken(base, repoTop, raw string, prov domain.Provenance) (do
 		case errors.Is(err, domain.ErrTargetIsRepoRoot), errors.Is(err, domain.ErrRepoEscape):
 			// positional: base-dependent, re-decided below
 		default:
-			return domain.Target{}, err
+			return domain.Target{}, fmt.Errorf("canonicalize clitoken: canonicalize from: %w", err)
 		}
 	}
 	if base == "" {
@@ -288,7 +292,11 @@ func canonicalizeCLIToken(base, repoTop, raw string, prov domain.Provenance) (do
 	if err != nil {
 		return domain.Target{}, err
 	}
-	return domain.CanonicalizeFrom(rel, prov)
+	t, err := domain.CanonicalizeFrom(rel, prov)
+	if err != nil {
+		return t, fmt.Errorf("canonicalize cli token: canonicalize from: %w", err)
+	}
+	return t, nil
 }
 
 // repoRelFromBase joins a relative token to its base and expresses the result
@@ -301,7 +309,7 @@ func canonicalizeCLIToken(base, repoTop, raw string, prov domain.Provenance) (do
 func repoRelFromBase(base, repoTop, raw string) (string, error) {
 	absTop, err := filepath.Abs(repoTop)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("repo rel from base: abs: %w", err)
 	}
 	// Same reason as normalizeRepoPath: /var vs /private/var on macOS, and any
 	// other symlinked checkout root.
@@ -319,7 +327,7 @@ func repoRelFromBase(base, repoTop, raw string) (string, error) {
 	absP := resolveAncestors(filepath.Join(absBase, raw))
 	rel, err := filepath.Rel(absTop, absP)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("repo rel from base: rel: %w", err)
 	}
 	if rel == "." {
 		return ".", nil // Canonicalize answers ErrTargetIsRepoRoot

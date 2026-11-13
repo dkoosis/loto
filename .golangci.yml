@@ -11,6 +11,11 @@ linters:
   default: standard
 
   enable:
+    # Fleet floor additions (repo-standard v0.4.0)
+    - dupl
+    - godoclint
+    - wrapcheck
+
     # Error handling
     - err113
     - errchkjson
@@ -90,6 +95,7 @@ linters:
 
   settings:
     errcheck:
+      check-blank: true
       exclude-functions:
         - (io.Closer).Close
         - (*os.File).Close
@@ -106,15 +112,16 @@ linters:
       # bugclasses pack (ccp-sbp, decision nug d7ea466a8172): the ruleguard
       # checker runs the shared machine rules for the recurring cross-repo Go
       # defect classes. Rules live in .golangci-rules/bugclasses.go — a verbatim
-      # copy of the upstream pack; drift-guarding moved into conform (sd-th5.15).
+      # copy of the upstream pack; drift-guarding is repo-standard's lint-pack rule.
       enabled-checks:
         - ruleguard
       settings:
         ruleguard:
           # ${base-path} = the .golangci.yml directory (golangci-lint v2). The
-          # glob names ONLY bugclasses.go, so rule 2 (raw-state-write, the
-          # opt-in file) stays off until loto moves durable state to atomicfile.
-          rules: "${base-path}/.golangci-rules/bugclasses.go,${base-path}/.golangci-rules/modern.go"
+          # glob names the pack files, including optin_rawstatewrite.go (rule 2,
+          # raw os.WriteFile of durable state), which loto must run because it
+          # requires github.com/dkoosis/atomicfile.
+          rules: "${base-path}/.golangci-rules/bugclasses.go,${base-path}/.golangci-rules/modern.go,${base-path}/.golangci-rules/optin_rawstatewrite.go"
           # Fail the run on rule-compile errors — never silently skip them.
           failOn: dsl
       disabled-checks:
@@ -185,6 +192,12 @@ linters:
       - legacy
       - std-error-handling
     rules:
+      # check-blank applies to non-test code only (the lintbrush baseline's entry).
+      - path: _test\.go$
+        linters:
+          - errcheck
+        text: Error return value
+        source: '(^|[^A-Za-z0-9_.])_\s*(,\s*[A-Za-z0-9_]+\s*)*(:=|=[^=])|,\s*_\s*(:=|=[^=])'
       # gosec G703 (taint analysis, new in golangci-lint v2.14) traces the
       # operator's own DB path into the store's file ops. That path is
       # trusted config, not input, and every file the store opens derives from it.

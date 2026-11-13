@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"loto/internal/domain"
@@ -51,7 +52,7 @@ func (s *Store) withLockBatchTx(ctx context.Context, targets []domain.Target, li
 		return err
 	}
 	if err := tx.Commit(); err != nil {
-		return err
+		return fmt.Errorf("with lock batch tx: commit: %w", err)
 	}
 	flock.release()
 	return nil

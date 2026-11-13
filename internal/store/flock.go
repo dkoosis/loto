@@ -45,7 +45,7 @@ func (h *opFlock) release() {
 	if h == nil || h.f == nil {
 		return
 	}
-	_ = syscall.Flock(int(h.f.Fd()), syscall.LOCK_UN)
+	_ = syscall.Flock(int(h.f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock; closing the fd on the next line drops the lock anyway
 	_ = h.f.Close()
 	h.f = nil
 }
@@ -104,7 +104,7 @@ func acquireOpFlock(ctx context.Context, path string, stderrW io.Writer) (*opFlo
 		select {
 		case <-ctx.Done():
 			f.Close()
-			return nil, ctx.Err()
+			return nil, fmt.Errorf("flock wait: %w", ctx.Err())
 		case <-time.After(jitter(backoff)):
 		}
 		backoff = nextBackoff(backoff)

@@ -29,7 +29,7 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	defer rt.Close()
 	defer rt.DeferredTagFooter(stdout)
 
-	repoTop, _ := repoTopForCwd(ctx)
+	repoTop, _ := repoTopForCwd(ctx) //nolint:errcheck // outside a repo repoTop stays empty, which the callers treat as no repo
 	fmt.Fprintf(stdout, "project: %s\n", ResolveAndPinProjectSlug(repoTop))
 	fmt.Fprintf(stdout, "repo:    %s\n", repoTop)
 	fmt.Fprintf(stdout, "state:   %s\n", rt.StateDir)
@@ -206,7 +206,7 @@ func printStatusLocks(stdout io.Writer, rt *runtime, all []domain.LockRecord, mi
 	for i := range all {
 		canonicals[i] = domain.Canonical(all[i].Target.Canonical)
 	}
-	tagsByTarget, _ := rt.Store.ListAliveByTargets(rt.Ctx, canonicals)
+	tagsByTarget, _ := rt.Store.ListAliveByTargets(rt.Ctx, canonicals) //nolint:errcheck // tags only decorate the listing; a lookup failure shows none
 	for i := range all {
 		l := &all[i]
 		// branch= names the tree the holder locked from (loto-16cf); omitted

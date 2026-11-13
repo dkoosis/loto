@@ -117,7 +117,7 @@ func printDoctorEnforcementStats(rt *runtime, stdout, stderr io.Writer) {
 // doctor run needs to know whether an outdated binary caused it, which the
 // row can't say if it only prints after the calls that might fail.
 func printDoctorBinaryIdentity(ctx context.Context, stdout io.Writer) string {
-	repoTop, _ := repoTopForCwd(ctx)
+	repoTop, _ := repoTopForCwd(ctx) //nolint:errcheck // outside a repo repoTop stays empty, which the callers treat as no repo
 	id := readBuildIdentity()
 	renderBinaryIdentity(stdout, repoTop, id, checkBinaryStaleness(ctx, repoTop, id))
 	return repoTop
@@ -174,7 +174,7 @@ func cmdDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	// write verbs' GCSessionsIfDue (openRuntimeGC, sd-kx5) which skips most
 	// calls via a marker file — this is the "fix it now" tool, so it must not
 	// defer to that marker. The read path runs neither.
-	sessionsReaped, sessionsResidual, _ := identity.GCSessions(time.Now(), string(rt.SessionUUID), lockOwnerUUIDs(ctx, rt.Store))
+	sessionsReaped, sessionsResidual, _ := identity.GCSessions(time.Now(), string(rt.SessionUUID), lockOwnerUUIDs(ctx, rt.Store)) //nolint:errcheck // best-effort reap; the residual count reports what is left
 
 	live := rt.liveProbe()
 
@@ -431,7 +431,7 @@ func gitLsFiles(ctx context.Context, root string) (stdout string, warnings []str
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 	if runErr := cmd.Run(); runErr != nil {
-		return "", nil, runErr
+		return "", nil, fmt.Errorf("git ls files: run: %w", runErr)
 	}
 	for line := range strings.SplitSeq(strings.TrimSpace(errBuf.String()), "\n") {
 		if line != "" {
@@ -503,7 +503,7 @@ type claimResidue struct {
 func scanClaimResidue(rt *runtime, repoTop string) ([]claimResidue, error) {
 	claims, err := rt.Store.ListCandidateClaims(rt.Ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("scan claim residue: list candidate claims: %w", err)
 	}
 	if len(claims) == 0 {
 		return nil, nil
@@ -513,7 +513,7 @@ func scanClaimResidue(rt *runtime, repoTop string) ([]claimResidue, error) {
 	}
 	ids, err := gate.ListCandidateIDs(rt.Ctx, repoTop)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("scan claim residue: list candidate ids: %w", err)
 	}
 	live := make(map[string]struct{}, len(ids))
 	for _, id := range ids {

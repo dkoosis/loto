@@ -37,7 +37,7 @@ func (h *holdRefList) String() string { return domain.FormatHoldRefs(*h) }
 func (h *holdRefList) Set(v string) error {
 	ref, err := domain.ParseHoldRef(v)
 	if err != nil {
-		return err
+		return fmt.Errorf("set: parse hold ref: %w", err)
 	}
 	if slices.Contains(*h, ref) {
 		return fmt.Errorf("%w: %s", errDuplicateExpectHolder, ref)
@@ -141,7 +141,7 @@ func cmdUnlock(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	// repo-relative canonical key, exactly like lock/check/status/tag. Without
 	// this, `loto unlock /abs/path` hits ErrRepoEscape and the lock acquired by
 	// the same absolute path is never released (loto-tel0).
-	repoTop, _ := repoTopForCwd(ctx)
+	repoTop, _ := repoTopForCwd(ctx) //nolint:errcheck // outside a repo repoTop stays empty, which the callers treat as no repo
 	if *force {
 		return breakTargets(rt, fs.Args(), *intent, repoTop, expect, stdout, stderr)
 	}

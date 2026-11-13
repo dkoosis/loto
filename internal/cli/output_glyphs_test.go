@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,7 +38,7 @@ func TestNoBannedGlyphsInSource(t *testing.T) {
 			}
 			f, err := os.Open(path)
 			if err != nil {
-				return err
+				return fmt.Errorf("test no banned glyphs in source: open: %w", err)
 			}
 			defer f.Close()
 			scanner := bufio.NewScanner(f)

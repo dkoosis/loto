@@ -77,7 +77,7 @@ func cmdLock(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "✗ --ttl must be positive, got %s\n", *ttl)
 		return 2
 	}
-	repoTop, _ := repoTopForCwd(ctx)
+	repoTop, _ := repoTopForCwd(ctx) //nolint:errcheck // outside a repo repoTop stays empty, which the callers treat as no repo
 	if fs.NArg() == 0 {
 		if mistaken := mistypedDashTTargets(args, repoTop); len(mistaken) > 0 {
 			emitDashTIsIntentHint(stderr, mistaken)

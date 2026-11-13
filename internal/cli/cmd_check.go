@@ -113,7 +113,7 @@ func checkPreflight(ctx context.Context, args []string, stdout, stderr io.Writer
 	// with cmd.Dir = repoTop (loto-jff, gh#128). Without that pin, the staged
 	// diff inherits process cwd and reads the wrong repo's index in worktree /
 	// nested-launch / scripted-invocation scenarios.
-	repoTop, _ = repoTopForCwd(ctx)
+	repoTop, _ = repoTopForCwd(ctx) //nolint:errcheck // outside a repo repoTop stays empty, which the callers treat as no repo
 
 	// The provenance fork, in one place: tokens the CALLER typed resolve against
 	// the caller's cwd, tokens git produced (cmd.Dir=repoTop) are already

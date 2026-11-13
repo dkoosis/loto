@@ -2,8 +2,8 @@
 #
 # Primary: scan check audit report deploy doctor cross
 #   scan   — changed pkgs only (fast inner loop)
-#   check  — full repo: vet + lint + arch + test + build + conform-to-sdlc
-#   audit  — everything: +race +vuln +dupl +nilcheck
+#   check  — full repo: vet + lint + arch + test + build + repo-standard
+#   audit  — everything: +race +fuzz +dupe +nilcheck +deadcode +omitempty +vuln
 # Run `make help` for full target list.
 
 .DEFAULT_GOAL := check
@@ -30,8 +30,18 @@ include .sandbox/lib/Makefile.doctor.mk
 include .sandbox/lib/Makefile.cross.mk
 
 .PHONY: help scan check audit deploy report report-human \
-        vet lint arch test race demo demo-v vuln dupl nilcheck stress perf scriptcheck \
-        docscheck makefilecheck selfcheck build install tidy clean hooks pack-drift
+        vet lint arch test race fuzz demo demo-v vuln dupe nilcheck deadcode omitempty stress perf scriptcheck \
+        docscheck makefilecheck standard build install tidy clean hooks
+
+# Pinned gate tools: each runs as `go run <pkg>@$(<TOOL>_VER)` or `npx`, so a
+# green gate means the tool ran at this version.
+GOARCHLINT_VER := v1.15.0
+NILAWAY_VER := v0.0.0-20260918162853-acb8859b9031
+GOVULNCHECK_VER := v1.9.0
+DEADCODE_VER := v0.52.0
+JSCPD_VER := 5.1.2
+REPO_STANDARD_VER := v0.4.0
+OMITEMPTYSCALAR_VER := v0.4.0
 
 BIN_DIR := bin
 BIN     := $(BIN_DIR)/loto
@@ -88,7 +98,7 @@ REPORT_CMD = set +e; \
 	echo '--- tool:vet format:sarif ---'; \
 	go vet $(PKG) 2>&1 | fo wrap diag --tool vet --level error; echo; \
 	echo '--- tool:lint format:sarif ---'; \
-	golangci-lint run --output.sarif.path=/dev/stdout $(PKG) 2>/dev/null; echo; \
+	golangci-lint run --output.sarif.path=stdout $(PKG) 2>/dev/null; echo; \
 	echo '--- tool:test format:testjson ---'; \
 	go test -race -json -cover -count=1 $(PKG) 2>&1; echo
 
@@ -101,13 +111,14 @@ help: ## Show this help
 		/^## [^-]/ { printf "\n%s\n", substr($$0, 4) } \
 		/^[a-zA-Z0-9_-]+:.*?## / { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-check: vet lint arch test build docscheck scriptcheck makefilecheck pack-drift selfcheck ## Full repo: vet + lint + arch + test + build + docs + scripts + pack-drift + conform-to-sdlc
+check: vet lint arch test build docscheck scriptcheck makefilecheck standard ## Full repo: vet + lint + arch + test + build + docs + scripts + repo-standard
 	@echo "=== check pass ==="
 
-# Dogfood the fleet gate (sd-th5.15): conform-to-sdlc is pinned as a go.mod tool
-# dependency (go.sum-verified); bumping the pin is a deliberate PR.
-selfcheck: ## Run conform-to-sdlc (fleet SDLC checker) against this repo
-	go tool conform-to-sdlc
+# Dogfood the fleet gate: repo-standard runs at the pinned REPO_STANDARD_VER and
+# is the last prerequisite of check, so it grades the tree the rest of the gate
+# passed. Bumping the pin is a deliberate PR.
+standard: ## Run repo-standard (fleet SDLC checker) against this repo
+	go run github.com/dkoosis/repo-standard/cmd/repo-standard@$(REPO_STANDARD_VER)
 
 # Catches README drift against the Makefile/CLI it describes (loto-qo0y):
 # a documented `make <target>` that no longer exists, a `# go ...` comment
@@ -142,7 +153,7 @@ scriptcheck: ## Test the build-tooling shell scripts (scripts/*_test.sh)
 makefilecheck: ## Every piped recipe line gates the same under make 3.81 and 4.x
 	@bash scripts/makefile_check.sh
 
-audit: check race vuln dupl nilcheck demo ## Exhaustive: +race +vuln +dupl +nilcheck +demo
+audit: check race fuzz dupe nilcheck deadcode omitempty vuln demo ## Exhaustive: +race +fuzz +dupe +nilcheck +deadcode +omitempty +vuln +demo
 	@echo "=== audit pass ==="
 
 demo: ## Run CLI primitive demos (fo-rendered: triage line, not the full transcript)
@@ -188,13 +199,9 @@ ARCH_JSON := $(CACHE_DIR)/archcheck.json
 # GOTOOLCHAIN to go.mod's own version for this one invocation makes the
 # child `go list` calls match CI's toolchain without touching the
 # go-arch-lint version pin at all (loto-scmj).
-arch: ## Enforce layering (.go-arch-lint.yml)
-	@if ! command -v go-arch-lint >/dev/null 2>&1; then \
-		echo "go-arch-lint not installed; 'go install github.com/fe3dback/go-arch-lint@v1.15.0'"; \
-		exit 1; \
-	fi
+arch: ## Enforce layering (.go-arch-lint.yml, go-arch-lint pinned)
 	@mkdir -p $(CACHE_DIR)
-	@set -o pipefail; GOTOOLCHAIN=go$(GOMOD_VER) go-arch-lint check --json 2>/dev/null | tee $(ARCH_JSON) | fo wrap archlint | fo --format llm
+	@set -o pipefail; GOTOOLCHAIN=go$(GOMOD_VER) go run github.com/fe3dback/go-arch-lint@$(GOARCHLINT_VER) check --json 2>/dev/null | tee $(ARCH_JSON) | fo wrap archlint | fo --format llm
 	@jq -e '.Payload.ArchHasWarnings == false' $(ARCH_JSON) >/dev/null || { \
 		echo "✗ go-arch-lint found warnings the fo summary above did not render (loto-lu52 — fo's archlint wrapper drops ArchWarningsNotMatched into an empty SARIF results array):"; \
 		jq '.Payload | {ArchWarningsNotMatched, ArchWarningsDeps, ArchWarningsDeepScan}' $(ARCH_JSON); \
@@ -207,14 +214,14 @@ arch: ## Enforce layering (.go-arch-lint.yml)
 # loto-46x1: a PATH/pin mismatch used to print a ⚠ naming the drift and then
 # run the unpinned binary anyway — findings silently drifted from CI's while
 # the gate reported clean. scripts/lint-locked (ported from ferret#160; also
-# GOLANGCILINT in conform-to-sdlc/mnemd) closes that: on a mismatch it builds
+# GOLANGCILINT in repo-standard/mnemd) closes that: on a mismatch it builds
 # the PINNED version once (`go run …@vX.Y.Z`, cached under Go's module cache
 # outside this mutex) and execs that instead, so the binary that runs always
 # matches the pin — no separate install step, no manual chmod.
 GOLANGCILINT := bash scripts/lint-locked
 
 lint: ## Run golangci-lint (full)
-	@$(GATE) lint sarif -- $(GOLANGCILINT) run --output.sarif.path=/dev/stdout $(PKG)
+	@$(GATE) lint sarif -- $(GOLANGCILINT) run --output.sarif.path=stdout $(PKG)
 
 # -count=1 defeats Go's test cache, so every local `make check` re-ran the whole
 # suite — 81s of the ~150s total, paid again for a one-line docs edit, and paid
@@ -245,35 +252,43 @@ stress: ## Concurrent-agent conformance gauntlet (build-tag stress)
 perf: ## Wall-clock bounds (build-tag perf; host-dependent, so never in check or CI)
 	go test -tags=perf -run 'TestHook_PrePostMedianUnder50msAt300KB|TestHook_EditDecidesUnder10msAt200Holds' -count=1 -v ./internal/cli
 
-vuln: ## Scan for known vulnerabilities (fo-rendered)
-	@if ! command -v govulncheck >/dev/null 2>&1; then \
-		echo "govulncheck not installed (install: go install golang.org/x/vuln/cmd/govulncheck@latest)"; \
-		exit 1; \
-	fi
+vuln: ## Scan for known vulnerabilities (govulncheck, pinned; fo-rendered)
 	@echo "--- vuln (govulncheck) ---"
-	@$(GATE) vuln sarif -- govulncheck -format sarif ./...
+	@$(GATE) vuln sarif -- go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VER) -format sarif ./...
 
-# ‡ The skip and the run live in ONE recipe line. Make gives each line its own
-# shell, so an `exit 0` on the detection line ends only that shell — the next
-# line then ran the missing tool anyway and died on "command not found". The
-# same shape is safe under `exit 1` (arch, lint, vuln): make stops there.
-dupl: ## Detect duplicate code (jscpd; fo-rendered; skips if not installed — dev-only)
-	@echo "--- dupl (jscpd) ---"
-	@set -o pipefail; if ! command -v jscpd >/dev/null 2>&1; then \
-		echo "+ dupl: jscpd not installed — skipped (npm i -g jscpd)"; \
-	else \
-		rm -rf .jscpd-tmp; \
-		jscpd . --silent --reporters json --output .jscpd-tmp >/dev/null 2>&1 || true; \
-		fo wrap jscpd <.jscpd-tmp/jscpd-report.json | fo --format llm; \
-	fi
+# jscpd runs at the pinned version (npx fetches it, so this needs the network)
+# and never skips.
+dupe: ## Detect duplicate code (jscpd, pinned; fo-rendered)
+	@echo "--- dupe (jscpd) ---"
+	@set -o pipefail; rm -rf .jscpd-tmp; \
+		npx --yes jscpd@$(JSCPD_VER) . --silent --reporters json --output .jscpd-tmp >/dev/null 2>&1 || true; \
+		fo wrap jscpd <.jscpd-tmp/jscpd-report.json | fo --format llm
 
-nilcheck: ## Run nilaway (fo-rendered; skips if not installed — dev-only)
+nilcheck: ## Run nilaway (pinned; fo-rendered)
 	@echo "--- nilcheck (nilaway) ---"
-	@if ! command -v nilaway >/dev/null 2>&1; then \
-		echo "+ nilcheck: nilaway not installed — skipped (go install go.uber.org/nilaway/cmd/nilaway@latest)"; \
-	else \
-		$(GATE) nilaway diag -- nilaway -include-pkgs=loto -test=false ./...; \
-	fi
+	@$(GATE) nilcheck diag -- go run go.uber.org/nilaway/cmd/nilaway@$(NILAWAY_VER) -include-pkgs=loto -test=false ./...
+
+# Runs each Fuzz function it finds, FUZZTIME apiece.
+FUZZTIME ?= 10s
+fuzz: ## Fuzz every Fuzz test (FUZZTIME=10s each)
+	@set -e; \
+	for pkg in $$(go list ./...); do \
+		list=$$(go test -list '^Fuzz' $$pkg) || exit $$?; \
+		for f in $$(printf '%s\n' "$$list" | sed -n '/^Fuzz/p'); do \
+			echo "fuzz $$pkg $$f"; \
+			go test -run '^$$' -fuzz "^$$f$$" -fuzztime=$(FUZZTIME) $$pkg; \
+		done; \
+	done
+
+# deadcode lists each function no path from main reaches, and exits 0 either way,
+# so the target fails on any output.
+deadcode: ## Fail on any function unreachable from main (deadcode, pinned)
+	@out=$$(go run golang.org/x/tools/cmd/deadcode@$(DEADCODE_VER) ./cmd/loto) || { echo "deadcode: could not run"; exit 1; }; \
+	if [ -n "$$out" ]; then echo "$$out"; echo "deadcode: the functions above are unreachable; cut them"; exit 1; fi
+
+# omitemptyscalar exits 3 on a ,omitempty tag on a bool (a false lost on write).
+omitempty: ## Fail on a bool field tagged omitempty (omitemptyscalar, pinned)
+	go run github.com/dkoosis/repo-standard/cmd/omitemptyscalar@$(OMITEMPTYSCALAR_VER) ./...
 
 ## ---------------------------------------------------------------------
 ## Build
@@ -361,6 +376,3 @@ scan: ## Vet + lint + test changed packages only (fast inner loop)
 		go test -count=1 -cover $$PKGS && \
 		echo "=== scan pass ==="; \
 	fi
-
-pack-drift: ## Fail if the copied lintbrush pack rules drifted from upstream (network-soft)
-	@.golangci-rules/check-pack-drift.sh

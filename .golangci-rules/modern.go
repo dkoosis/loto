@@ -18,7 +18,7 @@
 // rewrite is a pure substitution, a Suggest golangci-lint --fix can apply.
 // README.md carries the per-rule table with the use-modern-go guideline id.
 //
-//pack:version v1
+//pack:version v2
 package gorules
 
 import "github.com/quasilyte/go-ruleguard/dsl"
@@ -49,17 +49,15 @@ func timeSince(m dsl.Matcher) {
 // --- slices.Clone -----------------------------------------------------------
 
 //doc:summary hand-rolled slice copy via append onto an empty slice
-//doc:before  append([]T(nil), s...)
+//doc:before  append(s[:0:0], s...)
 //doc:after   slices.Clone(s)
 //doc:tags    modern
 func slicesClone(m dsl.Matcher) {
-	// Three spellings of the pre-1.21 idiom: append onto a nil conversion,
-	// onto an empty literal, or onto the zero-cap reslice of the source.
-	// $s must itself be a slice: append([]byte(nil), str...) copies a string
-	// and has no slices.Clone form.
+	// Only the zero-cap reslice of the source matches: it keeps nil as nil
+	// and empty as non-nil, as slices.Clone does. append([]T(nil), s...) and
+	// append([]T{}, s...) differ on nil/empty input, so --fix must not touch
+	// them. $s must itself be a slice.
 	m.Match(
-		`append([]$_(nil), $s...)`,
-		`append([]$_{}, $s...)`,
 		`append($s[:0:0], $s...)`,
 	).
 		Where(m["s"].Type.Is(`[]$_`)).

@@ -558,7 +558,7 @@ func TestSync_DeletesResidueAttributedToARejectedCandidate(t *testing.T) {
 	if !strings.Contains(out.String(), "ℹ target="+tcResidueNewGo+" action=delete candidate="+tcResidueCandidate) {
 		t.Errorf("deletion row must name path and candidate: %q", out.String())
 	}
-	if _, err := os.Stat(residue); !os.IsNotExist(err) {
+	if _, err := os.Stat(residue); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("attributed residue survived: %v", err)
 	}
 	if !strings.Contains(out.String(), "ℹ attribution=rejected-candidate-write-set+blob window=") {
@@ -1107,7 +1107,7 @@ func TestSync_WriteFailurePreservesExistingFile(t *testing.T) {
 	syncWriteFn = func(f *os.File, _ []byte) (int, error) {
 		n, err := f.WriteString("x")
 		if err != nil {
-			return n, err
+			return n, fmt.Errorf("test sync_write failure preserves existing file: write string: %w", err)
 		}
 		return n, writeErr
 	}

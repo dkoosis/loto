@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 
 	"golang.org/x/sys/unix"
@@ -21,5 +22,8 @@ func syncFull(f *os.File) error {
 	if _, err := unix.FcntlInt(f.Fd(), unix.F_FULLFSYNC, 0); err == nil {
 		return nil
 	}
-	return f.Sync()
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync full: sync: %w", err)
+	}
+	return nil
 }

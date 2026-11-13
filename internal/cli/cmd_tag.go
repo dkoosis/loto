@@ -84,7 +84,7 @@ func cmdTag(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	warnIfNoBeadID(text, stderr)
-	repoTop, _ := repoTopForCwd(ctx)
+	repoTop, _ := repoTopForCwd(ctx) //nolint:errcheck // outside a repo repoTop stays empty, which the callers treat as no repo
 
 	// A directory — the repo root included — is not a lockable target, so
 	// resolveCLITarget rejects it before any store call. That rejection is

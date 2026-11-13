@@ -221,41 +221,7 @@ func TestRecordCallPre_NeverResurrectsAnAlreadyExpiredLease(t *testing.T) {
 // and admission event under the shared 1000-row ceiling the same way
 // hook_timing did before HookTimingRetentionMax existed.
 func TestRotateEvents_LockRefreshedHasItsOwnCap(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-	now := time.Now()
-
-	// One low-rate row of another kind, written first so it is the OLDEST and
-	// therefore the first casualty of a global-cap-only rotation.
-	if _, err := s.AppendEvent(ctx, domain.Event{
-		Kind: EventGateBypass, ActorUUID: tcOwnerA, Reason: "seed", CreatedAt: now,
-	}); err != nil {
-		t.Fatalf("seed event: %v", err)
-	}
-	for i := range LockRefreshedRetentionMax + 50 {
-		if _, err := s.AppendEventRotating(ctx, domain.Event{
-			Kind: EventLockRefreshed, ActorUUID: tcOwnerA, Reason: "hook",
-			CreatedAt: now.Add(time.Duration(i+1) * time.Millisecond),
-		}); err != nil {
-			t.Fatalf("refreshed row %d: %v", i, err)
-		}
-	}
-
-	var refreshed, bypass int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM events WHERE event_kind = ?`, EventLockRefreshed).Scan(&refreshed); err != nil {
-		t.Fatalf("count refreshed: %v", err)
-	}
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM events WHERE event_kind = ?`, EventGateBypass).Scan(&bypass); err != nil {
-		t.Fatalf("count bypass: %v", err)
-	}
-	if refreshed != LockRefreshedRetentionMax {
-		t.Errorf("lock_refreshed rows = %d, want its cap of %d", refreshed, LockRefreshedRetentionMax)
-	}
-	if bypass != 1 {
-		t.Errorf("the hook evicted an unrelated kind: gate_bypass rows = %d, want 1", bypass)
-	}
+	assertKindHasOwnCap(t, EventLockRefreshed, LockRefreshedRetentionMax, "hook")
 }
 
 // TestRecordCallPre_RefreshScopedToCallWorktree (PR #373 review): one owner

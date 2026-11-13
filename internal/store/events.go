@@ -90,7 +90,7 @@ var evidenceKinds = []string{EventStagedGateFired, EventGuardOverride, EventRefA
 // evidenceKindsJSON is evidenceKinds as the JSON array rotateEventsTx binds
 // to json_each(?), so the SQL text stays constant whatever the list holds.
 func evidenceKindsJSON() string {
-	b, _ := json.Marshal(evidenceKinds) //nolint:errchkjson // a []string always marshals
+	b, _ := json.Marshal(evidenceKinds) //nolint:errchkjson,errcheck // a []string always marshals
 	return string(b)
 }
 
@@ -104,13 +104,13 @@ func rotateEventsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, `
 DELETE FROM events WHERE created_at < ?
    AND event_kind NOT IN (SELECT value FROM json_each(?))`, cutoffNs, ev); err != nil {
-		return err
+		return fmt.Errorf("rotate events tx: exec: %w", err)
 	}
 	evCutoffNs := now.Add(-EvidenceRetentionAge).UnixNano()
 	if _, err := tx.ExecContext(ctx, `
 DELETE FROM events WHERE created_at < ?
    AND event_kind IN (SELECT value FROM json_each(?))`, evCutoffNs, ev); err != nil {
-		return err
+		return fmt.Errorf("rotate events tx: exec: %w", err)
 	}
 	for _, k := range eventKindRetentionMax {
 		if _, err := tx.ExecContext(ctx, `
@@ -118,7 +118,7 @@ DELETE FROM events WHERE id IN (
   SELECT id FROM events WHERE event_kind = ?
    ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
 )`, k.kind, k.max); err != nil {
-			return err
+			return fmt.Errorf("rotate events tx: exec: %w", err)
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -126,14 +126,17 @@ DELETE FROM events WHERE id IN (
   SELECT id FROM events WHERE event_kind IN (SELECT value FROM json_each(?))
    ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
 )`, ev, EvidenceRetentionMaxRows); err != nil {
-		return err
+		return fmt.Errorf("rotate events tx: exec: %w", err)
 	}
 	_, err := tx.ExecContext(ctx, `
 DELETE FROM events WHERE id IN (
   SELECT id FROM events WHERE event_kind NOT IN (SELECT value FROM json_each(?))
    ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
 )`, ev, eventsRetentionMax)
-	return err
+	if err != nil {
+		return fmt.Errorf("rotate events tx: exec: %w", err)
+	}
+	return nil
 }
 
 // auditDetachedTimeout bounds best-effort audit writes that must survive
@@ -238,7 +241,10 @@ func (s *Store) AppendEvents(ctx context.Context, evs []domain.Event) error {
 	if err := appendEventsTx(ctx, tx, evs); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit events: %w", err)
+	}
+	return nil
 }
 
 // appendEventsRotating is AppendEvents plus the retention pass, in one tx
@@ -263,7 +269,10 @@ func (s *Store) appendEventsRotating(ctx context.Context, evs []domain.Event) er
 	if err := rotateEventsTx(ctx, tx, time.Now()); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("append events rotating: commit: %w", err)
+	}
+	return nil
 }
 
 func appendEventTx(ctx context.Context, tx *sql.Tx, e domain.Event) error {
@@ -282,7 +291,7 @@ func appendEventsTx(ctx context.Context, tx *sql.Tx, evs []domain.Event) error {
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO events(`+eventCols+`) VALUES (?,?,?,?,?,?,?,?)`,
 			evs[i].ID, evs[i].Target.Canonical, evs[i].Kind, evs[i].ActorUUID, subject, evs[i].Reason, evs[i].Detail, evs[i].CreatedAt.UnixNano()); err != nil {
-			return err
+			return fmt.Errorf("append events tx: exec: %w", err)
 		}
 	}
 	return nil
@@ -291,7 +300,7 @@ func appendEventsTx(ctx context.Context, tx *sql.Tx, evs []domain.Event) error {
 func (s *Store) EventsForTarget(ctx context.Context, t domain.Target) ([]domain.Event, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+eventCols+` FROM events WHERE target_canonical = ? ORDER BY created_at, id`, t.Canonical)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("events for target: query: %w", err)
 	}
 	defer rows.Close()
 	return scanEvents(rows)
@@ -300,7 +309,7 @@ func (s *Store) EventsForTarget(ctx context.Context, t domain.Target) ([]domain.
 func (s *Store) ListEvents(ctx context.Context) ([]domain.Event, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+eventCols+` FROM events ORDER BY created_at, id`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list events: query: %w", err)
 	}
 	defer rows.Close()
 	return scanEvents(rows)
@@ -316,7 +325,7 @@ func scanEvents(rows *sql.Rows) ([]domain.Event, error) {
 			createdNs int64
 		)
 		if err := rows.Scan(&e.ID, &canonical, &e.Kind, &e.ActorUUID, &subject, &e.Reason, &e.Detail, &createdNs); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan events: scan: %w", err)
 		}
 		e.Target = domain.Target{Canonical: canonical}
 		if subject.Valid {
@@ -325,5 +334,8 @@ func scanEvents(rows *sql.Rows) ([]domain.Event, error) {
 		e.CreatedAt = time.Unix(0, createdNs).UTC()
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("scan events: iterate rows: %w", err)
+	}
+	return out, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"loto/internal/domain"
@@ -78,7 +79,7 @@ func (s *Store) InsertTag(ctx context.Context, t NewTag) (string, error) {
 		return "", ErrNoHostLock
 	}
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("insert tag: scan: %w", err)
 	}
 
 	var n int
@@ -87,7 +88,7 @@ func (s *Store) InsertTag(ctx context.Context, t NewTag) (string, error) {
 		WHERE `+k.col("target_canonical")+` = ? AND lock_owner_uuid = ? AND lock_created_at = ?
 		  AND acked_at IS NULL`,
 		k.key(string(t.TargetCanonical)), t.LockOwnerUUID, t.LockCreatedAt).Scan(&n); err != nil {
-		return "", err
+		return "", fmt.Errorf("insert tag: scan: %w", err)
 	}
 	if n >= tagCap {
 		return "", ErrTagCapReached
@@ -101,10 +102,10 @@ func (s *Store) InsertTag(ctx context.Context, t NewTag) (string, error) {
 		VALUES(?,?,?,?,?,?,?)`,
 		id, string(t.TargetCanonical), t.LockOwnerUUID, t.LockCreatedAt,
 		t.TaggerUUID, t.Text, now); err != nil {
-		return "", err
+		return "", fmt.Errorf("insert tag: exec: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return "", err
+		return "", fmt.Errorf("insert tag: commit: %w", err)
 	}
 	return id, nil
 }
@@ -128,7 +129,7 @@ func (s *Store) ListAliveForOwner(ctx context.Context, ownerUUID domain.AgentUUI
 		  AND t.acked_at IS NULL
 		ORDER BY t.created_at ASC, t.id ASC`, owner, owner)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list alive for owner: query: %w", err)
 	}
 	defer rows.Close()
 	return scanTags(rows)
@@ -163,7 +164,7 @@ func (s *Store) ListAliveByTargets(ctx context.Context, canonicals []domain.Cano
 		` WHERE `+k.col("t.target_canonical")+` IN (`+placeholders+`) AND t.acked_at IS NULL`+
 		` ORDER BY t.created_at ASC, t.id ASC`, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list alive by targets: query: %w", err)
 	}
 	defer rows.Close()
 	all, err := scanTags(rows)
@@ -194,7 +195,7 @@ func (s *Store) ListAliveForTarget(ctx context.Context, targetCanonical domain.C
 		` WHERE `+k.col("t.target_canonical")+` = ? AND t.acked_at IS NULL`+
 		` ORDER BY t.created_at ASC, t.id ASC`, k.key(string(targetCanonical)))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list alive for target: query: %w", err)
 	}
 	defer rows.Close()
 	return scanTags(rows)
@@ -208,7 +209,7 @@ func scanTags(rows *sql.Rows) ([]Tag, error) {
 		var acked sql.NullInt64
 		if err := rows.Scan(&t.ID, &canonical, &t.LockOwnerUUID, &t.LockCreatedAt,
 			&t.TaggerUUID, &t.Text, &t.CreatedAt, &acked); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan tags: scan: %w", err)
 		}
 		t.TargetCanonical = domain.Canonical(canonical)
 		if acked.Valid {
@@ -217,7 +218,10 @@ func scanTags(rows *sql.Rows) ([]Tag, error) {
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("scan tags: iterate rows: %w", err)
+	}
+	return out, nil
 }
 
 // ackClassifyHook fires between the UPDATE and the classifying SELECT inside
@@ -248,11 +252,11 @@ func (s *Store) Ack(ctx context.Context, tagID string, byUUID domain.AgentUUID) 
 		WHERE id = ? AND lock_owner_uuid = ? AND acked_at IS NULL`,
 		now, tagID, by)
 	if err != nil {
-		return err
+		return fmt.Errorf("ack: exec: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return fmt.Errorf("ack: rows affected: %w", err)
 	}
 	if n > 0 {
 		return commitTxFn(tx)
@@ -269,7 +273,7 @@ func (s *Store) Ack(ctx context.Context, tagID string, byUUID domain.AgentUUID) 
 		return nil // unknown id → no-op (edge #11)
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("ack: scan: %w", err)
 	}
 	if owner.String != by {
 		return ErrTagNotMine

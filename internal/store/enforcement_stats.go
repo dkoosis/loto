@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"slices"
 	"time"
@@ -107,7 +108,7 @@ func (s *Store) readEnforcementCounts(ctx context.Context, cutoff int64, out *En
 		cutoff, EventRefRefused, EventRefRefusedOverridden,
 		EventTreeChangeReported, EventTreeChangeActed, EventPostMissing)
 	if err != nil {
-		return err
+		return fmt.Errorf("read enforcement counts: query: %w", err)
 	}
 	defer rows.Close()
 
@@ -115,7 +116,7 @@ func (s *Store) readEnforcementCounts(ctx context.Context, cutoff int64, out *En
 		var kind string
 		var n int
 		if err := rows.Scan(&kind, &n); err != nil {
-			return err
+			return fmt.Errorf("read enforcement counts: scan: %w", err)
 		}
 		switch kind {
 		case EventRefRefused:
@@ -130,7 +131,10 @@ func (s *Store) readEnforcementCounts(ctx context.Context, cutoff int64, out *En
 			out.PostMissing = n
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read enforcement counts: iterate rows: %w", err)
+	}
+	return nil
 }
 
 // readPostMissingResolved counts post_missing_resolved rows and their mean
@@ -141,7 +145,7 @@ func (s *Store) readPostMissingResolved(ctx context.Context, cutoff int64) (coun
 		`SELECT detail FROM events WHERE created_at >= ? AND event_kind = ?`,
 		cutoff, EventPostMissingResolved)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("read post missing resolved: query: %w", err)
 	}
 	defer rows.Close()
 
@@ -149,7 +153,7 @@ func (s *Store) readPostMissingResolved(ctx context.Context, cutoff int64) (coun
 	for rows.Next() {
 		var detail string
 		if err := rows.Scan(&detail); err != nil {
-			return 0, 0, err
+			return 0, 0, fmt.Errorf("read post missing resolved: scan: %w", err)
 		}
 		count++
 		var d postMissingDetail
@@ -158,7 +162,7 @@ func (s *Store) readPostMissingResolved(ctx context.Context, cutoff int64) (coun
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("read post missing resolved: iterate rows: %w", err)
 	}
 	if count > 0 {
 		meanAge = time.Duration(ageSum/int64(count)) * time.Millisecond
@@ -211,7 +215,7 @@ func (s *Store) readHookTimingPerCall(ctx context.Context, cutoff int64) (map[st
 		`SELECT reason, detail FROM events WHERE created_at >= ? AND event_kind = ?`,
 		cutoff, EventHookTiming)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read hook timing per call: query: %w", err)
 	}
 	defer rows.Close()
 
@@ -219,7 +223,7 @@ func (s *Store) readHookTimingPerCall(ctx context.Context, cutoff int64) (map[st
 	for rows.Next() {
 		var reason, detail string
 		if err := rows.Scan(&reason, &detail); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read hook timing per call: scan: %w", err)
 		}
 		var d hookTimingPayload
 		if json.Unmarshal([]byte(detail), &d) != nil || d.CallID == "" {
@@ -238,7 +242,10 @@ func (s *Store) readHookTimingPerCall(ctx context.Context, cutoff int64) (map[st
 		}
 		a.lockedBytes = max(a.lockedBytes, d.LockedBytes)
 	}
-	return byCall, rows.Err()
+	if err := rows.Err(); err != nil {
+		return byCall, fmt.Errorf("read hook timing per call: iterate rows: %w", err)
+	}
+	return byCall, nil
 }
 
 // percentileMS returns the nearest-rank percentile p (0-100) over sorted,

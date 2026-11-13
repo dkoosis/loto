@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"syscall"
@@ -36,12 +37,12 @@ var afterOpenHook = func(string) {}
 func safeOpenRegular(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open file: %w", err)
 	}
 	st, err := f.Stat()
 	if err != nil {
 		_ = f.Close()
-		return nil, err
+		return nil, fmt.Errorf("stat: %w", err)
 	}
 	if !st.Mode().IsRegular() {
 		_ = f.Close()
@@ -64,7 +65,7 @@ func safeOpenRegular(path string) (*os.File, error) {
 func permAfterNlinkCheck(f *os.File, path, op string) (os.FileMode, error) {
 	st, err := f.Stat()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("stat: %w", err)
 	}
 	if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Nlink > 1 {
 		return 0, &fs.PathError{Op: op, Path: path, Err: errMultiLinked}

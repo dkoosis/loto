@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -52,11 +53,11 @@ func readSidecar(dir string, pid int) (*ccSidecar, error) {
 	path := filepath.Join(dir, strconv.Itoa(pid)+".json")
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read file: %w", err)
 	}
 	var sc ccSidecar
 	if err := json.Unmarshal(b, &sc); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
 	return &sc, nil
 }

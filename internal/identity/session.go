@@ -2,6 +2,7 @@ package identity
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -112,12 +113,15 @@ func RecordSession(a *Agent, repoTop string) (*SessionRecord, error) {
 func writeSession(path string, rec *SessionRecord) error {
 	body, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("write session: marshal indent: %w", err)
 	}
 	if err := mkdirAllSync(sessionDir()); err != nil {
 		return err
 	}
-	return atomicfile.WriteFile(path, body, 0o600)
+	if err := atomicfile.WriteFile(path, body, 0o600); err != nil {
+		return fmt.Errorf("write session: write file: %w", err)
+	}
+	return nil
 }
 
 // RecordCheckout re-records the checkout session sid is working in, when it
@@ -397,7 +401,7 @@ var sessionGCMaxUnlink = 5000 //nolint:gochecknoglobals // test-tunable knob
 func GCSessions(now time.Time, keepSID string, pinned map[string]struct{}) (reaped, residual int, err error) {
 	entries, err := os.ReadDir(sessionDir())
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("gcsessions: read dir: %w", err)
 	}
 	cutoff := now.Add(-sessionGCMaxAge)
 	for _, e := range entries {
@@ -442,7 +446,7 @@ func GCSessionsIfDue(now time.Time, keepSID string, pinned map[string]struct{}) 
 	}
 	reaped, residual, err = GCSessions(now, keepSID, pinned)
 	if mkErr := mkdirAllSync(lotoHome()); mkErr == nil {
-		_ = os.WriteFile(marker, []byte(now.UTC().Format(time.RFC3339)+"\n"), 0o600)
+		_ = atomicfile.WriteFile(marker, []byte(now.UTC().Format(time.RFC3339)+"\n"), 0o600) //nolint:errcheck // the marker only throttles the next GC; a lost write means one extra GC
 	}
 	return true, reaped, residual, err
 }

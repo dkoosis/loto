@@ -3,6 +3,7 @@ package identity
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -67,7 +68,7 @@ func ClaudeSessions() ([]ClaudeSession, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("claude sessions: read dir: %w", err)
 	}
 	var out []ClaudeSession
 	for _, e := range entries {

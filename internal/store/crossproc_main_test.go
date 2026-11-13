@@ -10,6 +10,7 @@
 // cleanup, and the child watchdog — plus one smoke test proving the
 // mechanism on whichever OS runs it. Contract families (A/B/C) land in later
 // PRs, each adding rows to crossProcRoles rather than a second TestMain.
+
 package store
 
 import (
@@ -282,7 +283,10 @@ func (c *child) wait() (crossProcVerdict, error) {
 		return v, fmt.Errorf("crossproc: decode verdict: %w (wait=%s stdout=%q stderr=%q)",
 			decErr, waitMsg, c.stdout.String(), c.stderr.String())
 	}
-	return v, waitErr
+	if waitErr != nil {
+		return v, fmt.Errorf("wait for child: %w", waitErr)
+	}
+	return v, nil
 }
 
 // crossProcBarrier is the kernel-mediated release-N-processes-at-once

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"loto/internal/domain"
@@ -28,7 +29,7 @@ func (s *Store) LatestEventByKindActor(ctx context.Context, kind, actorUUID stri
 		  ORDER BY created_at DESC, id DESC LIMIT 1`,
 		kind, actorUUID, since.UnixNano())
 	if err != nil {
-		return domain.Event{}, false, err
+		return domain.Event{}, false, fmt.Errorf("latest event by kind actor: query: %w", err)
 	}
 	defer rows.Close()
 	evs, err := scanEvents(rows)

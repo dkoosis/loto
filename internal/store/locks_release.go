@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"maps"
 	"slices"
 	"sort"
@@ -84,7 +85,10 @@ func gcTagsForReclaimTx(ctx context.Context, tx *sql.Tx, stale domain.LockRecord
 	_, err := tx.ExecContext(ctx,
 		`DELETE FROM tags WHERE target_canonical = ? AND lock_owner_uuid = ? AND lock_created_at = ?`,
 		stale.Target.Canonical, string(stale.OwnerUUID), stale.CreatedAt.UnixNano())
-	return err
+	if err != nil {
+		return fmt.Errorf("gc tags for reclaim tx: exec: %w", err)
+	}
+	return nil
 }
 
 // applyOwnedReleasesTx acks tags, deletes the owned host-lock rows, and emits
@@ -222,7 +226,10 @@ func ackTagsForReleaseTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals
 		`   SELECT `+k.col("target_canonical")+`, owner_uuid, created_at FROM locks`+
 		`   WHERE `+k.col("target_canonical")+` IN (`+placeholders+`) AND owner_uuid = ? AND `+wtCond+
 		` )`, args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("ack tags for release tx: exec: %w", err)
+	}
+	return nil
 }
 
 // deleteOwnedTx removes `locks` rows for the given canonical paths owned by
@@ -240,7 +247,10 @@ func deleteOwnedTx(ctx context.Context, tx *sql.Tx, k keyMatch, canonicals []str
 	args = append(args, wtArgs...)
 	_, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE `+k.col("target_canonical")+` IN (`+placeholders+`) AND owner_uuid = ? AND `+wtCond, args...) //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 
-	return err
+	if err != nil {
+		return fmt.Errorf("delete owned tx: exec: %w", err)
+	}
+	return nil
 }
 
 // ReleaseBySession atomically releases all locks owned by byAgent in the given
@@ -283,7 +293,7 @@ func (s *Store) ReleaseBySession(ctx context.Context, agent domain.AgentUUID, se
 		return SessionRelease{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return SessionRelease{}, err
+		return SessionRelease{}, fmt.Errorf("release by session: commit: %w", err)
 	}
 
 	flock.release()
@@ -418,18 +428,21 @@ func loadSessionTargetsTx(ctx context.Context, tx *sql.Tx, byAgent, sessionUUID,
 	q += ` ORDER BY target_canonical`
 	rows, err := tx.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load session targets tx: query: %w", err)
 	}
 	defer rows.Close()
 	var out []sessionTarget
 	for rows.Next() {
 		var c sessionTarget
 		if err := rows.Scan(&c.Canonical, &c.Intent, &c.Worktree); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("load session targets tx: scan: %w", err)
 		}
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("load session targets tx: iterate rows: %w", err)
+	}
+	return out, nil
 }
 
 // andSessionClause narrows an owner-scoped query to one pinned session.

@@ -29,7 +29,7 @@ type Agent struct {
 // it never mints anything that persists. Returns ErrUnpinned when nothing pins an owner.
 func Ensure(ctx context.Context) (*Agent, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ensure: iterate rows: %w", err)
 	}
 	return ensureEnv()
 }

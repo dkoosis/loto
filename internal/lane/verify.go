@@ -110,7 +110,7 @@ func Verify(ctx context.Context, repoTop, commit string, cmd []string) (VerifyRe
 
 	// Learn the worktree's git admin dir so its absolute form can be scrubbed too;
 	// a non-fatal best effort (a tool that never prints it costs us nothing).
-	gitDir, _ := g.run(ctx, gitCall{args: []string{"-C", wt, gitRevParse, "--absolute-git-dir"}})
+	gitDir, _ := g.run(ctx, gitCall{args: []string{"-C", wt, gitRevParse, "--absolute-git-dir"}}) //nolint:errcheck // non-fatal best effort; a tool that never prints the git dir costs nothing
 
 	out, passed, err := runVerifyCmd(ctx, wt, cmd)
 	if err != nil {
@@ -148,7 +148,10 @@ func killVerifyGroup(pid int) error {
 	if errors.Is(err, syscall.ESRCH) {
 		return os.ErrProcessDone
 	}
-	return err
+	if err != nil {
+		return fmt.Errorf("kill verify group: kill: %w", err)
+	}
+	return nil
 }
 
 func runVerifyCmd(ctx context.Context, dir string, cmd []string) (string, bool, error) {
@@ -207,7 +210,7 @@ func runVerifyCmd(ctx context.Context, dir string, cmd []string) (string, bool, 
 	if ctx.Err() != nil {
 		return buf.String(), false, fmt.Errorf("%w: %w", errVerifyAborted, ctx.Err())
 	}
-	if _, ok := errors.AsType[*exec.ExitError](err); ok {
+	if _, ok := errors.AsType[*exec.ExitError](err); ok { //nolint:errcheck // only the type match matters, the *exec.ExitError value is unused
 		return buf.String(), false, nil
 	}
 	return buf.String(), false, fmt.Errorf("lane: verify command %q: %w", cmd[0], err)

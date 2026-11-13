@@ -25,6 +25,7 @@
 // between commit and restore for a peer to land in, and the choreography had
 // no signal left to synchronize on. The flock's remaining job — serializing
 // the tx — is already covered by A1.
+
 package store
 
 import (

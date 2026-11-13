@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"loto/internal/domain"
@@ -201,19 +202,19 @@ func refreshOwnLocksBelowHalfTTLTx(ctx context.Context, tx *sql.Tx, k keyMatch, 
 	q := `UPDATE locks SET expires_at = ? WHERE owner_uuid = ? AND expires_at > ? AND expires_at < ? AND ` + wtCond + ` AND ` + k.col("target_canonical") + ` IN (` + pathPH + `) RETURNING target_canonical` //nolint:gosec // G202 wtCond, col and pathPH are fixed SQL, all data via args
 	rows, err := tx.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("refresh own locks below half ttltx: query: %w", err)
 	}
 	defer rows.Close()
 	var targets []domain.Target
 	for rows.Next() {
 		var canon string
 		if err := rows.Scan(&canon); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("refresh own locks below half ttltx: scan: %w", err)
 		}
 		targets = append(targets, domain.Target{Canonical: canon})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("refresh own locks below half ttltx: iterate rows: %w", err)
 	}
 	if len(targets) == 0 {
 		return nil, nil
@@ -262,7 +263,7 @@ func (s *Store) commitRefreshes(ctx context.Context, extend []domain.Target, own
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE locks SET expires_at = ? WHERE owner_uuid = ? AND expires_at > ? AND `+wtCond+` AND `+k.col("target_canonical")+` IN (`+placeholders+`)`, //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 		args...); err != nil {
-		return err
+		return fmt.Errorf("commit refreshes: exec: %w", err)
 	}
 	if err := appendEventsTx(ctx, tx, events); err != nil {
 		return err
@@ -272,5 +273,8 @@ func (s *Store) commitRefreshes(ctx context.Context, extend []domain.Target, own
 	if err := rotateEventsTx(ctx, tx, now); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit refreshes: commit: %w", err)
+	}
+	return nil
 }

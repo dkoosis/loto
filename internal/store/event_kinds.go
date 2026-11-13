@@ -48,6 +48,7 @@ const (
 	// per class would need a CHECK-constraint migration every time the
 	// taxonomy grows, and would make "how many candidates were rejected at
 	// all" a query over a list someone has to remember to extend.
+
 	EventCandidateAccepted = "candidate_accepted"
 	EventCandidateRejected = "candidate_rejected"
 	// EventStagedGateFired was the firing counter behind `loto check --held`
@@ -58,7 +59,7 @@ const (
 	// answer one question — "is the three-shape denylist refusing the right
 	// things?" — and the answer is a RATIO, which is why both kinds exist
 	// rather than refusals alone.
-	//
+
 	// EventRefRefused is written by `loto hook ref` when the
 	// reference-transaction hook aborts a protected ref shape. Target is the
 	// ref name; ActorUUID the refused owner; Reason the shape

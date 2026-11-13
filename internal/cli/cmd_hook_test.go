@@ -103,6 +103,26 @@ func hookCallPaths(t *testing.T, callID string) (store.HookCall, map[string]stor
 	return call, byPath
 }
 
+// An absent pre-call record gives the post hook no extra paths to observe.
+func TestHookAddRecordedPaths_AbsentCallPreservesObservations(t *testing.T) {
+	withTempProject(t)
+	pinAgent(t)
+	rt, done := hookStoreRead(t)
+	defer done()
+	want := []store.HookPathState{{Path: tcTargetA, Digest: "observed-digest", Locked: true}}
+	var warn bytes.Buffer
+	got, err := hookAddRecordedPaths(rt, "never-recorded", want, &warn)
+	if err != nil {
+		t.Fatalf("absent call must be a no-op: %v", err)
+	}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("observations changed: got %+v, want %+v", got, want)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("absent call emitted warning: %s", &warn)
+	}
+}
+
 // The bead's first acceptance criterion, end to end: a synthetic pre then post
 // for one Bash call over a checkout with one locked file leaves ONE call
 // record carrying seq_pre, seq_post, and the pre and post digest of the locked

@@ -64,7 +64,7 @@ func cmdWhoami(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		// record is written with an empty repo, which reads as "not provably
 		// in any checkout" — I1 then counts the session out rather than
 		// refusing a peer's branch switch on a guess (loto-ea8y.4).
-		repoTop, _ := repoTopForCwd(ctx)
+		repoTop, _ := repoTopForCwd(ctx) //nolint:errcheck // outside a repo repoTop stays empty, which the callers treat as no repo
 		var rerr error
 		rec, rerr = identity.RecordSession(a, repoTop)
 		if rerr != nil {

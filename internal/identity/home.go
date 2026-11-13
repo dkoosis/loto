@@ -2,6 +2,7 @@ package identity
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -63,13 +64,16 @@ func sessionPath(sid string) (string, error) {
 func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
-		return err
+		return fmt.Errorf("sync dir: open: %w", err)
 	}
 	if err := d.Sync(); err != nil {
 		d.Close()
-		return err
+		return fmt.Errorf("sync dir: sync: %w", err)
 	}
-	return d.Close()
+	if err := d.Close(); err != nil {
+		return fmt.Errorf("sync dir: close: %w", err)
+	}
+	return nil
 }
 
 // mkdirAllSync is os.MkdirAll(dir, 0o700) plus an fsync of every newly-created
@@ -102,7 +106,7 @@ func mkdirAllSync(dir string) error {
 		p = parent
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+		return fmt.Errorf("mkdir all sync: mkdir all: %w", err)
 	}
 	// Fsync top-down (shallowest parent first): a level's entry must be durable
 	// in its parent before that level's own contents are flushed, else a crash

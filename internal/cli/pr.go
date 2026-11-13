@@ -190,7 +190,7 @@ func bridgeBead(ctx context.Context, repoTop string, o prOpts, pub prPublisher, 
 	built := b.Class == gate.BridgeBuildable
 	if built && !o.dryRun {
 		if err := gate.BuildBridge(ctx, gate.BridgeParams{RepoTop: repoTop, MainRef: o.base}, b); err != nil {
-			return prRow{}, err
+			return prRow{}, fmt.Errorf("bridge bead: build bridge: %w", err)
 		}
 	}
 	if o.dryRun {
@@ -206,11 +206,11 @@ func bridgeBead(ctx context.Context, repoTop string, o prOpts, pub prPublisher, 
 		return prRow{}, fmt.Errorf("%w: %q", errPRNotABeadBranch, b.Branch)
 	}
 	if err := pub.Push(ctx, repoTop, o.remote, b.Branch); err != nil {
-		return prRow{}, err
+		return prRow{}, fmt.Errorf("bridge bead: push: %w", err)
 	}
 	ref, found, err := pub.FindPR(ctx, repoTop, b.Branch)
 	if err != nil {
-		return prRow{}, err
+		return prRow{}, fmt.Errorf("bridge bead: find pr: %w", err)
 	}
 	action := prActionAlreadyOpen
 	switch {
@@ -218,7 +218,7 @@ func bridgeBead(ctx context.Context, repoTop string, o prOpts, pub prPublisher, 
 		if ref, err = pub.CreatePR(ctx, repoTop, prCreate{
 			Base: o.base, Branch: b.Branch, Title: prTitle(b), Body: prBody(b, o.base),
 		}); err != nil {
-			return prRow{}, err
+			return prRow{}, fmt.Errorf("bridge bead: create pr: %w", err)
 		}
 		action = prActionOpened
 	case built:

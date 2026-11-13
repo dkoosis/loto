@@ -24,7 +24,10 @@ const (
 // successful repair transaction. Tests can replace it to inject failures.
 var vacuumFn = func(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `VACUUM`)
-	return err
+	if err != nil {
+		return fmt.Errorf("exec context: %w", err)
+	}
+	return nil
 }
 
 type DoctorReport struct {
@@ -170,19 +173,19 @@ func (s *Store) collectStaleCandidateClaims(ctx context.Context, r *DoctorReport
 func (s *Store) runIntegrityCheck(ctx context.Context, r *DoctorReport) error {
 	rows, err := s.db.QueryContext(ctx, `PRAGMA integrity_check`)
 	if err != nil {
-		return err
+		return fmt.Errorf("query context: %w", err)
 	}
 	defer rows.Close()
 	var lines []string
 	for rows.Next() {
 		var line string
 		if err := rows.Scan(&line); err != nil {
-			return err
+			return fmt.Errorf("scan: %w", err)
 		}
 		lines = append(lines, line)
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return fmt.Errorf("err: %w", err)
 	}
 	r.IntegrityOK = len(lines) == 1 && lines[0] == "ok"
 	if r.IntegrityOK {
@@ -288,7 +291,7 @@ func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live d
 		return err
 	}
 	if err := tx.Commit(); err != nil {
-		return err
+		return fmt.Errorf("commit: %w", err)
 	}
 	// The chmod-era migration runs under the still-held flock, then the flock is
 	// released BEFORE the detached audit so its write tx can't extend the hold
@@ -298,7 +301,7 @@ func (s *Store) DoctorRepair(ctx context.Context, agent domain.AgentUUID, live d
 	failEvents := restoreChmodEraFiles(s.repoTop, candidates, byAgent, now)
 	flock.release()
 	if len(failEvents) > 0 {
-		_ = s.appendAuditDetached(failEvents)
+		_ = s.appendAuditDetached(failEvents) //nolint:errcheck // best-effort audit of restore failures; the doctor result already reports them
 	}
 	if err := vacuumFn(ctx, s.db); err != nil {
 		fmt.Fprintf(s.stderr, "loto: VACUUM after repair: %v (best-effort, repair succeeded)\n", err)
@@ -366,18 +369,18 @@ func chmodEraCandidates(ctx context.Context, tx *sql.Tx, all []domain.LockRecord
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT target_canonical FROM events WHERE target_canonical != ''`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query context: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var p string
 		if err := rows.Scan(&p); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan: %w", err)
 		}
 		add(p)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("err: %w", err)
 	}
 	sort.Strings(out)
 	return out, nil
@@ -459,12 +462,15 @@ func gcTagsTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
 		    AND l.owner_uuid       = tags.lock_owner_uuid
 		    AND l.created_at       = tags.lock_created_at
 		)`); err != nil {
-		return err
+		return fmt.Errorf("exec context: %w", err)
 	}
 	cutoff := now.Add(-tagsRetentionAge).UnixNano()
 	_, err := tx.ExecContext(ctx, `
 		DELETE FROM tags WHERE acked_at IS NOT NULL AND acked_at < ?`, cutoff)
-	return err
+	if err != nil {
+		return fmt.Errorf("exec context: %w", err)
+	}
+	return nil
 }
 
 // gcCandidateClaimsTx deletes every row belonging to a candidate whose claim
@@ -516,11 +522,11 @@ func gcCandidateClaimsTx(ctx context.Context, tx *sql.Tx, ec domain.EvalContext,
 	for _, id := range ids {
 		res, err := tx.ExecContext(ctx, `DELETE FROM candidate_claims WHERE candidate_id = ?`, id)
 		if err != nil {
-			return removed, err
+			return removed, fmt.Errorf("gc candidate claims tx: exec: %w", err)
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			return removed, err
+			return removed, fmt.Errorf("rows affected: %w", err)
 		}
 		removed += int(n)
 	}
@@ -746,7 +752,7 @@ func moveCorruptAside(dbPath string, when time.Time) (string, error) {
 		} else {
 			// Best-effort: flush the parent so the requarantine entry is durable.
 			// A defer can only log, never return — match the recovery-path tone.
-			_ = syncDir(dir)
+			_ = syncDir(dir) //nolint:errcheck // best-effort flush on a failure path that can only log
 			fmt.Fprintf(os.Stderr, "loto: corrupt DB bytes preserved at %s after commit-rename failure\n", failed)
 		}
 	}()
@@ -786,7 +792,7 @@ func fillCorruptStaging(dbPath, staging, base string) (bool, error) {
 		// Rename directly and tolerate a missing sibling rather than Stat-then-
 		// Rename: the stat+rename pair is a TOCTOU race, and a not-exist error
 		// here just means there was no WAL/SHM to quarantine.
-		if err := os.Rename(src, filepath.Join(staging, base+sfx)); err != nil && !os.IsNotExist(err) {
+		if err := os.Rename(src, filepath.Join(staging, base+sfx)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return true, fmt.Errorf("rename %s: %w", sfx, err)
 		}
 	}
@@ -804,11 +810,14 @@ func fillCorruptStaging(dbPath, staging, base string) (bool, error) {
 func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
-		return err
+		return fmt.Errorf("open: %w", err)
 	}
 	if err := d.Sync(); err != nil {
 		d.Close()
-		return err
+		return fmt.Errorf("sync: %w", err)
 	}
-	return d.Close()
+	if err := d.Close(); err != nil {
+		return fmt.Errorf("close: %w", err)
+	}
+	return nil
 }

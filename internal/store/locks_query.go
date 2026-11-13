@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"loto/internal/domain"
@@ -10,7 +11,7 @@ import (
 func (s *Store) ListLocks(ctx context.Context) ([]domain.LockRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+lockCols+` FROM locks`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list locks: query: %w", err)
 	}
 	defer rows.Close()
 	return scanLocksRows(rows)
@@ -36,12 +37,12 @@ func (s *Store) LockForOwnerAt(ctx context.Context, t domain.Target, owner domai
 		`SELECT `+lockCols+` FROM locks WHERE `+k.col("target_canonical")+` = ? AND owner_uuid = ? AND `+wtCond, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
 		args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("lock for owner at: query: %w", err)
 	}
 	defer rows.Close()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("lock for owner at: iterate rows: %w", err)
 		}
 		return nil, nil //nolint:nilnil // (nil, nil) signals "no row"; explicit not-found
 	}
@@ -49,7 +50,10 @@ func (s *Store) LockForOwnerAt(ctx context.Context, t domain.Target, owner domai
 	if err != nil {
 		return nil, err
 	}
-	return &l, rows.Err()
+	if err := rows.Err(); err != nil {
+		return &l, fmt.Errorf("lock for owner at: iterate rows: %w", err)
+	}
+	return &l, nil
 }
 
 // LocksForOwnerAt is the batched LockForOwnerAt: one owner-scoped query over the
@@ -70,7 +74,7 @@ func (s *Store) LocksForOwnerAt(ctx context.Context, targets []domain.Target, ow
 		`SELECT `+lockCols+` FROM locks WHERE owner_uuid = ? AND `+wtCond+` AND `+k.col("target_canonical")+` IN (`+placeholders+`)`, //nolint:gosec // G202 placeholders are '?' chars only, all data via args
 		args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("locks for owner at: query: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -83,7 +87,10 @@ func (s *Store) LocksForOwnerAt(ctx context.Context, targets []domain.Target, ow
 		// spelling is exactly what would not match (loto-8soe).
 		out[k.key(l.Target.Canonical)] = l
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("locks for owner at: iterate rows: %w", err)
+	}
+	return out, nil
 }
 
 // LockAt returns the longest-standing holder of target, or (nil,nil) if none.
@@ -97,12 +104,12 @@ func (s *Store) LockAt(ctx context.Context, t domain.Target) (*domain.LockRecord
 		`SELECT `+lockCols+` FROM locks WHERE `+s.keys().col("target_canonical")+` = ? ORDER BY created_at ASC, owner_uuid ASC LIMIT 1`, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
 		s.keys().key(t.Canonical))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("lock at: query: %w", err)
 	}
 	defer rows.Close()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("lock at: iterate rows: %w", err)
 		}
 		return nil, nil //nolint:nilnil // (nil, nil) signals "no row"; explicit not-found
 	}
@@ -110,7 +117,10 @@ func (s *Store) LockAt(ctx context.Context, t domain.Target) (*domain.LockRecord
 	if err != nil {
 		return nil, err
 	}
-	return &l, rows.Err()
+	if err := rows.Err(); err != nil {
+		return &l, fmt.Errorf("lock at: iterate rows: %w", err)
+	}
+	return &l, nil
 }
 
 // LocksAt returns EVERY holder of target in deterministic order (oldest lock
@@ -123,7 +133,7 @@ func (s *Store) LocksAt(ctx context.Context, t domain.Target) ([]domain.LockReco
 		`SELECT `+lockCols+` FROM locks WHERE `+s.keys().col("target_canonical")+` = ? ORDER BY created_at ASC, owner_uuid ASC`, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
 		s.keys().key(t.Canonical))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("locks at: query: %w", err)
 	}
 	defer rows.Close()
 	return scanLocksRows(rows)
@@ -144,7 +154,7 @@ func (s *Store) HoldsCovering(ctx context.Context, t domain.Target) ([]domain.Lo
 		`SELECT `+lockCols+` FROM locks WHERE `+s.keys().col("target_canonical")+` IN (`+ph+`) ORDER BY created_at ASC, owner_uuid ASC`, //nolint:gosec // G202 k.col renders a fixed column expression, all data via args
 		args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("holds covering: query: %w", err)
 	}
 	defer rows.Close()
 	return scanLocksRows(rows)

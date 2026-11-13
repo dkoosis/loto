@@ -2,6 +2,7 @@ package identity
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -78,7 +79,7 @@ func TestRecordSessionOutsideASessionIsNoop(t *testing.T) {
 	if rec != nil || err != nil {
 		t.Errorf("no session id: got (%+v, %v), want (nil, nil)", rec, err)
 	}
-	if _, err := os.Stat(sessionDir()); !os.IsNotExist(err) {
+	if _, err := os.Stat(sessionDir()); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("session dir must not be created on a bare shell: %v", err)
 	}
 }
@@ -319,7 +320,7 @@ func TestGCSessionsReapsStaleAndKeepsFresh(t *testing.T) {
 	if reaped != 1 || residual != 0 {
 		t.Errorf("reaped=%d residual=%d, want 1/0", reaped, residual)
 	}
-	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("stale record must be gone: %v", err)
 	}
 	if _, err := os.Stat(fresh); err != nil {
@@ -345,7 +346,7 @@ func TestGCSessionsKeepsCallersOwnSessionAndLockPinned(t *testing.T) {
 			t.Errorf("%s must survive: %v", filepath.Base(keep), err)
 		}
 	}
-	if _, err := os.Stat(other); !os.IsNotExist(err) {
+	if _, err := os.Stat(other); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("unpinned stale record must be gone: %v", err)
 	}
 }

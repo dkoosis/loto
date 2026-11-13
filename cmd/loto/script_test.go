@@ -162,7 +162,7 @@ func TestScripts(t *testing.T) {
 			base := filepath.Join(env.WorkDir, ".lotobase")
 			for _, d := range []string{home, base} {
 				if err := os.MkdirAll(d, 0o755); err != nil {
-					return err
+					return fmt.Errorf("test scripts: mkdir all: %w", err)
 				}
 			}
 			env.Setenv("HOME", home)
@@ -181,7 +181,7 @@ func TestScripts(t *testing.T) {
 			// stand-in that could drift from what ships.
 			realHooks, err := filepath.Abs(filepath.Join("..", "..", ".githooks"))
 			if err != nil {
-				return err
+				return fmt.Errorf("test scripts: abs: %w", err)
 			}
 			env.Setenv("REALHOOKS", realHooks)
 

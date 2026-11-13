@@ -420,7 +420,7 @@ func submitAccept(rt *runtime, repoTop string, env gate.Envelope, owner domain.A
 func currentPathEpochs(rt *runtime, targets []domain.Target, owner domain.AgentUUID) (map[string]int64, error) {
 	locks, err := rt.Store.LocksForOwnerAt(rt.Ctx, targets, owner)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("current path epochs: locks for owner at: %w", err)
 	}
 	out := make(map[string]int64, len(targets))
 	for _, t := range targets {

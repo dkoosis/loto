@@ -72,14 +72,14 @@ func ensureHookCallsTables(ctx context.Context, db sqlExecQuerier, apply bool) (
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='hook_calls'`,
 	).Scan(&n); err != nil {
-		return false, err
+		return false, fmt.Errorf("scan: %w", err)
 	}
 	if n > 0 {
 		return false, nil
 	}
 	if apply {
 		if _, err := db.ExecContext(ctx, hookCallsDDL); err != nil {
-			return false, err
+			return false, fmt.Errorf("exec context: %w", err)
 		}
 		return false, nil
 	}
@@ -96,14 +96,14 @@ func ensureHookCallsDeadAt(ctx context.Context, db sqlExecQuerier, apply bool) (
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('hook_calls') WHERE name = 'dead_at'`,
 	).Scan(&n); err != nil {
-		return false, err
+		return false, fmt.Errorf("scan: %w", err)
 	}
 	if n > 0 {
 		return false, nil
 	}
 	if apply {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE hook_calls ADD COLUMN dead_at INTEGER`); err != nil {
-			return false, err
+			return false, fmt.Errorf("exec context: %w", err)
 		}
 		return false, nil
 	}
@@ -243,7 +243,10 @@ func pathSeqAt(ctx context.Context, tx *sql.Tx, path, worktree string, epoch int
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
-	return seq, err
+	if err != nil {
+		return seq, fmt.Errorf("path seq at: scan: %w", err)
+	}
+	return seq, nil
 }
 
 // nextPathSeq assigns the next transition number of (path, worktree, epoch) in
@@ -257,7 +260,10 @@ func nextPathSeq(ctx context.Context, tx *sql.Tx, path, worktree string, epoch i
 INSERT INTO path_seq(path_canonical, worktree, epoch, seq, digest) VALUES (?, ?, ?, 1, ?)
 ON CONFLICT(path_canonical, worktree, epoch) DO UPDATE SET seq = seq + 1, digest = excluded.digest
 RETURNING seq`, path, worktree, epoch, digest).Scan(&seq)
-	return seq, err
+	if err != nil {
+		return seq, fmt.Errorf("next path seq: scan: %w", err)
+	}
+	return seq, nil
 }
 
 // pathSeqStateTx reads (path, epoch)'s current number and the digest it was
@@ -283,7 +289,7 @@ func pathSeqStateTx(ctx context.Context, tx *sql.Tx, path, worktree string, epoc
 		return 0, "", false, nil
 	}
 	if err != nil {
-		return 0, "", false, err
+		return 0, "", false, fmt.Errorf("path seq state tx: scan: %w", err)
 	}
 	return seq, digest, true, nil
 }
@@ -299,7 +305,10 @@ func (s *Store) PathSeq(ctx context.Context, path, worktree string, epoch int64)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
-	return seq, err
+	if err != nil {
+		return seq, fmt.Errorf("path seq: scan: %w", err)
+	}
+	return seq, nil
 }
 
 // RecordCallPre writes the call and every path it observed, in ONE write
@@ -323,11 +332,11 @@ VALUES (?, ?, ?, ?, ?, NULL, 0, ?)
 ON CONFLICT(call_id) DO NOTHING`,
 		call.CallID, string(call.OwnerUUID), string(call.SessionUUID), call.ToolName, call.TPre.UnixNano(), call.Worktree)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("record call pre: exec: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("rows affected: %w", err)
 	}
 	if n == 0 {
 		return false, nil
@@ -350,7 +359,7 @@ INSERT INTO hook_call_paths(call_id, path_canonical, locked, declared, pre_obser
 VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
 			call.CallID, o.Path, boolInt(o.Locked), boolInt(o.Declared),
 			o.Epoch, string(o.Holder), seqPre, o.Digest, o.Stat); err != nil {
-			return false, err
+			return false, fmt.Errorf("record call pre: exec: %w", err)
 		}
 	}
 
@@ -400,7 +409,7 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 		if errors.Is(err, sql.ErrNoRows) {
 			return PostOutcome{}, fmt.Errorf("%w: %s", ErrUnknownCall, callID)
 		}
-		return PostOutcome{}, err
+		return PostOutcome{}, fmt.Errorf("record call post: scan: %w", err)
 	}
 	// The observer is the call's OWN owner, read back rather than passed in:
 	// an event names who was watching, and the only sound source for that is
@@ -438,7 +447,7 @@ func (s *Store) RecordCallPost(ctx context.Context, callID string, tPost time.Ti
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE hook_calls SET t_post = ?, post_missing = 0 WHERE call_id = ?`,
 		tPost.UnixNano(), callID); err != nil {
-		return PostOutcome{}, err
+		return PostOutcome{}, fmt.Errorf("record call post: exec: %w", err)
 	}
 	if err := commitTxFn(tx); err != nil {
 		return PostOutcome{}, err
@@ -599,7 +608,10 @@ func postOnePathTx(ctx context.Context, tx *sql.Tx, callID, worktree string, o H
 UPDATE hook_call_paths SET seq_post = ?, digest_post = ?, stat_post = ?
  WHERE call_id = ? AND path_canonical = ?`,
 			seqPost, o.Digest, o.Stat, callID, o.Path)
-		return res, err
+		if err != nil {
+			return res, fmt.Errorf("post one path tx: exec: %w", err)
+		}
+		return res, nil
 	}
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO hook_call_paths(call_id, path_canonical, locked, declared, pre_observed,
@@ -608,7 +620,10 @@ INSERT INTO hook_call_paths(call_id, path_canonical, locked, declared, pre_obser
 VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, '', ?, '', ?)`,
 		callID, o.Path, boolInt(o.Locked), boolInt(o.Declared),
 		res.epoch, string(o.Holder), seqPre, seqPost, o.Digest, o.Stat)
-	return res, err
+	if err != nil {
+		return res, fmt.Errorf("post one path tx: exec: %w", err)
+	}
+	return res, nil
 }
 
 // recordedPathsTx loads a call's pre-recorded paths, keyed by path.
@@ -618,7 +633,7 @@ SELECT path_canonical, locked, declared, pre_observed, epoch_pre, holder_pre,
        seq_pre, seq_post, digest_pre, digest_post, stat_pre, stat_post
   FROM hook_call_paths WHERE call_id = ?`, callID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("recorded paths tx: query: %w", err)
 	}
 	defer rows.Close()
 	out := map[string]HookCallPath{}
@@ -629,7 +644,10 @@ SELECT path_canonical, locked, declared, pre_observed, epoch_pre, holder_pre,
 		}
 		out[p.Path] = p
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("recorded paths tx: iterate rows: %w", err)
+	}
+	return out, nil
 }
 
 func scanCallPath(rows *sql.Rows) (HookCallPath, error) {
@@ -642,7 +660,7 @@ func scanCallPath(rows *sql.Rows) (HookCallPath, error) {
 	)
 	if err := rows.Scan(&p.Path, &locked, &declared, &preObserved, &p.Epoch, &holder,
 		&p.SeqPre, &seqPost, &p.DigestPre, &digestPost, &p.StatPre, &statPost); err != nil {
-		return HookCallPath{}, err
+		return HookCallPath{}, fmt.Errorf("scan call path: scan: %w", err)
 	}
 	p.Locked = locked != 0
 	p.Declared = declared != 0
@@ -669,7 +687,7 @@ SELECT path_canonical, locked, declared, pre_observed, epoch_pre, holder_pre,
        seq_pre, seq_post, digest_pre, digest_post, stat_pre, stat_post
   FROM hook_call_paths WHERE call_id = ? ORDER BY path_canonical`, callID)
 	if err != nil {
-		return HookCall{}, nil, false, err
+		return HookCall{}, nil, false, fmt.Errorf("call record: query: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -680,7 +698,7 @@ SELECT path_canonical, locked, declared, pre_observed, epoch_pre, holder_pre,
 		paths = append(paths, p)
 	}
 	if err := rows.Err(); err != nil {
-		return HookCall{}, nil, false, err
+		return HookCall{}, nil, false, fmt.Errorf("call record: iterate rows: %w", err)
 	}
 	return call, paths, true, nil
 }
@@ -708,7 +726,7 @@ func scanHookCall(sc rowScanner) (HookCall, error) {
 		missing        int
 	)
 	if err := sc.Scan(&c.CallID, &owner, &session, &c.ToolName, &preNs, &postNs, &missing, &deadNs, &c.Worktree); err != nil {
-		return HookCall{}, err
+		return HookCall{}, fmt.Errorf("scan: %w", err)
 	}
 	c.OwnerUUID = domain.AgentUUID(owner)
 	c.SessionUUID = domain.SessionUUID(session)
@@ -734,7 +752,7 @@ func (s *Store) InFlightCalls(ctx context.Context) ([]HookCall, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+hookCallCols+` FROM hook_calls WHERE `+hookCallInFlightSQL+` ORDER BY t_pre, call_id`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("in flight calls: query: %w", err)
 	}
 	defer rows.Close()
 	var out []HookCall
@@ -745,7 +763,10 @@ func (s *Store) InFlightCalls(ctx context.Context) ([]HookCall, error) {
 		}
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("in flight calls: iterate rows: %w", err)
+	}
+	return out, nil
 }
 
 // InFlightMaxAge is how long a call may stay in flight before it is ended as
@@ -824,11 +845,11 @@ func markOneDeadCallTx(ctx context.Context, tx *sql.Tx, id string, c HookCall, r
 		`UPDATE hook_calls SET dead_at = ? WHERE call_id = ? AND `+hookCallInFlightSQL,
 		now.UnixNano(), id)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("mark one dead call tx: exec: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("rows affected: %w", err)
 	}
 	if n == 0 {
 		return 0, nil
@@ -904,7 +925,7 @@ func appendPostMissingResolvedTx(ctx context.Context, tx *sql.Tx, callID string,
 ) error {
 	payload, err := json.Marshal(postMissingDetail{CallID: callID, Session: string(session), AgeMS: age.Milliseconds()})
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal: %w", err)
 	}
 	return appendEventTx(ctx, tx, domain.Event{
 		Kind:      EventPostMissingResolved,
@@ -934,7 +955,7 @@ func postMissingCandidatesTx(ctx context.Context, tx *sql.Tx, cutoff time.Time) 
 		  WHERE `+hookCallInFlightSQL+` AND post_missing = 0 AND t_pre < ?
 		  ORDER BY call_id`, cutoff.UnixNano())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("post missing candidates tx: query: %w", err)
 	}
 	defer rows.Close()
 
@@ -943,12 +964,15 @@ func postMissingCandidatesTx(ctx context.Context, tx *sql.Tx, cutoff time.Time) 
 		var c postMissingCandidate
 		var tPreNs int64
 		if err := rows.Scan(&c.callID, &c.owner, &c.session, &tPreNs); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("post missing candidates tx: scan: %w", err)
 		}
 		c.tPre = time.Unix(0, tPreNs)
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("post missing candidates tx: iterate rows: %w", err)
+	}
+	return out, nil
 }
 
 // MarkPostMissing flags every in-flight call older than tReport. It does NOT
@@ -977,11 +1001,11 @@ func (s *Store) MarkPostMissing(ctx context.Context, now time.Time, tReport time
 	for _, f := range toFlag {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE hook_calls SET post_missing = 1 WHERE call_id = ?`, f.callID); err != nil {
-			return 0, err
+			return 0, fmt.Errorf("mark post missing: exec: %w", err)
 		}
 		payload, err := json.Marshal(postMissingDetail{CallID: f.callID, Session: f.session, AgeMS: now.Sub(f.tPre).Milliseconds()})
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("marshal: %w", err)
 		}
 		if err := appendEventTx(ctx, tx, domain.Event{
 			Kind:      EventPostMissing,
@@ -1044,15 +1068,15 @@ func (s *Store) DropFinishedCalls(ctx context.Context, now time.Time, floor time
 	// place a call loses its record without its paths, so the keyed form leaves
 	// no orphans the scan would have caught.
 	if _, err := tx.ExecContext(ctx, dropFinishedCallPathsSQL, cutoff); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("drop finished calls: exec: %w", err)
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM hook_calls WHERE `+finishedCallDroppableSQL, cutoff)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("drop finished calls: exec: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("drop finished calls: rows affected: %w", err)
 	}
 	if err := commitTxFn(tx); err != nil {
 		return 0, err
@@ -1088,25 +1112,25 @@ func (s *Store) DeleteCallAndTiming(ctx context.Context, callID string) (deleted
 
 	res, err := tx.ExecContext(ctx, `DELETE FROM hook_calls WHERE call_id = ?`, callID)
 	if err != nil {
-		return false, 0, err
+		return false, 0, fmt.Errorf("delete call and timing: exec: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, 0, err
+		return false, 0, fmt.Errorf("delete call and timing: rows affected: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM hook_call_paths WHERE call_id = ?`, callID); err != nil {
-		return false, 0, err
+		return false, 0, fmt.Errorf("delete call and timing: exec: %w", err)
 	}
 
 	evRes, err := tx.ExecContext(ctx,
 		`DELETE FROM events WHERE event_kind = ? AND detail LIKE ?`,
 		EventHookTiming, `%"call_id":"`+callID+`"%`)
 	if err != nil {
-		return false, 0, err
+		return false, 0, fmt.Errorf("delete call and timing: exec: %w", err)
 	}
 	evN, err := evRes.RowsAffected()
 	if err != nil {
-		return false, 0, err
+		return false, 0, fmt.Errorf("delete call and timing: rows affected: %w", err)
 	}
 
 	if err := commitTxFn(tx); err != nil {
@@ -1130,7 +1154,7 @@ func ensureTreeReportsActedAt(ctx context.Context, db sqlExecQuerier, apply bool
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('tree_reports') WHERE name = 'acted_at'`,
 	).Scan(&n); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure tree reports acted at: scan: %w", err)
 	}
 	// Absent table: ensureTreeEventsTables creates it with the column, and it
 	// runs first. Nothing to add, and nothing pending.
@@ -1140,7 +1164,7 @@ func ensureTreeReportsActedAt(ctx context.Context, db sqlExecQuerier, apply bool
 	if apply {
 		if _, err := db.ExecContext(ctx,
 			`ALTER TABLE tree_reports ADD COLUMN acted_at INTEGER`); err != nil {
-			return false, err
+			return false, fmt.Errorf("exec context: %w", err)
 		}
 		return false, nil
 	}
@@ -1167,7 +1191,7 @@ func ensurePathSeqDigest(ctx context.Context, db sqlExecQuerier, apply bool) (bo
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('path_seq') WHERE name = 'digest'`,
 	).Scan(&n); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure path seq digest: scan: %w", err)
 	}
 	if n > 0 {
 		return false, nil
@@ -1175,7 +1199,7 @@ func ensurePathSeqDigest(ctx context.Context, db sqlExecQuerier, apply bool) (bo
 	if apply {
 		if _, err := db.ExecContext(ctx,
 			`ALTER TABLE path_seq ADD COLUMN digest TEXT NOT NULL DEFAULT ''`); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure path seq digest: exec: %w", err)
 		}
 		return false, nil
 	}
@@ -1213,7 +1237,7 @@ func ensurePathSeqWorktree(ctx context.Context, db sqlExecQuerier, apply bool) (
 	if err := db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('path_seq') WHERE name = 'worktree'`,
 	).Scan(&n); err != nil {
-		return false, err
+		return false, fmt.Errorf("ensure path seq worktree: scan: %w", err)
 	}
 	if n > 0 {
 		return false, nil
@@ -1233,7 +1257,7 @@ SELECT path_canonical, epoch, seq, digest, '' FROM path_seq;
 DROP TABLE path_seq;
 ALTER TABLE path_seq_new RENAME TO path_seq;`
 		if _, err := db.ExecContext(ctx, rebuild); err != nil {
-			return false, err
+			return false, fmt.Errorf("ensure path seq worktree: exec: %w", err)
 		}
 		return false, nil
 	}

@@ -2,9 +2,8 @@ package cli
 
 import (
 	"context"
-	"os"
+	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -114,7 +113,7 @@ func gitWorktrees(ctx context.Context, repoTop string) ([]worktreeRec, error) {
 	cmd.Dir = repoTop
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("git worktrees: run git: %w", err)
 	}
 	return parseWorktreePorcelain(string(out)), nil
 }
@@ -145,40 +144,4 @@ func checkoutPath(paths map[string]string, key string) string {
 		return p
 	}
 	return key
-}
-
-// goneCheckout returns a test for a key whose linked checkout no longer
-// exists: its admin dir in the common git dir is missing, or its gitdir file
-// points at a checkout directory that is. A removed `isolation: worktree`
-// subagent checkout leaves rows like this, and `git worktree list` no longer
-// names it. Any git failure reports nothing gone, the narrower sweep.
-func goneCheckout(ctx context.Context, repoTop string) func(string) bool {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--path-format=absolute", "--git-common-dir")
-	cmd.Dir = repoTop
-	out, err := cmd.Output()
-	common := strings.TrimSpace(string(out))
-	if err != nil || common == "" {
-		return nil
-	}
-	return func(key string) bool {
-		name, ok := strings.CutPrefix(key, "worktrees/")
-		if !ok || name == "" || strings.ContainsAny(name, "/\\") || name == ".." {
-			return false
-		}
-		admin := filepath.Join(common, "worktrees", name)
-		if _, err := os.Stat(admin); err != nil {
-			return os.IsNotExist(err)
-		}
-		b, err := os.ReadFile(filepath.Join(admin, "gitdir"))
-		if err != nil {
-			return false
-		}
-		link := filepath.Clean(strings.TrimSpace(string(b)))
-		if !filepath.IsAbs(link) {
-			link = filepath.Join(admin, link) // git can record the link relative to the admin dir
-		}
-		//nolint:gosec // G703: the path is git's own gitdir record, only stat'd for existence, never opened or written.
-		_, err = os.Stat(link)
-		return os.IsNotExist(err)
-	}
 }
