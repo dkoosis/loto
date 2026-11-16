@@ -208,16 +208,7 @@ arch: ## Enforce layering (.go-arch-lint.yml, go-arch-lint pinned)
 		exit 1; \
 	}
 
-# Single source of truth: .sandbox/project.conf:GOLANGCI_LINT_VERSION — CI
-# reads the same key (.github/workflows/check.yml).
-#
-# loto-46x1: a PATH/pin mismatch used to print a ⚠ naming the drift and then
-# run the unpinned binary anyway — findings silently drifted from CI's while
-# the gate reported clean. scripts/lint-locked (ported from ferret#160; also
-# GOLANGCILINT in repo-standard/mnemd) closes that: on a mismatch it builds
-# the PINNED version once (`go run …@vX.Y.Z`, cached under Go's module cache
-# outside this mutex) and execs that instead, so the binary that runs always
-# matches the pin — no separate install step, no manual chmod.
+# Runs the installed golangci-lint, serialized through scripts/lint-locked.
 GOLANGCILINT := bash scripts/lint-locked
 
 lint: ## Run golangci-lint (full)
