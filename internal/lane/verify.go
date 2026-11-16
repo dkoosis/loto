@@ -210,7 +210,7 @@ func runVerifyCmd(ctx context.Context, dir string, cmd []string) (string, bool, 
 	if ctx.Err() != nil {
 		return buf.String(), false, fmt.Errorf("%w: %w", errVerifyAborted, ctx.Err())
 	}
-	if _, ok := errors.AsType[*exec.ExitError](err); ok { //nolint:errcheck // only the type match matters, the *exec.ExitError value is unused
+	if _, ok := errors.AsType[*exec.ExitError](err); ok {
 		return buf.String(), false, nil
 	}
 	return buf.String(), false, fmt.Errorf("lane: verify command %q: %w", cmd[0], err)

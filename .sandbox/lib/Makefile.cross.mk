@@ -10,7 +10,6 @@
 # ✗ SHELL := bash here — it would leak into every consumer's recipes, and .SHELLFLAGS
 # needs GNU make >= 3.82 (macOS ships 3.81).
 
-GOLANGCI_LINT_VER ?= v2.14.0
 GO_ARCH_LINT_VER  ?= v1.15.0
 GOVULNCHECK_VER   ?= v1.1.4
 GOFUMPT_VER       ?= v0.9.2
@@ -83,8 +82,8 @@ _cross-build:
 	for tool in $$PREBUILT_TOOLS; do \
 		case "$$tool" in \
 		golangci-lint) \
-			echo "-- golangci-lint $(GOLANGCI_LINT_VER)"; \
-			xtool_build github.com/golangci/golangci-lint/v2/cmd/golangci-lint $(GOLANGCI_LINT_VER) golangci-lint ;; \
+			echo "-- golangci-lint latest"; \
+			xtool_build github.com/golangci/golangci-lint/v2/cmd/golangci-lint latest golangci-lint ;; \
 		govulncheck) \
 			echo "-- govulncheck $(GOVULNCHECK_VER)"; \
 			xtool_build golang.org/x/vuln/cmd/govulncheck $(GOVULNCHECK_VER) govulncheck ;; \

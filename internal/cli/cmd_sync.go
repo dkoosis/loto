@@ -850,7 +850,7 @@ func syncIntegrationSHA(ctx context.Context, repoTop string) (sha string, exists
 	cmd.Dir = repoTop
 	out, runErr := cmd.Output()
 	if runErr != nil {
-		if _, ok := errors.AsType[*exec.ExitError](runErr); ok { //nolint:errcheck // only the type match matters, the *exec.ExitError value is unused
+		if _, ok := errors.AsType[*exec.ExitError](runErr); ok {
 			// --verify --quiet exits non-zero with no stderr when the ref is
 			// simply absent — not an error, the expected fresh-repo shape.
 			return "", false, nil
