@@ -22,7 +22,6 @@ SANDBOX_DIR="$REPO_DIR/.sandbox"
 # literal drifts silently until a build fails with a toolchain mismatch
 # (loto-qo0y item 5).
 GO_VERSION="$(awk '/^go /{print $2}' "$REPO_DIR/go.mod")"
-GOLANGCI_LINT_VER="v2.14.0"
 GO_ARCH_LINT_VER="v1.14.0"
 GOVULNCHECK_VER="v1.1.4"
 GOFUMPT_VER="v0.9.2"
@@ -103,7 +102,7 @@ install_tool() {
   fi
 }
 
-install_tool golangci-lint "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VER"
+install_tool golangci-lint "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest"
 install_tool go-arch-lint  "github.com/fe3dback/go-arch-lint@$GO_ARCH_LINT_VER"
 install_tool govulncheck   "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VER"
 install_tool gofumpt       "mvdan.cc/gofumpt@$GOFUMPT_VER"

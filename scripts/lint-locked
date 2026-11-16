@@ -58,20 +58,9 @@
 # also run as GOLANGCILINT — keeping the structure identical across
 # the four repos is deliberate; a fix in one belongs in all.
 #
-# Bead: loto-46x1 (the version-mismatch detect-and-run-the-wrong-binary defect
-# this script exists to close)
 # Wired into: make lint (via $(GOLANGCILINT))
 
 set -euo pipefail
-
-script_dir="$(cd "$(dirname "$0")" && pwd)"
-repo_dir="$(cd "$script_dir/.." && pwd)"
-case "$(uname -m)" in
-  x86_64) sandbox_arch="amd64" ;;
-  aarch64|arm64) sandbox_arch="arm64" ;;
-  *) sandbox_arch="" ;;
-esac
-bundled_lint="$repo_dir/.sandbox/bin/linux-$sandbox_arch/golangci-lint"
 
 # Key the mutex to the cache golangci-lint actually contends on. The dir only
 # needs to be a stable machine-global path; resolve it cheaply without spawning
@@ -122,74 +111,31 @@ notify() {
   { echo "$*" >/dev/tty; } 2>/dev/null || echo "$*" >&2
 }
 
-# ---------------------------------------------------------------------------
-# Which golangci-lint actually runs
-#
-# The PIN is the gate; whichever binary sits earliest on PATH is not. A dev
-# machine (or a Codex sandbox image) can have a newer or older golangci-lint
-# on PATH than the repo pins — a hard `make check` failure with nothing wrong
-# in the tree, or worse, a SILENT pass/fail drift against CI because the wrong
-# binary's rule set ran (loto-46x1: the pin mismatch used to only print a ⚠
-# and then run the unpinned binary anyway).
-#
-# So: every candidate is asked its version and must match the pin. Nothing that
-# fails to answer, or answers wrong, is trusted. The last resort runs the pinned
-# module through `go run` — version correctness then never
-# depends on PATH order, on any platform, including a dev Mac where the linux
-# prebuilt cannot even execute.
-#
-# Order: $GOLANGCILINT_BIN (explicit override, unchecked) > committed sandbox
-# prebuilt > PATH binary > `go run <pkg>@<pin>`. The middle two are version-
-# gated; a mismatch demotes the candidate rather than failing the run.
-lint_cmd=()
-
-# Version a candidate reports, empty if it cannot run (wrong OS/arch, absent).
-lint_ver_of() {
-  local out=""
-  out="$("$1" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" || out=""
-  printf '%s' "$out"
-}
-
-resolve_lint_cmd() {
-  local pin="" ver=""
-  pin="$(sed -n 's/^GOLANGCI_LINT_VERSION=//p' "$repo_dir/.sandbox/project.conf" 2>/dev/null | head -1)" || pin=""
-  pin="${pin#v}"
-
-  # Explicit override: the caller named a binary, so run exactly that one.
-  if [ -n "${GOLANGCILINT_BIN:-}" ]; then
-    lint_cmd=("$GOLANGCILINT_BIN")
-    return
+# Which golangci-lint runs, with no version pin: $GOLANGCILINT_BIN if set,
+# else the newer of PATH's and the committed sandbox prebuilt. Newer wins
+# both ways: the Codex image puts mise's too-old linter first on PATH (the
+# prebuilt beats it), while CI installs the latest release (it beats a
+# prebuilt that has aged). On a dev Mac the linux prebuilt cannot execute,
+# so PATH wins there. Ties go to PATH.
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+case "$(uname -m)" in
+  x86_64) sandbox_arch="amd64" ;;
+  aarch64|arm64) sandbox_arch="arm64" ;;
+  *) sandbox_arch="" ;;
+esac
+bundled_lint="$script_dir/../.sandbox/bin/linux-$sandbox_arch/golangci-lint"
+lint_cmd=(golangci-lint)
+if [ -n "${GOLANGCILINT_BIN:-}" ]; then
+  lint_cmd=("$GOLANGCILINT_BIN")
+elif [ -n "$sandbox_arch" ] && [ -x "$bundled_lint" ]; then
+  lint_ver_of() { "$1" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true; }
+  bundled_ver="$(lint_ver_of "$bundled_lint")"
+  path_ver="$(lint_ver_of golangci-lint)"
+  if [ -n "$bundled_ver" ] && { [ -z "$path_ver" ] ||
+      [ "$(printf '%s\n%s\n' "$path_ver" "$bundled_ver" | sort -V | tail -1)" != "$path_ver" ]; }; then
+    lint_cmd=("$bundled_lint")
   fi
-
-  # No pin to compare against — PATH is all we have, and a missing/unreadable
-  # project.conf must not silently turn linting into a network module fetch.
-  if [ -z "$pin" ]; then
-    lint_cmd=(golangci-lint)
-    notify "lint-locked: no GOLANGCI_LINT_VERSION in project.conf — using PATH golangci-lint unverified."
-    return
-  fi
-
-  # Committed sandbox prebuilt. Version-gated like everything else: it is a
-  # checked-in artifact that can drift from the pin, and on a dev Mac it is a
-  # linux ELF that cannot execute at all (lint_ver_of returns empty there).
-  if [ -n "$sandbox_arch" ] && [ -x "$bundled_lint" ]; then
-    ver="$(lint_ver_of "$bundled_lint")"
-    if [ "$ver" = "$pin" ]; then
-      lint_cmd=("$bundled_lint")
-      return
-    fi
-    [ -n "$ver" ] && notify "lint-locked: sandbox prebuilt is $ver, repo pins $pin — ignoring it."
-  fi
-
-  ver="$(lint_ver_of golangci-lint)"
-  if [ "$ver" = "$pin" ]; then
-    lint_cmd=(golangci-lint)
-    return
-  fi
-
-  notify "lint-locked: PATH golangci-lint is ${ver:-absent}, repo pins $pin — running \`go run ...@v$pin\` instead."
-  lint_cmd=(go run "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$pin")
-}
+fi
 
 waited=0
 until mkdir "$lock_dir" 2>/dev/null; do
@@ -228,10 +174,6 @@ cleanup() {
   if [ -n "$probe_json" ]; then rm -f "$probe_json" "$probe_out" "$probe_err"; fi
 }
 trap cleanup EXIT
-
-# Resolve the linter only now: the mutex is held, so the `--version` probes
-# below cannot race a peer for golangci-lint's cache (header, line ~62).
-resolve_lint_cmd
 
 # Pass through every arg and preserve golangci-lint's exit code (1 = findings).
 # Anything but `run` goes straight through: --allow-parallel-runners and the
