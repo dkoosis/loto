@@ -111,11 +111,30 @@ notify() {
   { echo "$*" >/dev/tty; } 2>/dev/null || echo "$*" >&2
 }
 
-# Runs the golangci-lint that is installed (PATH), with no version check.
-# $GOLANGCILINT_BIN names a different binary.
+# Which golangci-lint runs, with no version pin: $GOLANGCILINT_BIN if set,
+# else the newer of PATH's and the committed sandbox prebuilt. Newer wins
+# both ways: the Codex image puts mise's too-old linter first on PATH (the
+# prebuilt beats it), while CI installs the latest release (it beats a
+# prebuilt that has aged). On a dev Mac the linux prebuilt cannot execute,
+# so PATH wins there. Ties go to PATH.
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+case "$(uname -m)" in
+  x86_64) sandbox_arch="amd64" ;;
+  aarch64|arm64) sandbox_arch="arm64" ;;
+  *) sandbox_arch="" ;;
+esac
+bundled_lint="$script_dir/../.sandbox/bin/linux-$sandbox_arch/golangci-lint"
 lint_cmd=(golangci-lint)
 if [ -n "${GOLANGCILINT_BIN:-}" ]; then
   lint_cmd=("$GOLANGCILINT_BIN")
+elif [ -n "$sandbox_arch" ] && [ -x "$bundled_lint" ]; then
+  lint_ver_of() { "$1" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true; }
+  bundled_ver="$(lint_ver_of "$bundled_lint")"
+  path_ver="$(lint_ver_of golangci-lint)"
+  if [ -n "$bundled_ver" ] && { [ -z "$path_ver" ] ||
+      [ "$(printf '%s\n%s\n' "$path_ver" "$bundled_ver" | sort -V | tail -1)" != "$path_ver" ]; }; then
+    lint_cmd=("$bundled_lint")
+  fi
 fi
 
 waited=0
